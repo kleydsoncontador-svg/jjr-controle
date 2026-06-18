@@ -1132,16 +1132,52 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <input class="si" id="lucBusca" placeholder="&#128269; Buscar empresa..." oninput="renderLucros()" style="min-width:200px">
       <select class="si" id="lucAnoSel" onchange="lucChangeAno(this.value)"></select>
       <button class="btn bp bsm" onclick="lucAddAno()">+ Ano</button>
-      <label class="btn bo bsm" style="cursor:pointer" title="Importar sócios do Excel">
-        &#128196; Importar Excel
-        <input type="file" accept=".xlsx,.xls" onchange="lucImportExcel(this)" style="display:none">
-      </label>
+      <!-- botões contextuais: percentual -->
+      <div id="lucBtnsPerc">
+        <label class="btn bo bsm" style="cursor:pointer" title="Importar sócios do Excel">
+          &#128196; Importar Sócios
+          <input type="file" accept=".xlsx,.xls" onchange="lucImportExcel(this)" style="display:none">
+        </label>
+      </div>
+      <!-- botões contextuais: grid mensal -->
+      <div id="lucBtnsGrid" style="display:none;gap:6px;display:none">
+        <button class="btn bo bsm" onclick="lucExportTopTemplate(lucCurrentSub,lucCurrentAno)">&#11123; Baixar Modelo</button>
+        <button class="btn bp bsm" onclick="lucOpenTopImport(lucCurrentSub,lucCurrentAno)">&#128229; Importar Excel</button>
+      </div>
     </div>
   </div>
   <!-- Layout: nav lateral + conteúdo -->
   <div style="display:flex;flex:1;min-height:0;border-top:1px solid var(--border);overflow:hidden">
     <div class="luc-nav" id="lucNav"></div>
     <div class="luc-body" id="lucContent"></div>
+  </div>
+</div>
+
+<!-- Modal importação mensal (Lucro/Prej, Ajustes, etc.) -->
+<div class="mb" id="mLucTopImp" style="display:none">
+  <div class="modal" style="max-width:480px">
+    <div class="mt"><h3 id="mLucImpTitle">Importar Excel</h3><button onclick="closeModal('mLucTopImp')">&#x2715;</button></div>
+    <div class="mc" style="display:grid;gap:14px">
+      <div>
+        <label class="cl">Arquivo Excel (.xlsx)</label>
+        <input class="fi" id="mLucImpFile" type="file" accept=".xlsx,.xls" onchange="lucTopImpFileChange(this)" style="width:100%;box-sizing:border-box">
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+        <div>
+          <label class="cl">Mês início</label>
+          <select class="fi" id="mLucImpMesIni" style="width:100%;box-sizing:border-box"></select>
+        </div>
+        <div>
+          <label class="cl">Mês fim</label>
+          <select class="fi" id="mLucImpMesFim" style="width:100%;box-sizing:border-box"></select>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--slate)">Serão importados apenas os meses selecionados. Empresas são identificadas por CNPJ ou nome exato.</div>
+    </div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLucTopImp')">Cancelar</button>
+      <button class="btn bp" onclick="lucConfirmTopImport()">&#11123; Importar</button>
+    </div>
   </div>
 </div>
 
@@ -4100,12 +4136,14 @@ const LUC_MESES_FULL= ['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Ju
 
 // Estrutura hierárquica: itens de topo + trimestres com meses filhos
 const LUC_TOPS = [
-  {id:'percentual', label:'Percentual de Participação'},
-  {id:'lpm',        label:'Lucro/Prejuízo Mensal'},
-  {id:'ajustes',    label:'Ajustes de Ex. Anteriores'},
-  {id:'lpm_acum',   label:'Lucro/Prej. Mensal (Acumulado)'},
-  {id:'saldo',      label:'Saldo de Lucro/Prejuízo'},
+  {id:'percentual',   label:'Percentual de Participação'},
+  {id:'lpm',          label:'Lucro/Prejuízo Mensal'},
+  {id:'ajustes_cred', label:'Ajustes Credores de Ex. Anteriores'},
+  {id:'ajustes_dev',  label:'Ajustes Devedores de Ex. Anteriores'},
+  {id:'lpm_acum',     label:'Lucro/Prej. Mensal (Acumulado)'},
+  {id:'saldo',        label:'Saldo de Lucro/Prejuízo'},
 ];
+const LUC_TOP_GRID_IDS = ['lpm','ajustes_cred','ajustes_dev','lpm_acum','saldo'];
 const LUC_TRIMS = [
   {id:'trim_1', label:'1º Trimestre', trim:1, meses:[
     {id:'mes_01', label:'Janeiro'},
@@ -4143,6 +4181,12 @@ function lucGoSub(id){
   var sub = LUC_SUBS.find(function(s){return s.id===id;});
   var el = document.getElementById('lucSubLabel');
   if(el && sub) el.textContent = sub.label;
+  /* alterna botões do header */
+  var isGrid=LUC_TOP_GRID_IDS.indexOf(id)>=0;
+  var bPerc=document.getElementById('lucBtnsPerc');
+  var bGrid=document.getElementById('lucBtnsGrid');
+  if(bPerc) bPerc.style.display=isGrid?'none':'';
+  if(bGrid) bGrid.style.display=isGrid?'flex':'none';
   renderLucros();
 }
 
@@ -4255,6 +4299,8 @@ function renderLucros(){
     lucRenderMes(el, emps, lucCurrentSub.replace('mes_',''));
   } else if(lucCurrentSub.startsWith('trim_')){
     lucRenderTrim(el, emps, lucCurrentSub);
+  } else if(LUC_TOP_GRID_IDS.indexOf(lucCurrentSub)>=0){
+    lucRenderTopGrid(el, emps, lucCurrentSub, lucCurrentAno);
   } else {
     lucRenderPlaceholder(el, sub, emps);
   }
@@ -4410,7 +4456,7 @@ function lucRenderMesTable(eid, ano, mes, isJan){
     var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
     h+='<tr style="background:'+bg+';">'
       +'<td style="padding:6px 10px;white-space:nowrap">'+esc(soc.nome)+'</td>'
-      +'<td style="padding:6px 10px;font-family:var(--mono);font-size:11px;white-space:nowrap">'+esc(soc.doc||'—')+'</td>'
+      +'<td style="padding:6px 10px;font-family:var(--mono);font-size:11px;white-space:nowrap">'+fmtDoc(soc.doc)+'</td>'
       +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono)">'+parseFloat(pct).toFixed(4)+'%</td>'
       +'<td style="padding:6px 10px;text-align:right">';
     if(isJan){
@@ -4563,7 +4609,7 @@ function lucRenderTrimTable(eid, ano, meses, trimLabel){
     totSaldoAnt+=socSaldoAnt; totCredito+=socCredito; totBaixas+=socBaixas; totSaldoProx+=socSaldoProx;
     h+='<tr style="background:'+bg+'">'
       +'<td style="padding:5px 8px;white-space:nowrap">'+esc(soc.nome)+'</td>'
-      +'<td style="padding:5px 8px;font-family:var(--mono);font-size:11px">'+esc(soc.doc||'—')+'</td>'
+      +'<td style="padding:5px 8px;font-family:var(--mono);font-size:11px">'+fmtDoc(soc.doc)+'</td>'
       +cells
       +'<td style="padding:5px 8px;text-align:right;font-family:var(--mono);font-weight:600;background:#F0FDF9;border-left:2px solid var(--teal)">'+lucFmtBRL(socSaldoAnt)+'</td>'
       +'<td style="padding:5px 8px;text-align:right;font-family:var(--mono);font-weight:600;background:#F0FDF9">'+lucFmtBRL(socCredito)+'</td>'
@@ -4599,6 +4645,175 @@ function lucToggleEmpTrim(eid, trim){
   lucRenderTrim(el, lucEmps().filter(function(e){return !b||e.nome.toLowerCase().includes(b);}), 'trim_'+trim);
 }
 
+/* ── CPF/CNPJ auto-format ─────────────────────────────────────────── */
+function fmtDoc(v){
+  if(!v) return '—';
+  var d=(v+'').replace(/\D/g,'');
+  if(d.length===11) return d.replace(/(\d{3})(\d{3})(\d{3})(\d{2})/,'$1.$2.$3-$4');
+  if(d.length===14) return d.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/,'$1.$2.$3/$4-$5');
+  return v;
+}
+
+/* ── Lucros Top-Grid: Lucro/Prej, Ajustes, Acumulado, Saldo ─────── */
+function lucTopGet(subId,ano,eid){ return S.g('luc_top_'+subId+'_'+ano+'_'+eid)||{}; }
+function lucTopSet(subId,ano,eid,data){ S.s('luc_top_'+subId+'_'+ano+'_'+eid,data); }
+function lucTopGetMes(subId,ano,eid,mes){ return parseFloat((lucTopGet(subId,ano,eid))[mes])||0; }
+
+function lucCalcSaldo(ano,eid,mes){
+  return lucTopGetMes('lpm',ano,eid,mes)
+        +lucTopGetMes('ajustes_cred',ano,eid,mes)
+        +lucTopGetMes('ajustes_dev',ano,eid,mes)
+        +lucTopGetMes('lpm_acum',ano,eid,mes);
+}
+
+function lucFmtSigned(v){
+  var abs='R$ '+Math.abs(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  return v<0?'-'+abs:abs;
+}
+
+function lucRenderTopGrid(el,emps,subId,ano){
+  var isSaldo=subId==='saldo';
+  var isDevedor=subId==='ajustes_dev';
+  var thS='padding:6px 10px;font-size:11px;font-weight:700;text-align:right;white-space:nowrap;background:var(--bg);border-bottom:2px solid var(--border)';
+  var thL='padding:6px 10px;font-size:11px;font-weight:700;text-align:left;white-space:nowrap;background:var(--bg);border-bottom:2px solid var(--border)';
+  var h='<div style="overflow:auto"><table style="border-collapse:collapse;font-size:12.5px;min-width:100%">'
+    +'<thead><tr>'
+    +'<th style="'+thL+';position:sticky;left:0;z-index:3;min-width:220px">Empresa</th>'
+    +'<th style="'+thL+'">CNPJ</th>';
+  LUC_MLABELS.forEach(function(lbl){ h+='<th style="'+thS+'">'+lbl+'</th>'; });
+  h+='</tr></thead><tbody>';
+  emps.forEach(function(emp,i){
+    var eid=emp.eid;
+    var bg=i%2===0?'var(--white)':'var(--bg)';
+    h+='<tr style="background:'+bg+'">'
+      +'<td style="padding:6px 10px;white-space:nowrap;position:sticky;left:0;z-index:1;background:'+bg+'">'+esc(emp.nome)+'</td>'
+      +'<td style="padding:6px 10px;font-family:var(--mono);font-size:11px;white-space:nowrap">'+fmtDoc(emp.cnpj)+'</td>';
+    LUC_MESES.forEach(function(m){
+      if(isSaldo){
+        var v=lucCalcSaldo(ano,eid,m);
+        var col=v>0?'var(--teal)':v<0?'var(--red)':'var(--slate)';
+        h+='<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-weight:600;color:'+col+'">'+lucFmtSigned(v)+'</td>';
+      } else {
+        var stored=lucTopGetMes(subId,ano,eid,m);
+        var display=isDevedor?Math.abs(stored):stored;
+        h+='<td style="padding:3px 5px;text-align:right">'
+          +'<input class="luc-brl-in" type="text" value="'+lucFmtSigned(display)+'"'
+          +' onchange="lucSaveTopField(this,\''+subId+'\',\''+ano+'\',\''+eid+'\',\''+m+'\')"'
+          +' onfocus="this.select()"></td>';
+      }
+    });
+    h+='</tr>';
+  });
+  if(!isSaldo){
+    var tfS='padding:6px 10px;font-family:var(--mono);font-size:12px;font-weight:700;text-align:right;border-top:2px solid var(--border);background:var(--bg)';
+    h+='<tr><td colspan="2" style="padding:6px 10px;font-size:11.5px;font-weight:700;color:var(--slate);border-top:2px solid var(--border);background:var(--bg)">TOTAL</td>';
+    LUC_MESES.forEach(function(m){
+      var tot=emps.reduce(function(acc,e){ return acc+lucTopGetMes(subId,ano,e.eid,m); },0);
+      var col=tot<0?'var(--red)':tot>0?'var(--ink)':'var(--slate)';
+      h+='<td style="'+tfS+';color:'+col+'">'+lucFmtSigned(tot)+'</td>';
+    });
+    h+='</tr>';
+  }
+  h+='</tbody></table></div>';
+  el.innerHTML=h;
+}
+
+function lucSaveTopField(inp,subId,ano,eid,mes){
+  var val=lucParseBRL(inp.value);
+  if(subId==='ajustes_dev') val=-Math.abs(val);
+  var data=lucTopGet(subId,ano,eid);
+  data[mes]=val;
+  lucTopSet(subId,ano,eid,data);
+  var display=subId==='ajustes_dev'?Math.abs(val):val;
+  inp.value=lucFmtSigned(display);
+}
+
+/* ── Excel — modelo e importação ─────────────────────────────────── */
+var _lucImportFile=null, _lucImportSubId=null;
+
+function lucExportTopTemplate(subId,ano){
+  if(typeof XLSX==='undefined'){toast('Biblioteca XLSX não carregada.','err');return;}
+  var emps=lucEmps();
+  var sub=LUC_SUBS.find(function(s){return s.id===subId;})||{label:subId};
+  var header=['Empresa','CNPJ'].concat(LUC_MESES.map(function(m,i){return LUC_MLABELS[i]+'/'+ano;}));
+  var rows=[header];
+  emps.forEach(function(emp){
+    var row=[emp.nome, (emp.cnpj||'').replace(/\D/g,'')];
+    LUC_MESES.forEach(function(){ row.push(0); });
+    rows.push(row);
+  });
+  var ws=XLSX.utils.aoa_to_sheet(rows);
+  /* largura de colunas */
+  ws['!cols']=[{wch:40},{wch:16}].concat(LUC_MESES.map(function(){return {wch:14};}));
+  var wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,ws,sub.label.substring(0,30));
+  XLSX.writeFile(wb,'modelo_'+subId+'_'+ano+'.xlsx');
+}
+
+function lucOpenTopImport(subId,ano){
+  _lucImportSubId=subId;
+  var el=document.getElementById('mLucTopImp');
+  if(!el) return;
+  document.getElementById('mLucImpTitle').textContent='Importar: '+(LUC_SUBS.find(function(s){return s.id===subId;})||{label:subId}).label;
+  /* preenche selects de mês */
+  ['mLucImpMesIni','mLucImpMesFim'].forEach(function(id){
+    var sel=document.getElementById(id);
+    sel.innerHTML=LUC_MESES.map(function(m,i){
+      return '<option value="'+m+'">'+LUC_MESES_FULL[i]+'/'+ano+'</option>';
+    }).join('');
+  });
+  document.getElementById('mLucImpMesFim').value='12';
+  document.getElementById('mLucImpFile').value='';
+  _lucImportFile=null;
+  openModal('mLucTopImp');
+}
+
+function lucTopImpFileChange(input){
+  _lucImportFile=input.files&&input.files[0]||null;
+}
+
+function lucConfirmTopImport(){
+  var mesIni=document.getElementById('mLucImpMesIni').value;
+  var mesFim=document.getElementById('mLucImpMesFim').value;
+  var ano=lucCurrentAno;
+  var subId=_lucImportSubId;
+  if(!_lucImportFile){toast('Selecione um arquivo Excel.','err');return;}
+  if(mesIni>mesFim){toast('Mês início deve ser ≤ mês fim.','err');return;}
+  var mesesImp=LUC_MESES.filter(function(m){return m>=mesIni&&m<=mesFim;});
+  var reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      var wb=XLSX.read(e.target.result,{type:'array'});
+      var ws=wb.Sheets[wb.SheetNames[0]];
+      var rows=XLSX.utils.sheet_to_json(ws,{defval:''});
+      var emps=lucEmps();
+      var ok=0;
+      rows.forEach(function(row){
+        var nomePlanilha=(row['Empresa']||row['empresa']||'').toString().trim().toLowerCase();
+        var cnpjPlanilha=(row['CNPJ']||row['cnpj']||'').toString().replace(/\D/g,'');
+        var emp=emps.find(function(e){
+          return (cnpjPlanilha&&(e.cnpj||'').replace(/\D/g,'')===cnpjPlanilha)
+              || e.nome.toLowerCase()===nomePlanilha;
+        });
+        if(!emp) return;
+        var data=lucTopGet(subId,ano,emp.eid);
+        mesesImp.forEach(function(m,i){
+          var colLabel=LUC_MLABELS[LUC_MESES.indexOf(m)]+'/'+ano;
+          var v=parseFloat((row[colLabel]||row[LUC_MLABELS[LUC_MESES.indexOf(m)]]||'0').toString().replace(',','.'))||0;
+          if(subId==='ajustes_dev') v=-Math.abs(v);
+          data[m]=v;
+        });
+        lucTopSet(subId,ano,emp.eid,data);
+        ok++;
+      });
+      toast(ok+' empresa(s) importada(s) ('+mesesImp.length+' mês/es).','ok');
+      closeModal('mLucTopImp');
+      renderLucros();
+    }catch(err){toast('Erro ao ler Excel: '+err.message,'err');}
+  };
+  reader.readAsArrayBuffer(_lucImportFile);
+}
+
 function lucRenderSociosTable(eid){
   var socios=lucSocGet(eid);
   var ano=lucCurrentAno;
@@ -4618,7 +4833,7 @@ function lucRenderSociosTable(eid){
     socios.forEach(function(s){
       tbody+='<tr>'
         +'<td>'+esc(s.nome)+'</td>'
-        +'<td style="font-family:var(--mono);font-size:11px;color:var(--slate)">'+esc(s.doc||'—')+'</td>'
+        +'<td style="font-family:var(--mono);font-size:11px;color:var(--slate)">'+fmtDoc(s.doc)+'</td>'
         +'<td style="font-family:var(--mono);font-size:11.5px;color:var(--slate);text-align:right">'+lucFmtP(s.pct_ant||0)+'%</td>';
       LUC_MESES.forEach(function(m){
         var key=ano+'-'+m;
