@@ -381,6 +381,11 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
 .luc-body{flex:1;overflow:auto;min-height:0;padding:14px}
 .luc-pct-in{width:60px;text-align:right;border:1px solid transparent;border-radius:3px;padding:2px 4px;font-family:var(--mono);font-size:11.5px;background:transparent;outline:none;color:var(--ink);display:block;box-sizing:border-box}
 .luc-pct-in:hover,.luc-pct-in:focus{border-color:var(--teal);background:#F0FDF9}
+.luc-brl-in{width:110px;text-align:right;border:1px solid transparent;border-radius:3px;padding:2px 6px;font-family:var(--mono);font-size:12px;background:transparent;outline:none;color:var(--ink);box-sizing:border-box}
+.luc-brl-in:hover,.luc-brl-in:focus{border-color:var(--teal);background:#F0FDF9}
+.luc-text-in{width:130px;border:1px solid transparent;border-radius:3px;padding:2px 6px;font-size:12px;background:transparent;outline:none;color:var(--ink);box-sizing:border-box}
+.luc-text-in:hover,.luc-text-in:focus{border-color:var(--teal);background:#F0FDF9}
+.luc-saldo-calc{font-family:var(--mono);font-size:12px;font-weight:600;padding:2px 6px;display:inline-block}
 .luc-socios-wrap{background:var(--bg);border-bottom:2px solid var(--teal)}
 .luc-socios-inner{overflow-x:auto;padding:10px 14px 14px}
 .luc-t{min-width:max-content;width:100%;border-collapse:collapse}
@@ -4246,10 +4251,8 @@ function renderLucros(){
   var sub=LUC_SUBS.find(function(s){return s.id===lucCurrentSub;})||{id:'percentual'};
   if(lucCurrentSub==='percentual'){
     lucRenderPercentual(el, emps);
-  } else if(sub.isTrim){
-    lucRenderPlaceholder(el, sub, emps);
-  } else if(sub.mes){
-    lucRenderPlaceholder(el, sub, emps);
+  } else if(lucCurrentSub.startsWith('mes_')){
+    lucRenderMes(el, emps, lucCurrentSub.replace('mes_',''));
   } else {
     lucRenderPlaceholder(el, sub, emps);
   }
@@ -4296,6 +4299,167 @@ function lucRenderPlaceholder(el, sub, emps){
   el.innerHTML='<div style="background:var(--bg);border:1px solid var(--border);border-radius:var(--r2);margin-bottom:14px;padding:12px 16px;font-size:12.5px;color:var(--slate)">'
     +'<b style="color:var(--teal)">'+label+'</b> — '+desc+'</div>'
     +'<div style="border:1px solid var(--border);border-radius:var(--r2);overflow:hidden">'+empList+'</div>';
+}
+
+/* ── Lucros / Dividendos — Visão Mensal ──────────────────────────── */
+
+function lucGetMesData(eid, ano, mes){
+  var k='luc_mes_'+ano+'_'+mes+'_'+eid;
+  return S.g(k)||[];
+}
+function lucSaveMesData(eid, ano, mes, rows){
+  var k='luc_mes_'+ano+'_'+mes+'_'+eid;
+  S.s(k, rows);
+}
+
+function lucGetMesRow(eid, ano, mes, sid){
+  var rows=lucGetMesData(eid, ano, mes);
+  return rows.find(function(r){return r.sid===sid;})||{sid:sid,saldo_ant_jan:0,credito:0,baixas:0,conta:''};
+}
+function lucSaveMesRow(eid, ano, mes, row){
+  var rows=lucGetMesData(eid, ano, mes);
+  var idx=rows.findIndex(function(r){return r.sid===row.sid;});
+  if(idx>=0) rows[idx]=row; else rows.push(row);
+  lucSaveMesData(eid, ano, mes, rows);
+}
+
+function lucCalcSaldoAnt(eid, ano, mes, sid){
+  /* Jan → usa saldo_ant_jan manual; demais → saldo_próx do mês anterior */
+  if(mes==='01'){
+    var r=lucGetMesRow(eid, ano, '01', sid);
+    return parseFloat(r.saldo_ant_jan)||0;
+  }
+  var prevMes=(parseInt(mes,10)-1).toString().padStart(2,'0');
+  var prevRow=lucGetMesRow(eid, ano, prevMes, sid);
+  var sAnt=lucCalcSaldoAnt(eid, ano, prevMes, sid);
+  var cred=parseFloat(prevRow.credito)||0;
+  var baix=parseFloat(prevRow.baixas)||0;
+  return sAnt+cred-baix;
+}
+
+function lucCalcSaldoProx(saldoAnt, credito, baixas){
+  return saldoAnt+(parseFloat(credito)||0)-(parseFloat(baixas)||0);
+}
+
+function lucFmtBRL(v){
+  return 'R$ '+parseFloat(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+}
+function lucParseBRL(s){
+  /* aceita "1.234,56" ou "1234.56" */
+  if(!s) return 0;
+  s=s.trim().replace(/[R$\s]/g,'');
+  if(s.indexOf(',')>s.indexOf('.')){
+    s=s.replace(/\./g,'').replace(',','.');
+  }
+  return parseFloat(s)||0;
+}
+
+function lucRenderMes(el, emps, mes){
+  /* mes = '01'..'12' */
+  var ano=lucCurrentAno||'2026';
+  var isJan=(mes==='01');
+  var mesIdx=parseInt(mes,10)-1;
+  var mesNome=LUC_MESES_FULL[mesIdx]||mes;
+  var html='<div style="font-weight:700;font-size:14px;color:var(--teal);margin-bottom:12px">'+mesNome+' / '+ano+'</div>';
+  if(!emps||!emps.length){
+    el.innerHTML=html+'<div style="color:var(--slate);font-size:13px">Nenhuma empresa cadastrada.</div>';
+    return;
+  }
+  emps.forEach(function(emp){
+    var eid=emp.eid;
+    var expanded=!!lucExpanded['mes_'+mes+'_'+eid];
+    html+='<div style="border:1px solid var(--border);border-radius:var(--r2);margin-bottom:10px;overflow:hidden">'
+      +'<div onclick="lucToggleEmpMes(\''+eid+'\',\''+mes+'\')" style="cursor:pointer;display:flex;align-items:center;justify-content:space-between;padding:8px 14px;background:var(--bg);user-select:none">'
+      +'<span style="font-weight:600;font-size:13px">'+esc(emp.nome)+(emp.cnpj?'<span style="font-family:var(--mono);font-size:11px;color:var(--slate);margin-left:10px">'+esc(emp.cnpj)+'</span>':'')+'</span>'
+      +'<span style="font-size:11px;color:var(--slate)">'+(expanded?'&#9650;':'&#9660;')+'</span>'
+      +'</div>';
+    if(expanded){
+      html+=lucRenderMesTable(eid, ano, mes, isJan);
+    }
+    html+='</div>';
+  });
+  el.innerHTML=html;
+}
+
+function lucRenderMesTable(eid, ano, mes, isJan){
+  var socios=lucSocGet(eid);
+  if(!socios.length){
+    return '<div style="padding:10px 14px;font-size:12.5px;color:var(--slate)">Nenhum sócio cadastrado no Percentual de Participação.</div>';
+  }
+  var thStyle='padding:7px 10px;font-size:11px;font-weight:700;text-align:left;white-space:nowrap;background:var(--bg);position:sticky;top:0;z-index:1;border-bottom:1px solid var(--border)';
+  var thStyleR=thStyle+';text-align:right';
+  var h='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px">'
+    +'<thead><tr>'
+    +'<th style="'+thStyle+'">Sócio / Acionista</th>'
+    +'<th style="'+thStyle+'">CPF / CNPJ</th>'
+    +'<th style="'+thStyleR+'">% Mês</th>'
+    +'<th style="'+thStyleR+'">'+(isJan?'Saldo Ant. <small style="font-weight:400">(manual)</small>':'Saldo Ant.')+'</th>'
+    +'<th style="'+thStyleR+'">Crédito no Mês</th>'
+    +'<th style="'+thStyleR+'">Baixas no Mês</th>'
+    +'<th style="'+thStyleR+'">Saldo p/ Próx. Mês</th>'
+    +'<th style="'+thStyle+'">Conta Contábil</th>'
+    +'</tr></thead><tbody>';
+  socios.forEach(function(soc,i){
+    var row=lucGetMesRow(eid, ano, mes, soc.id);
+    var saldoAnt=lucCalcSaldoAnt(eid, ano, mes, soc.id);
+    var saldoProx=lucCalcSaldoProx(saldoAnt, row.credito, row.baixas);
+    var bg=i%2===0?'var(--white)':'var(--bg)';
+    var pctKey=ano+'-'+mes;
+    var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
+    h+='<tr style="background:'+bg+';">'
+      +'<td style="padding:6px 10px;white-space:nowrap">'+esc(soc.nome)+'</td>'
+      +'<td style="padding:6px 10px;font-family:var(--mono);font-size:11px;white-space:nowrap">'+esc(soc.doc||'—')+'</td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono)">'+parseFloat(pct).toFixed(4)+'%</td>'
+      +'<td style="padding:6px 10px;text-align:right">';
+    if(isJan){
+      h+='<input class="luc-brl-in" type="text" value="'+esc(lucFmtBRL(row.saldo_ant_jan))+'"'
+        +' onchange="lucSaveMesField(this,\''+eid+'\',\''+ano+'\',\''+mes+'\',\''+soc.id+'\',\'saldo_ant_jan\')"'
+        +' onfocus="this.select()">';
+    } else {
+      h+='<span class="luc-saldo-calc">'+lucFmtBRL(saldoAnt)+'</span>';
+    }
+    h+='</td>'
+      +'<td style="padding:6px 10px;text-align:right">'
+      +'<input class="luc-brl-in" type="text" value="'+esc(lucFmtBRL(row.credito))+'"'
+      +' onchange="lucSaveMesField(this,\''+eid+'\',\''+ano+'\',\''+mes+'\',\''+soc.id+'\',\'credito\')"'
+      +' onfocus="this.select()"></td>'
+      +'<td style="padding:6px 10px;text-align:right">'
+      +'<input class="luc-brl-in" type="text" value="'+esc(lucFmtBRL(row.baixas))+'"'
+      +' onchange="lucSaveMesField(this,\''+eid+'\',\''+ano+'\',\''+mes+'\',\''+soc.id+'\',\'baixas\')"'
+      +' onfocus="this.select()"></td>'
+      +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-weight:600;color:'+(saldoProx<0?'var(--red)':'var(--ink)')+'">'+lucFmtBRL(saldoProx)+'</td>'
+      +'<td style="padding:6px 10px">'
+      +'<input class="luc-text-in" type="text" value="'+esc(row.conta||'')+'"'
+      +' onchange="lucSaveMesField(this,\''+eid+'\',\''+ano+'\',\''+mes+'\',\''+soc.id+'\',\'conta\')">'
+      +'</td></tr>';
+  });
+  h+='</tbody></table></div>';
+  return h;
+}
+
+function lucToggleEmpMes(eid, mes){
+  var k='mes_'+mes+'_'+eid;
+  lucExpanded[k]=!lucExpanded[k];
+  var el=document.getElementById('lucContent');
+  if(!el) return;
+  var b=((document.getElementById('lucBusca')||{}).value||'').toLowerCase().trim();
+  lucRenderMes(el, lucEmps().filter(function(e){return !b||e.nome.toLowerCase().includes(b);}), mes);
+}
+
+function lucSaveMesField(inp, eid, ano, mes, sid, field){
+  var row=lucGetMesRow(eid, ano, mes, sid);
+  if(field==='conta'){
+    row.conta=inp.value;
+  } else {
+    row[field]=lucParseBRL(inp.value);
+    inp.value=lucFmtBRL(row[field]);
+  }
+  lucSaveMesRow(eid, ano, mes, row);
+  var el=document.getElementById('lucContent');
+  if(el){
+    var b=((document.getElementById('lucBusca')||{}).value||'').toLowerCase().trim();
+    lucRenderMes(el, lucEmps().filter(function(e){return !b||e.nome.toLowerCase().includes(b);}), mes);
+  }
 }
 
 function lucRenderSociosTable(eid){
