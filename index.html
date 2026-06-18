@@ -1146,6 +1146,8 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
         <button class="btn bo bsm" onclick="lucExportTopTemplate(lucCurrentSub,lucCurrentAno)">&#11123; Baixar Modelo</button>
         <button class="btn bp bsm" onclick="lucOpenTopImport(lucCurrentSub,lucCurrentAno)">&#128229; Importar Excel</button>
       </div>
+      <!-- exportar tudo -->
+      <button class="btn bo bsm" onclick="lucOpenExportAll()" title="Exportar todos os indicadores para Excel">&#11123; Exportar Excel</button>
     </div>
   </div>
   <!-- Layout: nav lateral + conteúdo -->
@@ -1179,6 +1181,25 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     <div class="ma">
       <button class="btn bo" onclick="closeModal('mLucTopImp')">Cancelar</button>
       <button class="btn bp" onclick="lucConfirmTopImport()">&#11123; Importar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal exportar tudo em Excel -->
+<div class="mb" id="mLucExportAll" style="display:none">
+  <div class="modal" style="max-width:540px">
+    <div class="mt"><h3>Exportar Excel — Lucros/Dividendos</h3><button onclick="closeModal('mLucExportAll')">&#x2715;</button></div>
+    <div class="mc" style="display:grid;gap:12px">
+      <div style="font-size:12.5px;color:var(--slate)">Selecione as empresas que deseja incluir na exportação:</div>
+      <label style="display:flex;align-items:center;gap:8px;font-weight:600;font-size:13px;cursor:pointer;border-bottom:1px solid var(--border);padding-bottom:8px">
+        <input type="checkbox" id="lucExpAllChk" onchange="lucExpToggleAll(this.checked)" style="width:15px;height:15px">
+        Selecionar todas
+      </label>
+      <div id="lucExpEmpList" style="display:grid;gap:6px;max-height:320px;overflow-y:auto;padding-right:4px"></div>
+    </div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLucExportAll')">Cancelar</button>
+      <button class="btn bp" onclick="lucConfirmExportAll()">&#11123; Exportar Excel</button>
     </div>
   </div>
 </div>
@@ -4787,6 +4808,87 @@ function lucSaveTopField(inp,subId,ano,eid,mes){
   lucTopSet(subId,ano,eid,data);
   var display=subId==='ajustes_dev'?Math.abs(val):val;
   inp.value=lucFmtSigned(display);
+}
+
+/* ── Exportar tudo em Excel ──────────────────────────────────────── */
+function lucOpenExportAll(){
+  var emps=S.emps()||[];
+  var list=document.getElementById('lucExpEmpList');
+  if(!list) return;
+  list.innerHTML='';
+  emps.forEach(function(emp){
+    var lbl=document.createElement('label');
+    lbl.style.cssText='display:flex;align-items:center;gap:8px;font-size:12.5px;cursor:pointer';
+    lbl.innerHTML='<input type="checkbox" class="luc-exp-chk" data-eid="'+emp.eid
+      +'" checked style="width:14px;height:14px"> '
+      +'<span>'+esc(emp.nome)+'</span>'
+      +'<span style="color:var(--slate);font-size:11px;font-family:var(--mono)">'+fmtDoc(emp.cnpj)+'</span>';
+    list.appendChild(lbl);
+  });
+  document.getElementById('lucExpAllChk').checked=true;
+  openModal('mLucExportAll');
+}
+
+function lucExpToggleAll(checked){
+  document.querySelectorAll('.luc-exp-chk').forEach(function(c){ c.checked=checked; });
+}
+
+function lucConfirmExportAll(){
+  var ano=lucCurrentAno;
+  var selecionados=[];
+  document.querySelectorAll('.luc-exp-chk:checked').forEach(function(c){
+    var eid=c.dataset.eid;
+    var emps=S.emps()||[];
+    var emp=emps.find(function(e){ return e.eid===eid; });
+    if(emp) selecionados.push(emp);
+  });
+  if(!selecionados.length){ alert('Selecione ao menos uma empresa.'); return; }
+
+  var XLSX=window.XLSX;
+  if(!XLSX){ alert('Biblioteca Excel não carregada.'); return; }
+
+  var gridItems=[
+    {id:'lpm_acum',     label:'Lucro/Prej. Saldo de Abertura', auto:false},
+    {id:'lpm',          label:'Lucro/Prejuízo Mensal',         auto:false},
+    {id:'ajustes_cred', label:'Ajustes Credores de Ex. Anteriores', auto:false},
+    {id:'ajustes_dev',  label:'Ajustes Devedores de Ex. Anteriores', auto:false},
+    {id:'creditado_ant',label:'(-) Creditado no Mês Anterior', auto:true},
+    {id:'saldo_ant',    label:'Saldo de Lucro/Prejuízo Anterior', auto:true},
+    {id:'saldo',        label:'Saldo de Lucro/Prejuízo',       auto:true},
+  ];
+  var mLabels=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  var mCodes=['01','02','03','04','05','06','07','08','09','10','11','12'];
+
+  var wb=XLSX.utils.book_new();
+  var wsData=[];
+
+  /* cabeçalho */
+  wsData.push(['Empresa','CNPJ','Indicador'].concat(mLabels));
+
+  selecionados.forEach(function(emp,ei){
+    if(ei>0) wsData.push([]); /* linha em branco entre empresas */
+    gridItems.forEach(function(item){
+      var row=[ei===0||wsData[wsData.length-1].length?emp.nome:'', fmtDoc(emp.cnpj), item.label];
+      /* só coloca nome/cnpj na primeira linha da empresa */
+      if(item!==gridItems[0]){ row[0]=''; row[1]=''; }
+      mCodes.forEach(function(m){
+        var v=item.auto
+          ? lucCalcTopAuto(item.id,ano,emp.eid,m)
+          : lucTopGetMes(item.id,ano,emp.eid,m);
+        row.push(v);
+      });
+      wsData.push(row);
+    });
+  });
+
+  var ws=XLSX.utils.aoa_to_sheet(wsData);
+
+  /* largura das colunas */
+  ws['!cols']=[{wch:40},{wch:22},{wch:42}].concat(mLabels.map(function(){ return {wch:14}; }));
+
+  XLSX.utils.book_append_sheet(wb,ws,'Lucros_Dividendos_'+ano);
+  XLSX.writeFile(wb,'Lucros_Dividendos_'+ano+'.xlsx');
+  closeModal('mLucExportAll');
 }
 
 /* ── Excel — modelo e importação ─────────────────────────────────── */
