@@ -4140,10 +4140,12 @@ const LUC_TOPS = [
   {id:'lpm',          label:'Lucro/Prejuízo Mensal'},
   {id:'ajustes_cred', label:'Ajustes Credores de Ex. Anteriores'},
   {id:'ajustes_dev',  label:'Ajustes Devedores de Ex. Anteriores'},
-  {id:'lpm_acum',     label:'Lucro/Prej. Saldo de Abertura'},
-  {id:'saldo',        label:'Saldo de Lucro/Prejuízo'},
+  {id:'lpm_acum',      label:'Lucro/Prej. Saldo de Abertura'},
+  {id:'creditado_ant', label:'(-) Creditado no Mês Anterior'},
+  {id:'saldo',         label:'Saldo de Lucro/Prejuízo'},
 ];
-const LUC_TOP_GRID_IDS = ['lpm','ajustes_cred','ajustes_dev','lpm_acum','saldo'];
+const LUC_TOP_GRID_IDS = ['lpm','ajustes_cred','ajustes_dev','lpm_acum','creditado_ant','saldo'];
+const LUC_TOP_AUTO_IDS = ['creditado_ant','saldo']; /* calculados automaticamente (read-only) */
 const LUC_TRIMS = [
   {id:'trim_1', label:'1º Trimestre', trim:1, meses:[
     {id:'mes_01', label:'Janeiro'},
@@ -4466,9 +4468,15 @@ function lucRenderMesTable(eid, ano, mes, isJan){
     } else {
       h+='<span class="luc-saldo-calc">'+lucFmtBRL(saldoAnt)+'</span>';
     }
+    /* Crédito: auto-sugere Saldo × % quando positivo e não há valor salvo */
+    var saldoEmp=lucCalcSaldo(ano,eid,mes);
+    var creditoSugerido=(saldoEmp>0)?(saldoEmp*pct/100):0;
+    var creditoVal=(parseFloat(row.credito)||0)!==0 ? (parseFloat(row.credito)||0) : creditoSugerido;
+    var creditoSugestao=creditoSugerido>0&&(parseFloat(row.credito)||0)===0?' title="Auto: R$ '+creditoSugerido.toLocaleString(\'pt-BR\',{minimumFractionDigits:2})+'  (Saldo × %)"':'';
     h+='</td>'
       +'<td style="padding:6px 10px;text-align:right">'
-      +'<input class="luc-brl-in" type="text" value="'+esc(lucFmtBRL(row.credito))+'"'
+      +'<input class="luc-brl-in" type="text" value="'+esc(lucFmtBRL(creditoVal))+'"'
+      +creditoSugestao
       +' onchange="lucSaveMesField(this,\''+eid+'\',\''+ano+'\',\''+mes+'\',\''+soc.id+'\',\'credito\')"'
       +' onfocus="this.select()"></td>'
       +'<td style="padding:6px 10px;text-align:right">'
@@ -4661,11 +4669,28 @@ function lucTopGet(subId,ano,eid){ return S.g('luc_top_'+subId+'_'+ano+'_'+eid)|
 function lucTopSet(subId,ano,eid,data){ S.s('luc_top_'+subId+'_'+ano+'_'+eid,data); }
 function lucTopGetMes(subId,ano,eid,mes){ return parseFloat((lucTopGet(subId,ano,eid))[mes])||0; }
 
+function lucCalcCreditadoAnt(ano,eid,mes){
+  /* soma dos créditos de todos os sócios no mês anterior */
+  if(mes==='01') return 0;
+  var prevMes=(parseInt(mes,10)-1).toString().padStart(2,'0');
+  return lucSocGet(eid).reduce(function(acc,soc){
+    var row=lucGetMesRow(eid,ano,prevMes,soc.id);
+    return acc+(parseFloat(row.credito)||0);
+  },0);
+}
+
 function lucCalcSaldo(ano,eid,mes){
   return lucTopGetMes('lpm',ano,eid,mes)
         +lucTopGetMes('ajustes_cred',ano,eid,mes)
         +lucTopGetMes('ajustes_dev',ano,eid,mes)
-        +lucTopGetMes('lpm_acum',ano,eid,mes);
+        +lucTopGetMes('lpm_acum',ano,eid,mes)
+        -lucCalcCreditadoAnt(ano,eid,mes);
+}
+
+function lucCalcTopAuto(subId,ano,eid,mes){
+  if(subId==='creditado_ant') return lucCalcCreditadoAnt(ano,eid,mes);
+  if(subId==='saldo') return lucCalcSaldo(ano,eid,mes);
+  return 0;
 }
 
 function lucFmtSigned(v){
@@ -4674,7 +4699,7 @@ function lucFmtSigned(v){
 }
 
 function lucRenderTopGrid(el,emps,subId,ano){
-  var isSaldo=subId==='saldo';
+  var isAuto=LUC_TOP_AUTO_IDS.indexOf(subId)>=0;
   var isDevedor=subId==='ajustes_dev';
   var thS='padding:6px 10px;font-size:11px;font-weight:700;text-align:right;white-space:nowrap;background:var(--bg);border-bottom:2px solid var(--border);min-width:160px';
   var thL='padding:6px 10px;font-size:11px;font-weight:700;text-align:left;white-space:nowrap;background:var(--bg);border-bottom:2px solid var(--border)';
@@ -4691,10 +4716,12 @@ function lucRenderTopGrid(el,emps,subId,ano){
       +'<td style="padding:6px 10px;white-space:nowrap;position:sticky;left:0;z-index:1;background:'+bg+'">'+esc(emp.nome)+'</td>'
       +'<td style="padding:6px 10px;font-family:var(--mono);font-size:11px;white-space:nowrap">'+fmtDoc(emp.cnpj)+'</td>';
     LUC_MESES.forEach(function(m){
-      if(isSaldo){
-        var v=lucCalcSaldo(ano,eid,m);
-        var col=v>0?'var(--teal)':v<0?'var(--red)':'var(--slate)';
-        h+='<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-weight:600;white-space:nowrap;color:'+col+'">'+lucFmtSigned(v)+'</td>';
+      if(LUC_TOP_AUTO_IDS.indexOf(subId)>=0){
+        var v=lucCalcTopAuto(subId,ano,eid,m);
+        /* creditado_ant: mostra como negativo (é uma dedução) */
+        var display=subId==='creditado_ant'?-v:v;
+        var col=display>0?'var(--teal)':display<0?'var(--red)':'var(--slate)';
+        h+='<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-weight:600;white-space:nowrap;color:'+col+'">'+lucFmtSigned(display)+'</td>';
       } else {
         var stored=lucTopGetMes(subId,ano,eid,m);
         var display=isDevedor?Math.abs(stored):stored;
@@ -4706,7 +4733,7 @@ function lucRenderTopGrid(el,emps,subId,ano){
     });
     h+='</tr>';
   });
-  if(!isSaldo){
+  if(!isAuto){
     var tfS='padding:6px 10px;font-family:var(--mono);font-size:12px;font-weight:700;text-align:right;border-top:2px solid var(--border);background:var(--bg)';
     h+='<tr><td colspan="2" style="padding:6px 10px;font-size:11.5px;font-weight:700;color:var(--slate);border-top:2px solid var(--border);background:var(--bg)">TOTAL</td>';
     LUC_MESES.forEach(function(m){
