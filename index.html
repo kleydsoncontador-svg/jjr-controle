@@ -4926,11 +4926,33 @@ function filtrarPickerListagem(){
     :'<div style="padding:10px;color:var(--slate);font-size:.85rem">Nenhum item encontrado</div>';
 }
 function selecionarItemGanho(idx){
+  const item=_pickerItens[idx];
+  if(!item)return;
+  const lista=document.getElementById('pickerLista');
+  lista.innerHTML=`<div style="padding:14px">
+    <div style="margin-bottom:10px;font-size:.88rem;font-weight:600;color:var(--slate)">${esc(item.nome)}</div>
+    <div style="margin-bottom:8px;font-size:.82rem;color:var(--slate)">Selecione o padrão da tabela:</div>
+    <button class="btn bp bsm" onclick="confirmarAddGanho(${idx},'trimestral')" style="margin-right:8px;margin-bottom:6px">&#128197; Padrão Trimestral</button>
+    <button class="btn bo bsm" onclick="confirmarAddGanho(${idx},'anual')" style="margin-bottom:6px">&#128467; Padrão Anual</button>
+  </div>`;
+}
+function confirmarAddGanho(idx,padrao){
   const eid=document.getElementById('ganhosEid').value;
   const item=_pickerItens[idx];
   if(!item)return;
-  addGanhoRendimento(eid,'Receitas Financeiras',item.nome);
+  const ganhos=getGanhos(eid);
+  const id=Date.now();
+  const ano=(S.fechAtual()||'').split('-')[0]||String(new Date().getFullYear());
+  const dados={};
+  for(let m=1;m<=12;m++) dados[String(m).padStart(2,'0')+'/'+ano]={};
+  ganhos[id]={id,tipo:'Receitas Financeiras',nome:item.nome,
+    data:new Date().toLocaleDateString('pt-BR'),
+    padrao,cnpj:'',razaoSocial:'',tipoRendimento:'',
+    cols:JSON.parse(JSON.stringify(COLS_RF_DEFAULT)),dados};
+  setGanhos(eid,ganhos);
   document.getElementById('pickerReceitaFin').style.display='none';
+  abrirGanhos(eid);
+  toast('Adicionado! Clique em Abrir para preencher.','ok');
 }
 function removeGanhoRendimento(eid,id){
   if(!confirm('Remover este ganho/rendimento?'))return;
@@ -4981,9 +5003,10 @@ function abrirGanhoDetalhe(eid,id){
   const ganhos=getGanhos(eid);
   const ganho=ganhos[id];
   if(!ganho)return;
-
   if(ganho.tipo==='Aplic. Aut Mais Itaú'){
     renderApplicAuto(eid,id,ganho);
+  } else if(ganho.tipo==='Receitas Financeiras'){
+    renderGanhoTrimestral(eid,id,ganho);
   } else {
     toast('Tipo não implementado ainda','err');
   }
@@ -5098,6 +5121,200 @@ function fecharGanhoDetalhe(){
   const container=document.getElementById('ganhoDetalheContainer');
   if(container)container.style.display='none';
 }
+
+var COLS_RF_DEFAULT=[
+  {id:'bruto',nome:'Rendimento Bruto s/ Resgates',op:'+',tipo:'num'},
+  {id:'iof',nome:'(-) IOF',op:'-',tipo:'num'},
+  {id:'trib',nome:'(=) Renda Tributável',op:null,tipo:'num'},
+  {id:'irrf',nome:'IRRF',op:'-',tipo:'num',hl:1},
+  {id:'codigo',nome:'Código',op:null,tipo:'text'},
+  {id:'aliq',nome:'Alíquota IRRF',op:null,tipo:'text'},
+  {id:'rendMes',nome:'Rendimento do Mês (Competência)',op:null,tipo:'num'},
+  {id:'aplic',nome:'Aplicação',op:'+',tipo:'num'},
+  {id:'resgate',nome:'Valor Principal Resgatado',op:'-',tipo:'num'},
+  {id:'rendLiq',nome:'Rendimento Líquido Pago',op:null,tipo:'num'}
+];
+function _fmt(v){return(parseFloat(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});}
+function calcSaldosGanho(ganho){
+  const dados=ganho.dados||{},cols=ganho.cols||[];
+  const anos=[...new Set(Object.keys(dados).map(k=>k.split('/')[1]).filter(Boolean))].sort();
+  const mks=[];
+  anos.forEach(ano=>{for(let m=1;m<=12;m++)mks.push(String(m).padStart(2,'0')+'/'+ano);});
+  const ants={},ats={};
+  mks.forEach((mk,i)=>{
+    const d=dados[mk]||{};
+    const ant=i===0?(parseFloat(d.saldoAnt)||0):(ats[mks[i-1]]||0);
+    ants[mk]=ant;
+    let s=ant;
+    cols.forEach(c=>{if(c.tipo==='num'){const v=parseFloat(d[c.id])||0;if(c.op==='+')s+=v;else if(c.op==='-')s-=v;}});
+    ats[mk]=s;
+  });
+  return{ants,ats,mks};
+}
+function renderGanhoTrimestral(eid,id,ganho){
+  const dados=ganho.dados||{};
+  const cols=ganho.cols||JSON.parse(JSON.stringify(COLS_RF_DEFAULT));
+  const anos=[...new Set(Object.keys(dados).map(k=>k.split('/')[1]).filter(Boolean))].sort();
+  if(!anos.length){const a=String(new Date().getFullYear());ganho.dados=ganho.dados||{};for(let m=1;m<=12;m++)ganho.dados[String(m).padStart(2,'0')+'/'+a]={}; anos.push(a);}
+  const{ants,ats,mks}=calcSaldosGanho(ganho);
+  const firstMk=mks[0]||'';
+  const pid=String(id),eid2=String(eid);
+  const btnOp=(cid,op,cur)=>`<button onclick="toggleColOp('${eid2}','${pid}','${cid}','${op}')" style="border:1px solid;border-radius:3px;padding:1px 6px;cursor:pointer;font-size:11px;font-weight:700;${cur===op?(op==='+'?'background:#16a34a;color:#fff;border-color:#16a34a':'background:#dc2626;color:#fff;border-color:#dc2626'):'background:transparent;color:var(--slate);border-color:var(--border)'}">${op==='+'?'+':'−'}</button>`;
+  let h=`<div style="background:var(--white);border-radius:8px;padding:20px;min-height:calc(100vh - 40px)">
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+    <div><h3 style="margin:0 0 4px">${esc(ganho.nome)}</h3>
+      <span style="font-size:.75rem;background:var(--slate-100);color:var(--slate);padding:2px 8px;border-radius:10px">${ganho.padrao==='trimestral'?'Padrão Trimestral':'Padrão Anual'}</span></div>
+    <div style="display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn bo bsm" onclick="imprimirGanho()">&#128424; PDF</button>
+      <button class="btn bo bsm" onclick="exportarGanhoExcel('${eid2}','${pid}')">&#128202; Excel/CSV</button>
+      <button class="btn bo bsm" onclick="adicionarAnoGanho('${eid2}','${pid}')">+ Ano</button>
+      <button class="btn bo bsm" onclick="adicionarColGanho('${eid2}','${pid}')">+ Coluna</button>
+      <button class="btn bo bsm" onclick="fecharGanhoDetalhe()">&#8592; Voltar</button>
+    </div>
+  </div>
+  <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;padding:12px;background:var(--bg);border-radius:6px;align-items:flex-end">
+    <div><div style="font-size:.72rem;color:var(--slate);margin-bottom:2px">PRODUTO</div>
+      <div style="font-weight:600;font-size:.9rem">${esc(ganho.nome)}</div></div>
+    <div><div style="font-size:.72rem;color:var(--slate);margin-bottom:2px">CNPJ</div>
+      <input class="fi" id="grf-${pid}-cnpj" value="${esc(ganho.cnpj||'')}" placeholder="00.000.000/0000-00" style="font-size:.85rem;width:160px" onchange="salvarCampoGanho('${eid2}','${pid}','cnpj',this.value)"></div>
+    <div><div style="font-size:.72rem;color:var(--slate);margin-bottom:2px">INSTITUIÇÃO FINANCEIRA</div>
+      <div style="display:flex;align-items:center;gap:6px">
+        <span id="grf-${pid}-razao" style="font-weight:600;font-size:.9rem">${esc(ganho.razaoSocial||'—')}</span>
+        <button class="btn bo bsm" onclick="buscarRazaoSocialGanho('${eid2}','${pid}')" style="font-size:.72rem;padding:2px 8px">&#128269; Buscar</button>
+      </div></div>
+    <div><div style="font-size:.72rem;color:var(--slate);margin-bottom:2px">TIPO DE RENDIMENTO</div>
+      <input class="fi" value="${esc(ganho.tipoRendimento||'')}" placeholder="Ex: Aplicações Financeiras de Renda Fixa" style="font-size:.85rem;width:260px" onchange="salvarCampoGanho('${eid2}','${pid}','tipoRendimento',this.value)"></div>
+  </div>
+  <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:11px;white-space:nowrap">
+  <thead>
+    <tr style="background:var(--bg)">
+      <th style="border:1px solid var(--border);padding:3px;min-width:68px"></th>
+      <th style="border:1px solid var(--border);padding:3px;min-width:52px"></th>`;
+  cols.forEach(c=>{h+=`<th style="border:1px solid var(--border);padding:3px;text-align:center;min-width:100px;${c.hl?'background:#dbeafe':''}"><div style="display:flex;justify-content:center;gap:3px">${btnOp(c.id,'+',c.op)}${btnOp(c.id,'-',c.op)}</div></th>`;});
+  h+=`<th style="border:1px solid var(--border);padding:3px;min-width:120px"></th><th style="border:1px solid var(--border);padding:3px;min-width:120px"></th></tr>
+    <tr style="background:var(--slate-100);font-weight:600">
+      <th style="padding:7px;border:1px solid var(--border);text-align:left">Mês/Ano</th>
+      <th style="padding:7px;border:1px solid var(--border);text-align:center">Trimestre</th>`;
+  cols.forEach(c=>{h+=`<th style="padding:7px;border:1px solid var(--border);text-align:right;${c.hl?'background:#dbeafe':''}"><div style="display:flex;justify-content:space-between;align-items:center;gap:3px"><span style="font-size:10px">${esc(c.nome)}</span><span style="display:flex;gap:2px;flex-shrink:0"><button onclick="editarColNome('${eid2}','${pid}','${c.id}')" style="border:none;background:none;cursor:pointer;padding:1px 3px;color:var(--slate);font-size:11px" title="Renomear">&#9998;</button><button onclick="excluirColGanho('${eid2}','${pid}','${c.id}')" style="border:none;background:none;cursor:pointer;padding:1px 3px;color:var(--red);font-size:11px" title="Excluir">&#10005;</button></span></div></th>`;});
+  h+=`<th style="padding:7px;border:1px solid var(--border);text-align:right;background:#dcfce7;font-size:10px">Saldo Bruto<br>(Atualizado)</th>
+      <th style="padding:7px;border:1px solid var(--border);text-align:right;font-size:10px">Saldo Bruto<br>Anterior</th></tr>
+  </thead><tbody>`;
+  anos.forEach(ano=>{
+    const totalCols=cols.length+4;
+    h+=`<tr><td colspan="${totalCols}" style="background:var(--slate-100);padding:5px 8px;font-weight:700;font-size:12px;border:1px solid var(--border)">&#128197; ${ano}</td></tr>`;
+    for(let t=1;t<=4;t++){
+      const qTotals={};cols.forEach(c=>{if(c.tipo==='num')qTotals[c.id]=0;});
+      let lastSaldoQ=0;
+      for(let m=(t-1)*3+1;m<=t*3;m++){
+        const mk=String(m).padStart(2,'0')+'/'+ano;
+        const d=dados[mk]||{};
+        const ant=ants[mk]??0,sal=ats[mk]??0;
+        lastSaldoQ=sal;
+        const mKey=mk.replace('/','_');
+        const isFirst=mk===firstMk;
+        cols.forEach(c=>{if(c.tipo==='num')qTotals[c.id]+=(parseFloat(d[c.id])||0);});
+        h+=`<tr onmouseenter="this.style.background='#f8fafc'" onmouseleave="this.style.background=''">
+          <td style="padding:5px 7px;border:1px solid var(--border)">${mk}</td>
+          <td style="padding:5px 7px;border:1px solid var(--border);text-align:center">${t}º Tri</td>`;
+        cols.forEach(c=>{const v=c.tipo==='text'?(d[c.id]||''):(parseFloat(d[c.id])||0);
+          h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="${c.tipo==='text'?'text':'number'}" step="0.01" value="${c.tipo==='text'?esc(v):(v||'')}" onchange="atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id}',this.value)" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:80px" placeholder="0"></td>`;});
+        h+=`<td id="grf-${pid}-s-${mKey}" style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:#166534">${_fmt(sal)}</td>
+          <td style="padding:2px;border:1px solid var(--border)">
+            ${isFirst?`<input type="number" step="0.01" value="${ant||''}" onchange="atualizarGanhoCell('${eid2}','${pid}','${mk}','saldoAnt',this.value)" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:90px" placeholder="Saldo inicial">`:`<span id="grf-${pid}-a-${mKey}" style="display:block;padding:5px 7px;text-align:right;color:var(--slate)">${_fmt(ant)}</span>`}
+          </td></tr>`;
+      }
+      h+=`<tr style="background:#f1f5f9;font-weight:700"><td colspan="2" style="padding:7px;border:1px solid var(--border);text-align:right">${t}º Trimestre Total</td>`;
+      cols.forEach(c=>{h+=`<td style="padding:7px;border:1px solid var(--border);text-align:right;${c.hl?'background:#dbeafe':''}">${c.tipo==='num'?_fmt(qTotals[c.id]):'—'}</td>`;});
+      h+=`<td style="padding:7px;border:1px solid var(--border);text-align:right;background:#dcfce7;color:#166534;font-weight:800">${_fmt(lastSaldoQ)}</td><td style="border:1px solid var(--border)"></td></tr>`;
+    }
+  });
+  h+=`</tbody></table></div></div>`;
+  const container=document.getElementById('ganhoDetalheContainer');
+  if(container){container.innerHTML='<div style="margin:auto;max-width:1400px">'+h+'</div>';container.style.display='block';}
+}
+function atualizarGanhoCell(eid,id,mk,colId,value){
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  if(!ganho.dados)ganho.dados={};if(!ganho.dados[mk])ganho.dados[mk]={};
+  const col=(ganho.cols||[]).find(c=>c.id===colId);
+  ganho.dados[mk][colId]=colId==='saldoAnt'||(!col||col.tipo==='num')?(parseFloat(value)||0):value;
+  setGanhos(eid,ganhos);
+  const{ants,ats}=calcSaldosGanho(ganho);
+  const pid=String(id);
+  Object.keys(ants).forEach(m=>{
+    const k=m.replace('/','_');
+    const sEl=document.getElementById('grf-'+pid+'-s-'+k);
+    const aEl=document.getElementById('grf-'+pid+'-a-'+k);
+    if(sEl)sEl.textContent=_fmt(ats[m]);
+    if(aEl)aEl.textContent=_fmt(ants[m]);
+  });
+}
+function toggleColOp(eid,id,colId,op){
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  const col=(ganho.cols||[]).find(c=>c.id===colId);if(!col)return;
+  col.op=col.op===op?null:op;setGanhos(eid,ganhos);renderGanhoTrimestral(eid,id,ganho);
+}
+function editarColNome(eid,id,colId){
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  const col=(ganho.cols||[]).find(c=>c.id===colId);if(!col)return;
+  const novo=prompt('Novo nome para a coluna:',col.nome);
+  if(novo&&novo.trim()){col.nome=novo.trim();setGanhos(eid,ganhos);renderGanhoTrimestral(eid,id,ganho);}
+}
+function excluirColGanho(eid,id,colId){
+  if(!confirm('Excluir esta coluna?'))return;
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  ganho.cols=(ganho.cols||[]).filter(c=>c.id!==colId);setGanhos(eid,ganhos);renderGanhoTrimestral(eid,id,ganho);
+}
+function adicionarColGanho(eid,id){
+  const nome=prompt('Nome da nova coluna:');if(!nome||!nome.trim())return;
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  if(!ganho.cols)ganho.cols=[];
+  ganho.cols.push({id:'col_'+Date.now(),nome:nome.trim(),op:null,tipo:'num'});
+  setGanhos(eid,ganhos);renderGanhoTrimestral(eid,id,ganho);
+}
+function adicionarAnoGanho(eid,id){
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  const anos=[...new Set(Object.keys(ganho.dados||{}).map(k=>k.split('/')[1]).filter(Boolean))].sort();
+  const novoAno=(anos.length?Math.max(...anos.map(Number)):new Date().getFullYear())+1;
+  if(!ganho.dados)ganho.dados={};
+  for(let m=1;m<=12;m++){const mk=String(m).padStart(2,'0')+'/'+novoAno;if(!ganho.dados[mk])ganho.dados[mk]={};}
+  setGanhos(eid,ganhos);renderGanhoTrimestral(eid,id,ganho);toast(novoAno+' adicionado','ok');
+}
+function salvarCampoGanho(eid,id,campo,value){
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  ganho[campo]=value;setGanhos(eid,ganhos);
+}
+async function buscarRazaoSocialGanho(eid,id){
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  const raw=ganho.cnpj||(document.getElementById('grf-'+id+'-cnpj')||{}).value||'';
+  const cnpj=raw.replace(/\D/g,'');
+  if(cnpj.length!==14){toast('Preencha o CNPJ primeiro','err');return;}
+  const el=document.getElementById('grf-'+id+'-razao');if(el)el.textContent='Buscando...';
+  try{
+    const r=await fetch('https://brasilapi.com.br/api/cnpj/v1/'+cnpj);
+    const d=await r.json();
+    const nome=d.razao_social||d.nome||'';
+    ganho.razaoSocial=nome;
+    ganho.cnpj=cnpj.replace(/(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})/,'$1.$2.$3/$4-$5');
+    setGanhos(eid,ganhos);
+    if(el)el.textContent=nome||'Não encontrado';
+    toast('Instituição atualizada','ok');
+  }catch(e){if(el)el.textContent='Erro na busca';toast('Erro ao buscar CNPJ','err');}
+}
+function exportarGanhoExcel(eid,id){
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  const cols=ganho.cols||[],dados=ganho.dados||{};
+  const{ants,ats,mks}=calcSaldosGanho(ganho);
+  const rows=[['Mês/Ano','Trimestre',...cols.map(c=>c.nome),'Saldo Bruto (Atualizado)','Saldo Bruto Anterior']];
+  mks.forEach(mk=>{
+    const d=dados[mk]||{};const m=parseInt(mk.split('/')[0]);
+    rows.push([mk,Math.ceil(m/3)+'º Trimestre',...cols.map(c=>c.tipo==='text'?(d[c.id]||''):(parseFloat(d[c.id])||0)),_fmt(ats[mk]??0),_fmt(ants[mk]??0)]);
+  });
+  const csv=rows.map(r=>r.map(v=>'"'+String(v).replace(/"/g,'""')+'"').join(';')).join('\r\n');
+  const blob=new Blob(['﻿'+csv],{type:'text/csv;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');a.href=url;a.download=(ganho.nome||'ganho').replace(/[^a-zA-Z0-9]/g,'_')+'.csv';a.click();URL.revokeObjectURL(url);
+}
+function imprimirGanho(){window.print();}
 
 function renderGanhos(){
   const busca=(document.getElementById('ganhosBuscaInput')||{}).value||'';
