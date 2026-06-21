@@ -655,9 +655,9 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
           </div>
           <div id="feCnpjStatus" style="font-size:11.5px;margin-top:4px;min-height:16px"></div>
         </div>
-        <div class="fg" style="grid-column:1/-1"><label class="fl">Razão social *</label><input class="fi" id="feNome"></div>
-        <div class="fg"><label class="fl">Nome fantasia</label><input class="fi" id="feFantasia"></div>
-        <div class="fg"><label class="fl">Atividade principal</label><input class="fi" id="feAtividade"></div>
+        <div class="fg" style="grid-column:1/-1"><label class="fl">Razão social *</label><input class="fi" id="feNome" readonly placeholder="Preenchido automaticamente pelo Buscar" style="background:var(--bg);color:var(--slate)"></div>
+        <div class="fg"><label class="fl">Nome fantasia</label><input class="fi" id="feFantasia" readonly placeholder="Preenchido automaticamente pelo Buscar" style="background:var(--bg);color:var(--slate)"></div>
+        <div class="fg"><label class="fl">Atividade principal</label><input class="fi" id="feAtividade" readonly placeholder="Preenchido automaticamente pelo Buscar" style="background:var(--bg);color:var(--slate)"></div>
         <div class="fg"><label class="fl">Natureza jurídica</label>
           <input class="fi" id="feNatJur" placeholder="Preenchido automaticamente pelo Buscar" readonly style="background:var(--bg);color:var(--slate)">
         </div>
@@ -2817,34 +2817,44 @@ function addEmailField(val){
 // ─── CNPJ search (BrasilAPI) ─────────────────────────────────────────────────
 async function buscarTodosCNPJs(){
   const emps = S.emps();
-  const semCnpj = emps.filter(e=>!(e.cnpjNum||'').replace(/\D/g,'').match(/^\d{14}$/));
-  if(!confirm('Isso vai buscar Natureza Jurídica e Porte de todas as '+emps.length+' empresas via BrasilAPI.\n\nSomente esses campos serão atualizados. Seus dados existentes não serão apagados.\n\nContinuar?')) return;
-  let ok=0, err=0;
+  const comCnpj = emps.filter(e=>(e.cnpjNum||e.cnpj||'').replace(/\D/g,'').length===14);
+  const semCnpj = emps.length - comCnpj.length;
+  if(!confirm(
+    'Isso vai buscar via BrasilAPI os seguintes dados de '+emps.length+' empresas:\n'
+    +'  • Razão Social\n  • Nome Fantasia\n  • Atividade Principal (CNAE)\n  • Natureza Jurídica\n  • Porte da Empresa\n\n'
+    +'Responsável, Tributação, Grupo, E-mails e demais dados NÃO serão alterados.\n'
+    +(semCnpj?' ⚠️ '+semCnpj+' empresa(s) sem CNPJ válido serão ignoradas.\n':'')
+    +'\nContinuar?'
+  )) return;
+  let ok=0, err=0, skip=0;
   const btn = event.target;
-  btn.disabled=true; btn.textContent='Buscando...';
-  for(const emp of emps){
-    const raw=(emp.cnpjNum||emp.cnpj||'').replace(/\D/g,'');
-    if(raw.length!==14){ err++; continue; }
+  btn.disabled=true;
+  // Campos que o Buscar CNPJ controla — nunca toca em resp, reg, grupoNome, emails, datas, etc.
+  for(let i=0;i<emps.length;i++){
+    const raw=(emps[i].cnpjNum||emps[i].cnpj||'').replace(/\D/g,'');
+    if(raw.length!==14){ skip++; continue; }
+    btn.textContent='Buscando '+( ok+err+skip+1)+'/'+emps.length+'...';
     try{
       const r=await fetch('https://brasilapi.com.br/api/cnpj/v1/'+raw);
-      if(!r.ok){ err++; continue; }
+      if(!r.ok){ err++; await new Promise(r=>setTimeout(r,600)); continue; }
       const d=await r.json();
-      const idx=emps.findIndex(e=>String(e.eid)===String(emp.eid));
-      if(idx>=0){
-        if(d.natureza_juridica) emps[idx].natJur=d.natureza_juridica;
-        if(d.porte) emps[idx].porte=d.porte;
-        if(d.razao_social && !emps[idx].nome) emps[idx].nome=d.razao_social;
-        if(d.nome_fantasia && !emps[idx].fantasia) emps[idx].fantasia=d.nome_fantasia;
-      }
+      // Atualiza APENAS campos originados do CNPJ
+      if(d.razao_social) emps[i].nome=d.razao_social;
+      if(d.nome_fantasia !== undefined) emps[i].fantasia=d.nome_fantasia||'';
+      if(d.cnae_fiscal_descricao) emps[i].atividade=d.cnae_fiscal_descricao;
+      if(d.natureza_juridica) emps[i].natJur=d.natureza_juridica;
+      if(d.porte) emps[i].porte=d.porte;
       ok++;
-      btn.textContent='Buscando... ('+ok+'/'+emps.length+')';
-      await new Promise(r=>setTimeout(r,300));
-    }catch(e){ err++; }
+      // Salva a cada 5 empresas para não perder progresso
+      if(ok%5===0) S.saveEmps(emps);
+      await new Promise(r=>setTimeout(r,500));
+    }catch(e){ err++; await new Promise(r=>setTimeout(r,500)); }
   }
   S.saveEmps(emps);
   btn.disabled=false; btn.textContent='&#128269; Buscar todos CNPJs';
   renderEmpresasPage();
-  toast('Concluído: '+ok+' atualizadas'+(err?' | '+err+' erros':''),'ok');
+  const msg='Concluído: '+ok+' atualizadas'+(skip?' | '+skip+' sem CNPJ':'')+(err?' | '+err+' com erro':'');
+  toast(msg, err>0?'':'ok');
 }
 async function buscarCNPJ(){
   const raw=(document.getElementById('eCNPJ')?.value||'').replace(/\D/g,'');
