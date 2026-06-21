@@ -615,6 +615,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
         <option value="extincao">Extinção</option>
       </select>
       <button class="btn bp bsm" onclick="abrirCadastroEmpresa(null)">&#65291; Nova empresa</button>
+      <button class="btn bo bsm" onclick="buscarTodosCNPJs()" title="Atualiza Natureza Jurídica e Porte de todas as empresas via CNPJ">&#128269; Buscar todos CNPJs</button>
     </div>
     <div class="tw" style="overflow-x:auto;max-height:calc(100vh - 260px);overflow-y:auto">
       <table class="data" style="width:100%">
@@ -1853,20 +1854,37 @@ const LUCROS_RM_SEED     = [{"eid":"4","meses":{"01-2026":100000.0,"02-2026":100
 const SEED_FLAG = 'seeded_ccc_v3';
 
 function seedData(){
-  // Se dados já foram carregados E existem empresas, não precisa recarregar
-  if(S.g(SEED_FLAG) && S.emps().length > 0) return;
+  const existing = S.emps();
+  // NUNCA sobrescreve empresas existentes — preserva natJur, porte e qualquer campo customizado
+  if(existing.length > 0){
+    if(!S.meses().length) S.saveMeses(MESES_SEED);
+    if(!S.fechAtual()) S.saveFechAtual('2026-01');
+    if(!S.listagem().length) S.saveListagem(LST_SEED);
+    if(!S.users().length){
+      var resps=[...new Set(EMP_SEED.flatMap(function(e){return(e.resp||'').split('/').map(function(r){return r.trim();});}).filter(Boolean))];
+      var users=[];
+      resps.forEach(function(nome){
+        var login=nome.split(' ')[0].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+        if(!users.find(function(u){return u.login===login;})){
+          users.push({id:'u_'+login,nome:nome,login:login,senha:'jjr123',perfil:nome==='Kleydson'?'admin':'editor',criadoEm:new Date().toISOString()});
+        }
+      });
+      S.saveUsers(users);
+    }
+    S.s(SEED_FLAG, true);
+    return;
+  }
+  // Sem nenhuma empresa — carga inicial limpa
   S.saveEmps(EMP_SEED);
   S.saveMeses(MESES_SEED);
-  const defaultFech = '2026-01';
-  S.saveFechAtual(defaultFech);
+  S.saveFechAtual('2026-01');
   CH_SEED && Object.keys(CH_SEED).forEach(eid => S.saveChk(eid, CH_SEED[eid]));
   S.saveListagem(LST_SEED);
-  // Cria usuários a partir dos responsáveis
   if(!S.users().length){
     var resps=[...new Set(EMP_SEED.flatMap(function(e){return(e.resp||'').split('/').map(function(r){return r.trim();});}).filter(Boolean))];
     var users=[];
     resps.forEach(function(nome){
-      var login=nome.split(' ')[0].toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+      var login=nome.split(' ')[0].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
       if(!users.find(function(u){return u.login===login;})){
         users.push({id:'u_'+login,nome:nome,login:login,senha:'jjr123',perfil:nome==='Kleydson'?'admin':'editor',criadoEm:new Date().toISOString()});
       }
@@ -2751,7 +2769,7 @@ function saveEmp(){
   const data={
     cnpj:getV('eCNPJ'),nome:getV('eNome'),fantasia:getV('eFantasia'),
     atividade:getV('eAtividade'),reg:getV('eReg'),rfb:getV('eRfb'),
-    nire:getV('eNire'),
+    nire:getV('eNire'),natJur:getV('eNatJur'),porte:getV('ePOrte'),
     entrada:getV('eEntrada'),balancete:getV('eBalancete'),fopag:getV('eFopag'),
     fiscal:getV('eFiscal'),financeiro:getV('eFinanceiro'),
     resp:getV('eResp'),grupoNome:getV('eGrupo'),
@@ -2797,6 +2815,37 @@ function addEmailField(val){
 }
 
 // ─── CNPJ search (BrasilAPI) ─────────────────────────────────────────────────
+async function buscarTodosCNPJs(){
+  const emps = S.emps();
+  const semCnpj = emps.filter(e=>!(e.cnpjNum||'').replace(/\D/g,'').match(/^\d{14}$/));
+  if(!confirm('Isso vai buscar Natureza Jurídica e Porte de todas as '+emps.length+' empresas via BrasilAPI.\n\nSomente esses campos serão atualizados. Seus dados existentes não serão apagados.\n\nContinuar?')) return;
+  let ok=0, err=0;
+  const btn = event.target;
+  btn.disabled=true; btn.textContent='Buscando...';
+  for(const emp of emps){
+    const raw=(emp.cnpjNum||emp.cnpj||'').replace(/\D/g,'');
+    if(raw.length!==14){ err++; continue; }
+    try{
+      const r=await fetch('https://brasilapi.com.br/api/cnpj/v1/'+raw);
+      if(!r.ok){ err++; continue; }
+      const d=await r.json();
+      const idx=emps.findIndex(e=>String(e.eid)===String(emp.eid));
+      if(idx>=0){
+        if(d.natureza_juridica) emps[idx].natJur=d.natureza_juridica;
+        if(d.porte) emps[idx].porte=d.porte;
+        if(d.razao_social && !emps[idx].nome) emps[idx].nome=d.razao_social;
+        if(d.nome_fantasia && !emps[idx].fantasia) emps[idx].fantasia=d.nome_fantasia;
+      }
+      ok++;
+      btn.textContent='Buscando... ('+ok+'/'+emps.length+')';
+      await new Promise(r=>setTimeout(r,300));
+    }catch(e){ err++; }
+  }
+  S.saveEmps(emps);
+  btn.disabled=false; btn.textContent='&#128269; Buscar todos CNPJs';
+  renderEmpresasPage();
+  toast('Concluído: '+ok+' atualizadas'+(err?' | '+err+' erros':''),'ok');
+}
 async function buscarCNPJ(){
   const raw=(document.getElementById('eCNPJ')?.value||'').replace(/\D/g,'');
   if(raw.length!==14){ toast('CNPJ inválido.','err'); return; }
@@ -3443,11 +3492,6 @@ async function bootstrap(){
   if(ok){
     if(!isGithubPages) await _loadFromSupabase();
     seedData();
-    // Fallback: se nenhuma empresa foi carregada, força reload dos dados
-    if(S.emps().length === 0){
-      S.s(SEED_FLAG, null);
-      seedData();
-    }
     fillSelects();
     renderPeriodControl();
     renderDash();
