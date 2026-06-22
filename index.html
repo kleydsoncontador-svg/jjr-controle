@@ -1539,16 +1539,21 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 <div id="mParcelamentos" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:200;overflow-y:auto">
-  <div style="max-width:1100px;margin:0 auto;padding:24px 20px">
+  <div style="max-width:1400px;margin:0 auto;padding:24px 20px">
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
       <div>
         <div style="font-size:11px;color:var(--slate);text-transform:uppercase;letter-spacing:.06em;margin-bottom:4px">Parcelamentos</div>
         <div id="parcEmpNome" style="font-size:22px;font-weight:700;color:var(--ink)"></div>
       </div>
-      <button onclick="fecharParcelamentos()" class="btn bo">← Fechar</button>
+      <div style="display:flex;gap:8px;align-items:center">
+        <button id="btnTabResumo" onclick="toggleParcView('resumo')" class="btn bp" style="font-size:.82rem">Resumo Mensal</button>
+        <button id="btnTabLista" onclick="toggleParcView('lista')" class="btn bo" style="font-size:.82rem">Lista de Parcelamentos</button>
+        <button onclick="fecharParcelamentos()" class="btn bo">← Fechar</button>
+      </div>
     </div>
-    <div style="height:2px;background:linear-gradient(90deg,#1E3558,transparent);margin:12px 0 24px"></div>
-    <div id="parcListView">
+    <div style="height:2px;background:linear-gradient(90deg,#1E3558,transparent);margin:12px 0 20px"></div>
+    <div id="parcResumoView"></div>
+    <div id="parcListView" style="display:none">
       <div style="margin-bottom:16px">
         <button class="btn bp" onclick="abrirFormParc(document.getElementById('parcEid').value)">+ Novo Parcelamento</button>
       </div>
@@ -5934,12 +5939,124 @@ function abrirParcelamentos(eid){
   const emp=S.emps().find(e=>String(e.eid)==_parcEid);
   document.getElementById('parcEmpNome').textContent=emp?emp.nome:'Empresa';
   document.getElementById('parcEid').value=_parcEid;
-  document.getElementById('parcListView').style.display='block';
   document.getElementById('parcFormView').style.display='none';
   document.getElementById('mParcelamentos').style.display='block';
-  _renderParcList();
+  toggleParcView('resumo');
 }
 function fecharParcelamentos(){document.getElementById('mParcelamentos').style.display='none';}
+function toggleParcView(tab){
+  const isResumo=tab==='resumo';
+  document.getElementById('parcResumoView').style.display=isResumo?'block':'none';
+  document.getElementById('parcListView').style.display=isResumo?'none':'block';
+  document.getElementById('parcFormView').style.display='none';
+  document.getElementById('btnTabResumo').className=isResumo?'btn bp':'btn bo';
+  document.getElementById('btnTabLista').className=isResumo?'btn bo':'btn bp';
+  if(isResumo)_renderParcResumoMensal();
+  else _renderParcList();
+}
+function _renderParcResumoMensal(){
+  const parcs=Object.values(getParcelamentos(_parcEid));
+  const container=document.getElementById('parcResumoView');
+  if(!parcs.length){
+    container.innerHTML='<div style="padding:40px;text-align:center;color:var(--slate)">Nenhum parcelamento cadastrado. Vá em "Lista de Parcelamentos" e clique em "+ Novo Parcelamento".</div>';
+    return;
+  }
+  // para cada parcelamento, gera mapa mesKey → dados da linha
+  const mesesSet=new Set();
+  const parcMapa={};
+  parcs.forEach(p=>{
+    if(!p.primeiroVencimento)return;
+    const pts=p.primeiroVencimento.split('/');
+    if(pts.length!==3)return;
+    const primDate=new Date(parseInt(pts[2]),parseInt(pts[1])-1,1);
+    const saldo=p.saldoPrestacoes||(parseInt(p.totalParcelas||0)-((parseFloat(p.entrada||0))>0?1:0));
+    const vlr=p.valorParcela||0;
+    const txAdic=parseFloat(p.txAdicional)||1;
+    const vlrAdic=vlr*txAdic/100;
+    const linhas=p.linhas||[];
+    const pagas=parseInt(p.parcelasPagas)||0;
+    parcMapa[p.id]={p,meses:{}};
+    let selicAcum=0;
+    for(let n=1;n<=saldo;n++){
+      const d=new Date(primDate.getFullYear(),primDate.getMonth()+(n-1),1);
+      const mk=String(d.getMonth()+1).padStart(2,'0')+'/'+d.getFullYear();
+      mesesSet.add(mk);
+      const ln=linhas[n]||{};
+      selicAcum+=parseFloat(ln.selicMensal)||0;
+      const vlrAt=vlr+vlr*selicAcum/100+vlrAdic;
+      const isPaga=n<=pagas;
+      const isCurr=n===pagas+1;
+      parcMapa[p.id].meses[mk]={n,vlrAt,isPaga,isCurr,valorPago:parseFloat(ln.valorPagoGerado)||0};
+    }
+  });
+  // ordena meses
+  const meses=[...mesesSet].sort((a,b)=>{
+    const[ma,ya]=a.split('/');const[mb,yb]=b.split('/');
+    return(parseInt(ya)*12+parseInt(ma))-(parseInt(yb)*12+parseInt(mb));
+  });
+  const ids=Object.keys(parcMapa);
+  const f=v=>_fmt(parseFloat(v)||0);
+  const ST_COR={Ativo:'#166534',Quitado:'#1d4ed8',Rescindido:'#dc2626',Suspenso:'#d97706'};
+  // cards de resumo de cada parcelamento
+  let cardsHtml='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px;margin-bottom:20px">';
+  ids.forEach(id=>{
+    const{p}=parcMapa[id];
+    const sc=ST_COR[p.situacao]||'var(--slate)';
+    const pagas=parseInt(p.parcelasPagas)||0;
+    const total=p.saldoPrestacoes||0;
+    cardsHtml+=`<div style="background:var(--white);border:1px solid var(--border);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:4px">
+      <div style="font-size:.7rem;color:var(--slate);text-transform:uppercase;letter-spacing:.05em">${esc(p.orgao||'—')}</div>
+      <div style="font-size:.92rem;font-weight:700;color:#1E3558">${esc(p.parcelNome||p.orgao||'Parcelamento')}</div>
+      <div style="font-size:.78rem;color:var(--slate)">${pagas}/${total} parcelas pagas</div>
+      <div style="font-size:.82rem;font-weight:600">Prestação: R$ ${f(p.valorParcela)}</div>
+      <div style="margin-top:4px;display:flex;gap:6px">
+        <span style="font-size:.68rem;font-weight:700;color:${sc};background:${sc}22;padding:2px 8px;border-radius:20px">${esc(p.situacao||'Ativo')}</span>
+        <button class="btn bo" style="font-size:.68rem;padding:1px 8px" onclick="abrirTabelaParc('${_parcEid}','${p.id}')">Ver Tabela</button>
+      </div>
+    </div>`;
+  });
+  cardsHtml+='</div>';
+  // tabela de resumo mensal
+  const thS='padding:7px 10px;border:1px solid #ccc;background:#1E3558;color:#fff;font-weight:700;font-size:.72rem;white-space:nowrap;text-align:center';
+  const thSub='padding:5px 8px;border:1px solid #ccc;background:#2d4f7c;color:#fff;font-weight:600;font-size:.7rem;white-space:nowrap;text-align:center';
+  let thead=`<thead><tr><th style="${thS}">Mês</th>`;
+  ids.forEach(id=>{
+    const{p}=parcMapa[id];
+    thead+=`<th colspan="2" style="${thS}">${esc(p.parcelNome||p.orgao||'Parcelamento')}</th>`;
+  });
+  thead+=`<th colspan="2" style="${thS};background:#0f2a47">Total do Mês</th></tr><tr><th style="${thSub}"></th>`;
+  ids.forEach(()=>{thead+=`<th style="${thSub}">Valor</th><th style="${thSub}">Status</th>`;});
+  thead+=`<th style="${thSub};background:#1a3d66">Valor</th><th style="${thSub};background:#1a3d66">Pago</th></tr></thead>`;
+  let tbody='<tbody>';
+  meses.forEach(mk=>{
+    const now=new Date();
+    const[mm,yy]=mk.split('/');
+    const mDate=new Date(parseInt(yy),parseInt(mm)-1,1);
+    const isFut=mDate>new Date(now.getFullYear(),now.getMonth(),1);
+    let totalMes=0,totalPago=0,anyData=false;
+    let rowCells='';
+    ids.forEach(id=>{
+      const info=parcMapa[id].meses[mk];
+      if(!info){rowCells+=`<td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;color:#ccc">—</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;color:#ccc">—</td>`;return;}
+      anyData=true;
+      totalMes+=info.vlrAt;
+      totalPago+=info.isPaga?(info.valorPago||info.vlrAt):0;
+      const bg=info.isPaga?'#f0fff4':info.isCurr?'#fefce8':'#fff';
+      const statusTxt=info.isPaga?'<span style="color:#16a34a;font-weight:700">✓ Pago</span>':info.isCurr?'<span style="color:#b45309;font-weight:700">● Atual</span>':'<span style="color:#94a3b8">○</span>';
+      rowCells+=`<td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;background:${bg};font-size:.82rem${info.isCurr?';font-weight:700':''}">R$ ${f(info.vlrAt)}</td><td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:center;background:${bg};font-size:.78rem">${statusTxt}</td>`;
+    });
+    if(!anyData)return;
+    const rowBg=isFut?'#f8fafc':'#fff';
+    tbody+=`<tr style="background:${rowBg}">
+      <td style="padding:6px 10px;border:1px solid #e2e8f0;font-weight:600;white-space:nowrap;font-size:.82rem">${mk}</td>
+      ${rowCells}
+      <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;font-size:.84rem;background:#f0f4ff">R$ ${f(totalMes)}</td>
+      <td style="padding:6px 10px;border:1px solid #e2e8f0;text-align:right;font-weight:700;font-size:.84rem;background:#f0f4ff;color:${totalPago>0?'#16a34a':'#94a3b8'}">${totalPago>0?'R$ '+f(totalPago):'—'}</td>
+    </tr>`;
+  });
+  tbody+='</tbody>';
+  container.innerHTML=cardsHtml+`<div style="overflow-x:auto"><table style="border-collapse:collapse;min-width:100%;font-size:.82rem">${thead}${tbody}</table></div>`;
+}
 
 function _renderParcList(){
   const parcs=getParcelamentos(_parcEid);
