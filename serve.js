@@ -20,6 +20,11 @@ const MIME_TYPES = {
 };
 
 const server = http.createServer((req, res) => {
+  // Add no-cache headers to all responses
+  res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+
   let filePath = path.join(ROOT_DIR, url.parse(req.url).pathname);
 
   // Try to serve the requested file
