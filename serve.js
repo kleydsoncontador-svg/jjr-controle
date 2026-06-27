@@ -2,6 +2,8 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const url = require('url');
+const cron = require('node-cron');
+const { criarBackup } = require('./backup');
 
 const PORT = 3000;
 const ROOT_DIR = __dirname;
@@ -53,6 +55,20 @@ const server = http.createServer((req, res) => {
   }
 });
 
+// Agendar backup automático diariamente às 02:00
+cron.schedule('0 2 * * *', () => {
+  console.log('\n⏰ Executando backup automático diário...');
+  criarBackup();
+});
+
+// Fazer um backup também 5 minutos após o servidor iniciar
+setTimeout(() => {
+  console.log('\n⏰ Executando primeiro backup...');
+  criarBackup();
+}, 5 * 60 * 1000);
+
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`\n✓ JJR Controle Contábil rodando em http://localhost:${PORT}\n`);
+  console.log(`\n✓ JJR Controle Contábil rodando em http://localhost:${PORT}`);
+  console.log(`📁 Backups serão salvos em: C:\\jjr-controle\\backups\\`);
+  console.log(`⏰ Backup automático agendado para 02:00 diariamente\n`);
 });
