@@ -7,10 +7,10 @@ C:\jjr-controle\backups\
 
 ## Como Funciona
 
-✅ **Automático**: Executa diariamente às 02:00 (madrugada)
+✅ **Automático**: Executa **a cada hora** (00:00, 01:00, 02:00, etc)
 ✅ **Formato**: JSON com todos os dados da Supabase
-✅ **Nomeação**: `backup_YYYY-MM-DD.json` (um por dia)
-✅ **Retenção**: Mantém últimos 30 dias automaticamente
+✅ **Nomeação**: `backup_YYYY-MM-DD.json` (pode ter múltiplos por dia)
+✅ **Retenção**: Mantém **últimos 7 dias** automaticamente
 ✅ **Execução Extra**: Primeiro backup 5 minutos após servidor iniciar
 
 ## Sincronizar com OneDrive

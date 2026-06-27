@@ -55,9 +55,9 @@ const server = http.createServer((req, res) => {
   }
 });
 
-// Agendar backup automático diariamente às 02:00
-cron.schedule('0 2 * * *', () => {
-  console.log('\n⏰ Executando backup automático diário...');
+// Agendar backup automático a cada hora
+cron.schedule('0 * * * *', () => {
+  console.log('\n⏰ Executando backup automático horário...');
   criarBackup();
 });
 

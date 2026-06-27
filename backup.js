@@ -44,8 +44,8 @@ async function criarBackup() {
     console.log(`📁 Localização: ${caminhoCompleto}`);
     console.log(`📊 Total de registros: ${data.length}`);
 
-    // Limpeza: manter apenas últimos 30 backups
-    limparBackupsAntigos(30);
+    // Limpeza: manter apenas últimos 7 dias de backups (168 backups horários)
+    limparBackupsAntigos(7);
 
   } catch (err) {
     console.error('❌ Erro no backup:', err.message);
