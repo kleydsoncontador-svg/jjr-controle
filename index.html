@@ -1197,6 +1197,32 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     </div>
   </div>
 
+  <!-- Modal: Controle de Tributo em Atraso -->
+  <div class="mb" id="mControleTrib" style="display:none">
+    <div class="modal" style="max-width:900px">
+      <div class="mt">
+        <h3 id="mControleTitle">Controle de Tributo</h3>
+        <button onclick="closeModal('mControleTrib')">&#x2715;</button>
+      </div>
+      <div class="mc" style="max-height:600px;overflow-y:auto">
+        <table style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead style="background:#f0f0f0;position:sticky;top:0">
+            <tr>
+              <th style="border:1px solid #ddd;padding:8px;text-align:left;font-weight:600">Data</th>
+              <th style="border:1px solid #ddd;padding:8px;text-align:left;font-weight:600">Descrição</th>
+              <th style="border:1px solid #ddd;padding:8px;text-align:right;font-weight:600">Saldo (R$)</th>
+            </tr>
+          </thead>
+          <tbody id="tabelaControleBody">
+          </tbody>
+        </table>
+      </div>
+      <div class="ma">
+        <button class="btn bo" onclick="closeModal('mControleTrib')">Fechar</button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <!-- ═══ APP / SISTEMA FINANCEIRO ═══ -->
@@ -5547,6 +5573,178 @@ function excluirTrib(eid, idx){
   toast('Lançamento excluído.','ok');
 }
 
+// Função para verificar se é dia útil (seg-sex, sem feriados)
+function ehDiaUtil(data){
+  const dia = data.getDay();
+  return dia >= 1 && dia <= 5; // 1=seg, 5=sex
+}
+
+// Próximo dia útil após uma data
+function proximoDiaUtil(data){
+  const prox = new Date(data);
+  prox.setDate(prox.getDate() + 1);
+  while(!ehDiaUtil(prox)){
+    prox.setDate(prox.getDate() + 1);
+  }
+  return prox;
+}
+
+// Obter taxa SELIC mensal para um mês específico
+function obterTaxaSelic(mes, ano){
+  // Busca no formato "MM/YYYY"
+  const chave = String(mes).padStart(2,'0') + '/' + ano;
+  const selicData = S.g('taxaSelic') || [];
+  const encontrado = selicData.find(r => r.mes === chave);
+  return encontrado ? parseFloat(encontrado.taxa) || 0 : 0;
+}
+
+// Converter string DD/MM/YYYY para Date
+function parseDataDD(str){
+  if(!str || typeof str !== 'string') return null;
+  const p = str.split('/');
+  if(p.length !== 3) return null;
+  return new Date(parseInt(p[2]), parseInt(p[1])-1, parseInt(p[0]));
+}
+
+// Formatar Date para DD/MM/YYYY
+function formatDataDDMMYYYY(d){
+  if(!(d instanceof Date)) return '';
+  const dia = String(d.getDate()).padStart(2,'0');
+  const mes = String(d.getMonth()+1).padStart(2,'0');
+  const ano = d.getFullYear();
+  return dia + '/' + mes + '/' + ano;
+}
+
+function abrirControleTributo(eid, idx){
+  const list = getTaList(eid);
+  const trib = list[idx];
+
+  if(!trib) {
+    toast('Tributo não encontrado','erro');
+    return;
+  }
+
+  if(!trib.dataVencimento){
+    toast('Este tributo não possui data de vencimento','alerta');
+    return;
+  }
+
+  const emps = S.emps();
+  const emp = emps.find(e=>String(e.eid)===String(eid));
+  const nomeEmp = emp ? emp.nome : 'Empresa';
+
+  // Parse da data de vencimento
+  const dataVenc = parseDataDD(trib.dataVencimento);
+  if(!dataVenc){
+    toast('Data de vencimento inválida','erro');
+    return;
+  }
+
+  const valorOriginal = trib.valor || 0;
+  const dataAtual = new Date();
+
+  // Gerar as linhas de movimento
+  const movimentos = [];
+
+  // Linha 1: Data do vencimento com valor original
+  movimentos.push({
+    data: new Date(dataVenc),
+    descricao: 'Vencimento - ' + trib.nome,
+    saldo: valorOriginal
+  });
+
+  // Se a data atual é anterior ao vencimento, não gera mais linhas
+  if(dataAtual < dataVenc){
+    renderModalControleMovimentos(movimentos);
+    document.getElementById('mControleTitle').textContent =
+      nomeEmp + ' — ' + trib.nome + ' (' + trib.dataVencimento + ')';
+    openModal('mControleTrib');
+    return;
+  }
+
+  // Calcular multa de mora
+  let saldoAtual = valorOriginal;
+  let dataAtual1 = new Date(dataVenc);
+
+  // Primeiro dia útil após vencimento para começar multa
+  let primeiroDiaUtil = proximoDiaUtil(dataVenc);
+  let diasAtraso = 0;
+  let multaAcumulada = 0;
+
+  // Gerar movimentos de multa até a data atual
+  while(primeiroDiaUtil <= dataAtual){
+    diasAtraso++;
+
+    // Multa de mora: 0,33% ao dia, máximo 20% no 61º dia
+    const taxaMulta = Math.min(diasAtraso * 0.0033, 0.20);
+    const novaMulta = valorOriginal * taxaMulta;
+    const multaDiaria = novaMulta - multaAcumulada;
+
+    if(multaDiaria > 0.01){ // Só adiciona se > 1 centavo
+      saldoAtual = valorOriginal + novaMulta;
+      movimentos.push({
+        data: new Date(primeiroDiaUtil),
+        descricao: 'Multa de Mora (' + diasAtraso + ' dia' + (diasAtraso>1?'s':'') + ')',
+        saldo: saldoAtual
+      });
+    }
+
+    multaAcumulada = novaMulta;
+    primeiroDiaUtil.setDate(primeiroDiaUtil.getDate() + 1);
+    while(!ehDiaUtil(primeiroDiaUtil) && primeiroDiaUtil <= dataAtual){
+      primeiroDiaUtil.setDate(primeiroDiaUtil.getDate() + 1);
+    }
+  }
+
+  // Gerar movimentos de juros SELIC (último dia de cada mês)
+  let mesFim = new Date(dataVenc);
+  mesFim.setDate(1);
+  mesFim.setMonth(mesFim.getMonth() + 1);
+  mesFim.setDate(mesFim.getDate() - 1); // Último dia do mês
+
+  while(mesFim <= dataAtual){
+    const mes = mesFim.getMonth() + 1;
+    const ano = mesFim.getFullYear();
+    const taxaSelic = obterTaxaSelic(mes, ano);
+
+    if(taxaSelic > 0){
+      const juros = saldoAtual * (taxaSelic / 100);
+      saldoAtual = saldoAtual + juros;
+      movimentos.push({
+        data: new Date(mesFim),
+        descricao: 'Juros SELIC (' + taxaSelic.toFixed(4) + '% a.m.)',
+        saldo: saldoAtual
+      });
+    }
+
+    mesFim.setMonth(mesFim.getMonth() + 1);
+    mesFim.setDate(mesFim.getDate() - 1); // Próximo último dia de mês
+  }
+
+  // Ordenar movimentos por data
+  movimentos.sort((a,b)=>a.data-b.data);
+
+  renderModalControleMovimentos(movimentos);
+  document.getElementById('mControleTitle').textContent =
+    nomeEmp + ' — ' + trib.nome + ' (' + trib.dataVencimento + ')';
+  openModal('mControleTrib');
+}
+
+function renderModalControleMovimentos(movimentos){
+  const tbody = document.getElementById('tabelaControleBody');
+  if(!tbody) return;
+
+  tbody.innerHTML = movimentos.map(m=>{
+    const dataStr = formatDataDDMMYYYY(m.data);
+    const saldoStr = m.saldo.toLocaleString('pt-BR', {minimumFractionDigits:2});
+    return `<tr>
+      <td style="border:1px solid #ddd;padding:8px;font-family:var(--mono);font-size:12px;white-space:nowrap">${dataStr}</td>
+      <td style="border:1px solid #ddd;padding:8px;font-size:12px">${esc(m.descricao)}</td>
+      <td style="border:1px solid #ddd;padding:8px;text-align:right;font-family:var(--mono);font-size:12px;font-weight:600">R$ ${saldoStr}</td>
+    </tr>`;
+  }).join('');
+}
+
 function renderTribAtraso(){
   const busca    = (document.getElementById('taBusca')?.value||'').toLowerCase();
   const respFilt = document.getElementById('taResp')?.value||'';
@@ -5605,6 +5803,8 @@ function renderTribAtraso(){
             onclick="marcarPago('${e.eid}',${realIdx})">
             ${t.pago?'↩ Reabrir':'✓ Pago'}
           </button>
+          <button class="icon-btn" onclick="abrirControleTributo('${e.eid}',${realIdx})"
+            title="Controle" style="color:var(--green);font-size:16px;margin-left:2px">📊</button>
           <button class="icon-btn" onclick="editarTrib('${e.eid}',${realIdx})"
             title="Editar" style="color:var(--blue);font-size:16px;margin-left:2px">✎</button>
           <button class="icon-btn" onclick="excluirTrib('${e.eid}',${realIdx})"
