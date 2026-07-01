@@ -1186,6 +1186,10 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
           <input class="fi" id="tDataVencimento" type="text" placeholder="DD/MM/AAAA" oninput="formatarDataTrib(this)" maxlength="10">
         </div>
         <div class="fg">
+          <div class="fl">Conta crédito (usada no TXT de multa/juros)</div>
+          <input class="fi" id="tContaCredito" type="text" placeholder="Ex: 2.1.1.01.0001" maxlength="20">
+        </div>
+        <div class="fg">
           <div class="fl">Observação</div>
           <input class="fi" id="tObs" placeholder="Ex: DARF vencida, parcelamento, multa...">
         </div>
@@ -1217,7 +1221,14 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
           </tbody>
         </table>
       </div>
-      <div class="ma">
+      <div class="ma" style="flex-wrap:wrap;gap:10px;align-items:center">
+        <div style="display:flex;align-items:center;gap:6px;margin-right:auto;flex-wrap:wrap">
+          <label style="font-size:11.5px;color:var(--slate);font-weight:600">De:</label>
+          <input class="fi" id="ctrlTxtInicio" type="date" style="width:150px;padding:5px 8px">
+          <label style="font-size:11.5px;color:var(--slate);font-weight:600">até:</label>
+          <input class="fi" id="ctrlTxtFim" type="date" style="width:150px;padding:5px 8px">
+          <button class="btn bp bsm" onclick="gerarTXTControleTributo()">📝 Gerar TXT</button>
+        </div>
         <button class="btn bo" onclick="closeModal('mControleTrib')">Fechar</button>
       </div>
     </div>
@@ -5453,6 +5464,7 @@ function openTribModal(eid){
   document.getElementById('tCompetencia').value = fech||'';
   document.getElementById('tValor').value = '';
   document.getElementById('tDataVencimento').value = '';
+  document.getElementById('tContaCredito').value = '';
   document.getElementById('tObs').value = '';
   // Ensure datalist is filled
   const dlT = document.getElementById('dlTributos');
@@ -5484,6 +5496,7 @@ function saveTribAtraso(){
     const nome  = (document.getElementById('tNome')?.value||'').trim();
     const comp  = document.getElementById('tCompetencia')?.value||'';
     const dataVencimento = (document.getElementById('tDataVencimento')?.value||'').trim();
+    const contaCredito = (document.getElementById('tContaCredito')?.value||'').trim();
     const obs   = (document.getElementById('tObs')?.value||'').trim();
     console.log('saveTribAtraso: nome=', nome, 'comp=', comp);
 
@@ -5507,11 +5520,11 @@ function saveTribAtraso(){
 
       if(typeof _taEditIdx !== 'undefined' && _taEditIdx >= 0){
         // Edição: atualizar lançamento existente
-        list[_taEditIdx] = { ...list[_taEditIdx], nome, comp, valor, obs, dataVencimento };
+        list[_taEditIdx] = { ...list[_taEditIdx], nome, comp, valor, obs, dataVencimento, contaCredito };
         _taEditIdx = undefined;
       } else {
         // Criação: adicionar novo lançamento
-        list.push({ nome, comp, valor, obs, dataVencimento, pago:false, dataPagto:'', id:Date.now() });
+        list.push({ nome, comp, valor, obs, dataVencimento, contaCredito, pago:false, dataPagto:'', id:Date.now() });
       }
     }
 
@@ -5519,6 +5532,7 @@ function saveTribAtraso(){
     closeModal('mTrib');
     document.getElementById('tValor').value='';
     document.getElementById('tDataVencimento').value='';
+    document.getElementById('tContaCredito').value='';
     document.getElementById('darfUnificadoPanel').style.display='none';
     document.getElementById('tValor').closest('.fg').style.display='';
     const busca = document.getElementById('taEmpBusca');
@@ -5553,6 +5567,7 @@ function editarTrib(eid, idx){
   document.getElementById('tCompetencia').value = trib.comp||'';
   document.getElementById('tValor').value = trib.valor ? trib.valor.toLocaleString('pt-BR',{minimumFractionDigits:2}) : '0,00';
   document.getElementById('tDataVencimento').value = trib.dataVencimento||'';
+  document.getElementById('tContaCredito').value = trib.contaCredito||'';
   document.getElementById('tObs').value = trib.obs||'';
 
   const empNome = document.getElementById('mTribEmpNome');
@@ -5650,7 +5665,9 @@ function abrirControleTributo(eid, idx){
   movimentos.push({
     data: new Date(dataVenc),
     descricao: 'Vencimento - ' + trib.nome,
-    saldo: valorOriginal
+    saldo: valorOriginal,
+    tipo: 'vencimento',
+    valor: valorOriginal
   });
 
   // Se a data atual é anterior ao vencimento, não gera mais linhas
@@ -5658,6 +5675,8 @@ function abrirControleTributo(eid, idx){
     renderModalControleMovimentos(movimentos);
     document.getElementById('mControleTitle').textContent =
       nomeEmp + ' — ' + trib.nome + ' (' + trib.dataVencimento + ')';
+    window._controleTribAtual = { eid, idx, trib, movimentos };
+    prepararDatasTXTControle(movimentos);
     openModal('mControleTrib');
     return;
   }
@@ -5685,7 +5704,9 @@ function abrirControleTributo(eid, idx){
       movimentos.push({
         data: new Date(primeiroDiaUtil),
         descricao: 'Multa de Mora (' + diasAtraso + ' dia' + (diasAtraso>1?'s':'') + ')',
-        saldo: saldoAtual
+        saldo: saldoAtual,
+        tipo: 'multa',
+        valor: multaDiaria
       });
     }
 
@@ -5713,7 +5734,9 @@ function abrirControleTributo(eid, idx){
       movimentos.push({
         data: new Date(mesFim),
         descricao: 'Juros SELIC (' + taxaSelic.toFixed(4) + '% a.m.)',
-        saldo: saldoAtual
+        saldo: saldoAtual,
+        tipo: 'juros',
+        valor: juros
       });
     }
 
@@ -5727,7 +5750,80 @@ function abrirControleTributo(eid, idx){
   renderModalControleMovimentos(movimentos);
   document.getElementById('mControleTitle').textContent =
     nomeEmp + ' — ' + trib.nome + ' (' + trib.dataVencimento + ')';
+  window._controleTribAtual = { eid, idx, trib, movimentos };
+  prepararDatasTXTControle(movimentos);
   openModal('mControleTrib');
+}
+
+// Formata Date para input type="date" (YYYY-MM-DD)
+function formatDataYYYYMMDD(d){
+  if(!(d instanceof Date)) return '';
+  const dia = String(d.getDate()).padStart(2,'0');
+  const mes = String(d.getMonth()+1).padStart(2,'0');
+  const ano = d.getFullYear();
+  return ano + '-' + mes + '-' + dia;
+}
+
+// Preenche os campos de data inicial/final do TXT com o intervalo de multa/juros disponível
+function prepararDatasTXTControle(movimentos){
+  const lancaveis = movimentos.filter(m=>m.tipo==='multa'||m.tipo==='juros');
+  const ini = document.getElementById('ctrlTxtInicio');
+  const fim = document.getElementById('ctrlTxtFim');
+  if(!ini || !fim) return;
+  if(!lancaveis.length){
+    ini.value = '';
+    fim.value = '';
+    return;
+  }
+  ini.value = formatDataYYYYMMDD(lancaveis[0].data);
+  fim.value = formatDataYYYYMMDD(lancaveis[lancaveis.length-1].data);
+}
+
+function gerarTXTControleTributo(){
+  const ctx = window._controleTribAtual;
+  if(!ctx){ toast('Abra o controle de um tributo primeiro.','err'); return; }
+  const { eid, trib, movimentos } = ctx;
+
+  const iniStr = document.getElementById('ctrlTxtInicio')?.value||'';
+  const fimStr = document.getElementById('ctrlTxtFim')?.value||'';
+  if(!iniStr || !fimStr){ toast('Informe a data inicial e final.','err'); return; }
+
+  const dataIni = new Date(iniStr+'T00:00:00');
+  const dataFim = new Date(fimStr+'T23:59:59');
+  if(dataIni > dataFim){ toast('Data inicial não pode ser maior que a final.','err'); return; }
+
+  const contaCredito = trib.contaCredito||'';
+  const competencia = fmtMes(trib.comp);
+
+  const selecionados = movimentos.filter(m=>
+    (m.tipo==='multa' || m.tipo==='juros') && m.data >= dataIni && m.data <= dataFim
+  );
+
+  if(!selecionados.length){
+    toast('Nenhum lançamento de multa/juros no período informado.','warn');
+    return;
+  }
+
+  const linhas = selecionados.map(m=>{
+    const dataStr = formatDataYYYYMMDD(m.data);
+    const ctadebito = m.tipo==='multa' ? '526' : '372';
+    const descTipo = m.tipo==='multa' ? 'Multa de Mora' : 'Juros SELIC';
+    const historico = `${trib.nome} ${competencia} - ${descTipo}`;
+    const valorFormatado = m.valor.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).replace(/\./g,'');
+    return `${dataStr};${ctadebito};${contaCredito};${valorFormatado};;${historico};1;${eid};;`;
+  });
+
+  const conteudo = linhas.join('\n');
+  const blob = new Blob([conteudo], {type:'text/plain;charset=utf-8'});
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = `${trib.nome}_${eid}_multa_juros.txt`.replace(/\s+/g,'_');
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  toast('TXT gerado com sucesso','ok');
 }
 
 function renderModalControleMovimentos(movimentos){
@@ -5839,7 +5935,7 @@ function renderTribAtraso(){
             <th style="text-align:right;width:140px">Valor original</th>
             <th>Observação</th>
             <th style="text-align:center;width:110px">Situação</th>
-            <th style="width:140px"></th>
+            <th style="width:190px"></th>
           </tr></thead>
           <tbody>${rows}</tbody>
         </table>
