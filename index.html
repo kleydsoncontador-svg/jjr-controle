@@ -340,9 +340,9 @@ tr.decl-entregue:hover td{background:#DBEAFE!important}
 
 
 .ta-add-bar{display:flex;align-items:center;gap:10px;background:var(--white);border:1.5px solid var(--teal);border-radius:var(--r2);padding:12px 16px;margin-bottom:4px;flex-wrap:wrap;box-shadow:0 0 0 3px rgba(15,123,108,.06)}
-.ta-card{background:var(--white);border:0.5px solid var(--border);border-radius:var(--r2);box-shadow:var(--shadow);margin-bottom:14px;overflow:hidden}
-.ta-card-head{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--border);background:var(--bg);flex-wrap:wrap;gap:8px}
-.ta-t td,.ta-t th{padding:8px 10px;font-size:12.5px}
+.ta-card{background:var(--white);border:0.5px solid var(--border);border-radius:var(--r2);box-shadow:var(--shadow);margin-bottom:10px;overflow:hidden}
+.ta-card-head{display:flex;align-items:center;justify-content:space-between;padding:7px 14px;border-bottom:1px solid var(--border);background:var(--bg);flex-wrap:wrap;gap:8px}
+.ta-t td,.ta-t th{padding:4px 10px;font-size:12.5px}
 tr.ta-aberto td{background:#FFFBEB}
 tr.ta-pago td{background:#F0FDF4;color:#94A3B8;text-decoration:line-through;text-decoration-color:#CBD5E1}
 tr.ta-pago .badge,.ta-pago button{text-decoration:none}
@@ -1228,6 +1228,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
           <input class="fi" id="ctrlTxtInicio" type="date" style="width:150px;padding:5px 8px">
           <label style="font-size:11.5px;color:var(--slate);font-weight:600">até:</label>
           <input class="fi" id="ctrlTxtFim" type="date" style="width:150px;padding:5px 8px">
+          <button class="btn bo bsm" onclick="limparFiltroTXTControle()" title="Volta o período para o intervalo completo disponível">Limpar filtro</button>
           <button class="btn bp bsm" onclick="gerarTXTControleTributo()">📝 Gerar TXT</button>
         </div>
         <button class="btn bo" onclick="closeModal('mControleTrib')">Fechar</button>
@@ -5631,6 +5632,111 @@ function formatDataDDMMYYYY(d){
   return dia + '/' + mes + '/' + ano;
 }
 
+// Gera as linhas de movimento (vencimento + multa + juros) de um tributo até uma data-limite
+function gerarMovimentosTributo(trib, dataLimite){
+  const dataVenc = parseDataDD(trib.dataVencimento);
+  if(!dataVenc) return null;
+
+  const valorOriginal = trib.valor || 0;
+  const movimentos = [];
+
+  // Linha 1: Data do vencimento com valor original
+  movimentos.push({
+    data: new Date(dataVenc),
+    descricao: 'Vencimento - ' + trib.nome,
+    tipo: 'vencimento',
+    valor: valorOriginal
+  });
+
+  // Se a data-limite é anterior ao vencimento, só existe a linha de vencimento
+  if(dataLimite >= dataVenc){
+    // Primeiro dia útil após vencimento para começar a multa
+    // (depois de iniciada, a multa corre todos os dias corridos, inclusive fins de semana e feriados)
+    let diaMulta = proximoDiaUtil(dataVenc);
+    let diasAtraso = 0;
+    let multaAcumulada = 0;
+
+    // Gerar movimentos de multa até a data-limite (multa sempre incide sobre o valor original)
+    while(diaMulta <= dataLimite){
+      diasAtraso++;
+
+      // Multa de mora: 0,33% ao dia corrido, máximo 20% no 61º dia
+      const taxaMulta = Math.min(diasAtraso * 0.0033, 0.20);
+      const novaMulta = valorOriginal * taxaMulta;
+      const multaDiaria = novaMulta - multaAcumulada;
+
+      if(multaDiaria > 0.01){ // Só adiciona se > 1 centavo
+        movimentos.push({
+          data: new Date(diaMulta),
+          descricao: 'Multa de Mora (' + diasAtraso + ' dia' + (diasAtraso>1?'s':'') + ')',
+          tipo: 'multa',
+          valor: multaDiaria
+        });
+      }
+
+      multaAcumulada = novaMulta;
+      diaMulta.setDate(diaMulta.getDate() + 1);
+    }
+
+    // Gerar movimentos de juros SELIC (último dia de cada mês, a partir do mês do vencimento)
+    let anoRef = dataVenc.getFullYear();
+    let mesRef = dataVenc.getMonth(); // 0-based
+    let mesFim = new Date(anoRef, mesRef + 1, 0); // último dia do mês do vencimento (dia 0 do mês seguinte)
+
+    while(mesFim <= dataLimite){
+      const mes = mesFim.getMonth() + 1;
+      const ano = mesFim.getFullYear();
+      const taxaSelic = obterTaxaSelic(mes, ano);
+
+      if(taxaSelic > 0){
+        // Juros SELIC incide sempre sobre o valor original (principal), não sobre o saldo acumulado
+        const juros = valorOriginal * (taxaSelic / 100);
+        movimentos.push({
+          data: new Date(mesFim),
+          descricao: 'Juros SELIC (' + taxaSelic.toFixed(4) + '% a.m.)',
+          tipo: 'juros',
+          valor: juros
+        });
+      }
+
+      mesRef++;
+      mesFim = new Date(anoRef, mesRef + 1, 0); // último dia do próximo mês
+    }
+  }
+
+  // Ordenar movimentos por data e só então acumular o saldo, em ordem cronológica real
+  movimentos.sort((a,b)=>a.data-b.data);
+  let saldoAtual = 0;
+  movimentos.forEach(m=>{
+    saldoAtual += m.valor;
+    m.saldo = saldoAtual;
+  });
+
+  // Se já passou o vencimento e não há mais encargos previstos até a data-limite
+  // (ex.: multa já no teto de 20% e o mês ainda sem taxa SELIC cadastrada em "Taxa Selic"),
+  // adiciona uma linha informativa mostrando que o saldo permanece o mesmo até esta data
+  const ultimo = movimentos[movimentos.length - 1];
+  if(dataLimite >= dataVenc && ultimo && ultimo.data.toDateString() !== dataLimite.toDateString()){
+    movimentos.push({
+      data: new Date(dataLimite),
+      descricao: 'Situação atual — sem novos encargos até esta data',
+      tipo: 'info',
+      valor: 0,
+      saldo: saldoAtual
+    });
+  }
+
+  return movimentos;
+}
+
+// Retorna apenas o saldo final de um tributo em uma data-limite (usado na listagem)
+function calcularSaldoAtualizadoTributo(trib, dataLimite){
+  if(!trib.dataVencimento) return trib.valor || 0;
+  const movimentos = gerarMovimentosTributo(trib, dataLimite);
+  if(!movimentos || !movimentos.length) return trib.valor || 0;
+  return movimentos[movimentos.length - 1].saldo;
+}
+
 function abrirControleTributo(eid, idx){
   const list = getTaList(eid);
   const trib = list[idx];
@@ -5649,99 +5755,13 @@ function abrirControleTributo(eid, idx){
   const emp = emps.find(e=>String(e.eid)===String(eid));
   const nomeEmp = emp ? emp.nome : 'Empresa';
 
-  // Parse da data de vencimento
   const dataVenc = parseDataDD(trib.dataVencimento);
   if(!dataVenc){
     toast('Data de vencimento inválida','erro');
     return;
   }
 
-  const valorOriginal = trib.valor || 0;
-  const dataAtual = new Date();
-
-  // Gerar as linhas de movimento
-  const movimentos = [];
-
-  // Linha 1: Data do vencimento com valor original
-  movimentos.push({
-    data: new Date(dataVenc),
-    descricao: 'Vencimento - ' + trib.nome,
-    saldo: valorOriginal,
-    tipo: 'vencimento',
-    valor: valorOriginal
-  });
-
-  // Se a data atual é anterior ao vencimento, não gera mais linhas
-  if(dataAtual < dataVenc){
-    renderModalControleMovimentos(movimentos);
-    document.getElementById('mControleTitle').textContent =
-      nomeEmp + ' — ' + trib.nome + ' (' + trib.dataVencimento + ')';
-    window._controleTribAtual = { eid, idx, trib, movimentos };
-    prepararDatasTXTControle(movimentos);
-    openModal('mControleTrib');
-    return;
-  }
-
-  // Primeiro dia útil após vencimento para começar a multa
-  // (depois de iniciada, a multa corre todos os dias corridos, inclusive fins de semana e feriados)
-  let diaMulta = proximoDiaUtil(dataVenc);
-  let diasAtraso = 0;
-  let multaAcumulada = 0;
-
-  // Gerar movimentos de multa até a data atual (multa sempre incide sobre o valor original)
-  while(diaMulta <= dataAtual){
-    diasAtraso++;
-
-    // Multa de mora: 0,33% ao dia corrido, máximo 20% no 61º dia
-    const taxaMulta = Math.min(diasAtraso * 0.0033, 0.20);
-    const novaMulta = valorOriginal * taxaMulta;
-    const multaDiaria = novaMulta - multaAcumulada;
-
-    if(multaDiaria > 0.01){ // Só adiciona se > 1 centavo
-      movimentos.push({
-        data: new Date(diaMulta),
-        descricao: 'Multa de Mora (' + diasAtraso + ' dia' + (diasAtraso>1?'s':'') + ')',
-        tipo: 'multa',
-        valor: multaDiaria
-      });
-    }
-
-    multaAcumulada = novaMulta;
-    diaMulta.setDate(diaMulta.getDate() + 1);
-  }
-
-  // Gerar movimentos de juros SELIC (último dia de cada mês, a partir do mês do vencimento)
-  let anoRef = dataVenc.getFullYear();
-  let mesRef = dataVenc.getMonth(); // 0-based
-  let mesFim = new Date(anoRef, mesRef + 1, 0); // último dia do mês do vencimento (dia 0 do mês seguinte)
-
-  while(mesFim <= dataAtual){
-    const mes = mesFim.getMonth() + 1;
-    const ano = mesFim.getFullYear();
-    const taxaSelic = obterTaxaSelic(mes, ano);
-
-    if(taxaSelic > 0){
-      // Juros SELIC incide sempre sobre o valor original (principal), não sobre o saldo acumulado
-      const juros = valorOriginal * (taxaSelic / 100);
-      movimentos.push({
-        data: new Date(mesFim),
-        descricao: 'Juros SELIC (' + taxaSelic.toFixed(4) + '% a.m.)',
-        tipo: 'juros',
-        valor: juros
-      });
-    }
-
-    mesRef++;
-    mesFim = new Date(anoRef, mesRef + 1, 0); // último dia do próximo mês
-  }
-
-  // Ordenar movimentos por data e só então acumular o saldo, em ordem cronológica real
-  movimentos.sort((a,b)=>a.data-b.data);
-  let saldoAtual = 0;
-  movimentos.forEach(m=>{
-    saldoAtual += m.valor;
-    m.saldo = saldoAtual;
-  });
+  const movimentos = gerarMovimentosTributo(trib, new Date());
 
   renderModalControleMovimentos(movimentos);
   document.getElementById('mControleTitle').textContent =
@@ -5773,6 +5793,15 @@ function prepararDatasTXTControle(movimentos){
   }
   ini.value = formatDataYYYYMMDD(lancaveis[0].data);
   fim.value = formatDataYYYYMMDD(lancaveis[lancaveis.length-1].data);
+}
+
+// Restaura o período do TXT para o intervalo completo de multa/juros disponível.
+// Não afeta a tabela do controle, que sempre mostra o histórico completo até hoje.
+function limparFiltroTXTControle(){
+  const ctx = window._controleTribAtual;
+  if(!ctx){ toast('Abra o controle de um tributo primeiro.','err'); return; }
+  prepararDatasTXTControle(ctx.movimentos);
+  toast('Filtro de datas do TXT restaurado.','ok');
 }
 
 function gerarTXTControleTributo(){
@@ -5836,9 +5865,12 @@ function renderModalControleMovimentos(movimentos){
     const valorStr = (m.tipo==='multa'||m.tipo==='juros')
       ? 'R$ ' + m.valor.toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2})
       : '—';
-    return `<tr>
+    const infoRow = m.tipo==='info';
+    const descStyle = infoRow ? 'font-style:italic;color:var(--slate)' : '';
+    const rowBg = infoRow ? 'background:#F8FAFC' : '';
+    return `<tr style="${rowBg}">
       <td style="border:1px solid #ddd;padding:8px;font-family:var(--mono);font-size:12px;white-space:nowrap">${dataStr}</td>
-      <td style="border:1px solid #ddd;padding:8px;font-size:12px">${esc(m.descricao)}</td>
+      <td style="border:1px solid #ddd;padding:8px;font-size:12px;${descStyle}">${esc(m.descricao)}</td>
       <td style="border:1px solid #ddd;padding:8px;text-align:right;font-family:var(--mono);font-size:12px;color:var(--slate)">${valorStr}</td>
       <td style="border:1px solid #ddd;padding:8px;text-align:right;font-family:var(--mono);font-size:12px;font-weight:600">R$ ${saldoStr}</td>
     </tr>`;
@@ -5851,6 +5883,8 @@ function renderTribAtraso(){
   const grupoFilt= document.getElementById('taGrupo')?.value||'';
   const filtro   = document.getElementById('taFiltro')?.value||'aberto';
   const fech     = S.fechAtual();
+  const [fechAno, fechMes] = fech.split('-').map(Number);
+  const dataLimiteFech = new Date(fechAno, fechMes, 0); // último dia do mês do fechamento atual
 
   fillFilterDropdown('taResp',  S.emps().map(e=>e.resp), 'Todos responsáveis');
   fillFilterDropdown('taGrupo', S.emps().map(e=>e.grupoNome), 'Todos grupos');
@@ -5887,12 +5921,15 @@ function renderTribAtraso(){
 
     const rows = filtered.map(t=>{
       const realIdx = listAll.indexOf(t);
+      const saldoAtualizado = t.dataVencimento ? calcularSaldoAtualizadoTributo(t, dataLimiteFech) : null;
       return `<tr class="${t.pago?'ta-pago':'ta-aberto'}">
         <td style="font-size:12.5px">${esc(t.nome)}</td>
         <td style="text-align:center;font-family:var(--mono);font-size:12px">${fmtMes(t.comp)}</td>
         <td style="text-align:right;font-family:var(--mono);font-size:13px;font-weight:700">
           R$&nbsp;${(t.valor||0).toLocaleString('pt-BR',{minimumFractionDigits:2})}</td>
         <td style="font-size:11.5px;color:var(--slate)">${esc(t.obs||'—')}</td>
+        <td style="text-align:right;font-family:var(--mono);font-size:13px;font-weight:700;color:var(--red)">
+          ${saldoAtualizado!==null ? 'R$&nbsp;'+saldoAtualizado.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}) : '—'}</td>
         <td style="text-align:center">
           ${t.pago
             ? `<span class="badge b-completo" style="font-size:10px">✓ Pago ${t.dataPagto?''+t.dataPagto:''}</span>`
@@ -5938,6 +5975,7 @@ function renderTribAtraso(){
             <th style="text-align:center;width:100px">Competência</th>
             <th style="text-align:right;width:140px">Valor original</th>
             <th>Observação</th>
+            <th style="text-align:right;width:140px">Saldo atualizado</th>
             <th style="text-align:center;width:110px">Situação</th>
             <th style="width:190px"></th>
           </tr></thead>
