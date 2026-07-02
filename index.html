@@ -1927,6 +1927,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
         <div style="margin-left:auto;display:flex;gap:8px">
           <button class="action-btn action-btn-pdf" onclick="exportarListaParc('pdf')">📄 Gerar PDF</button>
           <button class="action-btn action-btn-excel" onclick="exportarListaParc('excel')">📊 Gerar Excel</button>
+          <button class="action-btn" style="background:#166534;color:#fff" onclick="gerarTXTParcelamentos()">📝 Gerar TXT</button>
         </div>
       </div>
       <div id="parcListTabela" style="overflow-x:auto"></div>
@@ -5668,6 +5669,55 @@ function _parcBloqueiaSelicPrimeiro(p, n){
 function _parcBloqueiaAdicionalPrimeiro(p, n){
   return n===1 && p.adicionalPrimeiroPag==='nao';
 }
+// Calcula todos os valores de um parcelamento para a parcela cujo mês de vencimento
+// é selMes/selAno (ou found=false se o parcelamento não tem parcela nesse mês).
+// Usado tanto pela lista de parcelamentos quanto pelo gerador de TXT, para manter os
+// mesmos valores (AVP, Base, Juros Mensal) em ambos os lugares.
+function _calcLinhaParcParaMes(p, selMes, selAno){
+  let primDate=null;
+  if(p.primeiroVencimento){const pts=p.primeiroVencimento.split('/');if(pts.length===3)primDate=new Date(parseInt(pts[2]),parseInt(pts[1])-1,1);}
+  const saldoBase=p.saldoPrestacoes||Math.max(0,parseInt(p.totalParcelas||0)-(parseFloat(p.entrada||0)>0?1:0));
+  const vlr=parseFloat(p.valorParcela)||0;
+  const txAdic=parseFloat(p.txAdicional)||1;
+  const vlrAdic=vlr*txAdic/100;
+  const linhas=p.linhas||[];
+  const anoBase=primDate?primDate.getFullYear():new Date().getFullYear();
+  let n=0,found=false;
+  if(primDate){for(let i=1;i<=saldoBase;i++){const d=new Date(primDate.getFullYear(),primDate.getMonth()+(i-1),1);if(d.getFullYear()===selAno&&d.getMonth()+1===selMes){n=i;found=true;break;}}}
+  let selicAcum=0,vlrAtCursor=vlr,vlrAtAnterior=vlr;
+  let selicRow=0,vlrAdicRowCursor=0,bloqSelicCursor=false,bloqAdicCursor=false;
+  for(let i=1;i<=n;i++){
+    const lni=linhas[i]||{};
+    bloqSelicCursor=_parcBloqueiaSelicPrimeiro(p,i);
+    bloqAdicCursor=_parcBloqueiaAdicionalPrimeiro(p,i);
+    selicRow=bloqSelicCursor?0:(lni.selicMensal!=null&&lni.selicMensal!==''?parseFloat(lni.selicMensal)||0:_selicAutoParc(primDate,i));
+    selicAcum+=selicRow;
+    const valorSelicI=vlr*selicAcum/100;
+    vlrAdicRowCursor=bloqAdicCursor?0:vlrAdic;
+    vlrAtAnterior=vlrAtCursor;
+    vlrAtCursor=vlr+valorSelicI+vlrAdicRowCursor;
+  }
+  const ln=linhas[n]||{};
+  const bloqSelic=bloqSelicCursor,bloqAdic=bloqAdicCursor;
+  const selic=found?selicRow:0;
+  const valorSelic=vlr*selicAcum/100;
+  const vlrAdicRow=vlrAdicRowCursor;
+  const vlrAt=found?vlrAtCursor:vlr;
+  const saldoResid=saldoBase-n;
+  const saldoOrig=vlr*saldoResid;
+  const saldoAtu=vlrAt*saldoResid;
+  const juros=saldoAtu-saldoOrig;
+  const periodo=primDate&&n>0?new Date(primDate.getFullYear(),primDate.getMonth()+(n-1),1).getFullYear()-anoBase+1:n;
+  const baseAtualAuto=n===0?0:(vlrAt-vlrAtAnterior);
+  const baseAtualVal=(ln.baseAtualizacao!=null&&ln.baseAtualizacao!=='')?parseFloat(ln.baseAtualizacao)||0:baseAtualAuto;
+  const saldoResidAnterior=saldoBase-(n-1);
+  const avpAuto=n===0?0:baseAtualVal*saldoResidAnterior;
+  const avpVal=(ln.avp!=null&&ln.avp!=='')?parseFloat(ln.avp)||0:avpAuto;
+  const jmAuto=n===0?0:(vlrAt-vlr);
+  const jmVal=(ln.jurosMensal!=null&&ln.jurosMensal!=='')?parseFloat(ln.jurosMensal)||0:jmAuto;
+  const dataBalPad=ln.dataBalaanco||_ultimoDiaMesParc(primDate,n);
+  return {primDate,saldoBase,vlr,txAdic,vlrAdic,linhas,ln,n,found,selic,selicAcum,valorSelic,bloqSelic,bloqAdic,vlrAdicRow,vlrAt,saldoResid,saldoOrig,saldoAtu,juros,periodo,baseAtualVal,avpVal,jmVal,dataBalPad};
+}
 
 // Converter string DD/MM/YYYY para Date
 function parseDataDD(str){
@@ -7767,44 +7817,15 @@ function _renderParcListTabela(){
   let totVlr=0,totSelicV=0,totAdicV=0,totVlrAt=0,totPagoGerado=0,totSaldoResid=0,totSaldoOrig=0,totSaldoAtu=0,totJuros=0,totAvp=0,totBase=0,totJm=0,totDif=0,totPago=0;
   const ST_COR={Ativo:'#166534',Quitado:'#1d4ed8',Rescindido:'#dc2626',Suspenso:'#d97706'};
   parcs.forEach(p=>{
-    let primDate=null;
-    if(p.primeiroVencimento){const pts=p.primeiroVencimento.split('/');if(pts.length===3)primDate=new Date(parseInt(pts[2]),parseInt(pts[1])-1,1);}
-    const saldoBase=p.saldoPrestacoes||Math.max(0,parseInt(p.totalParcelas||0)-(parseFloat(p.entrada||0)>0?1:0));
-    const vlr=parseFloat(p.valorParcela)||0;
-    const txAdic=parseFloat(p.txAdicional)||1;
-    const vlrAdic=vlr*txAdic/100;
-    const linhas=p.linhas||[];
-    const anoBase=primDate?primDate.getFullYear():new Date().getFullYear();
-    let n=0,found=false;
-    if(primDate){for(let i=1;i<=saldoBase;i++){const d=new Date(primDate.getFullYear(),primDate.getMonth()+(i-1),1);if(d.getFullYear()===selAno&&d.getMonth()+1===selMes){n=i;found=true;break;}}}
-    let selicAcum=0;
-    for(let i=1;i<=n;i++){
-      const lni=linhas[i]||{};
-      const bloqI=_parcBloqueiaSelicPrimeiro(p,i);
-      selicAcum+=(bloqI?0:(lni.selicMensal!=null&&lni.selicMensal!==''?parseFloat(lni.selicMensal)||0:_selicAutoParc(primDate,i)));
-    }
-    const ln=linhas[n]||{};
-    const bloqSelic=_parcBloqueiaSelicPrimeiro(p,n);
-    const bloqAdic=_parcBloqueiaAdicionalPrimeiro(p,n);
-    const selic=found?(bloqSelic?0:(ln.selicMensal!=null&&ln.selicMensal!==''?parseFloat(ln.selicMensal)||0:_selicAutoParc(primDate,n))):0;
-    const valorSelic=vlr*selicAcum/100;
-    const vlrAdicRow=bloqAdic?0:vlrAdic;
-    const vlrAt=found?vlr+valorSelic+vlrAdicRow:vlr;
-    const saldoResid=saldoBase-n;
-    const saldoOrig=vlr*saldoResid;
-    const saldoAtu=vlrAt*saldoResid;
-    const juros=saldoAtu-saldoOrig;
-    const periodo=primDate&&n>0?new Date(primDate.getFullYear(),primDate.getMonth()+(n-1),1).getFullYear()-anoBase+1:n;
-    const avp=parseFloat(ln.avp)||0;
-    const base=parseFloat(ln.baseAtualizacao)||0;
-    const jm=parseFloat(ln.jurosMensal)||0;
+    const r=_calcLinhaParcParaMes(p,selMes,selAno);
+    const {found,n,ln,vlr,selic,selicAcum,valorSelic,bloqAdic,vlrAdicRow,vlrAt,saldoResid,saldoOrig,saldoAtu,juros,periodo,txAdic,avpVal,baseAtualVal,jmVal}=r;
     const dif=parseFloat(ln.difPrestacoes)||0;
     const pago=parseFloat(ln.valorPago)||0;
     const pagoGerado=parseFloat(ln.valorPagoGerado)||0;
     if(found){
       totVlr+=vlr;totSelicV+=valorSelic;totAdicV+=vlrAdicRow;totVlrAt+=vlrAt;
       totPagoGerado+=pagoGerado;totSaldoResid+=saldoResid;totSaldoOrig+=saldoOrig;
-      totSaldoAtu+=saldoAtu;totJuros+=juros;totAvp+=avp;totBase+=base;totJm+=jm;totDif+=dif;totPago+=pago;
+      totSaldoAtu+=saldoAtu;totJuros+=juros;totAvp+=avpVal;totBase+=baseAtualVal;totJm+=jmVal;totDif+=dif;totPago+=pago;
     }
     const sc=ST_COR[p.situacao]||'var(--slate)';
     const nome=esc(p.parcelNome||p.orgao||'Parcelamento');
@@ -7830,9 +7851,9 @@ function _renderParcListTabela(){
       <td style="${cs}">${found?('R$ '+_fmt(saldoOrig)):'—'}</td>
       <td style="${cs}">${found?('R$ '+_fmt(saldoAtu)):'—'}</td>
       <td style="${cs}${juros>0?';color:#dc2626':''}">${found?('R$ '+_fmt(juros)):'—'}</td>
-      <td style="${cs}">${found?fv(avp):'—'}</td>
-      <td style="${cs}">${found?fv(base):'—'}</td>
-      <td style="${cs}">${found?fv(jm):'—'}</td>
+      <td style="${cs}">${found?fv(avpVal):'—'}</td>
+      <td style="${cs}">${found?fv(baseAtualVal):'—'}</td>
+      <td style="${cs}">${found?fv(jmVal):'—'}</td>
       <td style="${cs}${dif<0?';color:#dc2626':''}">${found?fv(Math.abs(dif)):'—'}</td>
       <td style="${cs}">${found?fv(pago):'—'}</td>
     </tr>`;
@@ -8003,6 +8024,51 @@ td{padding:4px 8px;border:1px solid #ddd;font-size:10px}
   a.href=URL.createObjectURL(blob);
   a.download='parcelamento_'+nome.replace(/[^a-zA-Z0-9]/g,'_')+'_'+data.replace(/\//g,'-')+'.xls';
   a.click();
+}
+// Gera um TXT de lançamentos contábeis (AVP e Juros Mensal) de todos os parcelamentos
+// ATIVOS da empresa, para o mês/ano selecionado nos filtros da lista de parcelamentos.
+function gerarTXTParcelamentos(){
+  const eid=_parcEid;
+  const selMes=parseInt(document.getElementById('parcListMes')?.value)||new Date().getMonth()+1;
+  const selAno=parseInt(document.getElementById('parcListAno')?.value)||new Date().getFullYear();
+  const parcs=Object.values(getParcelamentos(eid));
+  if(!parcs.length){ toast('Nenhum parcelamento cadastrado.','warn'); return; }
+
+  const emp=S.emps().find(e=>String(e.eid)===String(eid));
+  const nomeEmp=emp?emp.nome:eid;
+  const mesAnoStr=String(selMes).padStart(2,'0')+'/'+selAno;
+  const fmtValor=v=>v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).replace(/\./g,'');
+
+  const linhas=[];
+  parcs.forEach(p=>{
+    if((p.situacao||'Ativo')!=='Ativo') return; // só parcelamentos ativos
+    const r=_calcLinhaParcParaMes(p,selMes,selAno);
+    if(!r.found) return;
+    const nomeParc=p.parcelNome||p.orgao||'Parcelamento';
+
+    if(r.avpVal){
+      const historico=`${nomeParc} ${mesAnoStr} - Apropriação Juros AVP`;
+      linhas.push(`${r.dataBalPad};${p.contaRedutora||''};${p.contaPassivo||''};${fmtValor(r.avpVal)};;${historico};1;${eid};;`);
+    }
+    if(r.jmVal){
+      const historico=`${nomeParc} ${mesAnoStr} - Apropriação Juros Mensal`;
+      linhas.push(`${r.dataBalPad};3372;${p.contaRedutora||''};${fmtValor(r.jmVal)};;${historico};1;${eid};;`);
+    }
+  });
+
+  if(!linhas.length){ toast('Nenhum lançamento de AVP/Juros Mensal encontrado para o período selecionado.','warn'); return; }
+
+  const conteudo=linhas.join('\n');
+  const blob=new Blob([conteudo],{type:'text/plain;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const link=document.createElement('a');
+  link.href=url;
+  link.download=`Parcelamentos_${nomeEmp}_${String(selMes).padStart(2,'0')}-${selAno}.txt`.replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+  toast('TXT gerado com sucesso','ok');
 }
 function exportarListaParc(formato){
   const el=document.getElementById('parcListTabela');if(!el)return;
