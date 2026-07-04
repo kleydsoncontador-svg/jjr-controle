@@ -92,3 +92,12 @@ CREATE POLICY "auth_delete" ON public.dados_app
 -- Após executar, confirme com:
 -- SELECT tablename, rowsecurity FROM pg_tables WHERE tablename = 'dados_app';
 -- SELECT policyname FROM pg_policies WHERE tablename = 'dados_app';
+
+-- ─── Realtime (sincronização entre operadores sem precisar dar F5) ───────────
+-- OBRIGATÓRIO rodar este comando uma vez para o app atualizar a tela sozinho
+-- quando outro operador salvar algo (ex: marcar fechamento, editar ganhos):
+ALTER PUBLICATION supabase_realtime ADD TABLE public.dados_app;
+
+-- Confirme que funcionou com:
+-- SELECT tablename FROM pg_publication_tables WHERE pubname = 'supabase_realtime';
+-- (deve listar 'dados_app' no resultado)

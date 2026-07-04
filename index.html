@@ -4704,9 +4704,77 @@ async function bootstrap(){
     const hash = window.location.hash.slice(1);
     goPage(hash || 'dash');
     setTimeout(initLucros,500);
+    _startRealtimeSync();
   } else {
     document.getElementById('loginScreen').style.display='flex';
   }
+}
+
+// ─── Sincronização em tempo real entre operadores (Supabase Realtime) ────────
+// Cada gravação em S.s() já sobe pro Supabase. Aqui a gente escuta as mudanças
+// que OUTROS operadores fizeram e atualiza a tela na hora, sem precisar dar F5.
+// Requer que a tabela 'dados_app' esteja habilitada em Database > Replication
+// no painel do Supabase (ver instrução em supabase-schema.sql).
+let _rtPendingPayloads=[];
+function _isEditingSomething(){
+  const ae=document.activeElement;
+  if(!ae)return false;
+  const tag=(ae.tagName||'').toUpperCase();
+  return tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
+}
+function _flushRealtimePending(){
+  if(_isEditingSomething()||!_rtPendingPayloads.length)return;
+  const toApply=_rtPendingPayloads.splice(0);
+  toApply.forEach(_applyRealtimePayload);
+}
+document.addEventListener('focusout',()=>{setTimeout(_flushRealtimePending,60);});
+setInterval(_flushRealtimePending,3000);
+function _applyRealtimePayload(payload){
+  try{
+    const row=(payload.new&&Object.keys(payload.new).length)?payload.new:payload.old;
+    if(!row||!row.key)return;
+    const key=row.key;
+    if(payload.eventType==='DELETE'){delete cccCache[key];}
+    else{cccCache[key]=row.value;cccIdbSet(key,row.value);}
+    _rerenderForRealtimeKey(key);
+  }catch(e){console.warn('realtime apply err',e);}
+}
+function _rerenderForRealtimeKey(key){
+  try{
+    if(key==='emps'){
+      if(currentPage==='dash'){renderDash();showSyncToast();}
+      else if(currentPage==='pendencias'){renderPendencias();showSyncToast();}
+      else if(currentPage==='ganhos'){renderGanhos();}
+      else if(currentPage==='parcelamentos'){renderParcelamentos();}
+      else if(currentPage==='imoveis'){renderImoveis();}
+      else if(currentPage==='empresa'&&typeof currentEid!=='undefined'&&currentEid){renderEmpresaPage(currentEid);showSyncToast();}
+    } else if(key.indexOf('ganhos_')===0){
+      const eid=key.slice('ganhos_'.length);
+      const mGanhos=document.getElementById('mGanhos');
+      const modalOpen=mGanhos&&mGanhos.style.display!=='none';
+      const sameEid=document.getElementById('ganhosEid')&&document.getElementById('ganhosEid').value===eid;
+      const detalheEl=document.getElementById('ganhoDetalheContainer');
+      const detailOpen=detalheEl&&detalheEl.style.display==='block';
+      if(modalOpen&&sameEid&&!detailOpen){renderGanhoResumoCards();showSyncToast();}
+    } else if(key.indexOf('parcelamentos_')===0){
+      const eid=key.slice('parcelamentos_'.length);
+      const mParc=document.getElementById('mParcelamentos');
+      const modalOpen=mParc&&mParc.style.display!=='none';
+      if(modalOpen&&typeof _parcEid!=='undefined'&&String(_parcEid)===eid){_renderParcList();showSyncToast();}
+    } else if(key.indexOf('chk_')===0){
+      const eid=key.slice('chk_'.length);
+      if(currentPage==='empresa'&&typeof currentEid!=='undefined'&&String(currentEid)===eid){renderEmpresaPage(eid);showSyncToast();}
+    }
+  }catch(e){console.warn('realtime rerender err',key,e);}
+}
+function _startRealtimeSync(){
+  if(!_supaClient)return;
+  _supaClient.channel('dados_app_realtime')
+    .on('postgres_changes',{event:'*',schema:'public',table:'dados_app'},(payload)=>{
+      if(_isEditingSomething()){_rtPendingPayloads.push(payload);return;}
+      _applyRealtimePayload(payload);
+    })
+    .subscribe();
 }
 
 async function cccVerificarUpdate(){
