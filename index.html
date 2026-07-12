@@ -2296,6 +2296,12 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
 const CCC_DB_NAME = 'ccc_db';
 const CCC_DB_STORE = 'kv';
 const cccCache = {};
+// Timestamp (ISO) da última gravação LOCAL de cada chave. Usado pra nunca deixar
+// uma leitura do servidor (boot ou eco do realtime) sobrescrever uma edição local
+// mais recente que ainda não terminou de sincronizar — ver S.s(), _loadFromSupabase()
+// e _applyRealtimePayload().
+const cccLocalUpdatedAt = {};
+const CCC_META_KEY = '__ccc_local_updated_at__';
 let cccDb = null;
 let _supaClient = null;  // Supabase client (inicializado no bootstrap)
 
@@ -2340,6 +2346,9 @@ function cccIdbSet(key, value){
 async function cccInitStorage(){
   cccDb = await cccIdbOpen();
   var data = await cccIdbGetAll(cccDb);
+  var meta = data[CCC_META_KEY];
+  if(meta && typeof meta==='object') Object.assign(cccLocalUpdatedAt, meta);
+  delete data[CCC_META_KEY];
   Object.assign(cccCache, data);
 }
 
@@ -2348,11 +2357,14 @@ const S = {
   s:(k,v)=>{
     cccCache[k]=v;
     cccIdbSet(k,v);
+    var ts=new Date().toISOString();
+    cccLocalUpdatedAt[k]=ts;
+    cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
     if(_supaClient&&k!=='ccc_session'){
-      _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:new Date().toISOString()}).then(function(r){if(r.error)console.warn('SB save err',k,r.error);});
+      _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){if(r.error)console.warn('SB save err',k,r.error);});
     } else if(!_supaClient&&k!=='ccc_session') {
       // Se Supabase não está pronto, tenta novamente em 500ms
-      setTimeout(()=>{ if(_supaClient) _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:new Date().toISOString()}).catch(e=>console.warn('SB retry err',k,e)); }, 500);
+      setTimeout(()=>{ if(_supaClient) _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).catch(e=>console.warn('SB retry err',k,e)); }, 500);
     }
   },
   emps:()=>S.g('emps')||[],
@@ -4902,17 +4914,36 @@ document.addEventListener('focusout', e=>{
 async function _loadFromSupabase(){
   if(!_supaClient)return;
   try{
-    var r=await _supaClient.from('dados_app').select('key,value').order('updated_at', {ascending: false});
+    var r=await _supaClient.from('dados_app').select('key,value,updated_at').order('updated_at', {ascending: false});
     if(r.error){console.warn('SB load err:',r.error);return;}
+    var serverTsByKey={};
     if(r.data&&r.data.length){
       r.data.forEach(function(row){
         if(row.key!==undefined&&row.value!==undefined){
-          cccCache[row.key]=row.value;
-          cccIdbSet(row.key,row.value); // espelha no IndexedDB como backup local
+          serverTsByKey[row.key]=row.updated_at;
+          var localTs=cccLocalUpdatedAt[row.key];
+          // Só aceita a versão do servidor se ela for igual ou mais recente que a
+          // local — evita que uma edição feita agora mesmo (ainda subindo pro
+          // servidor) seja apagada por uma leitura que chegou antes dessa gravação.
+          if(!localTs||!row.updated_at||new Date(row.updated_at)>=new Date(localTs)){
+            cccCache[row.key]=row.value;
+            cccIdbSet(row.key,row.value); // espelha no IndexedDB como backup local
+            if(row.updated_at)cccLocalUpdatedAt[row.key]=row.updated_at;
+          }
         }
       });
+      cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
       console.log('✓ Supabase: carregou',r.data.length,'registros. Ganhos encontrados:',r.data.filter(d=>d.key.startsWith('ganhos_')).length);
     }
+    // Reenvia pro servidor qualquer dado local mais recente que ele ainda não tem
+    // confirmado (ex: gravação que não terminou de sincronizar antes da página recarregar).
+    Object.keys(cccLocalUpdatedAt).forEach(function(key){
+      if(key==='ccc_session')return;
+      var localTs=cccLocalUpdatedAt[key],serverTs=serverTsByKey[key];
+      if((!serverTs||new Date(localTs)>new Date(serverTs))&&(key in cccCache)){
+        _supaClient.from('dados_app').upsert({key:key,value:cccCache[key],updated_at:localTs}).then(function(res){if(res.error)console.warn('SB resync err',key,res.error);});
+      }
+    });
   }catch(e){console.warn('_loadFromSupabase:',e);}
 }
 
@@ -4975,8 +5006,16 @@ function _applyRealtimePayload(payload){
     const row=(payload.new&&Object.keys(payload.new).length)?payload.new:payload.old;
     if(!row||!row.key)return;
     const key=row.key;
+    const localTs=cccLocalUpdatedAt[key];
+    const rowTs=row.updated_at;
+    // Ignora ecos do realtime mais antigos que a última gravação LOCAL dessa
+    // chave — sem isso, um eco atrasado (ex: da gravação do campo 1, chegando
+    // só depois de você já ter editado os campos 2 e 3) apagava as edições
+    // mais novas, mesmo elas já estando salvas localmente.
+    if(localTs&&rowTs&&new Date(rowTs)<new Date(localTs))return;
     if(payload.eventType==='DELETE'){delete cccCache[key];}
     else{cccCache[key]=row.value;cccIdbSet(key,row.value);}
+    if(rowTs)cccLocalUpdatedAt[key]=rowTs;
     _refreshCurrentView();
   }catch(e){console.warn('realtime apply err',e);}
 }
@@ -9007,10 +9046,10 @@ function renderGanhoTrimestral(eid,id,ganho){
               disp=c.tipo==='num'?(v?_fmt(v):''):(esc(v));
             }
             const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial);
-            h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id+colIdSuffix}" ${!isEditable?'disabled':''} onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id+colIdSuffix}',n);${c.tipo==='num'?`this.value=n?_fmt(n):''`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:90px" placeholder="0"></td>`;});
+            h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id+colIdSuffix}" ${!isEditable?'disabled':''} oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','${c.id+colIdSuffix}',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id+colIdSuffix}',n);${c.tipo==='num'?`this.value=n?_fmt(n):''`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:90px" placeholder="0"></td>`;});
           h+=`<td ${r===1?`id="grf-${pid}-s-${mKey}"`:''} style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}</td>
             <td style="padding:2px;border:1px solid var(--border)">
-              ${r===1&&isFirst?`<input type="text" value="${ant?_fmt(ant):''}" data-mk="${mk}" data-col="saldoAnt" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','saldoAnt',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="Saldo inicial">`:(r===1?`<span id="grf-${pid}-a-${mKey}" style="display:block;padding:5px 7px;text-align:right;color:var(--slate)">${_fmt(ant)}</span>`:'')}</td>${isCDBEspecial?`<td style="padding:2px;border:1px solid var(--border)">${r===1?`<input type="text" value="${d.resgateValor?_fmt(parseFloat(d.resgateValor)||0):''}" data-mk="${mk}" data-col="resgateValor" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgateValor',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0">`:''}</td><td style="padding:2px;border:1px solid var(--border)">${r===1?`<input type="text" value="${d.resgatePrincipal?_fmt(parseFloat(d.resgatePrincipal)||0):''}" data-mk="${mk}" data-col="resgatePrincipal" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgatePrincipal',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0">`:''}</td>`:''}</tr>`;
+              ${r===1&&isFirst?`<input type="text" value="${ant?_fmt(ant):''}" data-mk="${mk}" data-col="saldoAnt" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','saldoAnt',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','saldoAnt',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="Saldo inicial">`:(r===1?`<span id="grf-${pid}-a-${mKey}" style="display:block;padding:5px 7px;text-align:right;color:var(--slate)">${_fmt(ant)}</span>`:'')}</td>${isCDBEspecial?`<td style="padding:2px;border:1px solid var(--border)">${r===1?`<input type="text" value="${d.resgateValor?_fmt(parseFloat(d.resgateValor)||0):''}" data-mk="${mk}" data-col="resgateValor" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgateValor',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgateValor',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0">`:''}</td><td style="padding:2px;border:1px solid var(--border)">${r===1?`<input type="text" value="${d.resgatePrincipal?_fmt(parseFloat(d.resgatePrincipal)||0):''}" data-mk="${mk}" data-col="resgatePrincipal" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgatePrincipal',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgatePrincipal',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0">`:''}</td>`:''}</tr>`;
         });
       }
       h+=`<tr style="background:#f1f5f9;font-weight:700"><td colspan="2" style="padding:7px;border:1px solid var(--border);text-align:right;position:sticky;left:0;z-index:2;background:#f1f5f9">${t}º Trimestre Total</td>`;
@@ -9128,11 +9167,11 @@ function renderGanhoAnual(eid,id,ganho){
           disp=c.tipo==='num'?(v?_fmt(v):''):(esc(v));
         }
         const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial);
-        h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id}" ${!isEditable?'disabled':''} onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id}',n);${c.tipo==='num'?`this.value=n?_fmt(n):''`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:90px" placeholder="0"></td>`;});
+        h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id}" ${!isEditable?'disabled':''} oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','${c.id}',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id}',n);${c.tipo==='num'?`this.value=n?_fmt(n):''`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:90px" placeholder="0"></td>`;});
       h+=`<td id="grf-${pid}-s-${mKey}" style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}</td>
         <td style="padding:2px;border:1px solid var(--border)">
-          ${isFirst?`<input type="text" value="${ant?_fmt(ant):''}" data-mk="${mk}" data-col="saldoAnt" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','saldoAnt',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="Saldo inicial">`:`<span id="grf-${pid}-a-${mKey}" style="display:block;padding:5px 7px;text-align:right;color:var(--slate)">${_fmt(ant)}</span>`}
-        </td>${isCDBEspecial?`<td style="padding:2px;border:1px solid var(--border)"><input type="text" value="${d.resgateValor?_fmt(parseFloat(d.resgateValor)||0):''}" data-mk="${mk}" data-col="resgateValor" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgateValor',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0"></td><td style="padding:2px;border:1px solid var(--border)"><input type="text" value="${d.resgatePrincipal?_fmt(parseFloat(d.resgatePrincipal)||0):''}" data-mk="${mk}" data-col="resgatePrincipal" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgatePrincipal',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0"></td>`:''}</tr>`;
+          ${isFirst?`<input type="text" value="${ant?_fmt(ant):''}" data-mk="${mk}" data-col="saldoAnt" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','saldoAnt',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','saldoAnt',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="Saldo inicial">`:`<span id="grf-${pid}-a-${mKey}" style="display:block;padding:5px 7px;text-align:right;color:var(--slate)">${_fmt(ant)}</span>`}
+        </td>${isCDBEspecial?`<td style="padding:2px;border:1px solid var(--border)"><input type="text" value="${d.resgateValor?_fmt(parseFloat(d.resgateValor)||0):''}" data-mk="${mk}" data-col="resgateValor" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgateValor',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgateValor',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0"></td><td style="padding:2px;border:1px solid var(--border)"><input type="text" value="${d.resgatePrincipal?_fmt(parseFloat(d.resgatePrincipal)||0):''}" data-mk="${mk}" data-col="resgatePrincipal" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgatePrincipal',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgatePrincipal',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0"></td>`:''}</tr>`;
     }
     h+=`<tr style="background:#f1f5f9;font-weight:700"><td style="padding:7px;border:1px solid var(--border);text-align:right;position:sticky;left:0;z-index:2;background:#f1f5f9">Total ${ano}</td>`;
     cols.forEach(c=>{const v=c.tipo==='num'?aTotals[c.id]:null;h+=`<td style="padding:7px;border:1px solid var(--border);text-align:right;${v!==null&&v<0?'color:#dc2626;':''}${c.hl?'background:#dbeafe':''}">${v!==null?_fmt(v):'—'}</td>`;});
@@ -9141,6 +9180,17 @@ function renderGanhoAnual(eid,id,ganho){
   h+=`</tbody></table></div></div>`;
   const container=document.getElementById('ganhoDetalheContainer');
   if(container){container.innerHTML=h;container.style.display='block';}
+}
+function salvarGanhoCellSilencioso(eid,id,mk,colId,value){
+  // Salva a cada tecla digitada, sem recriar a tabela — cobre o caso de o usuário
+  // trocar de janela/app (o navegador não dispara blur no campo ao perder o foco
+  // do SISTEMA, só quando o foco muda para outro elemento DENTRO da página), o
+  // que antes fazia o valor digitado nunca ser salvo e sumir ao voltar.
+  const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
+  if(!ganho.dados)ganho.dados={};if(!ganho.dados[mk])ganho.dados[mk]={};
+  const col=(ganho.cols||[]).find(c=>c.id===colId);
+  ganho.dados[mk][colId]=colId==='saldoAnt'||(!col||col.tipo==='num')?(parseFloat(value)||0):value;
+  setGanhos(eid,ganhos);
 }
 function atualizarGanhoCell(eid,id,mk,colId,value){
   const ganhos=getGanhos(eid),ganho=ganhos[id];if(!ganho)return;
