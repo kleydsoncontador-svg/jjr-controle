@@ -8034,13 +8034,17 @@ function baixarConvItauTxt(eid){
 // de um mês inteiro): o "(=) Total" de cada dia do PDF (Principal - |Descontos|
 // + Juros) bate exatamente com a soma dos créditos "MOV TÍTCOB DISP" lançados
 // no Razão naquele mesmo dia (mesmo quando há vários lançamentos no mesmo dia
-// referenciando datas de disponibilização diferentes). Só processamos as 3
-// operações que compõem esse "Total" (Principal, Descontos, Juros) — Custas
-// e Tarifas de cobrança ficam de fora, a pedido do usuário.
+// referenciando datas de disponibilização diferentes). Custas e Tarifas de
+// cobrança NÃO entram nesse "Total" (aparecem separadas, como dedução da
+// conta corrente) — por isso elas não fazem parte da conferência interna
+// obrigatória (ver _convCobrExtrairPdf), só as 3 operações que compõem o
+// Total mesmo.
 const CONV_COBR_OPERACOES=[
   {id:'principal',label:'Principal (liquidações)'},
   {id:'descontos',label:'Descontos / abatimentos'},
-  {id:'juros',label:'Juros / multa'}
+  {id:'juros',label:'Juros / multa'},
+  {id:'custas',label:'Custas de cartório'},
+  {id:'tarifas',label:'Tarifas de cobrança'}
 ];
 let _convCobrExpandido={};
 let _convCobrResultados={};
@@ -8302,7 +8306,9 @@ async function _convCobrExtrairPdf(file){
         principal:campo(/Principal\s*\(liquida[çc][õo]es\)\s+([\d.,]+)/i)||0,
         descontos:campo(/Descontos\s*\/\s*abatimentos\s+(-?[\d.,]+)/i)||0,
         juros:campo(/Juros\s*\/\s*multa\s+(-?[\d.,]+)/i)||0,
-        total:campo(/\(=\)\s*Total\s+(-?[\d.,]+)/i)
+        total:campo(/\(=\)\s*Total\s+(-?[\d.,]+)/i),
+        custas:campo(/Custas\s+(-?[\d.,]+)/i)||0,
+        tarifas:campo(/Tarifas\s+(-?[\d.,]+)/i)||0
       };
     }
     paginas.push({palavras,resumo});
@@ -8327,18 +8333,31 @@ async function _convCobrExtrairPdf(file){
     // o resumo do dia. Se não bater, é sinal de um tipo de "Descrição da
     // operação" novo que este parser ainda não reconhece — melhor travar a
     // geração do que gerar um TXT incompleto.
-    let somaPrincipal=0,somaJuros=0,somaDescontos=0;
+    let somaPrincipal=0,somaJuros=0,somaDescontos=0,somaCustas=0,somaTarifas=0;
     registros.forEach(r=>{
       if(/^liquida[çc][ãa]o/i.test(r.descricao))somaPrincipal+=r.valorBoleto||0;
+      // Custas/protesto: "Valor boleto" é só a referência do título original
+      // que foi a cartório (repetida em ambos os registros) — o valor
+      // cobrado de fato está no "valorFinal" (ex: -9,19 / -8,00).
+      else if(/custas/i.test(r.descricao))somaCustas+=r.valorFinal||0;
+      else if(/tarifa\s*de\s*protesto/i.test(r.descricao))somaTarifas+=r.valorFinal||0;
       (r.sublinhas||[]).forEach(sl=>{
         if(/juros/i.test(sl.descricao))somaJuros+=sl.valor||0;
         else if(/desconto/i.test(sl.descricao))somaDescontos+=sl.valor||0;
+        else if(/tarifa\s*de\s*cobran[çc]a/i.test(sl.descricao))somaTarifas+=sl.valor||0;
       });
     });
     const avisos=[];
     if(Math.abs(somaPrincipal-dia.resumo.principal)>0.01)avisos.push('Principal: detalhado R$ '+_fmt(somaPrincipal)+' × resumo R$ '+_fmt(dia.resumo.principal));
     if(Math.abs(somaJuros-dia.resumo.juros)>0.01)avisos.push('Juros: detalhado R$ '+_fmt(somaJuros)+' × resumo R$ '+_fmt(dia.resumo.juros));
     if(Math.abs(somaDescontos-dia.resumo.descontos)>0.01)avisos.push('Descontos: detalhado R$ '+_fmt(somaDescontos)+' × resumo R$ '+_fmt(dia.resumo.descontos));
+    // Custas e Tarifas ficam de fora da conferência rígida (tolerância bem
+    // maior): o PDF às vezes simplesmente não imprime a tarifa de um boleto
+    // que caiu por último numa página (confirmado em dados reais — não é
+    // bug de parsing, é omissão do próprio extrato), então uma pequena
+    // diferença aqui é esperada e não deve travar a geração do TXT.
+    if(Math.abs(somaCustas-dia.resumo.custas)>3)avisos.push('Custas: detalhado R$ '+_fmt(somaCustas)+' × resumo R$ '+_fmt(dia.resumo.custas));
+    if(Math.abs(somaTarifas-dia.resumo.tarifas)>3)avisos.push('Tarifas: detalhado R$ '+_fmt(somaTarifas)+' × resumo R$ '+_fmt(dia.resumo.tarifas));
     resultado[dia.resumo.data]={resumo:dia.resumo,registros,avisos};
   });
   return resultado;
@@ -8488,12 +8507,20 @@ function _convCobrGerarResultado(eid,datas,diasPdf,regras,conferido){
   datas.forEach(data=>{
     const registros=(diasPdf[data]&&diasPdf[data].registros)||[];
     registros.forEach(r=>{
-      if(/^liquida[çc][ãa]o/i.test(r.descricao)&&Math.abs(r.valorBoleto||0)>0.005){
-        const rc=regras.principal;
+      let catPrimaria=null;
+      // Custas/protesto usam "valorFinal" (o valor realmente cobrado) — o
+      // "Valor boleto" nesses dois é só a referência do título original que
+      // foi a cartório, repetida nos dois registros (custas e protesto).
+      if(/^liquida[çc][ãa]o/i.test(r.descricao)){catPrimaria='principal';}
+      else if(/custas/i.test(r.descricao)){catPrimaria='custas';}
+      else if(/tarifa\s*de\s*protesto/i.test(r.descricao)){catPrimaria='tarifas';}
+      const valorPrimaria=catPrimaria==='principal'?r.valorBoleto:r.valorFinal;
+      if(catPrimaria&&Math.abs(valorPrimaria||0)>0.005){
+        const rc=regras[catPrimaria];
         linhas.push({
           dataEditada:data,
           historico:_convCobrHistorico(r.descricao,r.pagador,r.seuNumero),
-          valor:Math.abs(r.valorBoleto),
+          valor:Math.abs(valorPrimaria),
           debito:rc.contaDebito,
           credito:rc.contaCredito
         });
@@ -8502,6 +8529,7 @@ function _convCobrGerarResultado(eid,datas,diasPdf,regras,conferido){
         let catId=null;
         if(/juros/i.test(sl.descricao))catId='juros';
         else if(/desconto/i.test(sl.descricao))catId='descontos';
+        else if(/tarifa\s*de\s*cobran[çc]a/i.test(sl.descricao))catId='tarifas';
         if(!catId||Math.abs(sl.valor||0)<0.005)return;
         const rc=regras[catId];
         linhas.push({
@@ -8514,7 +8542,8 @@ function _convCobrGerarResultado(eid,datas,diasPdf,regras,conferido){
       });
     });
   });
-  _convCobrResultados[eid]={linhas,validacoes:{totalLinhas:linhas.length,totalDias:datas.length,conferido:!!conferido}};
+  _convCobrResultados[eid]={linhas,validacoes:{totalLinhas:linhas.length,totalDias:datas.length,conferido:!!conferido,
+    periodoInicio:datas[0]||'',periodoFim:datas[datas.length-1]||''}};
   renderConvCobrLista();
   toast('Extrato processado com sucesso!','ok');
 }
@@ -8524,8 +8553,9 @@ function renderConvCobrResultado(eid,resultado){
   const avisoConferencia=validacoes.conferido
     ?`<div style="margin-top:6px;font-size:11px;color:#16a34a">✓ ${validacoes.totalDias} dia(s) conciliado(s) com o Razão · ${validacoes.totalLinhas} linha(s) geradas</div>`
     :`<div style="margin-top:6px;font-size:11px;color:#b45309">⚠ Gerado direto do PDF, sem conferência com o Razão · ${validacoes.totalDias} dia(s) · ${validacoes.totalLinhas} linha(s) geradas</div>`;
+  const periodoTxt=validacoes.periodoInicio?(validacoes.periodoInicio===validacoes.periodoFim?validacoes.periodoInicio:validacoes.periodoInicio+' a '+validacoes.periodoFim):'';
   return `<div style="margin-top:12px;background:var(--bg);border-radius:6px;padding:12px">
-    <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:8px">Resumo do lançamento</div>
+    <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:8px">Resumo do lançamento${periodoTxt?' — '+esc(periodoTxt):''}</div>
     <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Total dos lançamentos</span><span>R$ ${_fmt(total)}</span></div>
     ${avisoConferencia}
     <div style="margin-top:10px;max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
@@ -8561,7 +8591,10 @@ function baixarConvCobrTxt(eid){
   const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url;a.download='Extrato_Cobranca_Itau_'+nomeArq+'.txt';a.click();
+  const fmtData=d=>(d||'').replace(/\//g,'-');
+  const {periodoInicio,periodoFim}=resultado.validacoes||{};
+  const periodoArq=periodoInicio?(periodoInicio===periodoFim?'_'+fmtData(periodoInicio):'_'+fmtData(periodoInicio)+'_a_'+fmtData(periodoFim)):'';
+  a.href=url;a.download='Extrato_Cobranca_Itau_'+nomeArq+periodoArq+'.txt';a.click();
   URL.revokeObjectURL(url);
 }
 
