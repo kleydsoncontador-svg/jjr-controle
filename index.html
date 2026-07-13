@@ -8170,35 +8170,178 @@ function _convCobrParseValor(s){
   if(isNaN(v))return null;
   return neg?-v:v;
 }
+// Detecta onde termina o cabeçalho repetido da tabela de detalhes em cada
+// página (procurando "Crédito/Débito (R$)", que só aparece no cabeçalho) e
+// remove também o rodapé de "Consultas, informações...". Sobra só os tokens
+// de dados da página.
+function _convCobrLimparPaginaPalavras(palavras){
+  let idxAncora=-1;
+  for(let k=0;k<palavras.length-1;k++){
+    if(palavras[k].indexOf('dito/D')>=0&&palavras[k+1]==='(R$)')idxAncora=k+2;
+  }
+  if(idxAncora<0)return[];
+  let fim=palavras.length;
+  for(let k=idxAncora;k<palavras.length;k++){
+    if(palavras[k]==='Consultas,'){fim=k;break;}
+  }
+  return palavras.slice(idxAncora,fim);
+}
+// Só reconhece como "valor" um token no formato de moeda BR (com vírgula
+// decimal). Isso é o que separa de forma confiável um valor real (ex:
+// "-1,50") de um código numérico puro (Cart, Nosso número, ou até um CPF
+// colado no nome do pagador, ex: "ADELSON JOSE MIRANDA 007535968") — sem
+// essa exigência de vírgula, esses códigos eram confundidos com valores.
+function _convCobrEhValor(tok){
+  return /^-?[\d.]+,\d{2}$/.test(tok);
+}
+// Lê tokens até achar 'boleto', tratando qualquer par "texto + valor"
+// encontrado pelo caminho como uma SUB-LINHA ÓRFÃ do registro anterior (a
+// tarifa/juros/desconto de um boleto às vezes "vaza" pra página seguinte,
+// quando o boleto cai bem na quebra de página — sem isso a sub-linha era
+// perdida ou virava lixo dentro do nome do próximo pagador). Um valor SEM
+// texto antes (nenhuma palavra acumulada) é o código "Cart." do próximo
+// registro, não uma sub-linha.
+function _convCobrLeAteBoleto(palavras,i,registroAnterior){
+  const n=palavras.length;
+  let buffer=[];
+  while(true){
+    const chunk=[];
+    let tipo='fim';
+    while(i<n){
+      if(palavras[i]==='boleto'){tipo='boleto';break;}
+      if(_convCobrEhValor(palavras[i])){tipo='valor';break;}
+      chunk.push(palavras[i]);i++;
+    }
+    if(tipo==='boleto'){buffer=buffer.concat(chunk);return{buffer,i};}
+    if(tipo==='valor'){
+      if(chunk.length){
+        const valorOrfa=_convCobrParseValor(palavras[i]);i++;
+        if(registroAnterior)registroAnterior.sublinhas.push({descricao:chunk.join(' '),valor:valorOrfa});
+      } else {
+        buffer.push(palavras[i]);i++;
+      }
+    } else {
+      buffer=buffer.concat(chunk);return{buffer,i};
+    }
+  }
+}
+// Máquina de estados que percorre os tokens da seção "Movimentação
+// detalhada" (já sem cabeçalho) e monta um registro por boleto. Cada boleto
+// segue sempre o padrão: <Cart> <Pagador...> boleto <NossoNúmero> 1
+// <SeuNúmero> <Vencimento> <Ag.rec.> <ValorBoleto> <Descrição...> -
+// [<DescriçãoSecundária...> <Valor>]* <ValorFinal>.
+function _convCobrParseSecaoDetalhada(palavras){
+  const registros=[];
+  let i=0,n=palavras.length;
+  let r0=_convCobrLeAteBoleto(palavras,i,null);
+  let bufferPagador=r0.buffer;i=r0.i;
+  let ultimoRegistro=null;
+  while(i<n&&palavras[i]==='boleto'){
+    const cart=bufferPagador[0]||null;
+    const pagador=bufferPagador.length>1?bufferPagador.slice(1).join(' '):null;
+    i++;
+    const nossoNumero=palavras[i++];
+    i++; // token constante "1" entre Nosso número e Seu número — não usado
+    const seuNumero=palavras[i++];
+    const vencimento=palavras[i++];
+    const agRec=palavras[i++];
+    const valorBoletoTok=palavras[i++];
+    const descPalavras=[];
+    while(i<n&&palavras[i]!=='-'){descPalavras.push(palavras[i]);i++;}
+    const descricao=descPalavras.join(' ');
+    if(i<n&&palavras[i]==='-')i++;
+    const sublinhas=[];
+    while(i<n){
+      if(palavras[i]==='boleto')break;
+      if(_convCobrEhValor(palavras[i]))break;
+      const subDesc=[];
+      while(i<n&&!_convCobrEhValor(palavras[i])){subDesc.push(palavras[i]);i++;}
+      if(i<n){
+        const subValorTok=palavras[i];i++;
+        sublinhas.push({descricao:subDesc.join(' '),valor:_convCobrParseValor(subValorTok)});
+      }
+    }
+    let valorFinal=null;
+    if(i<n&&_convCobrEhValor(palavras[i])){valorFinal=_convCobrParseValor(palavras[i]);i++;}
+    const registro={cart,pagador,nossoNumero,seuNumero,vencimento,agRec,
+      valorBoleto:_convCobrParseValor(valorBoletoTok),descricao,sublinhas,valorFinal};
+    registros.push(registro);
+    ultimoRegistro=registro;
+    const rn=_convCobrLeAteBoleto(palavras,i,ultimoRegistro);
+    bufferPagador=rn.buffer;i=rn.i;
+  }
+  return registros;
+}
 async function _convCobrExtrairPdf(file){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  const dias={};
+  // 1ª passada: lê cada página (na ordem original dos itens do content
+  // stream — a mesma técnica que já funciona bem pra caixa de resumo, ver
+  // nota abaixo) e guarda tanto os tokens da página quanto o resumo do dia,
+  // se essa for a 1ª página de um dia novo.
+  const paginas=[];
   for(let i=1;i<=pdf.numPages;i++){
     const page=await pdf.getPage(i);
     const content=await page.getTextContent();
-    // A caixa de resumo deste extrato não se presta ao agrupamento por
-    // posição (x/y) usado no conversor de fatura de cartão — os itens saem
-    // com coordenadas que não refletem a ordem visual real. Em compensação,
-    // a ORDEM ORIGINAL dos itens (como aparecem no content stream do PDF)
-    // já corresponde exatamente à ordem de leitura, então usamos ela direto.
-    const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ');
+    // A ORDEM ORIGINAL dos itens (como aparecem no content stream do PDF) já
+    // corresponde à ordem de leitura — diferente do agrupamento por posição
+    // (x/y) usado no conversor de fatura de cartão, que não funciona bem
+    // neste extrato (os itens saem com coordenadas que não refletem a ordem
+    // visual real).
+    const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+    const palavras=texto.split(' ');
     const mResumo=texto.match(/Movimenta[çc][ãa]o resumida de cobran[çc]a\s*\((\d{2}\/\d{2}\/\d{4})\)/i);
-    if(!mResumo)continue;
-    const data=mResumo[1];
-    if(dias[data])continue; // só a 1ª página do dia traz o resumo
-    const idxDetalhe=texto.search(/Movimenta[çc][ãa]o detalhada/i);
-    const bloco=idxDetalhe>=0?texto.slice(0,idxDetalhe):texto;
-    const campo=(rx)=>{const m=bloco.match(rx);return m?_convCobrParseValor(m[1]):null;};
-    dias[data]={
-      principal:campo(/Principal\s*\(liquida[çc][õo]es\)\s+([\d.,]+)/i)||0,
-      descontos:campo(/Descontos\s*\/\s*abatimentos\s+(-?[\d.,]+)/i)||0,
-      juros:campo(/Juros\s*\/\s*multa\s+(-?[\d.,]+)/i)||0,
-      total:campo(/\(=\)\s*Total\s+(-?[\d.,]+)/i)
-    };
+    let resumo=null;
+    if(mResumo){
+      const idxDetalhe=texto.search(/Movimenta[çc][ãa]o detalhada/i);
+      const bloco=idxDetalhe>=0?texto.slice(0,idxDetalhe):texto;
+      const campo=(rx)=>{const m=bloco.match(rx);return m?_convCobrParseValor(m[1]):null;};
+      resumo={
+        data:mResumo[1],
+        principal:campo(/Principal\s*\(liquida[çc][õo]es\)\s+([\d.,]+)/i)||0,
+        descontos:campo(/Descontos\s*\/\s*abatimentos\s+(-?[\d.,]+)/i)||0,
+        juros:campo(/Juros\s*\/\s*multa\s+(-?[\d.,]+)/i)||0,
+        total:campo(/\(=\)\s*Total\s+(-?[\d.,]+)/i)
+      };
+    }
+    paginas.push({palavras,resumo});
   }
-  return dias;
+  // 2ª passada: agrupa páginas por dia. Só a 1ª página de cada dia traz o
+  // resumo — as páginas seguintes (sem resumo) são continuação do mesmo dia.
+  const dias=[];
+  paginas.forEach(p=>{
+    if(p.resumo)dias.push({resumo:p.resumo,paginas:[p.palavras]});
+    else if(dias.length)dias[dias.length-1].paginas.push(p.palavras);
+  });
+  // 3ª passada: concatena os tokens de TODAS as páginas do dia (sem os
+  // cabeçalhos repetidos) antes de rodar o parser — necessário porque às
+  // vezes a sub-linha de um boleto (ex: tarifa) cai bem na quebra de página
+  // e só aparece no topo da página seguinte.
+  const resultado={};
+  dias.forEach(dia=>{
+    let concatenado=[];
+    dia.paginas.forEach(pal=>{concatenado=concatenado.concat(_convCobrLimparPaginaPalavras(pal));});
+    const registros=_convCobrParseSecaoDetalhada(concatenado);
+    // Conferência interna: soma do detalhe (linha a linha) tem que bater com
+    // o resumo do dia. Se não bater, é sinal de um tipo de "Descrição da
+    // operação" novo que este parser ainda não reconhece — melhor travar a
+    // geração do que gerar um TXT incompleto.
+    let somaPrincipal=0,somaJuros=0,somaDescontos=0;
+    registros.forEach(r=>{
+      if(/^liquida[çc][ãa]o/i.test(r.descricao))somaPrincipal+=r.valorBoleto||0;
+      (r.sublinhas||[]).forEach(sl=>{
+        if(/juros/i.test(sl.descricao))somaJuros+=sl.valor||0;
+        else if(/desconto/i.test(sl.descricao))somaDescontos+=sl.valor||0;
+      });
+    });
+    const avisos=[];
+    if(Math.abs(somaPrincipal-dia.resumo.principal)>0.01)avisos.push('Principal: detalhado R$ '+_fmt(somaPrincipal)+' × resumo R$ '+_fmt(dia.resumo.principal));
+    if(Math.abs(somaJuros-dia.resumo.juros)>0.01)avisos.push('Juros: detalhado R$ '+_fmt(somaJuros)+' × resumo R$ '+_fmt(dia.resumo.juros));
+    if(Math.abs(somaDescontos-dia.resumo.descontos)>0.01)avisos.push('Descontos: detalhado R$ '+_fmt(somaDescontos)+' × resumo R$ '+_fmt(dia.resumo.descontos));
+    resultado[dia.resumo.data]={resumo:dia.resumo,registros,avisos};
+  });
+  return resultado;
 }
 async function _convCobrExtrairRazao(file){
   const buf=await file.arrayBuffer();
@@ -8250,6 +8393,16 @@ async function processarConvCobr(eid){
       _convCobrResetBotao(eid);return;
     }
 
+    const avisosInternos=[];
+    Object.keys(diasPdf).forEach(data=>{
+      (diasPdf[data].avisos||[]).forEach(a=>avisosInternos.push(data+': '+a));
+    });
+    if(avisosInternos.length){
+      _convCobrSetStatus(eid,'O detalhamento por boleto não fecha com o resumo do dia — provavelmente um tipo de lançamento novo que este conversor ainda não reconhece. TXT não gerado, avise o desenvolvedor:\n'+avisosInternos.join('\n'),'err');
+      toast('PDF com lançamento não reconhecido — TXT não gerado.','err');
+      _convCobrResetBotao(eid);return;
+    }
+
     let datas,conferido;
     if(razaoFile){
       const razaoPorData=await _convCobrExtrairRazao(razaoFile);
@@ -8263,8 +8416,8 @@ async function processarConvCobr(eid){
         const dia=diasPdf[data];
         const esperado=razaoPorData[data];
         if(!dia){divergencias.push(data+': não encontrado no PDF (Razão espera R$ '+_fmt(esperado)+')');return;}
-        if(dia.total===null){divergencias.push(data+': PDF não trouxe o campo "Total" da movimentação');return;}
-        if(Math.abs(dia.total-esperado)>0.01){divergencias.push(data+': PDF soma R$ '+_fmt(dia.total)+', Razão espera R$ '+_fmt(esperado)+' (diferença R$ '+_fmt(dia.total-esperado)+')');}
+        if(dia.resumo.total===null){divergencias.push(data+': PDF não trouxe o campo "Total" da movimentação');return;}
+        if(Math.abs(dia.resumo.total-esperado)>0.01){divergencias.push(data+': PDF soma R$ '+_fmt(dia.resumo.total)+', Razão espera R$ '+_fmt(esperado)+' (diferença R$ '+_fmt(dia.resumo.total-esperado)+')');}
       });
       if(divergencias.length){
         _convCobrSetStatus(eid,'Divergências entre o PDF e o Razão — corrija antes de gerar o lançamento:\n'+divergencias.join('\n'),'err');
@@ -8286,7 +8439,7 @@ async function processarConvCobr(eid){
     datas.forEach(data=>{
       const dia=diasPdf[data];
       CONV_COBR_OPERACOES.forEach(op=>{
-        if(Math.abs(dia[op.id]||0)>0.005)categoriasUsadas.add(op.id);
+        if(Math.abs((dia.resumo&&dia.resumo[op.id])||0)>0.005)categoriasUsadas.add(op.id);
       });
     });
 
@@ -8308,20 +8461,56 @@ async function processarConvCobr(eid){
     _convCobrResetBotao(eid);
   }
 }
+// A partir do "Seu número" do boleto (sempre numérico), monta a Nota Fiscal
+// e a parcela: os 2 últimos dígitos são [quantidade de parcelas][parcela
+// atual recebida], e o restante é o número da NF. Regra passada pelo
+// usuário (contador) com base em como o sistema de faturamento do cliente
+// monta esse campo — ex: "1524271" → NF 15242, parcela 1 de 7.
+function _convCobrNfParcela(seuNumero){
+  if(!seuNumero||!/^\d+$/.test(seuNumero)||seuNumero.length<3)return null;
+  return{
+    nf:seuNumero.slice(0,-2),
+    total:seuNumero.slice(-2,-1),
+    atual:seuNumero.slice(-1)
+  };
+}
+function _convCobrCapitaliza(s){
+  s=(s||'').trim();
+  return s?s.charAt(0).toUpperCase()+s.slice(1):s;
+}
+function _convCobrHistorico(descricao,pagador,seuNumero){
+  const np=_convCobrNfParcela(seuNumero);
+  const nfTxt=np?('NF <'+np.nf+'> parcela '+np.atual+' de '+np.total):('Seu núm. '+(seuNumero||''));
+  return _convCobrCapitaliza(descricao)+' - '+(pagador||'')+' - '+nfTxt;
+}
 function _convCobrGerarResultado(eid,datas,diasPdf,regras,conferido){
   const linhas=[];
   datas.forEach(data=>{
-    const dia=diasPdf[data];
-    CONV_COBR_OPERACOES.forEach(op=>{
-      const valor=dia[op.id]||0;
-      if(Math.abs(valor)<0.005)return;
-      const r=regras[op.id];
-      linhas.push({
-        dataEditada:data,
-        historico:'MOV TÍTCOB DISP '+data+' - '+op.label,
-        valor:Math.abs(valor),
-        debito:r.contaDebito,
-        credito:r.contaCredito
+    const registros=(diasPdf[data]&&diasPdf[data].registros)||[];
+    registros.forEach(r=>{
+      if(/^liquida[çc][ãa]o/i.test(r.descricao)&&Math.abs(r.valorBoleto||0)>0.005){
+        const rc=regras.principal;
+        linhas.push({
+          dataEditada:data,
+          historico:_convCobrHistorico(r.descricao,r.pagador,r.seuNumero),
+          valor:Math.abs(r.valorBoleto),
+          debito:rc.contaDebito,
+          credito:rc.contaCredito
+        });
+      }
+      (r.sublinhas||[]).forEach(sl=>{
+        let catId=null;
+        if(/juros/i.test(sl.descricao))catId='juros';
+        else if(/desconto/i.test(sl.descricao))catId='descontos';
+        if(!catId||Math.abs(sl.valor||0)<0.005)return;
+        const rc=regras[catId];
+        linhas.push({
+          dataEditada:data,
+          historico:_convCobrHistorico(sl.descricao,r.pagador,r.seuNumero),
+          valor:Math.abs(sl.valor),
+          debito:rc.contaDebito,
+          credito:rc.contaCredito
+        });
       });
     });
   });
