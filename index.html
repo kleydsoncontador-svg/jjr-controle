@@ -8131,7 +8131,8 @@ function renderConvCobrCardExpandido(eid){
     <button class="btn bp bsm" onclick="salvarConvCobrContas('${eid}')" style="margin-bottom:16px">&#10003; Salvar Contas</button>
     <div style="border-top:1px solid var(--border);padding-top:12px">
       <div class="fg"><label class="fl">Extrato de Movimentação de Cobrança (PDF)</label><input type="file" id="convCobrPdf_${eid}" accept=".pdf" class="fi"></div>
-      <div class="fg" style="margin-top:8px"><label class="fl">Razão da Conta a Classificar (Excel)</label><input type="file" id="convCobrRazao_${eid}" accept=".xlsx,.xls,.csv" class="fi"></div>
+      <div class="fg" style="margin-top:8px"><label class="fl">Razão da Conta a Classificar (Excel) — opcional</label><input type="file" id="convCobrRazao_${eid}" accept=".xlsx,.xls,.csv" class="fi"></div>
+      <div style="font-size:11px;color:var(--slate);margin-top:4px">Se anexar o Razão, o valor de cada dia é conferido com o que já está lançado antes de gerar o TXT. Sem o Razão, o processamento sai direto do PDF, sem essa conferência.</div>
       <button class="btn bp bsm" id="convCobrBtnProcessar_${eid}" onclick="processarConvCobr('${eid}')" style="margin-top:10px">&#9881; Processar Arquivos</button>
       <div id="convCobrStatus_${eid}" style="margin-top:8px;font-size:12px;white-space:pre-line"></div>
       <div id="convCobrResultado_${eid}">${resultado?renderConvCobrResultado(eid,resultado):''}</div>
@@ -8242,18 +8243,11 @@ async function processarConvCobr(eid){
   const pdfFile=pdfInput&&pdfInput.files[0];
   const razaoFile=razaoInput&&razaoInput.files[0];
   if(!pdfFile){_convCobrSetStatus(eid,'Selecione o PDF do extrato de movimentação de cobrança.','err');toast('Selecione o PDF do extrato.','err');return;}
-  if(!razaoFile){_convCobrSetStatus(eid,'Selecione o arquivo do Razão (Excel) da conta a classificar.','err');toast('Selecione o arquivo do Razão.','err');return;}
 
   if(btn){btn.disabled=true;btn.textContent='Processando…';}
   _convCobrSetStatus(eid,'Lendo arquivos…','');
   toast('Processando arquivos…','');
   try{
-    const razaoPorData=await _convCobrExtrairRazao(razaoFile);
-    if(!razaoPorData||!Object.keys(razaoPorData).length){
-      _convCobrSetStatus(eid,'Nenhum lançamento "MOV TÍTCOB DISP" encontrado no Razão. Verifique se é o arquivo correto.','err');
-      toast('Nenhum lançamento MOV TÍTCOB DISP encontrado no Razão.','err');
-      _convCobrResetBotao(eid);return;
-    }
     const diasPdf=await _convCobrExtrairPdf(pdfFile);
     if(!Object.keys(diasPdf).length){
       _convCobrSetStatus(eid,'Nenhuma seção "Movimentação resumida de cobrança" encontrada no PDF. Verifique se é um extrato de movimentação de cobrança do Itaú.','err');
@@ -8261,24 +8255,38 @@ async function processarConvCobr(eid){
       _convCobrResetBotao(eid);return;
     }
 
-    const divergencias=[];
-    Object.keys(razaoPorData).forEach(data=>{
-      const dia=diasPdf[data];
-      const esperado=razaoPorData[data];
-      if(!dia){divergencias.push(data+': não encontrado no PDF (Razão espera R$ '+_fmt(esperado)+')');return;}
-      if(dia.total===null){divergencias.push(data+': PDF não trouxe o campo "Total" da movimentação');return;}
-      if(Math.abs(dia.total-esperado)>0.01){divergencias.push(data+': PDF soma R$ '+_fmt(dia.total)+', Razão espera R$ '+_fmt(esperado)+' (diferença R$ '+_fmt(dia.total-esperado)+')');}
-    });
-    if(divergencias.length){
-      _convCobrSetStatus(eid,'Divergências entre o PDF e o Razão — corrija antes de gerar o lançamento:\n'+divergencias.join('\n'),'err');
-      toast('Divergências encontradas entre PDF e Razão.','err');
-      _convCobrResetBotao(eid);return;
+    let datas,conferido;
+    if(razaoFile){
+      const razaoPorData=await _convCobrExtrairRazao(razaoFile);
+      if(!razaoPorData||!Object.keys(razaoPorData).length){
+        _convCobrSetStatus(eid,'Nenhum lançamento "MOV TÍTCOB DISP" encontrado no Razão. Verifique se é o arquivo correto.','err');
+        toast('Nenhum lançamento MOV TÍTCOB DISP encontrado no Razão.','err');
+        _convCobrResetBotao(eid);return;
+      }
+      const divergencias=[];
+      Object.keys(razaoPorData).forEach(data=>{
+        const dia=diasPdf[data];
+        const esperado=razaoPorData[data];
+        if(!dia){divergencias.push(data+': não encontrado no PDF (Razão espera R$ '+_fmt(esperado)+')');return;}
+        if(dia.total===null){divergencias.push(data+': PDF não trouxe o campo "Total" da movimentação');return;}
+        if(Math.abs(dia.total-esperado)>0.01){divergencias.push(data+': PDF soma R$ '+_fmt(dia.total)+', Razão espera R$ '+_fmt(esperado)+' (diferença R$ '+_fmt(dia.total-esperado)+')');}
+      });
+      if(divergencias.length){
+        _convCobrSetStatus(eid,'Divergências entre o PDF e o Razão — corrija antes de gerar o lançamento:\n'+divergencias.join('\n'),'err');
+        toast('Divergências encontradas entre PDF e Razão.','err');
+        _convCobrResetBotao(eid);return;
+      }
+      datas=Object.keys(razaoPorData);
+      conferido=true;
+    } else {
+      datas=Object.keys(diasPdf);
+      conferido=false;
     }
-
-    const datas=Object.keys(razaoPorData).sort((a,b)=>{
+    datas.sort((a,b)=>{
       const[da,ma,ya]=a.split('/');const[db,mb,yb]=b.split('/');
       return new Date(ya,ma-1,da)-new Date(yb,mb-1,db);
     });
+
     const categoriasUsadas=new Set();
     datas.forEach(data=>{
       const dia=diasPdf[data];
@@ -8296,7 +8304,7 @@ async function processarConvCobr(eid){
       _convCobrResetBotao(eid);return;
     }
 
-    _convCobrGerarResultado(eid,datas,diasPdf,regras);
+    _convCobrGerarResultado(eid,datas,diasPdf,regras,conferido);
     _convCobrResetBotao(eid);
   }catch(e){
     console.error(e);
@@ -8305,7 +8313,7 @@ async function processarConvCobr(eid){
     _convCobrResetBotao(eid);
   }
 }
-function _convCobrGerarResultado(eid,datas,diasPdf,regras){
+function _convCobrGerarResultado(eid,datas,diasPdf,regras,conferido){
   const linhas=[];
   datas.forEach(data=>{
     const dia=diasPdf[data];
@@ -8322,17 +8330,20 @@ function _convCobrGerarResultado(eid,datas,diasPdf,regras){
       });
     });
   });
-  _convCobrResultados[eid]={linhas,validacoes:{totalLinhas:linhas.length,totalDias:datas.length}};
+  _convCobrResultados[eid]={linhas,validacoes:{totalLinhas:linhas.length,totalDias:datas.length,conferido:!!conferido}};
   renderConvCobrLista();
   toast('Extrato processado com sucesso!','ok');
 }
 function renderConvCobrResultado(eid,resultado){
   const{linhas,validacoes}=resultado;
   const total=linhas.reduce((s,l)=>s+l.valor,0);
+  const avisoConferencia=validacoes.conferido
+    ?`<div style="margin-top:6px;font-size:11px;color:#16a34a">✓ ${validacoes.totalDias} dia(s) conciliado(s) com o Razão · ${validacoes.totalLinhas} linha(s) geradas</div>`
+    :`<div style="margin-top:6px;font-size:11px;color:#b45309">⚠ Gerado direto do PDF, sem conferência com o Razão · ${validacoes.totalDias} dia(s) · ${validacoes.totalLinhas} linha(s) geradas</div>`;
   return `<div style="margin-top:12px;background:var(--bg);border-radius:6px;padding:12px">
     <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:8px">Resumo do lançamento</div>
     <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Total dos lançamentos</span><span>R$ ${_fmt(total)}</span></div>
-    <div style="margin-top:6px;font-size:11px;color:#16a34a">✓ ${validacoes.totalDias} dia(s) conciliado(s) com o Razão · ${validacoes.totalLinhas} linha(s) geradas</div>
+    ${avisoConferencia}
     <div style="margin-top:10px;max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
       <table style="width:100%;font-size:11px;border-collapse:collapse">
         <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0"><th style="padding:4px 6px;text-align:left">Data</th><th style="padding:4px 6px;text-align:left">Operação</th><th style="padding:4px 6px;text-align:right">Valor</th><th style="padding:4px 6px;text-align:left">Débito</th><th style="padding:4px 6px;text-align:left">Crédito</th></tr></thead>
