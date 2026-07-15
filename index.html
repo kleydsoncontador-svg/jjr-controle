@@ -10199,8 +10199,10 @@ function renderExtratoCCBancosSecao(eid){
   return html;
 }
 var CONV_EXTRATOCC_COLUNAS=[{id:'hist1',label:'Histórico 1'},{id:'hist2',label:'Histórico 2'},{id:'hist3',label:'Histórico 3'},{id:'valor',label:'Valor'}];
-var _extratoCCPendentes={};
-var _extratoCCResultados={};
+var _extratoCCMovimentos={};
+var _extratoCCFiltro={};
+var _extratoCCRegrasAbertas={};
+var _extratoCCEditandoRegra={};
 var _extratoCCMapeamentoFormOpen={};
 var _extratoCCArquivoTemp={};
 
@@ -10209,8 +10211,6 @@ function setExtratoCCRegras(alvo,regras){S.s('extratoCC_regras_'+alvo,regras);}
 
 function renderExtratoCCBancoExpandido(alvo,cfg,banco){
   if(_extratoCCMapeamentoFormOpen[alvo]||(_extratoCCArquivoTemp[alvo]&&!cfg)) return renderExtratoCCMapeamentoForm(alvo,cfg);
-  const pend=_extratoCCPendentes[alvo];
-  if(pend) return renderExtratoCCPendentesForm(alvo,pend);
   return renderExtratoCCProcessForm(alvo,cfg,banco);
 }
 
@@ -10242,9 +10242,14 @@ function processarExtratoCC(alvo){
   _extratoCCExtrairExcel(file).then(dados=>{
     if(!dados||!dados.linhas.length){toast('Não consegui identificar as colunas/linhas do arquivo.','err');return;}
     _extratoCCArquivoTemp[alvo]=dados;
-    _extratoCCMapeamentoFormOpen[alvo]=true;
-    renderExtratoCCLista();
-    toast('Arquivo lido! Confirme abaixo qual coluna é cada informação.','ok');
+    const cfg=getExtratoCCConfig(alvo);
+    if(!cfg){
+      _extratoCCMapeamentoFormOpen[alvo]=true;
+      renderExtratoCCLista();
+      toast('Arquivo lido! Confirme abaixo qual coluna é cada informação.','ok');
+    } else {
+      _extratoCCProcessarMovimentos(alvo);
+    }
   }).catch(e=>{
     console.error(e);
     toast('Erro ao ler arquivo: '+e.message,'err');
@@ -10254,7 +10259,7 @@ function renderExtratoCCMapeamentoForm(alvo,cfg){
   const dados=_extratoCCArquivoTemp[alvo];
   if(!dados) return '<div style="margin-top:10px;font-size:12px;color:var(--slate)">Anexe o arquivo novamente pra mapear as colunas.</div>';
   const header=dados.header;
-  const opcoes=sel=>'<option value="">— nenhuma —</option>'+header.map((h,i)=>`<option value="${i}" ${Number(sel)===i?'selected':''}>${esc(h||'(coluna '+(i+1)+')')}</option>`).join('');
+  const opcoes=sel=>'<option value="">— nenhuma —</option>'+header.map((h,i)=>`<option value="${i}" ${sel!=null&&Number(sel)===i?'selected':''}>${esc(h||'(coluna '+(i+1)+')')}</option>`).join('');
   const map=(cfg&&cfg.mapeamento)||{};
   const amostra=dados.linhas.slice(0,3);
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
@@ -10266,6 +10271,8 @@ function renderExtratoCCMapeamentoForm(alvo,cfg){
       </table>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+      <div><label style="font-size:10px;color:var(--slate);display:block">Agência</label><input class="fi" id="extratoCCAgencia_${alvo}" value="${esc((cfg&&cfg.agencia)||'')}" placeholder="Agência" style="font-size:12px"></div>
+      <div><label style="font-size:10px;color:var(--slate);display:block">Conta Corrente</label><input class="fi" id="extratoCCContaCorrente_${alvo}" value="${esc((cfg&&cfg.contaCorrente)||'')}" placeholder="Conta corrente" style="font-size:12px"></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Coluna Data</label><select class="si" id="extratoCCColData_${alvo}" style="font-size:12px">${opcoes(map.colData)}</select></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Coluna Valor</label><select class="si" id="extratoCCColValor_${alvo}" style="font-size:12px">${opcoes(map.colValor)}</select></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Coluna Histórico 1</label><select class="si" id="extratoCCColHist1_${alvo}" style="font-size:12px">${opcoes(map.colHist1)}</select></div>
@@ -10273,11 +10280,25 @@ function renderExtratoCCMapeamentoForm(alvo,cfg){
       <div><label style="font-size:10px;color:var(--slate);display:block">Coluna Histórico 3 (opcional)</label><select class="si" id="extratoCCColHist3_${alvo}" style="font-size:12px">${opcoes(map.colHist3)}</select></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Conta Banco (lado débito/crédito é automático)</label><input class="fi" id="extratoCCContaBanco_${alvo}" value="${esc((cfg&&cfg.contaBanco)||'')}" placeholder="Conta" style="font-size:12px"></div>
     </div>
-    <div style="margin-top:6px;font-size:11px;color:var(--slate)">Entrada (valor positivo) lança a Conta Banco como débito; saída (valor negativo) lança como crédito — automático, conforme o sinal da coluna Valor.</div>
+    <div style="margin-top:10px;padding-top:10px;border-top:1px dashed var(--border)">
+      <div style="font-size:11px;color:var(--slate);margin-bottom:6px">Como saber se é entrada ou saída?</div>
+      <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:6px">
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px"><input type="radio" name="extratoCCTipoDC_${alvo}" value="sinal" ${map.colDC==null?'checked':''} onchange="_extratoCCToggleDC('${alvo}',false)"> Pelo sinal do Valor (negativo = saída)</label>
+        <label style="font-size:11px;display:flex;align-items:center;gap:4px"><input type="radio" name="extratoCCTipoDC_${alvo}" value="coluna" ${map.colDC!=null?'checked':''} onchange="_extratoCCToggleDC('${alvo}',true)"> Por uma coluna separada de D/C</label>
+      </div>
+      <div id="extratoCCDCBloco_${alvo}" style="display:${map.colDC!=null?'grid':'none'};grid-template-columns:1fr 1fr;gap:8px">
+        <div><label style="font-size:10px;color:var(--slate);display:block">Coluna D/C</label><select class="si" id="extratoCCColDC_${alvo}" style="font-size:12px">${opcoes(map.colDC)}</select></div>
+        <div><label style="font-size:10px;color:var(--slate);display:block">Texto que indica ENTRADA nessa coluna</label><input class="fi" id="extratoCCValorEntrada_${alvo}" value="${esc(map.valorEntrada||'')}" placeholder="ex: C, CREDITO, ENTRADA" style="font-size:12px"></div>
+      </div>
+    </div>
     <div style="margin-top:10px;display:flex;gap:6px">
       <button class="btn bp bsm" onclick="salvarExtratoCCMapeamento('${alvo}')">&#10003; Salvar e Continuar</button>
     </div>
   </div>`;
+}
+function _extratoCCToggleDC(alvo,mostrar){
+  const bloco=document.getElementById('extratoCCDCBloco_'+alvo);
+  if(bloco) bloco.style.display=mostrar?'grid':'none';
 }
 function salvarExtratoCCMapeamento(alvo){
   const colData=document.getElementById('extratoCCColData_'+alvo)?.value;
@@ -10286,10 +10307,22 @@ function salvarExtratoCCMapeamento(alvo){
   const colHist2=document.getElementById('extratoCCColHist2_'+alvo)?.value;
   const colHist3=document.getElementById('extratoCCColHist3_'+alvo)?.value;
   const contaBanco=(document.getElementById('extratoCCContaBanco_'+alvo)?.value||'').trim();
+  const agencia=(document.getElementById('extratoCCAgencia_'+alvo)?.value||'').trim();
+  const contaCorrente=(document.getElementById('extratoCCContaCorrente_'+alvo)?.value||'').trim();
   if(colData===''||colValor===''||colHist1===''){toast('Selecione ao menos Data, Valor e Histórico 1.','err');return;}
   if(!contaBanco){toast('Informe a Conta Banco.','err');return;}
-  const mapeamento={colData:Number(colData),colValor:Number(colValor),colHist1:Number(colHist1),colHist2:colHist2!==''?Number(colHist2):null,colHist3:colHist3!==''?Number(colHist3):null};
-  setExtratoCCConfig(alvo,{contaBanco,mapeamento});
+
+  const usaColunaDC=document.querySelector(`input[name="extratoCCTipoDC_${alvo}"]:checked`)?.value==='coluna';
+  let colDC=null, valorEntrada='';
+  if(usaColunaDC){
+    const colDCVal=document.getElementById('extratoCCColDC_'+alvo)?.value;
+    valorEntrada=(document.getElementById('extratoCCValorEntrada_'+alvo)?.value||'').trim();
+    if(colDCVal===''||!valorEntrada){toast('Selecione a coluna D/C e informe o texto que indica entrada.','err');return;}
+    colDC=Number(colDCVal);
+  }
+
+  const mapeamento={colData:Number(colData),colValor:Number(colValor),colHist1:Number(colHist1),colHist2:colHist2!==''?Number(colHist2):null,colHist3:colHist3!==''?Number(colHist3):null,colDC,valorEntrada};
+  setExtratoCCConfig(alvo,{contaBanco,agencia,contaCorrente,mapeamento});
   _extratoCCMapeamentoFormOpen[alvo]=false;
   _extratoCCProcessarMovimentos(alvo);
 }
@@ -10319,69 +10352,114 @@ function _extratoCCProcessarMovimentos(alvo){
   const map=cfg.mapeamento;
   const movimentos=dados.linhas.map(l=>{
     const valor=_convSignusParseValor(l[map.colValor]);
+    let entrada;
+    if(map.colDC!=null){
+      const dcTxt=String(l[map.colDC]??'').trim().toUpperCase();
+      entrada=dcTxt.includes(String(map.valorEntrada||'').toUpperCase());
+    } else {
+      entrada=valor>=0;
+    }
     return {
       data:_convMpFmtDataBr(l[map.colData]),
       valor,
       hist1:String(l[map.colHist1]??'').trim(),
       hist2:map.colHist2!=null?String(l[map.colHist2]??'').trim():'',
       hist3:map.colHist3!=null?String(l[map.colHist3]??'').trim():'',
-      entrada:valor>=0
+      entrada
     };
   }).filter(m=>m.data||m.valor);
 
+  _extratoCCMovimentos[alvo]={movimentos};
+  _extratoCCFiltro[alvo]='todos';
+  renderExtratoCCLista();
   const regras=getExtratoCCRegras(alvo);
-  const pendentes=movimentos.map((m,i)=>[i,m]).filter(([,m])=>!_extratoCCClassificar(m,regras));
-
-  if(pendentes.length){
-    _extratoCCPendentes[alvo]={movimentos,exemplos:pendentes};
-    renderExtratoCCLista();
-    toast(pendentes.length+' lançamento(s) precisam de classificação.','');
-    return;
-  }
-  delete _extratoCCPendentes[alvo];
-  _extratoCCGerarResultado(alvo,movimentos,regras);
+  const pendentesCount=movimentos.filter(m=>!_extratoCCClassificar(m,regras)).length;
+  toast(pendentesCount?pendentesCount+' lançamento(s) precisam de classificação.':'Todos os lançamentos já classificados automaticamente!','ok');
 }
-function renderExtratoCCPendentesForm(alvo,pend){
-  let html=`<div style="margin-top:12px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;padding:12px;max-height:500px;overflow-y:auto" onclick="event.stopPropagation()">
-    <div style="font-size:12px;font-weight:700;color:#92400E;margin-bottom:8px">⚠ ${pend.exemplos.length} lançamento(s) sem classificação — informe a conta contrapartida</div>
-    <div style="font-size:11px;color:#92400E;margin-bottom:10px">Marque quais colunas você usou pra decidir a conta (o texto ao lado precisa "conter" nessa coluna). Lançamentos futuros que baterem nessas mesmas colunas são classificados automaticamente.</div>`;
-  pend.exemplos.forEach(([idx,m])=>{
-    html+=`<div style="background:white;border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
-      <div style="font-size:11px;color:var(--slate);margin-bottom:6px">Data: ${esc(m.data)} · Valor: R$ ${_fmt(Math.abs(m.valor))} · ${m.entrada?'Entrada':'Saída'}</div>
-      <div style="display:grid;gap:6px">
-        <div style="display:flex;align-items:center;gap:8px">
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_hist1" checked> Histórico 1</label>
-          <input class="fi" id="extratoCCVal_${alvo}_${idx}_hist1" value="${esc(m.hist1)}" style="font-size:12px;flex:1">
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_hist2"> Histórico 2</label>
-          <input class="fi" id="extratoCCVal_${alvo}_${idx}_hist2" value="${esc(m.hist2)}" style="font-size:12px;flex:1">
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_hist3"> Histórico 3</label>
-          <input class="fi" id="extratoCCVal_${alvo}_${idx}_hist3" value="${esc(m.hist3)}" style="font-size:12px;flex:1">
-        </div>
-        <div style="display:flex;align-items:center;gap:8px">
-          <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_valor"> Valor</label>
-          <input class="fi" id="extratoCCVal_${alvo}_${idx}_valor" value="${esc(formatarNumero(Math.abs(m.valor)))}" style="font-size:12px;flex:1">
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
-          <label style="font-size:11px;min-width:130px">Conta ${m.entrada?'Crédito':'Débito'}</label>
-          <input class="fi" id="extratoCCConta_${alvo}_${idx}" placeholder="Conta" style="font-size:12px;width:160px">
-          <button type="button" class="btn bp bsm" onclick="salvarClassificacaoItemExtratoCC('${alvo}',${idx})" style="font-size:11px">&#10003; Salvar Classificação</button>
-        </div>
+function limparExtratoCCMovimentos(alvo){
+  if(!confirm('Descartar os lançamentos processados deste arquivo? As regras já criadas continuam salvas.'))return;
+  delete _extratoCCMovimentos[alvo];
+  renderExtratoCCLista();
+  toast('Lançamentos descartados','ok');
+}
+function renderExtratoCCTabela(alvo){
+  const movData=_extratoCCMovimentos[alvo];
+  if(!movData) return '';
+  const regras=getExtratoCCRegras(alvo);
+  const linhas=movData.movimentos.map((m,idx)=>({idx,m,regra:_extratoCCClassificar(m,regras)}));
+  const pendentesCount=linhas.filter(l=>!l.regra).length;
+  const classificadosCount=linhas.length-pendentesCount;
+  const filtro=_extratoCCFiltro[alvo]||'todos';
+  const linhasFiltradas=linhas.filter(l=>filtro==='todos'||(filtro==='classificados'&&l.regra)||(filtro==='pendentes'&&!l.regra));
+
+  let html=`<div style="margin-top:12px" onclick="event.stopPropagation()">
+    <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:10px">
+      <div style="display:flex;gap:6px;flex-wrap:wrap">
+        <button class="btn ${filtro==='todos'?'bp':'bo'} bsm" onclick="_extratoCCFiltro['${alvo}']='todos';renderExtratoCCLista()">Todos (${linhas.length})</button>
+        <button class="btn ${filtro==='classificados'?'bp':'bo'} bsm" onclick="_extratoCCFiltro['${alvo}']='classificados';renderExtratoCCLista()">Classificados (${classificadosCount})</button>
+        <button class="btn ${filtro==='pendentes'?'bp':'bo'} bsm" onclick="_extratoCCFiltro['${alvo}']='pendentes';renderExtratoCCLista()">Pendentes (${pendentesCount})</button>
       </div>
-    </div>`;
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" onclick="_extratoCCRegrasAbertas['${alvo}']=!_extratoCCRegrasAbertas['${alvo}'];renderExtratoCCLista()">📋 ${_extratoCCRegrasAbertas[alvo]?'Ocultar':'Ver'} Regras (${regras.length})</button>
+        <button class="btn bo bsm" onclick="limparExtratoCCMovimentos('${alvo}')" style="color:#dc2626">🗑️ Descartar</button>
+      </div>
+    </div>
+    ${_extratoCCRegrasAbertas[alvo]?renderExtratoCCRegrasPanel(alvo,regras):''}
+    <div style="max-height:500px;overflow-y:auto">`;
+
+  linhasFiltradas.forEach(({idx,m,regra})=>{
+    if(regra){
+      const historico=regra.historicoPersonalizado||[m.hist1,m.hist2,m.hist3].filter(Boolean).join(' - ');
+      html+=`<div style="background:#F0FDF4;border:1px solid #BBF7D0;border-radius:6px;padding:8px 10px;margin-bottom:6px;font-size:11px">
+        <span style="color:var(--slate)">${esc(m.data)} · R$ ${_fmt(Math.abs(m.valor))} · ${m.entrada?'Entrada':'Saída'}</span><br>
+        <span style="font-weight:600">${esc(historico)}</span> <span style="color:var(--slate)">→ Conta ${esc(regra.conta)}</span>
+      </div>`;
+    } else {
+      html+=renderExtratoCCClassificarLinha(alvo,idx,m);
+    }
   });
-  html+='</div>';
+  html+='</div></div>';
   return html;
 }
+function renderExtratoCCClassificarLinha(alvo,idx,m){
+  return `<div style="background:white;border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">
+    <div style="font-size:11px;color:var(--slate);margin-bottom:6px">Data: ${esc(m.data)} · Valor: R$ ${_fmt(Math.abs(m.valor))} · ${m.entrada?'Entrada':'Saída'}</div>
+    <div style="display:grid;gap:6px">
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_hist1" checked> Histórico 1</label>
+        <input class="fi" id="extratoCCVal_${alvo}_${idx}_hist1" value="${esc(m.hist1)}" style="font-size:12px;flex:1">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_hist2"> Histórico 2</label>
+        <input class="fi" id="extratoCCVal_${alvo}_${idx}_hist2" value="${esc(m.hist2)}" style="font-size:12px;flex:1">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_hist3"> Histórico 3</label>
+        <input class="fi" id="extratoCCVal_${alvo}_${idx}_hist3" value="${esc(m.hist3)}" style="font-size:12px;flex:1">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:11px;min-width:130px"><input type="checkbox" id="extratoCCChk_${alvo}_${idx}_valor"> Valor</label>
+        <input class="fi" id="extratoCCVal_${alvo}_${idx}_valor" value="${esc(formatarNumero(Math.abs(m.valor)))}" style="font-size:12px;flex:1">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <label style="font-size:11px;min-width:130px">Histórico personalizado</label>
+        <input class="fi" id="extratoCCHistPers_${alvo}_${idx}" placeholder="deixe em branco pra usar o histórico do extrato" style="font-size:12px;flex:1">
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-top:2px">
+        <label style="font-size:11px;min-width:130px">Conta ${m.entrada?'Crédito':'Débito'}</label>
+        <input class="fi" id="extratoCCConta_${alvo}_${idx}" placeholder="Conta" style="font-size:12px;width:160px">
+        <button type="button" class="btn bp bsm" onclick="salvarClassificacaoItemExtratoCC('${alvo}',${idx})" style="font-size:11px">&#10003; Salvar Classificação</button>
+      </div>
+    </div>
+  </div>`;
+}
 function salvarClassificacaoItemExtratoCC(alvo,idx){
-  const pend=_extratoCCPendentes[alvo];
-  if(!pend)return;
-  const m=pend.movimentos[idx];
+  const movData=_extratoCCMovimentos[alvo];
+  if(!movData)return;
+  const m=movData.movimentos[idx];
   if(!m)return;
   const conta=(document.getElementById('extratoCCConta_'+alvo+'_'+idx)?.value||'').trim();
+  const historicoPersonalizado=(document.getElementById('extratoCCHistPers_'+alvo+'_'+idx)?.value||'').trim();
   const campos=[];
   CONV_EXTRATOCC_COLUNAS.forEach(col=>{
     const chk=document.getElementById('extratoCCChk_'+alvo+'_'+idx+'_'+col.id);
@@ -10392,82 +10470,98 @@ function salvarClassificacaoItemExtratoCC(alvo,idx){
   });
   if(!campos.length){toast('Marque ao menos uma coluna.','err');return;}
   if(!conta){toast('Preencha a conta.','err');return;}
+  const regra={campos,conta};
+  if(historicoPersonalizado) regra.historicoPersonalizado=historicoPersonalizado;
   const regras=getExtratoCCRegras(alvo);
-  regras.push({campos,conta});
+  regras.push(regra);
   setExtratoCCRegras(alvo,regras);
-
-  const restantes=pend.exemplos.filter(([,ex])=>!_extratoCCClassificar(ex,regras));
-  const qtdRemovidas=pend.exemplos.length-restantes.length;
-  pend.exemplos=restantes;
-
-  if(!pend.exemplos.length){
-    delete _extratoCCPendentes[alvo];
-    _extratoCCGerarResultado(alvo,pend.movimentos,regras);
-    toast('Todos os lançamentos classificados!','ok');
-    return;
-  }
   renderExtratoCCLista();
-  toast(qtdRemovidas>1?'Classificação salva! '+(qtdRemovidas-1)+' outro(s) lançamento(s) já bateram com essa regra.':'Classificação salva!','ok');
+  toast('Classificação salva!','ok');
 }
-function _extratoCCGerarResultado(alvo,movimentos,regras){
-  const cfg=getExtratoCCConfig(alvo);
-  const linhas=movimentos.map(m=>{
-    const r=_extratoCCClassificar(m,regras);
-    const historico=_convMpRemoverAcentos([m.hist1,m.hist2,m.hist3].filter(Boolean).join(' - '));
-    return {
-      data:m.data,
-      valor:Math.abs(m.valor),
-      historico,
-      debito:m.entrada?cfg.contaBanco:(r?r.conta:''),
-      credito:m.entrada?(r?r.conta:''):cfg.contaBanco
-    };
+function renderExtratoCCRegrasPanel(alvo,regras){
+  if(!regras.length) return '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Nenhuma regra criada ainda.</div>';
+  let html='<div style="background:#F8FAFC;border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:10px">';
+  regras.forEach((r,i)=>{
+    const editando=_extratoCCEditandoRegra[alvo]===i;
+    const camposTxt=r.campos.map(c=>{
+      const label=CONV_EXTRATOCC_COLUNAS.find(cc=>cc.id===c.coluna)?.label||c.coluna;
+      return `${label} contém "${c.chave}"`;
+    }).join(' E ');
+    if(editando){
+      html+=`<div style="background:white;border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:6px">
+        <div style="font-size:11px;color:var(--slate);margin-bottom:6px">${esc(camposTxt)}</div>
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+          <input class="fi" id="extratoCCRegraConta_${alvo}_${i}" value="${esc(r.conta)}" placeholder="Conta" style="font-size:12px;width:140px">
+          <input class="fi" id="extratoCCRegraHist_${alvo}_${i}" value="${esc(r.historicoPersonalizado||'')}" placeholder="Histórico personalizado (opcional)" style="font-size:12px;flex:1;min-width:180px">
+          <button class="btn bp bsm" onclick="salvarEdicaoRegraExtratoCC('${alvo}',${i})">&#10003; Salvar</button>
+          <button class="btn bo bsm" onclick="_extratoCCEditandoRegra['${alvo}']=null;renderExtratoCCLista()">Cancelar</button>
+        </div>
+      </div>`;
+    } else {
+      html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;padding:6px 0;border-bottom:1px solid var(--border)">
+        <div><span style="color:var(--slate)">${esc(camposTxt)}</span> → <strong>${esc(r.conta)}</strong>${r.historicoPersonalizado?` · histórico: "${esc(r.historicoPersonalizado)}"`:''}</div>
+        <div style="display:flex;gap:4px">
+          <button class="icon-btn" onclick="_extratoCCEditandoRegra['${alvo}']=${i};renderExtratoCCLista()" title="Editar" style="padding:4px;background:none;border:none;cursor:pointer;font-size:1rem">✏️</button>
+          <button class="icon-btn" onclick="excluirRegraExtratoCC('${alvo}',${i})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem">🗑️</button>
+        </div>
+      </div>`;
+    }
   });
-  _extratoCCResultados[alvo]={linhas};
+  html+='</div>';
+  return html;
+}
+function salvarEdicaoRegraExtratoCC(alvo,i){
+  const regras=getExtratoCCRegras(alvo);
+  if(!regras[i])return;
+  const conta=(document.getElementById('extratoCCRegraConta_'+alvo+'_'+i)?.value||'').trim();
+  const hist=(document.getElementById('extratoCCRegraHist_'+alvo+'_'+i)?.value||'').trim();
+  if(!conta){toast('Preencha a conta.','err');return;}
+  regras[i].conta=conta;
+  if(hist) regras[i].historicoPersonalizado=hist; else delete regras[i].historicoPersonalizado;
+  setExtratoCCRegras(alvo,regras);
+  _extratoCCEditandoRegra[alvo]=null;
   renderExtratoCCLista();
-  toast('Extrato processado com sucesso!','ok');
+  toast('Regra atualizada!','ok');
+}
+function excluirRegraExtratoCC(alvo,i){
+  if(!confirm('Excluir esta regra? Os lançamentos que bateriam com ela voltarão a ficar pendentes.'))return;
+  const regras=getExtratoCCRegras(alvo);
+  regras.splice(i,1);
+  setExtratoCCRegras(alvo,regras);
+  renderExtratoCCLista();
+  toast('Regra excluída','ok');
 }
 function renderExtratoCCProcessForm(alvo,cfg,banco){
-  const resultado=_extratoCCResultados[alvo];
+  const movData=_extratoCCMovimentos[alvo];
+  const infoConta=cfg&&(cfg.agencia||cfg.contaCorrente)?`<div style="font-size:11px;color:var(--slate);margin-bottom:8px">${cfg.agencia?'Agência: '+esc(cfg.agencia):''}${cfg.agencia&&cfg.contaCorrente?' · ':''}${cfg.contaCorrente?'Conta: '+esc(cfg.contaCorrente):''}</div>`:'';
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
     ${cfg?`<div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button class="btn bo bsm" onclick="editarExtratoCCMapeamento('${alvo}')" style="font-size:11px">&#9998; Editar mapeamento/conta</button></div>`:''}
+    ${infoConta}
     <div class="fg"><label class="fl">Extrato ${esc(banco)} (Excel .xlsx/.xls — PDF ainda não suportado)</label><input type="file" id="extratoCCArquivo_${alvo}" accept=".xlsx,.xls" class="fi"></div>
-    <button class="btn bp bsm" onclick="processarExtratoCC('${alvo}')" style="margin-top:10px">&#9881; Processar Arquivo</button>
-    <div id="extratoCCResultado_${alvo}">${resultado?renderExtratoCCResultado(alvo,resultado):''}</div>
-  </div>`;
-}
-function renderExtratoCCResultado(alvo,resultado){
-  const total=resultado.linhas.reduce((s,l)=>s+l.valor,0);
-  return `<div style="margin-top:12px;background:var(--bg);border-radius:6px;padding:12px">
-    <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:8px">Resumo do lançamento</div>
-    <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Total dos lançamentos</span><span>R$ ${_fmt(total)}</span></div>
-    <div style="margin-top:6px;font-size:11px;color:#16a34a">✓ ${resultado.linhas.length} lançamento(s) gerado(s)</div>
-    <div style="margin-top:10px;max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
-      <table style="width:100%;font-size:11px;border-collapse:collapse">
-        <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0"><th style="padding:4px 6px;text-align:left">Data</th><th style="padding:4px 6px;text-align:left">Histórico</th><th style="padding:4px 6px;text-align:right">Valor</th><th style="padding:4px 6px;text-align:left">Débito</th><th style="padding:4px 6px;text-align:left">Crédito</th></tr></thead>
-        <tbody>${resultado.linhas.map(l=>`<tr style="border-top:1px solid var(--border)"><td style="padding:4px 6px">${esc(l.data)}</td><td style="padding:4px 6px">${esc(l.historico)}</td><td style="padding:4px 6px;text-align:right">R$ ${_fmt(l.valor)}</td><td style="padding:4px 6px">${esc(l.debito||'—')}</td><td style="padding:4px 6px">${esc(l.credito||'—')}</td></tr>`).join('')}</tbody>
-      </table>
+    <div style="display:flex;gap:6px;margin-top:10px;flex-wrap:wrap">
+      <button class="btn bp bsm" onclick="processarExtratoCC('${alvo}')">&#9881; Processar Arquivo</button>
+      ${movData?`<button class="action-btn action-btn-txt" onclick="baixarExtratoCCTxt('${alvo}')">📝 Gerar TXT</button>`:''}
     </div>
-    <div style="margin-top:10px;display:flex;gap:6px">
-      <button class="action-btn action-btn-txt" onclick="baixarExtratoCCTxt('${alvo}')">📝 Gerar TXT</button>
-      <button class="action-btn" onclick="excluirExtratoCCResultado('${alvo}')" style="background:#dc2626">🗑️ Excluir resultado</button>
-    </div>
+    ${movData?renderExtratoCCTabela(alvo):''}
   </div>`;
-}
-function excluirExtratoCCResultado(alvo){
-  if(!confirm('Excluir este resultado processado? Você poderá processar o arquivo novamente depois.'))return;
-  delete _extratoCCResultados[alvo];
-  renderExtratoCCLista();
-  toast('Resultado excluído','ok');
 }
 function baixarExtratoCCTxt(alvo){
-  const resultado=_extratoCCResultados[alvo];
-  if(!resultado){toast('Processe o arquivo primeiro.','err');return;}
+  const movData=_extratoCCMovimentos[alvo];
+  if(!movData){toast('Processe o arquivo primeiro.','err');return;}
+  const regras=getExtratoCCRegras(alvo);
+  const cfg=getExtratoCCConfig(alvo);
+  const pendentes=movData.movimentos.filter(m=>!_extratoCCClassificar(m,regras));
+  if(pendentes.length){toast('Ainda há '+pendentes.length+' lançamento(s) sem classificação.','err');return;}
+
   const eid=alvo.split('|')[0];
   const banco=alvo.split('|')[1]||'';
-  const txtLinhas=resultado.linhas.map(l=>{
-    const valorTxt=l.valor.toFixed(2).replace('.',',');
-    const histLimpo=(l.historico||'').replace(/;/g,' ');
-    return `${l.data};${l.debito};${l.credito};${valorTxt};;${histLimpo};1;${eid};;`;
+  const txtLinhas=movData.movimentos.map(m=>{
+    const r=_extratoCCClassificar(m,regras);
+    const historico=_convMpRemoverAcentos(r.historicoPersonalizado||[m.hist1,m.hist2,m.hist3].filter(Boolean).join(' - ')).replace(/;/g,' ');
+    const valorTxt=Math.abs(m.valor).toFixed(2).replace('.',',');
+    const debito=m.entrada?cfg.contaBanco:r.conta;
+    const credito=m.entrada?r.conta:cfg.contaBanco;
+    return `${m.data};${debito};${credito};${valorTxt};;${historico};1;${eid};;`;
   });
   const conteudo=txtLinhas.join('\r\n');
   const blob=new Blob([conteudo],{type:'text/plain;charset=utf-8'});
