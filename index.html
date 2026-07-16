@@ -11512,14 +11512,81 @@ function exportGanhoEmpresaPDF(eid){
     const sc=saldoAt<0?'#dc2626':'#166534';
     content+=`<tr style="background:#e8f5ee"><td style="padding:5px 12px;font-weight:700;color:#1E3558">Saldo Bruto (Atualizado)</td><td style="padding:5px 12px;text-align:right;font-weight:700;color:${sc}">R$ ${_fmt(saldoAt)}</td></tr></table></div>`;
   });
+  gArr.forEach(g=>{
+    content+=`<div style="page-break-before:always;padding-top:6px">${_gerarTabelaExtratoGanhoHTML(g)}</div>`;
+  });
   const nomePeriodo=_pdfTrim?(`${tri}º Trimestre`)+' '+ano:(MESES[parseInt(mes)]+' '+ano);
   const hdr=`<html><head><meta charset="UTF-8"><title>Ganhos e Rendimentos ${nomePeriodo}_${esc(emp.nome)}</title>
-  <style>body{font-family:Arial,sans-serif;font-size:11px;color:#1E3558;margin:18px}@media print{body{margin:8px}.hlRow{background:#fef9c3 !important}.hlText{color:#92400e !important;font-weight:700 !important}}</style>
+  <style>@page{size:portrait}body{font-family:Arial,sans-serif;font-size:11px;color:#1E3558;margin:18px}@media print{body{margin:8px}.hlRow{background:#fef9c3 !important}.hlText{color:#92400e !important;font-weight:700 !important}}</style>
   </head><body>${_jjrHeader('Ganhos/Rendimentos &bull; '+esc(emp.nome)+' &bull; '+periodoStr)}${content}</body></html>`;
   const win=window.open('','_blank','width=800,height=900');
   if(!win){toast('Permita popups para gerar PDF','err');return;}
   win.document.write(hdr);win.document.close();
   setTimeout(()=>{win.print();},700);
+}
+function _gerarTabelaExtratoGanhoHTML(ganho){
+  if(!ganho.cols||!ganho.cols.length) ganho.cols=JSON.parse(JSON.stringify(COLS_RF_DEFAULT));
+  const dados=ganho.dados||{};
+  const isDemais=_isSimpleLayout(ganho);
+  const cols=isDemais?COLS_DEMAIS_DEFAULT:ganho.cols;
+  const isCDBEspecial=!isDemais&&_isCDBEspecial(ganho.nome);
+  const{ants,ats,mks}=calcSaldosGanho(ganho);
+  const anos=[...new Set(mks.map(m=>m.split('/')[1]))].sort();
+  const totalCols=2+cols.length+2+(isCDBEspecial?2:0);
+  const td_=(html,extra='')=>`<td style="padding:2px 3px;border:1px solid #ddd;${extra}">${html}</td>`;
+
+  const infoPartes=[];
+  if(ganho.cnpj)infoPartes.push('CNPJ: '+esc(ganho.cnpj));
+  if(ganho.razaoSocial)infoPartes.push('Fonte Pagadora: '+esc(ganho.razaoSocial));
+  if(ganho.tipoRendimento)infoPartes.push('Tipo: '+esc(ganho.tipoRendimento));
+  if(ganho.codigo)infoPartes.push('Cód.: '+esc(String(ganho.codigo)));
+  if(ganho.adicionais)infoPartes.push(esc(ganho.adicionais));
+
+  let h=`<h3 style="color:#1E3558;font-size:12px;margin:0 0 2px">${esc(ganho.nome)}</h3>
+  ${infoPartes.length?`<div style="font-size:9px;color:#555;margin:0 0 6px">${infoPartes.join(' &bull; ')}</div>`:''}
+  <table style="width:100%;table-layout:fixed;border-collapse:collapse;font-size:7.5px">
+  <thead><tr>
+    <th style="background:#1E3558;color:#fff;padding:2px 3px;text-align:left;width:34px">Mês/Ano</th>
+    <th style="background:#1E3558;color:#fff;padding:2px 3px;text-align:center;width:20px">Tri</th>
+    ${cols.map(c=>`<th style="background:${c.hl?'#2a4a8a':'#1E3558'};color:#fff;padding:2px 3px;text-align:right">${_quebrarNomeColGanho(c.nome)}</th>`).join('')}
+    <th style="background:#15502e;color:#86efac;padding:2px 3px;text-align:right">Saldo Bruto<br>(Atualizado)</th>
+    <th style="background:#1E3558;color:#fff;padding:2px 3px;text-align:right">Saldo Bruto<br>Anterior</th>
+    ${isCDBEspecial?`<th style="background:#1E3558;color:#fff;padding:2px 3px;text-align:right">Resgate<br>(Valor)</th><th style="background:#1E3558;color:#fff;padding:2px 3px;text-align:right">Resgate<br>(Valor Principal)</th>`:''}
+  </tr></thead><tbody>`;
+
+  anos.forEach(ano=>{
+    h+=`<tr><td colspan="${totalCols}" style="background:#e2e8f0;font-weight:700;padding:2px 4px;border:1px solid #ddd">${ano}</td></tr>`;
+    for(let t=1;t<=4;t++){
+      const qT={};cols.forEach(c=>{if(c.tipo==='num')qT[c.id]=0;});
+      let lastSal=0,qResgateValor=0,qResgatePrincipal=0;
+      for(let m=(t-1)*3+1;m<=t*3;m++){
+        const mk=String(m).padStart(2,'0')+'/'+ano;
+        const d=dados[mk]||{};
+        const ant=ants[mk]??0,sal=ats[mk]??0;lastSal=sal;
+        if(isCDBEspecial){qResgateValor+=parseFloat(d.resgateValor)||0;qResgatePrincipal+=parseFloat(d.resgatePrincipal)||0;}
+        cols.forEach(c=>{if(c.tipo==='num')qT[c.id]+=(c.id==='bruto'?_brutoEfetivo(d,'',isCDBEspecial):(parseFloat(d[c.id])||0));});
+        h+=`<tr>${td_(mk)}${td_(t+'º','text-align:center')}
+          ${cols.map(c=>{
+            const v=c.tipo==='text'?(d[c.id]||''):(c.id==='bruto'?_brutoEfetivo(d,'',isCDBEspecial):(parseFloat(d[c.id])||0));
+            const neg=typeof v==='number'&&v<0;
+            return td_(typeof v==='number'?_fmt(v):esc(v),'text-align:right'+(neg?';color:#dc2626;font-weight:700':''));
+          }).join('')}
+          ${td_(_fmt(sal),'text-align:right;font-weight:700;'+(sal<0?'color:#dc2626':'color:#166534'))}
+          ${td_(_fmt(ant),'text-align:right')}
+          ${isCDBEspecial?td_(_fmt(parseFloat(d.resgateValor)||0),'text-align:right')+td_(_fmt(parseFloat(d.resgatePrincipal)||0),'text-align:right'):''}
+        </tr>`;
+      }
+      h+=`<tr style="background:#eef2f7;font-weight:700">
+        <td colspan="2" style="padding:2px 3px;border:1px solid #ddd">${t}º Tri Total</td>
+        ${cols.map(c=>{const v=c.tipo==='num'?qT[c.id]:null;return td_(v!==null?_fmt(v):'—','text-align:right'+(v!==null&&v<0?';color:#dc2626':''));}).join('')}
+        ${td_(_fmt(lastSal),'text-align:right;'+(lastSal<0?'color:#dc2626':'color:#166534'))}
+        ${td_('')}
+        ${isCDBEspecial?td_(_fmt(qResgateValor),'text-align:right')+td_(_fmt(qResgatePrincipal),'text-align:right'):''}
+      </tr>`;
+    }
+  });
+  h+='</tbody></table>';
+  return h;
 }
 function exportGanhoEmpresaExcel(eid){
   const emp=S.emps().find(e=>e.eid==eid);
