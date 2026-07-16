@@ -9608,7 +9608,7 @@ var SHOPEE_CFOP_TABELA=[[5101,'Venda de produção do estabelecimento'],[5102,'V
 var _convShopeeExpandido={};
 var _convShopeeConfigFormOpen={};
 var _convShopeeResultados={};
-var CONV_SHOPEE_OPERACOES=['Vendas/Revendas (por NF)','Cupons e rebates','Subtotal do Frete','Taxas'];
+var CONV_SHOPEE_OPERACOES=['Preço do produto','Subtotal do Frete','Taxas'];
 
 function _convShopeeResolveAlvo(alvo){
   const m=String(alvo).match(/^(.+)_f(\d+)$/);
@@ -9619,7 +9619,17 @@ function _convShopeeResolveAlvo(alvo){
   }
   return {eidMatriz:String(alvo),isFilial:false,filial:null,idx:-1,storageKey:String(alvo)};
 }
-function getConvShopeeConfig(alvo){const r=_convShopeeResolveAlvo(alvo);return S.g('convShopee_config_'+r.storageKey)||null;}
+function getConvShopeeConfig(alvo){
+  const r=_convShopeeResolveAlvo(alvo);
+  const cfg=S.g('convShopee_config_'+r.storageKey)||null;
+  // Migração: "Vendas/Revendas (por NF)" virou "Preço do produto" (Subtotal de
+  // mercadoria + Cupons e rebates, valor cheio da NF) — reaproveita a conta já
+  // configurada em vez de pedir de novo.
+  if(cfg&&cfg.contas&&cfg.contas['Vendas/Revendas (por NF)']&&!cfg.contas['Preço do produto']){
+    cfg.contas['Preço do produto']=cfg.contas['Vendas/Revendas (por NF)'];
+  }
+  return cfg;
+}
 function setConvShopeeConfig(alvo,cfg){const r=_convShopeeResolveAlvo(alvo);S.s('convShopee_config_'+r.storageKey,cfg);}
 function _convShopeeCodigoEmpresa(alvo){
   const r=_convShopeeResolveAlvo(alvo);
@@ -9851,7 +9861,6 @@ async function _convShopeeConciliar(diariosShopee,registrosLivro,onProgresso){
 
   return {
     conciliado, naoConciliado,
-    cuponsRebatesTotal: somarCampo('cuponsRebates'),
     subtotalFreteTotal: somarCampo('subtotalFrete'),
     taxasTotal: somarCampo('taxas'),
     ultimaData
@@ -10077,14 +10086,13 @@ async function processarConvShopee(alvo){
   _convShopeeResetBotao(alvo);
 }
 function renderConvShopeeResultado(alvo,resultado){
-  const{conciliado,naoConciliado,cuponsRebatesTotal,subtotalFreteTotal,taxasTotal}=resultado;
+  const{conciliado,naoConciliado,subtotalFreteTotal,taxasTotal}=resultado;
   const totalConciliado=conciliado.reduce((s,c)=>s+c.valor,0);
   const totalNaoConciliado=naoConciliado.reduce((s,c)=>s+c.valor,0);
   return `<div style="margin-top:12px;background:var(--bg);border-radius:6px;padding:12px">
     <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:8px">Resumo da conciliação</div>
     <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Conciliado (${conciliado.length} notas)</span><span>R$ ${_fmt(totalConciliado)}</span></div>
     ${naoConciliado.length?`<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0;color:#dc2626"><span>Não conciliado (${naoConciliado.length} dia(s))</span><span>R$ ${_fmt(totalNaoConciliado)}</span></div>`:''}
-    <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Cupons e rebates</span><span>R$ ${_fmt(Math.abs(cuponsRebatesTotal))}</span></div>
     <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Subtotal do Frete</span><span>R$ ${_fmt(Math.abs(subtotalFreteTotal))}</span></div>
     <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Taxas</span><span>R$ ${_fmt(Math.abs(taxasTotal))}</span></div>
     ${naoConciliado.length?`<div style="margin-top:8px;font-size:11px;color:#dc2626">⚠ ${naoConciliado.length} dia(s) não encontraram notas correspondentes no Livro de Saídas (nem na data exata, nem em ±2 dias). Essas datas entram no TXT como "NF &lt;?&gt; CLIENTE NAO ENCONTRADO".</div>`:''}
@@ -10114,8 +10122,7 @@ function baixarConvShopeeTxt(alvo){
   const cfg=getConvShopeeConfig(alvo);
   if(!cfg){toast('Configure as contas primeiro','warn');return;}
   const codigoEmpresa=_convShopeeCodigoEmpresa(alvo);
-  const contaVenda=cfg.contas['Vendas/Revendas (por NF)']||{};
-  const contaCupons=cfg.contas['Cupons e rebates']||{};
+  const contaPreco=cfg.contas['Preço do produto']||{};
   const contaFrete=cfg.contas['Subtotal do Frete']||{};
   const contaTaxas=cfg.contas['Taxas']||{};
 
@@ -10125,20 +10132,16 @@ function baixarConvShopeeTxt(alvo){
     const dataNotaBr=_convMpFmtDataBr(c.dataNota);
     const historico=_convMpRemoverAcentos(`NF ${c.nota} - ${c.cliente} (${dataNotaBr})`).replace(/;/g,' ');
     const valorTxt=c.valor.toFixed(2).replace('.',',');
-    linhas.push(`${dataBr};${contaVenda.debito};${contaVenda.credito};${valorTxt};;${historico};1;${codigoEmpresa};;`);
+    linhas.push(`${dataBr};${contaPreco.debito};${contaPreco.credito};${valorTxt};;${historico};1;${codigoEmpresa};;`);
   });
   resultado.naoConciliado.forEach(nc=>{
     const dataBr=_convMpFmtDataBr(nc.data);
     const historico='NF <?> CLIENTE NAO ENCONTRADO';
     const valorTxt=nc.valor.toFixed(2).replace('.',',');
-    linhas.push(`${dataBr};${contaVenda.debito};${contaVenda.credito};${valorTxt};;${historico};1;${codigoEmpresa};;`);
+    linhas.push(`${dataBr};${contaPreco.debito};${contaPreco.credito};${valorTxt};;${historico};1;${codigoEmpresa};;`);
   });
 
   const dataRef=resultado.ultimaData?_convMpFmtDataBr(resultado.ultimaData):'';
-  if(resultado.cuponsRebatesTotal){
-    const valorTxt=Math.abs(resultado.cuponsRebatesTotal).toFixed(2).replace('.',',');
-    linhas.push(`${dataRef};${contaCupons.debito};${contaCupons.credito};${valorTxt};;Cupons e rebates Shopee;1;${codigoEmpresa};;`);
-  }
   if(resultado.subtotalFreteTotal){
     const valorTxt=Math.abs(resultado.subtotalFreteTotal).toFixed(2).replace('.',',');
     linhas.push(`${dataRef};${contaFrete.debito};${contaFrete.credito};${valorTxt};;Subtotal do Frete Shopee;1;${codigoEmpresa};;`);
