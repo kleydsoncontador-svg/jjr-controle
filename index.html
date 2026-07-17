@@ -7894,6 +7894,8 @@ let _convItauResultados={};
 let _convItauPendentes={};
 let _convItauRegrasAbertas={};
 let _convItauEditandoRegra={};
+let _convItauRegrasSessao={};
+let _convItauValorOverrides={};
 let _pdfjsWorkerConfigurado=false;
 
 function getConvItauConfig(eid){return S.g('convItau_config_'+eid)||null;}
@@ -8109,14 +8111,15 @@ function _convItauDataUtilizada(dataStr,mesFechamento){
   if(dataTransObj<dataFechamentoObj)return dataFechamentoObj;
   return dataTransObj;
 }
-function _convItauClassificar(descricao,regras){
+function _convItauClassificar(descricao,regras,valor){
   const desc=descricao.toUpperCase();
+  const sinalAtual=valor<0?'credito':'debito';
   let melhor=null;
   regras.forEach(r=>{
     const chave=(r.chave||'').toUpperCase();
-    if(chave&&desc.includes(chave)){
-      if(!melhor||chave.length>melhor.chave.length)melhor=r;
-    }
+    if(!chave||!desc.includes(chave))return;
+    if(r.sinal&&r.sinal!==sinalAtual)return;
+    if(!melhor||chave.length>melhor.chave.length)melhor=r;
   });
   return melhor;
 }
@@ -8176,12 +8179,14 @@ async function processarConvItau(eid){
     const regras=getConvItauRegras(eid);
     const naoClassificados=new Map();
     relevantes.forEach(t=>{
-      const r=_convItauClassificar(t.descricao,regras);
+      const r=_convItauClassificar(t.descricao,regras,t.valor);
       if(!r&&!naoClassificados.has(t.descricao))naoClassificados.set(t.descricao,true);
     });
 
     if(naoClassificados.size){
       _convItauPendentes[eid]={mesFechamento,transacoes:relevantes,descricoes:[...naoClassificados.keys()]};
+      _convItauRegrasSessao[eid]=[];
+      _convItauValorOverrides[eid]={};
       renderConvItauLista();
       _convItauSetStatus(eid,naoClassificados.size+' fornecedor(es) novo(s) encontrados — classifique abaixo para gerar o lançamento.','');
       toast(naoClassificados.size+' fornecedor(es) precisam de classificação.','');
@@ -8202,52 +8207,84 @@ function renderConvItauPendentesForm(eid,pendentes){
   const descricoes=pendentes.descricoes;
   let html=`<div style="margin-top:12px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;padding:12px" onclick="event.stopPropagation()">
     <div style="font-size:12px;font-weight:700;color:#92400E;margin-bottom:8px">⚠ Fornecedores novos — informe a conta de cada um</div>
-    <div style="font-size:11px;color:#92400E;margin-bottom:10px">A regra vale por "contém no texto": se preferir, deixe só um trecho do nome (ex: "JOSE SILVA P" já cobre "JOSE SILVA PIRES" e "JOSE SILVA PI" em meses diferentes). Valores negativos na fatura (ex: estorno) entram como crédito dessa conta, não débito.</div>`;
+    <div style="font-size:11px;color:#92400E;margin-bottom:10px">A regra vale por "contém no texto": se preferir, deixe só um trecho do nome (ex: "JOSE SILVA P" já cobre "JOSE SILVA PIRES" e "JOSE SILVA PI" em meses diferentes). Valores negativos na fatura (ex: estorno) entram como crédito dessa conta, não débito — e uma regra salva para débito não vale automaticamente para crédito (e vice-versa). Salve cada linha individualmente; conforme você salva, ela sai da lista.</div>`;
   descricoes.forEach((desc,i)=>{
     const transacao=pendentes.transacoes.find(t=>t.descricao===desc);
-    const valor=transacao?transacao.valor:0;
-    const ehCredito=valor<0;
+    const valorParcela=transacao?transacao.valor:0;
+    const temParcelas=!!(transacao&&transacao.parcelaTotal);
+    const valorTotal=temParcelas?valorParcela*transacao.parcelaTotal:valorParcela;
+    const ehCredito=valorTotal<0;
     const badgeCor=ehCredito?'#dc2626':'#16a34a';
     const badgeTxt=ehCredito?'→ Crédito':'→ Débito';
-    html+=`<div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:8px;flex-wrap:wrap">
+    const valorInfo=temParcelas
+      ?`R$ ${_fmt(Math.abs(valorParcela))} (parcela ${String(transacao.parcelaAtual).padStart(2,'0')}/${String(transacao.parcelaTotal).padStart(2,'0')})<br>Total: R$ ${_fmt(Math.abs(valorTotal))} <span style="color:${badgeCor};font-weight:600">${badgeTxt}</span>`
+      :`R$ ${_fmt(Math.abs(valorTotal))} <span style="color:${badgeCor};font-weight:600">${badgeTxt}</span>`;
+    html+=`<div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;padding-bottom:10px;border-bottom:1px solid #FDE68A">
       <div style="flex:1;min-width:160px"><label style="font-size:10px;color:var(--slate);display:block">Fornecedor (regra)</label><input class="fi" id="convItauChave_${eid}_${i}" value="${esc(desc)}" style="font-size:12px"></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Conta do Fornecedor</label><input class="fi" id="convItauContaDeb_${eid}_${i}" placeholder="Conta" style="font-size:12px;width:140px"></div>
-      <div><label style="font-size:10px;color:var(--slate);display:block">Valor na fatura</label><div style="font-size:12px;padding:6px 0;white-space:nowrap">R$ ${_fmt(Math.abs(valor))} <span style="color:${badgeCor};font-weight:600">${badgeTxt}</span></div></div>
+      <div><label style="font-size:10px;color:var(--slate);display:block">Valor na fatura</label><div style="font-size:12px;padding:6px 0;white-space:nowrap">${valorInfo}</div></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Outro valor (opcional)</label><input class="fi" id="convItauValorOverride_${eid}_${i}" placeholder="Ex: 150,00" style="font-size:12px;width:110px"></div>
       <div style="flex:1;min-width:160px"><label style="font-size:10px;color:var(--slate);display:block">Histórico personalizado (opcional)</label><input class="fi" id="convItauHist_${eid}_${i}" placeholder="Deixe em branco para usar a descrição da fatura" style="font-size:12px"></div>
+      <div style="display:flex;flex-direction:column;align-items:flex-start;gap:4px">
+        <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--slate);white-space:nowrap"><input type="checkbox" id="convItauUsarRegra_${eid}_${i}" checked> Salvar como regra</label>
+        <button class="btn bp bsm" onclick="salvarClassificacaoLinhaConvItau('${eid}',${i})">&#10003; Salvar</button>
+      </div>
     </div>`;
   });
-  html+=`<button class="btn bp bsm" onclick="salvarClassificacoesConvItau('${eid}')">&#10003; Salvar Classificações e Gerar Lançamento</button>
-  </div>`;
+  html+='</div>';
   return html;
 }
-function salvarClassificacoesConvItau(eid){
+function salvarClassificacaoLinhaConvItau(eid,i){
   const pendentes=_convItauPendentes[eid];
   if(!pendentes)return;
-  const regras=getConvItauRegras(eid);
-  let faltando=false;
-  const overrides={};
-  pendentes.descricoes.forEach((desc,i)=>{
-    const chave=(document.getElementById('convItauChave_'+eid+'_'+i)?.value||'').trim();
-    const contaDebito=(document.getElementById('convItauContaDeb_'+eid+'_'+i)?.value||'').trim();
-    const historicoPersonalizado=(document.getElementById('convItauHist_'+eid+'_'+i)?.value||'').trim();
-    const overrideRaw=(document.getElementById('convItauValorOverride_'+eid+'_'+i)?.value||'').trim();
-    if(!chave||!contaDebito){faltando=true;return;}
-    const regra={chave,contaDebito};
-    if(historicoPersonalizado)regra.historicoPersonalizado=historicoPersonalizado;
+  const desc=pendentes.descricoes[i];
+  if(desc===undefined)return;
+  const chave=(document.getElementById('convItauChave_'+eid+'_'+i)?.value||'').trim();
+  const contaDebito=(document.getElementById('convItauContaDeb_'+eid+'_'+i)?.value||'').trim();
+  const historicoPersonalizado=(document.getElementById('convItauHist_'+eid+'_'+i)?.value||'').trim();
+  const overrideRaw=(document.getElementById('convItauValorOverride_'+eid+'_'+i)?.value||'').trim();
+  const usarComoRegra=!!document.getElementById('convItauUsarRegra_'+eid+'_'+i)?.checked;
+  if(!chave||!contaDebito){toast('Preencha fornecedor e conta.','err');return;}
+
+  const transacao=pendentes.transacoes.find(t=>t.descricao===desc);
+  const valorBase=transacao?(transacao.parcelaTotal?transacao.valor*transacao.parcelaTotal:transacao.valor):0;
+  let valorOverride=null;
+  if(overrideRaw){
+    const v=parseFloat(overrideRaw.replace(/\./g,'').replace(',','.'));
+    if(!isNaN(v))valorOverride=v;
+  }
+  const valorFinal=valorOverride!==null?valorOverride:valorBase;
+  const sinal=valorFinal<0?'credito':'debito';
+
+  const regra={chave,contaDebito,sinal};
+  if(historicoPersonalizado)regra.historicoPersonalizado=historicoPersonalizado;
+
+  if(usarComoRegra){
+    const regras=getConvItauRegras(eid);
     regras.push(regra);
-    if(overrideRaw){
-      const v=parseFloat(overrideRaw.replace(/\./g,'').replace(',','.'));
-      if(!isNaN(v))overrides[desc]=v;
-    }
-  });
-  if(faltando){toast('Preencha fornecedor e conta débito de todos os itens.','err');return;}
-  setConvItauRegras(eid,regras);
-  const transacoes=Object.keys(overrides).length
-    ?pendentes.transacoes.map(t=>overrides.hasOwnProperty(t.descricao)?{...t,valor:overrides[t.descricao]}:t)
-    :pendentes.transacoes;
-  _convItauGerarResultado(eid,transacoes,pendentes.mesFechamento,regras);
-  toast('Classificações salvas!','ok');
+    setConvItauRegras(eid,regras);
+  } else {
+    if(!_convItauRegrasSessao[eid])_convItauRegrasSessao[eid]=[];
+    _convItauRegrasSessao[eid].push(regra);
+  }
+  if(valorOverride!==null){
+    if(!_convItauValorOverrides[eid])_convItauValorOverrides[eid]={};
+    _convItauValorOverrides[eid][desc]=valorOverride;
+  }
+
+  pendentes.descricoes.splice(i,1);
+
+  if(!pendentes.descricoes.length){
+    const regras=getConvItauRegras(eid);
+    const regrasSessao=_convItauRegrasSessao[eid]||[];
+    const valorOverrides=_convItauValorOverrides[eid]||{};
+    _convItauGerarResultado(eid,pendentes.transacoes,pendentes.mesFechamento,[...regras,...regrasSessao],valorOverrides);
+    delete _convItauRegrasSessao[eid];
+    delete _convItauValorOverrides[eid];
+  } else {
+    renderConvItauLista();
+    toast('Fornecedor classificado!','ok');
+  }
 }
 function renderConvItauRegrasPanel(eid,regras){
   if(!regras.length) return '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Nenhuma regra criada ainda.</div>';
@@ -8259,6 +8296,11 @@ function renderConvItauRegrasPanel(eid,regras){
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
           <input class="fi" id="convItauRegraChave_${eid}_${i}" value="${esc(r.chave)}" placeholder="Fornecedor (regra)" style="font-size:12px;flex:1;min-width:160px">
           <input class="fi" id="convItauRegraConta_${eid}_${i}" value="${esc(r.contaDebito)}" placeholder="Conta do Fornecedor" style="font-size:12px;width:140px">
+          <select id="convItauRegraSinal_${eid}_${i}" class="fi" style="font-size:12px;width:150px">
+            <option value="" ${!r.sinal?'selected':''}>Débito e Crédito</option>
+            <option value="debito" ${r.sinal==='debito'?'selected':''}>Só Débito</option>
+            <option value="credito" ${r.sinal==='credito'?'selected':''}>Só Crédito</option>
+          </select>
         </div>
         <div style="display:flex;gap:6px;align-items:center;margin-top:6px">
           <input class="fi" id="convItauRegraHist_${eid}_${i}" value="${esc(r.historicoPersonalizado||'')}" placeholder="Histórico personalizado (opcional)" style="font-size:12px;flex:1">
@@ -8270,8 +8312,9 @@ function renderConvItauRegrasPanel(eid,regras){
       </div>`;
     } else {
       const histTxt=r.historicoPersonalizado?` · histórico: "${esc(r.historicoPersonalizado)}"`:'';
+      const sinalTxt=r.sinal==='credito'?' · <span style="color:#dc2626">só Crédito</span>':r.sinal==='debito'?' · <span style="color:#16a34a">só Débito</span>':'';
       html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;padding:6px 0;border-bottom:1px solid var(--border)">
-        <div><span style="color:var(--slate)">contém "${esc(r.chave)}"</span> → <strong>${esc(r.contaDebito)}</strong>${histTxt}</div>
+        <div><span style="color:var(--slate)">contém "${esc(r.chave)}"</span> → <strong>${esc(r.contaDebito)}</strong>${sinalTxt}${histTxt}</div>
         <div style="display:flex;gap:4px">
           <button class="icon-btn" onclick="_convItauEditandoRegra['${eid}']=${i};renderConvItauLista()" title="Editar" style="padding:4px;background:none;border:none;cursor:pointer;font-size:1rem">✏️</button>
           <button class="icon-btn" onclick="excluirRegraConvItau('${eid}',${i})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem">🗑️</button>
@@ -8288,9 +8331,12 @@ function salvarEdicaoRegraConvItau(eid,i){
   const chave=(document.getElementById('convItauRegraChave_'+eid+'_'+i)?.value||'').trim();
   const contaDebito=(document.getElementById('convItauRegraConta_'+eid+'_'+i)?.value||'').trim();
   const historicoPersonalizado=(document.getElementById('convItauRegraHist_'+eid+'_'+i)?.value||'').trim();
+  const sinal=(document.getElementById('convItauRegraSinal_'+eid+'_'+i)?.value||'').trim();
   if(!chave||!contaDebito){toast('Preencha fornecedor e conta débito.','err');return;}
   regras[i].chave=chave;
   regras[i].contaDebito=contaDebito;
+  if(sinal) regras[i].sinal=sinal;
+  else delete regras[i].sinal;
   if(historicoPersonalizado) regras[i].historicoPersonalizado=historicoPersonalizado;
   else delete regras[i].historicoPersonalizado;
   setConvItauRegras(eid,regras);
@@ -8306,19 +8352,22 @@ function excluirRegraConvItau(eid,i){
   renderConvItauLista();
   toast('Regra excluída','ok');
 }
-function _convItauGerarResultado(eid,transacoes,mesFechamento,regras){
+function _convItauGerarResultado(eid,transacoes,mesFechamento,regras,valorOverrides){
+  valorOverrides=valorOverrides||{};
   const cfg=getConvItauConfig(eid);
   const linhas=transacoes.map(t=>{
-    const r=_convItauClassificar(t.descricao,regras);
+    const valorBase=t.parcelaTotal?t.valor*t.parcelaTotal:t.valor;
+    const valorFinal=valorOverrides.hasOwnProperty(t.descricao)?valorOverrides[t.descricao]:valorBase;
+    const r=_convItauClassificar(t.descricao,regras,valorFinal);
     const contaFornecedor=r?r.contaDebito:'';
     const dataUso=_convItauDataUtilizada(t.dataStr,mesFechamento);
     const dataBr=_convMpFmtDataBr(dataUso);
-    const negativo=t.valor<0;
+    const negativo=valorFinal<0;
     const debito=negativo?cfg.contaCredito:contaFornecedor;
     const credito=negativo?contaFornecedor:cfg.contaCredito;
     const historicoBase=r&&r.historicoPersonalizado?r.historicoPersonalizado:t.descricao;
     const historico=historicoBase+(t.parcelaAtual?(' '+String(t.parcelaAtual).padStart(2,'0')+'/'+String(t.parcelaTotal).padStart(2,'0')):'');
-    return {dataEditada:dataBr,descricao:t.descricao,valor:t.valor,debito,credito,historico,semClassificacao:!contaFornecedor};
+    return {dataEditada:dataBr,descricao:t.descricao,valor:valorFinal,debito,credito,historico,semClassificacao:!contaFornecedor};
   });
   _convItauResultados[eid]={linhas,mesFechamento,
     validacoes:{totalLinhas:linhas.length,semClassificacao:linhas.filter(l=>l.semClassificacao).length}};
