@@ -7895,7 +7895,6 @@ let _convItauPendentes={};
 let _convItauRegrasAbertas={};
 let _convItauEditandoRegra={};
 let _convItauRegrasSessao={};
-let _convItauValorOverrides={};
 let _pdfjsWorkerConfigurado=false;
 
 function getConvItauConfig(eid){return S.g('convItau_config_'+eid)||null;}
@@ -8108,6 +8107,14 @@ function _convItauValorTotal(t){
   if(!t)return 0;
   return _convItauTemParcelaTotal(t)?t.valor*t.parcelaTotal:t.valor;
 }
+// Duas transações podem ter a mesma descrição (ex: um estorno negativo e uma
+// cobrança positiva do mesmo fornecedor) — pega especificamente a que ainda
+// não bate com nenhuma regra existente, não só a primeira com aquele texto.
+function _convItauTransacaoPendente(eid,pendentes,desc){
+  const regras=[...getConvItauRegras(eid),...(_convItauRegrasSessao[eid]||[])];
+  const candidatos=pendentes.transacoes.filter(t=>t.descricao===desc);
+  return candidatos.find(t=>!_convItauClassificar(t.descricao,regras,_convItauValorTotal(t)))||candidatos[0];
+}
 function _convItauDataUtilizada(dataStr,mesFechamento){
   const [ano,mes]=mesFechamento.split('-').map(Number);
   const [dia,mesTrans]=dataStr.split('/').map(Number);
@@ -8193,7 +8200,6 @@ async function processarConvItau(eid){
     if(naoClassificados.size){
       _convItauPendentes[eid]={mesFechamento,transacoes:relevantes,descricoes:[...naoClassificados.keys()]};
       _convItauRegrasSessao[eid]=[];
-      _convItauValorOverrides[eid]={};
       renderConvItauLista();
       _convItauSetStatus(eid,naoClassificados.size+' fornecedor(es) novo(s) encontrados — classifique abaixo para gerar o lançamento.','');
       toast(naoClassificados.size+' fornecedor(es) precisam de classificação.','');
@@ -8216,7 +8222,7 @@ function renderConvItauPendentesForm(eid,pendentes){
     <div style="font-size:12px;font-weight:700;color:#92400E;margin-bottom:8px">⚠ Fornecedores novos — informe a conta de cada um</div>
     <div style="font-size:11px;color:#92400E;margin-bottom:10px">A regra vale por "contém no texto": se preferir, deixe só um trecho do nome (ex: "JOSE SILVA P" já cobre "JOSE SILVA PIRES" e "JOSE SILVA PI" em meses diferentes). Valores negativos na fatura (ex: estorno) entram como crédito dessa conta, não débito — e uma regra salva para débito não vale automaticamente para crédito (e vice-versa). Salve cada linha individualmente; conforme você salva, ela sai da lista.</div>`;
   descricoes.forEach((desc,i)=>{
-    const transacao=pendentes.transacoes.find(t=>t.descricao===desc);
+    const transacao=_convItauTransacaoPendente(eid,pendentes,desc);
     const valorParcela=transacao?transacao.valor:0;
     const temParcelas=_convItauTemParcelaTotal(transacao);
     const valorTotal=_convItauValorTotal(transacao);
@@ -8253,7 +8259,7 @@ function salvarClassificacaoLinhaConvItau(eid,i){
   const usarComoRegra=!!document.getElementById('convItauUsarRegra_'+eid+'_'+i)?.checked;
   if(!chave||!contaDebito){toast('Preencha fornecedor e conta.','err');return;}
 
-  const transacao=pendentes.transacoes.find(t=>t.descricao===desc);
+  const transacao=_convItauTransacaoPendente(eid,pendentes,desc);
   const valorBase=_convItauValorTotal(transacao);
   let valorOverride=null;
   if(overrideRaw){
@@ -8274,9 +8280,8 @@ function salvarClassificacaoLinhaConvItau(eid,i){
     if(!_convItauRegrasSessao[eid])_convItauRegrasSessao[eid]=[];
     _convItauRegrasSessao[eid].push(regra);
   }
-  if(valorOverride!==null){
-    if(!_convItauValorOverrides[eid])_convItauValorOverrides[eid]={};
-    _convItauValorOverrides[eid][desc]=valorOverride;
+  if(valorOverride!==null&&transacao){
+    transacao._valorOverride=valorOverride;
   }
 
   pendentes.descricoes.splice(i,1);
@@ -8284,10 +8289,8 @@ function salvarClassificacaoLinhaConvItau(eid,i){
   if(!pendentes.descricoes.length){
     const regras=getConvItauRegras(eid);
     const regrasSessao=_convItauRegrasSessao[eid]||[];
-    const valorOverrides=_convItauValorOverrides[eid]||{};
-    _convItauGerarResultado(eid,pendentes.transacoes,pendentes.mesFechamento,[...regras,...regrasSessao],valorOverrides);
+    _convItauGerarResultado(eid,pendentes.transacoes,pendentes.mesFechamento,[...regras,...regrasSessao]);
     delete _convItauRegrasSessao[eid];
-    delete _convItauValorOverrides[eid];
   } else {
     renderConvItauLista();
     toast('Fornecedor classificado!','ok');
@@ -8359,12 +8362,11 @@ function excluirRegraConvItau(eid,i){
   renderConvItauLista();
   toast('Regra excluída','ok');
 }
-function _convItauGerarResultado(eid,transacoes,mesFechamento,regras,valorOverrides){
-  valorOverrides=valorOverrides||{};
+function _convItauGerarResultado(eid,transacoes,mesFechamento,regras){
   const cfg=getConvItauConfig(eid);
   const linhas=transacoes.map(t=>{
     const valorBase=_convItauValorTotal(t);
-    const valorFinal=valorOverrides.hasOwnProperty(t.descricao)?valorOverrides[t.descricao]:valorBase;
+    const valorFinal=t._valorOverride!==undefined?t._valorOverride:valorBase;
     const r=_convItauClassificar(t.descricao,regras,valorFinal);
     const contaFornecedor=r?r.contaDebito:'';
     const dataUso=_convItauDataUtilizada(t.dataStr,mesFechamento);
