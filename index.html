@@ -14992,6 +14992,24 @@ function lucSaveMesRow(eid, ano, mes, row){
   lucSaveMesData(eid, ano, mes, rows);
 }
 
+// Crédito do mês tal como é mostrado na tela: usa o valor salvo se houver, ou
+// a sugestão automática (saldo da empresa x % do sócio) quando o campo nunca
+// foi editado/salvo. O saldo do próximo mês tem que ser calculado com esse
+// mesmo valor "efetivo" — senão o crédito sugerido (que aparece na tela mas
+// nunca foi de fato salvo em disco) nunca entra no saldo anterior do mês
+// seguinte, e o saldo anterior volta a zero mesmo com crédito visível.
+function lucCalcCreditoEfetivo(eid, ano, mes, sid){
+  var row=lucGetMesRow(eid, ano, mes, sid);
+  var salvo=parseFloat(row.credito)||0;
+  if(salvo!==0)return salvo;
+  var socios=lucSocGet(eid);
+  var soc=socios.find(function(s){return s.id===sid;});
+  if(!soc)return 0;
+  var pctKey=ano+'-'+mes;
+  var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
+  var saldoEmpMes=lucCalcSaldo(ano,eid,mes);
+  return (saldoEmpMes>0)?(saldoEmpMes*pct/100):0;
+}
 function lucCalcSaldoAnt(eid, ano, mes, sid){
   /* Jan → usa saldo_ant_jan manual; demais → saldo_próx do mês anterior */
   if(mes==='01'){
@@ -15001,7 +15019,7 @@ function lucCalcSaldoAnt(eid, ano, mes, sid){
   var prevMes=(parseInt(mes,10)-1).toString().padStart(2,'0');
   var prevRow=lucGetMesRow(eid, ano, prevMes, sid);
   var sAnt=lucCalcSaldoAnt(eid, ano, prevMes, sid);
-  var cred=parseFloat(prevRow.credito)||0;
+  var cred=lucCalcCreditoEfetivo(eid, ano, prevMes, sid);
   var baix=parseFloat(prevRow.baixas)||0;
   return sAnt+cred-baix;
 }
@@ -15067,15 +15085,14 @@ function lucRenderMesTable(eid, ano, mes, isJan){
     +'<th style="'+thStyleR+'">Baixas no Mês</th>'
     +'<th style="'+thStyleR+'">Saldo p/ Próx. Mês</th>'
     +'</tr></thead><tbody>';
-  var saldoEmpMes=lucCalcSaldo(ano,eid,mes); /* saldo da empresa neste mês, para sugestão de crédito */
   socios.forEach(function(soc,i){
     var row=lucGetMesRow(eid, ano, mes, soc.id);
     var saldoAnt=lucCalcSaldoAnt(eid, ano, mes, soc.id);
     var pctKey=ano+'-'+mes;
     var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
     /* crédito: valor salvo OU sugestão automática (saldo × %) quando positivo */
-    var creditoSugerido=(saldoEmpMes>0)?(saldoEmpMes*pct/100):0;
-    var creditoVal=(parseFloat(row.credito)||0)!==0?(parseFloat(row.credito)||0):creditoSugerido;
+    var creditoVal=lucCalcCreditoEfetivo(eid, ano, mes, soc.id);
+    var creditoSugerido=(parseFloat(row.credito)||0)===0?creditoVal:0;
     var saldoProx=lucCalcSaldoProx(saldoAnt, creditoVal, row.baixas);
     var bg=i%2===0?'var(--white)':'var(--bg)';
     h+='<tr style="background:'+bg+';">'
@@ -15109,10 +15126,7 @@ function lucRenderMesTable(eid, ano, mes, isJan){
   socios.forEach(function(soc){
     var row=lucGetMesRow(eid, ano, mes, soc.id);
     var sAnt=lucCalcSaldoAnt(eid, ano, mes, soc.id);
-    var pctKeyT=ano+'-'+mes;
-    var pctT=soc.pct&&soc.pct[pctKeyT]!==undefined?soc.pct[pctKeyT]:(soc.pct_ant||0);
-    var credSugT=(saldoEmpMes>0)?(saldoEmpMes*pctT/100):0;
-    var credT=(parseFloat(row.credito)||0)!==0?(parseFloat(row.credito)||0):credSugT;
+    var credT=lucCalcCreditoEfetivo(eid, ano, mes, soc.id);
     totSaldoAnt  += sAnt;
     totCredito   += credT;
     totBaixas    += parseFloat(row.baixas)||0;
@@ -15530,14 +15544,10 @@ function lucConfirmExportAll(){
     var isFirst=true;
     mCodes.forEach(function(m,mi){
       var isJan=m==='01';
-      var saldoEmpMes=lucCalcSaldo(ano,eid,m);
       socios.forEach(function(soc){
         var row=lucGetMesRow(eid,ano,m,soc.id);
         var saldoAnt=lucCalcSaldoAnt(eid,ano,m,soc.id);
-        var pctKey=ano+'-'+m;
-        var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
-        var credSug=(saldoEmpMes>0)?(saldoEmpMes*pct/100):0;
-        var creditoVal=(parseFloat(row.credito)||0)!==0?(parseFloat(row.credito)||0):credSug;
+        var creditoVal=lucCalcCreditoEfetivo(eid,ano,m,soc.id);
         var saldoProx=lucCalcSaldoProx(saldoAnt,creditoVal,row.baixas);
         ws3.push([
           isFirst?emp.nome:'', isFirst?fmtDoc(emp.cnpj):'',
