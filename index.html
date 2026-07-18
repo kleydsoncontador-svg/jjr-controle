@@ -2891,6 +2891,30 @@ function seedData(){
       });
       if(mudouLst)S.saveListagem(lstNovo);
     }
+    // Migração: bens de Ativo Fixo cadastrados antes de existir a tabela de
+    // reaproveitamento de Valor Residual (getConvAtivoResiduais) tinham o
+    // residual preso só naquele bem — nunca "ensinavam" a combinação Valor do
+    // Produto + Conta + Centro + Taxa pros próximos itens iguais. Isso
+    // alimenta a tabela retroativamente com o que já foi digitado, e depois
+    // aplica o residual em qualquer bem já cadastrado que esteja com esse
+    // campo vazio mas bata com uma combinação agora conhecida.
+    if(typeof getConvAtivoBens==='function'){
+      existing.forEach(emp=>{
+        const bensAtivo=getConvAtivoBens(emp.eid);
+        if(!bensAtivo.length)return;
+        bensAtivo.forEach(b=>{
+          if(b.valores&&b.valores[27])_convAtivoRegistrarResidual(emp.eid,b.valores[14],b.valores[6],b.valores[7],b.valores[37],b.valores[27]);
+        });
+        let mudouBem=false;
+        bensAtivo.forEach(b=>{
+          if(b.valores&&!b.valores[27]){
+            const achado=_convAtivoBuscarResidual(emp.eid,b.valores[14],b.valores[6],b.valores[7],b.valores[37]);
+            if(achado){b.valores[27]=achado;mudouBem=true;}
+          }
+        });
+        if(mudouBem)setConvAtivoBens(emp.eid,bensAtivo);
+      });
+    }
     if(!S.users().length){
       var resps=[...new Set(EMP_SEED.flatMap(function(e){return(e.resp||'').split('/').map(function(r){return r.trim();});}).filter(Boolean))];
       var users=[];
@@ -8489,10 +8513,13 @@ let _convAtivoPendentes={};
 let _convAtivoRegrasAbertas={};
 let _convAtivoEditandoRegra={};
 let _convAtivoRegrasSessao={};
-let _convAtivoUltimoLote={};
 let _convAtivoEditandoBem={};
 
 function getConvAtivoConfig(eid){return S.g('convAtivo_config_'+eid)||null;}
+// "Último lote" persiste (não é só em memória) pra continuar dando pra
+// baixar o TXT daquele lote mesmo depois de recarregar a página.
+function getConvAtivoUltimoLote(eid){return S.g('convAtivo_ultimoLote_'+eid)||[];}
+function setConvAtivoUltimoLote(eid,codigos){S.s('convAtivo_ultimoLote_'+eid,codigos);}
 function setConvAtivoConfig(eid,cfg){S.s('convAtivo_config_'+eid,cfg);}
 function getConvAtivoRegras(eid){return S.g('convAtivo_regras_'+eid)||[];}
 function setConvAtivoRegras(eid,regras){S.s('convAtivo_regras_'+eid,regras);}
@@ -9050,14 +9077,14 @@ function _convAtivoGerarResultado(eid,nfsInfo,regras){
   });
   setConvAtivoBens(eid,[...bensAtuais,...novosBens]);
   setConvAtivoConfig(eid,{...cfg,proximoCodigo});
-  _convAtivoUltimoLote[eid]=novosBens.map(b=>b.codigoBem);
+  setConvAtivoUltimoLote(eid,novosBens.map(b=>b.codigoBem));
   delete _convAtivoPendentes[eid];
   renderConvAtivoLista();
   toast(nfsInfo.length>1?nfsInfo.length+' notas fiscais processadas com sucesso!':'Nota fiscal processada com sucesso!','ok');
 }
 function renderConvAtivoResultado(eid){
   const bens=getConvAtivoBens(eid);
-  const ultimoLote=_convAtivoUltimoLote[eid]||[];
+  const ultimoLote=getConvAtivoUltimoLote(eid);
   const bensLote=bens.filter(b=>ultimoLote.includes(b.codigoBem));
   let html='';
   if(bensLote.length){
@@ -9226,7 +9253,7 @@ function _convAtivoSufixoArquivo(bensLote){
 }
 function baixarConvAtivoTxt(eid){
   const bens=getConvAtivoBens(eid);
-  const ultimoLote=_convAtivoUltimoLote[eid]||[];
+  const ultimoLote=getConvAtivoUltimoLote(eid);
   const bensLote=bens.filter(b=>ultimoLote.includes(b.codigoBem));
   if(!bensLote.length){toast('Processe uma nota fiscal primeiro.','err');return;}
   const txtLinhas=bensLote.map(bem=>{
