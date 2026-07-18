@@ -8637,7 +8637,7 @@ function renderConvAtivoProcessForm(eid,cfg){
       <button class="btn bo bsm" onclick="editarConvAtivoConfig('${eid}')" style="font-size:11px">&#9998; Editar próximo código</button>
     </div>
     ${_convAtivoRegrasAbertas[eid]?renderConvAtivoRegrasPanel(eid,regras):''}
-    <div class="fg"><label class="fl">Nota Fiscal (XML ou PDF/DANFE)</label><input type="file" id="convAtivoArquivo_${eid}" accept=".xml,.pdf" class="fi"></div>
+    <div class="fg"><label class="fl">Nota(s) Fiscal(is) (XML ou PDF/DANFE — pode selecionar mais de uma)</label><input type="file" id="convAtivoArquivo_${eid}" accept=".xml,.pdf" multiple class="fi"></div>
     <button class="btn bp bsm" id="convAtivoBtnProcessar_${eid}" onclick="processarConvAtivo('${eid}')" style="margin-top:10px">&#9881; Processar Arquivo</button>
     <div id="convAtivoStatus_${eid}" style="margin-top:8px;font-size:12px"></div>
     ${pendentes&&pendentes.ncmsFaltando.length?renderConvAtivoPendentesForm(eid,pendentes):''}
@@ -8761,52 +8761,59 @@ async function processarConvAtivo(eid){
   const cfg=getConvAtivoConfig(eid);
   if(!cfg){_convAtivoSetStatus(eid,'Configure o próximo código de bem primeiro.','err');toast('Configure o próximo código de bem primeiro.','err');return;}
   const fileInput=document.getElementById('convAtivoArquivo_'+eid);
-  const file=fileInput&&fileInput.files[0];
-  if(!file){_convAtivoSetStatus(eid,'Selecione o arquivo da nota fiscal antes de processar.','err');toast('Selecione o arquivo da NF.','err');return;}
+  const files=fileInput?[...fileInput.files]:[];
+  if(!files.length){_convAtivoSetStatus(eid,'Selecione ao menos um arquivo de nota fiscal antes de processar.','err');toast('Selecione o(s) arquivo(s) da NF.','err');return;}
   if(btn){btn.disabled=true;btn.textContent='Processando…';}
-  _convAtivoSetStatus(eid,'Lendo arquivo…','');
-  toast('Processando nota fiscal…','');
-  try{
-    const isXml=/\.xml$/i.test(file.name);
-    _convAtivoParsearPDF._eidAtual=eid;
-    const nfInfo=isXml?await _convAtivoParsearXML(file):await _convAtivoParsearPDF(file);
-    if(!nfInfo.itens.length){
-      _convAtivoSetStatus(eid,'Nenhum item encontrado na nota fiscal.','err');
-      toast('Nenhum item encontrado.','err');
-      _convAtivoResetBotao(eid);
-      return;
+  _convAtivoSetStatus(eid,'Lendo '+files.length+' arquivo(s)…','');
+  toast('Processando '+files.length+' nota(s) fiscal(is)…','');
+  _convAtivoParsearPDF._eidAtual=eid;
+  const nfsInfo=[];
+  const falhas=[];
+  for(const file of files){
+    try{
+      const isXml=/\.xml$/i.test(file.name);
+      const nfInfo=isXml?await _convAtivoParsearXML(file):await _convAtivoParsearPDF(file);
+      if(!nfInfo.itens.length){falhas.push({nome:file.name,motivo:'Nenhum item encontrado'});continue;}
+      nfsInfo.push(nfInfo);
+    }catch(e){
+      console.error(e);
+      falhas.push({nome:file.name,motivo:e.message});
     }
-    const regras=getConvAtivoRegras(eid);
-    const naoClassificados=new Map();
-    nfInfo.itens.forEach(it=>{
-      const r=_convAtivoClassificar(it.ncm,regras);
-      if(!r&&!naoClassificados.has(it.ncm)){
-        const mesmoNcm=nfInfo.itens.filter(x=>x.ncm===it.ncm);
-        naoClassificados.set(it.ncm,{
-          ncm:it.ncm,
-          exemplo:it.descricao,
-          qtdTotal:mesmoNcm.reduce((s,x)=>s+x.qtd,0),
-          valorTotal:mesmoNcm.reduce((s,x)=>s+(x.valorTotal??x.qtd*x.valorUnitario),0)
-        });
-      }
-    });
-    if(naoClassificados.size){
-      _convAtivoPendentes[eid]={nfInfo,ncmsFaltando:[...naoClassificados.values()]};
-      _convAtivoRegrasSessao[eid]=[];
-      renderConvAtivoLista();
-      _convAtivoSetStatus(eid,naoClassificados.size+' NCM(s) novo(s) encontrado(s) — classifique abaixo para gerar o cadastro.','');
-      toast(naoClassificados.size+' NCM(s) precisam de classificação.','');
-      _convAtivoResetBotao(eid);
-      return;
-    }
-    _convAtivoGerarResultado(eid,nfInfo,regras);
-    _convAtivoResetBotao(eid);
-  }catch(e){
-    console.error(e);
-    _convAtivoSetStatus(eid,'Erro ao processar a NF: '+e.message,'err');
-    toast('Erro ao processar a NF: '+e.message,'err');
-    _convAtivoResetBotao(eid);
   }
+  if(!nfsInfo.length){
+    _convAtivoSetStatus(eid,'Nenhuma nota pôde ser processada — '+falhas.map(f=>f.nome+' ('+f.motivo+')').join('; '),'err');
+    toast('Nenhuma nota processada com sucesso.','err');
+    _convAtivoResetBotao(eid);
+    return;
+  }
+  const avisoFalhas=falhas.length?(' — '+falhas.length+' arquivo(s) com erro: '+falhas.map(f=>f.nome+' ('+f.motivo+')').join('; ')):'';
+  const todosItens=nfsInfo.flatMap(nf=>nf.itens);
+  const regras=getConvAtivoRegras(eid);
+  const naoClassificados=new Map();
+  todosItens.forEach(it=>{
+    const r=_convAtivoClassificar(it.ncm,regras);
+    if(!r&&!naoClassificados.has(it.ncm)){
+      const mesmoNcm=todosItens.filter(x=>x.ncm===it.ncm);
+      naoClassificados.set(it.ncm,{
+        ncm:it.ncm,
+        exemplo:it.descricao,
+        qtdTotal:mesmoNcm.reduce((s,x)=>s+x.qtd,0),
+        valorTotal:mesmoNcm.reduce((s,x)=>s+(x.valorTotal??x.qtd*x.valorUnitario),0)
+      });
+    }
+  });
+  if(naoClassificados.size){
+    _convAtivoPendentes[eid]={nfsInfo,ncmsFaltando:[...naoClassificados.values()]};
+    _convAtivoRegrasSessao[eid]=[];
+    renderConvAtivoLista();
+    _convAtivoSetStatus(eid,naoClassificados.size+' NCM(s) novo(s) encontrado(s) — classifique abaixo para gerar o cadastro.'+avisoFalhas,falhas.length?'err':'');
+    toast(naoClassificados.size+' NCM(s) precisam de classificação.','');
+    _convAtivoResetBotao(eid);
+    return;
+  }
+  _convAtivoGerarResultado(eid,nfsInfo,regras);
+  if(falhas.length)_convAtivoSetStatus(eid,'Processado com ressalvas'+avisoFalhas,'err');
+  _convAtivoResetBotao(eid);
 }
 function renderConvAtivoPendentesForm(eid,pendentes){
   const itens=pendentes.ncmsFaltando;
@@ -8861,7 +8868,7 @@ function salvarClassificacaoLinhaConvAtivo(eid,i){
   if(!pendentes.ncmsFaltando.length){
     const regras=getConvAtivoRegras(eid);
     const regrasSessao=_convAtivoRegrasSessao[eid]||[];
-    _convAtivoGerarResultado(eid,pendentes.nfInfo,[...regras,...regrasSessao]);
+    _convAtivoGerarResultado(eid,pendentes.nfsInfo,[...regras,...regrasSessao]);
     delete _convAtivoRegrasSessao[eid];
   } else {
     renderConvAtivoLista();
@@ -8976,38 +8983,40 @@ function _convAtivoIgnoradosIniciais(r){
 // processar outra NF) — a numeração do próximo código sempre continua do
 // maior código já usado nessa lista; o "próximo código" configurado só vale
 // como ponto de partida enquanto a lista ainda está vazia.
-function _convAtivoGerarResultado(eid,nfInfo,regras){
+function _convAtivoGerarResultado(eid,nfsInfo,regras){
   const bensAtuais=getConvAtivoBens(eid);
   const cfg=getConvAtivoConfig(eid);
   const maiorCodigoUsado=bensAtuais.reduce((max,b)=>Math.max(max,b.codigoBem),0);
   let proximoCodigo=maiorCodigoUsado>0?maiorCodigoUsado+1:cfg.proximoCodigo;
   const novosBens=[];
-  nfInfo.itens.forEach(item=>{
-    const r=_convAtivoClassificar(item.ncm,regras);
-    const qtdTotal=Math.max(1,Math.round(item.qtd));
-    const valoresDistribuidos=_convAtivoDistribuirValores(item.valorTotal??item.valorUnitario*item.qtd,qtdTotal);
-    for(let i=1;i<=qtdTotal;i++){
-      const qtdLabel=qtdTotal>1?(i+'/'+qtdTotal):'1';
-      const codigoBem=proximoCodigo++;
-      const historico=`<NF ${nfInfo.nfNumero}> ${nfInfo.fornecedor} |  QTD. ${qtdLabel}_${item.descricao}`;
-      novosBens.push({
-        codigoBem,nfNumero:nfInfo.nfNumero,fornecedor:nfInfo.fornecedor,semClassificacao:!r,
-        ignorados:_convAtivoIgnoradosIniciais(r),
-        valores:_convAtivoValoresIniciais({
-          eid,codigoBem,descricao:item.descricao,dataAquisicao:nfInfo.dataEmissao,
-          contaPatrimonial:r?r.contaPatrimonial:'',centroCusto:r?r.centroCusto:'',
-          historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:r?r.taxaDepreciacao:'',ncm:item.ncm,
-          valorResidual:r?r.valorResidual:''
-        })
-      });
-    }
+  nfsInfo.forEach(nfInfo=>{
+    nfInfo.itens.forEach(item=>{
+      const r=_convAtivoClassificar(item.ncm,regras);
+      const qtdTotal=Math.max(1,Math.round(item.qtd));
+      const valoresDistribuidos=_convAtivoDistribuirValores(item.valorTotal??item.valorUnitario*item.qtd,qtdTotal);
+      for(let i=1;i<=qtdTotal;i++){
+        const qtdLabel=qtdTotal>1?(i+'/'+qtdTotal):'1';
+        const codigoBem=proximoCodigo++;
+        const historico=`<NF ${nfInfo.nfNumero}> ${nfInfo.fornecedor} |  QTD. ${qtdLabel}_${item.descricao}`;
+        novosBens.push({
+          codigoBem,nfNumero:nfInfo.nfNumero,fornecedor:nfInfo.fornecedor,semClassificacao:!r,
+          ignorados:_convAtivoIgnoradosIniciais(r),
+          valores:_convAtivoValoresIniciais({
+            eid,codigoBem,descricao:item.descricao,dataAquisicao:nfInfo.dataEmissao,
+            contaPatrimonial:r?r.contaPatrimonial:'',centroCusto:r?r.centroCusto:'',
+            historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:r?r.taxaDepreciacao:'',ncm:item.ncm,
+            valorResidual:r?r.valorResidual:''
+          })
+        });
+      }
+    });
   });
   setConvAtivoBens(eid,[...bensAtuais,...novosBens]);
   setConvAtivoConfig(eid,{...cfg,proximoCodigo});
   _convAtivoUltimoLote[eid]=novosBens.map(b=>b.codigoBem);
   delete _convAtivoPendentes[eid];
   renderConvAtivoLista();
-  toast('Nota fiscal processada com sucesso!','ok');
+  toast(nfsInfo.length>1?nfsInfo.length+' notas fiscais processadas com sucesso!':'Nota fiscal processada com sucesso!','ok');
 }
 function renderConvAtivoResultado(eid){
   const bens=getConvAtivoBens(eid);
@@ -9017,8 +9026,12 @@ function renderConvAtivoResultado(eid){
   if(bensLote.length){
     const total=bensLote.reduce((s,b)=>s+_convAtivoParseValor(b.valores[14]),0);
     const semClass=bensLote.filter(b=>b.semClassificacao).length;
+    const nfsDistintas=[...new Set(bensLote.map(b=>b.nfNumero))];
+    const tituloLote=nfsDistintas.length>1
+      ?`Último lote processado — ${nfsDistintas.length} notas fiscais (${esc(nfsDistintas.join(', '))})`
+      :`Último lote processado — NF ${esc(bensLote[0].nfNumero)} · ${esc(bensLote[0].fornecedor)}`;
     html+=`<div style="margin-top:12px;background:var(--bg);border-radius:6px;padding:12px">
-      <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:8px">Último lote processado — NF ${esc(bensLote[0].nfNumero)} · ${esc(bensLote[0].fornecedor)}</div>
+      <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:8px">${tituloLote}</div>
       <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Valor total dos bens</span><span>R$ ${_fmt(total)}</span></div>
       <div style="margin-top:6px;font-size:11px;color:var(--slate)">
         <div>✓ ${bensLote.length} bem(ns) gerado(s), código ${bensLote[0].codigoBem} a ${bensLote[bensLote.length-1].codigoBem}</div>
@@ -9164,6 +9177,10 @@ function _convAtivoMontarLinhaTxt(bem){
   for(let i=0;i<81;i++)f.push(ignorados.includes(i)?'':(v[i]==null?'':String(v[i])));
   return f.join(';');
 }
+function _convAtivoSufixoArquivo(bensLote){
+  const nfsDistintas=[...new Set(bensLote.map(b=>b.nfNumero))];
+  return nfsDistintas.length>1?'Lote'+nfsDistintas.length+'NFs':'NF'+(nfsDistintas[0]||'');
+}
 function baixarConvAtivoTxt(eid){
   const bens=getConvAtivoBens(eid);
   const ultimoLote=_convAtivoUltimoLote[eid]||[];
@@ -9179,7 +9196,7 @@ function baixarConvAtivoTxt(eid){
   const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url;a.download='Cad_Bens_'+nomeArq+'_NF'+(bensLote[0].nfNumero||'')+'.txt';a.click();
+  a.href=url;a.download='Cad_Bens_'+nomeArq+'_'+_convAtivoSufixoArquivo(bensLote)+'.txt';a.click();
   URL.revokeObjectURL(url);
 }
 function baixarConvAtivoExcel(eid){
@@ -9188,6 +9205,8 @@ function baixarConvAtivoExcel(eid){
   const bensLote=bens.filter(b=>ultimoLote.includes(b.codigoBem));
   if(!bensLote.length){toast('Processe uma nota fiscal primeiro.','err');return;}
   const emp=S.emps().find(e=>String(e.eid)===eid);
+  const nfsDistintas=[...new Set(bensLote.map(b=>b.nfNumero))];
+  const subtitulo=nfsDistintas.length>1?(nfsDistintas.length+' notas fiscais'):('NF '+esc(bensLote[0].nfNumero)+' · '+esc(bensLote[0].fornecedor));
   let h=`<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="UTF-8">
   <style>body{font-family:Arial,sans-serif;font-size:10px;color:#1E3558}
   table{border-collapse:collapse;width:100%;border:1px solid #ccc}
@@ -9195,7 +9214,7 @@ function baixarConvAtivoExcel(eid){
   td{padding:5px 8px;border:1px solid #E2E8F0;font-size:10px}
   </style></head><body>
   <b style="font-size:13px">JJR Consultoria Contábil S/S</b><br>
-  <span style="font-size:10px;color:#888">${esc(emp?emp.nome:eid)} · NF Ativo Fixo · NF ${esc(bensLote[0].nfNumero)} · ${esc(bensLote[0].fornecedor)}</span><br><br>
+  <span style="font-size:10px;color:#888">${esc(emp?emp.nome:eid)} · NF Ativo Fixo · ${subtitulo}</span><br><br>
   <table>
   <tr><th class="hd">Cód. Bem</th><th class="hd">Descrição</th><th class="hd">Data Aquisição</th><th class="hd">Valor</th><th class="hd">Conta Patrimonial</th><th class="hd">Centro de Custo</th><th class="hd">Taxa Deprec. (%)</th><th class="hd">Histórico</th></tr>
   ${bensLote.map(b=>`<tr><td>${esc(b.codigoBem)}</td><td>${esc(b.valores[3])}</td><td>${esc(b.valores[4])}</td><td>${esc(b.valores[14])}</td><td>${esc(b.valores[6]||'—')}</td><td>${esc(b.valores[7]||'—')}</td><td>${esc(b.valores[37]||'—')}</td><td>${esc(b.valores[8])}</td></tr>`).join('')}
@@ -9204,7 +9223,7 @@ function baixarConvAtivoExcel(eid){
   const a=document.createElement('a');
   a.href=URL.createObjectURL(blob);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.download='Cad_Bens_'+nomeArq+'_NF'+(bensLote[0].nfNumero||'')+'.xls';
+  a.download='Cad_Bens_'+nomeArq+'_'+_convAtivoSufixoArquivo(bensLote)+'.xls';
   a.click();
 }
 
