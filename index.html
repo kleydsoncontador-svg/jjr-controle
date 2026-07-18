@@ -8498,6 +8498,32 @@ function getConvAtivoRegras(eid){return S.g('convAtivo_regras_'+eid)||[];}
 function setConvAtivoRegras(eid,regras){S.s('convAtivo_regras_'+eid,regras);}
 function getConvAtivoBens(eid){return S.g('convAtivo_bens_'+eid)||[];}
 function setConvAtivoBens(eid,bens){S.s('convAtivo_bens_'+eid,bens);}
+// Valor Residual NÃO é uma propriedade do NCM (a mesma NCM pode cobrir itens
+// de valores bem diferentes) — só repete automaticamente quando Valor do
+// Produto + Conta + Centro + Taxa forem TODOS iguais a uma combinação já
+// informada antes. NCM continua servindo só pra Conta/Centro/Taxa/Impostos.
+function getConvAtivoResiduais(eid){return S.g('convAtivo_residuais_'+eid)||[];}
+function setConvAtivoResiduais(eid,residuais){S.s('convAtivo_residuais_'+eid,residuais);}
+function _convAtivoBuscarResidual(eid,valorProduto,contaPatrimonial,centroCusto,taxaDepreciacao){
+  const valorFmt=_convAtivoFmtValorTxt(_convAtivoParseValor(valorProduto));
+  const match=getConvAtivoResiduais(eid).find(r=>
+    _convAtivoFmtValorTxt(_convAtivoParseValor(r.valorProduto))===valorFmt&&
+    r.contaPatrimonial===contaPatrimonial&&r.centroCusto===centroCusto&&String(r.taxaDepreciacao)===String(taxaDepreciacao)
+  );
+  return match?match.valorResidual:'';
+}
+function _convAtivoRegistrarResidual(eid,valorProduto,contaPatrimonial,centroCusto,taxaDepreciacao,valorResidual){
+  if(!valorResidual)return;
+  const residuais=getConvAtivoResiduais(eid);
+  const valorFmt=_convAtivoFmtValorTxt(_convAtivoParseValor(valorProduto));
+  const idx=residuais.findIndex(r=>
+    _convAtivoFmtValorTxt(_convAtivoParseValor(r.valorProduto))===valorFmt&&
+    r.contaPatrimonial===contaPatrimonial&&r.centroCusto===centroCusto&&String(r.taxaDepreciacao)===String(taxaDepreciacao)
+  );
+  const registro={valorProduto:valorFmt,contaPatrimonial,centroCusto,taxaDepreciacao,valorResidual};
+  if(idx>=0)residuais[idx]=registro;else residuais.push(registro);
+  setConvAtivoResiduais(eid,residuais);
+}
 
 // Layout completo (81 colunas) de importação de bens do Domínio (PMBEM).
 // idx é o índice 0-based na linha do TXT (coluna N do layout = idx N-1).
@@ -8801,6 +8827,7 @@ async function processarConvAtivo(eid){
       naoClassificados.set(it.ncm,{
         ncm:it.ncm,
         exemplo:it.descricao,
+        exemploValorUnitario:it.valorUnitario,
         qtdTotal:mesmoNcm.reduce((s,x)=>s+x.qtd,0),
         valorTotal:mesmoNcm.reduce((s,x)=>s+(x.valorTotal??x.qtd*x.valorUnitario),0)
       });
@@ -8860,7 +8887,8 @@ function salvarClassificacaoLinhaConvAtivo(eid,i){
   const ignorarCofins=!!document.getElementById('convAtivoIgnoraCofins_'+eid+'_'+i)?.checked;
   const usarComoRegra=!!document.getElementById('convAtivoUsarRegra_'+eid+'_'+i)?.checked;
   if(!contaPatrimonial||!centroCusto||!taxaDepreciacao){toast('Preencha conta patrimonial, centro de custo e taxa de depreciação.','err');return;}
-  const regra={ncm:item.ncm,contaPatrimonial,centroCusto,taxaDepreciacao,valorResidual,ignorarIcms,ignorarPis,ignorarCofins};
+  if(valorResidual)_convAtivoRegistrarResidual(eid,item.exemploValorUnitario,contaPatrimonial,centroCusto,taxaDepreciacao,valorResidual);
+  const regra={ncm:item.ncm,contaPatrimonial,centroCusto,taxaDepreciacao,ignorarIcms,ignorarPis,ignorarCofins};
   if(usarComoRegra){
     const regras=getConvAtivoRegras(eid);
     regras.push(regra);
@@ -8892,7 +8920,6 @@ function renderConvAtivoRegrasPanel(eid,regras){
           <input class="fi" id="convAtivoRegraConta_${eid}_${i}" value="${esc(r.contaPatrimonial)}" placeholder="Conta Patrimonial" style="font-size:12px;width:140px">
           <input class="fi" id="convAtivoRegraCentro_${eid}_${i}" value="${esc(r.centroCusto)}" placeholder="Centro de Custo" style="font-size:12px;width:120px">
           <input class="fi" id="convAtivoRegraTaxa_${eid}_${i}" value="${esc(r.taxaDepreciacao)}" placeholder="Taxa %" style="font-size:12px;width:90px">
-          <input class="fi" id="convAtivoRegraResidual_${eid}_${i}" value="${esc(r.valorResidual||'')}" placeholder="Vlr Residual" style="font-size:12px;width:100px">
         </div>
         <div style="display:flex;gap:16px;align-items:center;margin-top:6px">
           <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--slate)"><input type="checkbox" id="convAtivoRegraIgnoraIcms_${eid}_${i}" ${r.ignorarIcms?'checked':''}> Ignorar ICMS</label>
@@ -8907,7 +8934,7 @@ function renderConvAtivoRegrasPanel(eid,regras){
     } else {
       const flags=[r.ignorarIcms?'sem ICMS':'',r.ignorarPis?'sem PIS':'',r.ignorarCofins?'sem COFINS':''].filter(Boolean).join(', ');
       html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;padding:6px 0;border-bottom:1px solid var(--border)">
-        <div><span style="color:var(--slate)">NCM ${esc(r.ncm)}</span> → <strong>Conta ${esc(r.contaPatrimonial)}</strong> · Centro ${esc(r.centroCusto)} · ${esc(String(r.taxaDepreciacao))}% a.a.${flags?' · '+esc(flags):''}${r.valorResidual?' · Resid. R$ '+esc(r.valorResidual):''}</div>
+        <div><span style="color:var(--slate)">NCM ${esc(r.ncm)}</span> → <strong>Conta ${esc(r.contaPatrimonial)}</strong> · Centro ${esc(r.centroCusto)} · ${esc(String(r.taxaDepreciacao))}% a.a.${flags?' · '+esc(flags):''}</div>
         <div style="display:flex;gap:4px">
           <button class="icon-btn" onclick="_convAtivoEditandoRegra['${eid}']=${i};renderConvAtivoLista()" title="Editar" style="padding:4px;background:none;border:none;cursor:pointer;font-size:1rem">✏️</button>
           <button class="icon-btn" onclick="excluirRegraConvAtivo('${eid}',${i})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem">🗑️</button>
@@ -8925,13 +8952,11 @@ function salvarEdicaoRegraConvAtivo(eid,i){
   const contaPatrimonial=(document.getElementById('convAtivoRegraConta_'+eid+'_'+i)?.value||'').trim();
   const centroCusto=(document.getElementById('convAtivoRegraCentro_'+eid+'_'+i)?.value||'').trim();
   const taxaDepreciacao=(document.getElementById('convAtivoRegraTaxa_'+eid+'_'+i)?.value||'').trim();
-  const valorResidualRaw=(document.getElementById('convAtivoRegraResidual_'+eid+'_'+i)?.value||'').trim();
-  const valorResidual=valorResidualRaw?_convAtivoFmtValorTxt(_convAtivoParseValor(valorResidualRaw)):'';
   const ignorarIcms=!!document.getElementById('convAtivoRegraIgnoraIcms_'+eid+'_'+i)?.checked;
   const ignorarPis=!!document.getElementById('convAtivoRegraIgnoraPis_'+eid+'_'+i)?.checked;
   const ignorarCofins=!!document.getElementById('convAtivoRegraIgnoraCofins_'+eid+'_'+i)?.checked;
   if(!ncm||!contaPatrimonial||!centroCusto||!taxaDepreciacao){toast('Preencha todos os campos.','err');return;}
-  regras[i]={ncm,contaPatrimonial,centroCusto,taxaDepreciacao,valorResidual,ignorarIcms,ignorarPis,ignorarCofins};
+  regras[i]={ncm,contaPatrimonial,centroCusto,taxaDepreciacao,ignorarIcms,ignorarPis,ignorarCofins};
   setConvAtivoRegras(eid,regras);
   _convAtivoEditandoRegra[eid]=null;
   renderConvAtivoLista();
@@ -8998,6 +9023,11 @@ function _convAtivoGerarResultado(eid,nfsInfo,regras){
   nfsInfo.forEach(nfInfo=>{
     nfInfo.itens.forEach(item=>{
       const r=_convAtivoClassificar(item.ncm,regras);
+      // Valor Residual só repete quando Valor do Produto + Conta + Centro +
+      // Taxa baterem todos com uma combinação já informada antes — não é uma
+      // propriedade do NCM, já que o mesmo NCM pode cobrir itens de valores
+      // bem diferentes.
+      const valorResidual=r?_convAtivoBuscarResidual(eid,item.valorUnitario,r.contaPatrimonial,r.centroCusto,r.taxaDepreciacao):'';
       const qtdTotal=Math.max(1,Math.round(item.qtd));
       const valoresDistribuidos=_convAtivoDistribuirValores(item.valorTotal??item.valorUnitario*item.qtd,qtdTotal);
       for(let i=1;i<=qtdTotal;i++){
@@ -9011,7 +9041,7 @@ function _convAtivoGerarResultado(eid,nfsInfo,regras){
             eid,codigoBem,descricao:item.descricao,dataAquisicao:nfInfo.dataEmissao,
             contaPatrimonial:r?r.contaPatrimonial:'',centroCusto:r?r.centroCusto:'',
             historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:r?r.taxaDepreciacao:'',ncm:item.ncm,
-            valorResidual:r?r.valorResidual:''
+            valorResidual
           })
         });
       }
@@ -9172,6 +9202,9 @@ function salvarEdicaoBemConvAtivo(eid,codigoBem){
     const raw=el.value;
     bem.valores[campo.idx]=(CONV_ATIVO_NUMERICOS_IDX.includes(campo.idx)&&raw.trim())?_convAtivoFmtValorTxt(_convAtivoParseValor(raw)):raw;
   });
+  // Editar o Vlr Residual na mão também ensina a combinação (Valor do
+  // Produto + Conta + Centro + Taxa) pra próxima vez repetir sozinho.
+  if(bem.valores[27])_convAtivoRegistrarResidual(eid,bem.valores[14],bem.valores[6],bem.valores[7],bem.valores[37],bem.valores[27]);
   setConvAtivoBens(eid,bens);
   _convAtivoEditandoBem[eid]=null;
   renderConvAtivoLista();
