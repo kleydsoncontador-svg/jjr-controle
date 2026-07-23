@@ -7345,7 +7345,10 @@ const LUC_TOPS = [
 // Itens que ficam no rodapé da navegação, depois dos trimestres/meses
 const LUC_BOTTOM_ITEMS = [
   {id:'lucros2025',   label:'Lucros / Dividendos 2025'},
+  {id:'lucrosFiscal', label:'Lucros / Dividendos Fiscal'},
 ];
+// Mapeia trimestre (1-4) -> mês final (usado pro % do sócio na distribuição)
+const LUC_FISCAL_MES_FINAL = {1:'03',2:'06',3:'09',4:'12'};
 const LUC_TOP_GRID_IDS = ['lpm_acum','lpm','ajustes_cred','ajustes_dev','creditado_ant','saldo_ant','saldo'];
 const LUC_TOP_AUTO_IDS = ['creditado_ant','saldo_ant','saldo']; /* calculados automaticamente (read-only) */
 const LUC_TRIMS = [
@@ -7389,7 +7392,7 @@ function lucGoSub(id){
   var isGrid=LUC_TOP_GRID_IDS.indexOf(id)>=0;
   var bPerc=document.getElementById('lucBtnsPerc');
   var bGrid=document.getElementById('lucBtnsGrid');
-  if(bPerc) bPerc.style.display=(isGrid||id==='lucros2025')?'none':'';
+  if(bPerc) bPerc.style.display=(isGrid||id==='lucros2025'||id==='lucrosFiscal')?'none':'';
   if(bGrid) bGrid.style.display=isGrid?'flex':'none';
   renderLucros();
 }
@@ -15524,6 +15527,7 @@ function renderLucros(){
   var el=document.getElementById('lucContent');
   if(!el) return;
   if(lucCurrentSub==='lucros2025'){ lucRenderLucros2025(el); return; }
+  if(lucCurrentSub==='lucrosFiscal'){ lucRenderLucrosFiscal(el); return; }
   var busca=((document.getElementById('lucBusca')||{}).value||'').toLowerCase().trim();
   var emps=lucEmps().filter(function(e){ return !busca||(e.nome||'').toLowerCase().includes(busca)||(e.cnpj||'').includes(busca); });
   if(!emps.length){
@@ -15721,6 +15725,163 @@ function lucSalvarConta2025(inp){
   if(!dados[sid])dados[sid]={saldoInicial:0,meses:{},conta:''};
   dados[sid].conta=val;
   setLuc2025Dados(eid,dados);
+}
+
+// ── Lucros / Dividendos Fiscal ──────────────────────────────────────────────
+// Controle trimestral: por empresa, informa a Receita do trimestre e as
+// deduções (PIS, COFINS, CSLL, IRPJ); o Resultado (Receita − deduções) é
+// distribuído a cada sócio de acordo com o % dele no último mês do
+// trimestre (mesmo % de Percentual de Participação — Mar/Jun/Set/Dez).
+function getLucFiscalEmpresas(){ return S.g('lucFiscal_empresas')||[]; }
+function setLucFiscalEmpresas(arr){ S.s('lucFiscal_empresas',arr); }
+function getLucFiscalDados(eid,ano,trim){ return S.g('lucFiscal_dados_'+ano+'_'+trim+'_'+eid)||{receita:0,pis:0,cofins:0,csll:0,irpj:0}; }
+function setLucFiscalDados(eid,ano,trim,data){ S.s('lucFiscal_dados_'+ano+'_'+trim+'_'+eid,data); }
+function _lucFiscalResultado(d){ return (parseFloat(d.receita)||0)-(parseFloat(d.pis)||0)-(parseFloat(d.cofins)||0)-(parseFloat(d.csll)||0)-(parseFloat(d.irpj)||0); }
+function lucRenderLucrosFiscal(el){
+  var eids=getLucFiscalEmpresas();
+  var busca=((document.getElementById('lucBusca')||{}).value||'').toLowerCase().trim();
+  var todasEmps=S.emps().filter(function(e){
+    var tipo=(e.fechamentoStatus&&e.fechamentoStatus.tipo)||'ativo';
+    return tipo!=='saida'&&tipo!=='extincao';
+  });
+  var disponiveis=todasEmps.filter(function(e){return eids.indexOf(String(e.eid))<0;})
+    .sort(function(a,b){return Number(a.eid||0)-Number(b.eid||0);});
+
+  var html='<div class="hide-in-print" style="padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--border)">'
+    +'<label style="font-weight:600;color:#1E3558;display:block;margin-bottom:8px;font-size:12.5px">Adicionar empresa:</label>'
+    +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+    +'<select class="si" id="lucFiscalEmpresaSel" style="min-width:280px">'
+    +'<option value="">— Escolha uma empresa —</option>'
+    +disponiveis.map(function(e){return '<option value="'+esc(e.eid)+'">'+esc(e.eid)+' - '+esc(e.nome)+'</option>';}).join('')
+    +'</select>'
+    +'<button class="btn bp bsm" onclick="lucAdicionarEmpresaFiscal()">+ Adicionar Empresa</button>'
+    +'</div></div>';
+
+  var empsAdicionadas=eids.map(function(eid){return todasEmps.find(function(e){return String(e.eid)===String(eid);});}).filter(Boolean);
+  if(_empresaGlobal){
+    var filtrado=empsAdicionadas.some(function(e){return String(e.eid)===String(_empresaGlobal);});
+    empsAdicionadas=filtrado?empsAdicionadas.filter(function(e){return String(e.eid)===String(_empresaGlobal);}):[];
+    if(!filtrado){
+      var empSel=S.emps().find(function(e){return String(e.eid)===String(_empresaGlobal);});
+      el.innerHTML=html+'<div style="text-align:center;color:var(--slate);padding:30px 10px;font-size:13px">'+(empSel?esc(empSel.nome):'A empresa selecionada')+' não está nesta lista. <button class="btn bo bsm" onclick="limparEmpresaGlobal()" style="margin-top:8px">Ver todas as empresas</button></div>';
+      return;
+    }
+  }
+  if(busca){
+    empsAdicionadas=empsAdicionadas.filter(function(e){return (e.nome||'').toLowerCase().includes(busca)||(e.cnpj||'').includes(busca);});
+  }
+  if(!empsAdicionadas.length){
+    html+='<div style="text-align:center;color:var(--slate);padding:30px 10px;font-size:13px">Nenhuma empresa adicionada ainda. Escolha uma empresa acima e clique em "Adicionar Empresa".</div>';
+    el.innerHTML=html;
+    return;
+  }
+  empsAdicionadas.forEach(function(e){
+    html+='<div style="border:1px solid var(--border);border-radius:var(--r2);margin-bottom:12px;overflow:hidden">'
+      +'<div class="luc-emp-hdr">'
+      +'<div style="display:flex;align-items:center;gap:10px">'
+      +'<div>'+(e.eid?'<span class="idtag" style="margin-right:8px">'+e.eid+'</span>':'')+'<b>'+esc(e.nome)+'</b>'
+      +(e.cnpj?'<span style="font-family:var(--mono);font-size:11px;color:var(--slate);margin-left:8px">'+esc(e.cnpj)+'</span>':'')
+      +'</div></div>'
+      +'<div><button class="btn bo bsm" style="font-size:11px;border-color:var(--red);color:var(--red)" onclick="lucRemoverEmpresaFiscal(\''+e.eid+'\')">Remover</button></div>'
+      +'</div>'
+      +'<div id="lucFiscalEmpBody_'+e.eid+'">'+lucRenderFiscalEmpBody(e.eid)+'</div>'
+      +'</div>';
+  });
+  el.innerHTML=html;
+}
+function lucAdicionarEmpresaFiscal(){
+  var sel=document.getElementById('lucFiscalEmpresaSel');
+  var eid=sel?sel.value:'';
+  if(!eid){toast('Selecione uma empresa.','warn');return;}
+  var eids=getLucFiscalEmpresas();
+  if(eids.indexOf(eid)>=0){toast('Empresa já adicionada.','info');return;}
+  eids.push(eid);
+  setLucFiscalEmpresas(eids);
+  renderLucros();
+  toast('Empresa adicionada!','ok');
+}
+function lucRemoverEmpresaFiscal(eid){
+  if(!confirm('Remover esta empresa da lista de Lucros / Dividendos Fiscal? Os valores já lançados continuam salvos, só deixam de aparecer aqui.'))return;
+  var eids=getLucFiscalEmpresas().filter(function(x){return x!==eid;});
+  setLucFiscalEmpresas(eids);
+  renderLucros();
+  toast('Empresa removida.','ok');
+}
+function lucRenderFiscalEmpBody(eid){
+  var ano=lucCurrentAno||'2026';
+  var trims=[1,2,3,4];
+  var socios=lucSocGet(eid);
+
+  var linhas=[
+    {campo:'receita', label:'Receita do Trimestre'},
+    {campo:'pis',     label:'(-) PIS'},
+    {campo:'cofins',  label:'(-) COFINS'},
+    {campo:'csll',    label:'(-) CSLL'},
+    {campo:'irpj',    label:'(-) IRPJ'},
+  ];
+  var thStyle='padding:7px 10px;font-size:11px;font-weight:700;text-align:right;white-space:nowrap;background:var(--ink2);color:#fff;border-bottom:1px solid var(--border)';
+  var thStyleL=thStyle+';text-align:left';
+  var h='<div style="overflow-x:auto;padding:0 16px 6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px">'
+    +'<thead><tr><th style="'+thStyleL+'">Trimestre</th>';
+  trims.forEach(function(t){ h+='<th style="'+thStyle+'">'+t+'º Trim/'+ano+'</th>'; });
+  h+='</tr></thead><tbody>';
+  linhas.forEach(function(linha){
+    h+='<tr><td style="padding:6px 10px;font-size:12px;color:var(--slate)">'+linha.label+'</td>';
+    trims.forEach(function(t){
+      var d=getLucFiscalDados(eid,ano,t);
+      var v=parseFloat(d[linha.campo])||0;
+      h+='<td style="padding:4px 6px"><input class="luc-val-input" style="width:100%;text-align:right" value="'+(v!==0?lucFmt2025(v):'')+'"'
+        +' data-eid="'+esc(eid)+'" data-trim="'+t+'" data-campo="'+linha.campo+'"'
+        +' onblur="lucSalvarFiscalCampo(this)" onkeydown="if(event.key===\'Enter\')this.blur()" placeholder="0,00"></td>';
+    });
+    h+='</tr>';
+  });
+  h+='<tr style="border-top:2px solid var(--border);background:var(--bg)"><td style="padding:6px 10px;font-size:12px;font-weight:700;color:var(--ink)">Resultado do Trimestre</td>';
+  trims.forEach(function(t){
+    var d=getLucFiscalDados(eid,ano,t);
+    var res=_lucFiscalResultado(d);
+    h+='<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-weight:700;color:'+(res<0?'var(--red)':'var(--ink)')+'">'+lucFmt2025(res)+'</td>';
+  });
+  h+='</tr></tbody></table></div>';
+
+  if(!socios.length){
+    h+='<div style="padding:0 16px 14px;color:var(--slate);font-size:12.5px">Nenhum sócio cadastrado em "Percentual de Participação".</div>';
+    return h;
+  }
+  h+='<div style="overflow-x:auto;padding:0 16px 14px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px">'
+    +'<thead><tr><th style="'+thStyleL+'">Sócio / Acionista</th><th style="'+thStyleL+'">CPF / CNPJ</th>';
+  trims.forEach(function(t){ h+='<th style="'+thStyle+'">'+t+'º Trim/'+ano+'</th>'; });
+  h+='</tr></thead><tbody>';
+  socios.forEach(function(soc,i){
+    var bg=i%2===0?'var(--white)':'var(--bg)';
+    h+='<tr style="background:'+bg+'"><td style="padding:6px 10px">'+esc(soc.nome)+'</td>'
+      +'<td style="padding:6px 10px;font-family:var(--mono);font-size:11px;color:var(--slate)">'+fmtDoc(soc.doc)+'</td>';
+    trims.forEach(function(t){
+      var mesFinal=LUC_FISCAL_MES_FINAL[t];
+      var pctKey=ano+'-'+mesFinal;
+      var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
+      var d=getLucFiscalDados(eid,ano,t);
+      var res=_lucFiscalResultado(d);
+      var distrib=res*(parseFloat(pct)||0)/100;
+      h+='<td style="padding:6px 10px;text-align:right">'
+        +'<div style="font-family:var(--mono);font-weight:600;color:'+(distrib<0?'var(--red)':'var(--ink)')+'">'+lucFmt2025(distrib)+'</div>'
+        +'<div style="font-size:10px;color:var(--slate)">'+lucFmtP(pct)+'%</div>'
+        +'</td>';
+    });
+    h+='</tr>';
+  });
+  h+='</tbody></table></div>';
+  return h;
+}
+function lucSalvarFiscalCampo(inp){
+  var eid=inp.dataset.eid, trim=parseInt(inp.dataset.trim,10), campo=inp.dataset.campo;
+  var ano=lucCurrentAno||'2026';
+  var val=parseFloat((inp.value||'0').replace(/\./g,'').replace(',','.'))||0;
+  var d=getLucFiscalDados(eid,ano,trim);
+  d[campo]=val;
+  setLucFiscalDados(eid,ano,trim,d);
+  var container=document.getElementById('lucFiscalEmpBody_'+eid);
+  if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
 }
 
 function lucRenderPlaceholder(el, sub, emps){
