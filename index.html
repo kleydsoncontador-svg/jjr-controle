@@ -8366,11 +8366,13 @@ function _convItauValorTotal(t){
   return _convItauTemParcelaTotal(t)?t.valor*t.parcelaTotal:t.valor;
 }
 // Duas transações podem ter a mesma descrição (ex: um estorno negativo e uma
-// cobrança positiva do mesmo fornecedor) — pega especificamente a que ainda
-// não bate com nenhuma regra existente, não só a primeira com aquele texto.
-function _convItauTransacaoPendente(eid,pendentes,desc){
+// cobrança positiva do mesmo fornecedor) — cada sinal (débito/crédito) é uma
+// pendência à parte (precisam de regras diferentes), então filtra também
+// pelo sinal esperado, não só pelo texto, senão as duas pendências do mesmo
+// fornecedor acabavam apontando pra mesma transação.
+function _convItauTransacaoPendente(eid,pendentes,desc,sinal){
   const regras=[...getConvItauRegras(eid),...(_convItauRegrasSessao[eid]||[])];
-  const candidatos=pendentes.transacoes.filter(t=>t.descricao===desc);
+  const candidatos=pendentes.transacoes.filter(t=>t.descricao===desc&&(!sinal||(_convItauValorTotal(t)<0?'credito':'debito')===sinal));
   return candidatos.find(t=>!_convItauClassificar(t.descricao,regras,_convItauValorTotal(t)))||candidatos[0];
 }
 function _convItauDataUtilizada(dataStr,mesFechamento){
@@ -8449,14 +8451,24 @@ async function processarConvItau(eid){
     }
 
     const regras=getConvItauRegras(eid);
+    // Débito e crédito do mesmo fornecedor precisam de regras separadas (ver
+    // _convItauClassificar), então cada combinação descrição+sinal que ainda
+    // não tem regra é uma pendência à parte — senão um fornecedor com as duas
+    // (ex: uma cobrança normal e um estorno) só era perguntado uma vez, e a
+    // outra ficava sem conta pra sempre, sem chance de ser classificada.
     const naoClassificados=new Map();
     relevantes.forEach(t=>{
-      const r=_convItauClassificar(t.descricao,regras,t.valor);
-      if(!r&&!naoClassificados.has(t.descricao))naoClassificados.set(t.descricao,true);
+      const valorTotal=_convItauValorTotal(t);
+      const r=_convItauClassificar(t.descricao,regras,valorTotal);
+      if(!r){
+        const sinal=valorTotal<0?'credito':'debito';
+        const chave=t.descricao+'|'+sinal;
+        if(!naoClassificados.has(chave))naoClassificados.set(chave,{desc:t.descricao,sinal});
+      }
     });
 
     if(naoClassificados.size){
-      _convItauPendentes[eid]={mesFechamento,transacoes:relevantes,descricoes:[...naoClassificados.keys()]};
+      _convItauPendentes[eid]={mesFechamento,transacoes:relevantes,descricoes:[...naoClassificados.values()]};
       _convItauRegrasSessao[eid]=[];
       renderConvItauLista();
       _convItauSetStatus(eid,naoClassificados.size+' fornecedor(es) novo(s) encontrados — classifique abaixo para gerar o lançamento.','');
@@ -8479,8 +8491,9 @@ function renderConvItauPendentesForm(eid,pendentes){
   let html=`<div style="margin-top:12px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;padding:12px" onclick="event.stopPropagation()">
     <div style="font-size:12px;font-weight:700;color:#92400E;margin-bottom:8px">⚠ Fornecedores novos — informe a conta de cada um</div>
     <div style="font-size:11px;color:#92400E;margin-bottom:10px">A regra vale por "contém no texto": se preferir, deixe só um trecho do nome (ex: "JOSE SILVA P" já cobre "JOSE SILVA PIRES" e "JOSE SILVA PI" em meses diferentes). Valores negativos na fatura (ex: estorno) entram como crédito dessa conta, não débito — e uma regra salva para débito não vale automaticamente para crédito (e vice-versa). Salve cada linha individualmente; conforme você salva, ela sai da lista.</div>`;
-  descricoes.forEach((desc,i)=>{
-    const transacao=_convItauTransacaoPendente(eid,pendentes,desc);
+  descricoes.forEach((item,i)=>{
+    const desc=item.desc, sinalItem=item.sinal;
+    const transacao=_convItauTransacaoPendente(eid,pendentes,desc,sinalItem);
     const valorParcela=transacao?transacao.valor:0;
     const temParcelas=_convItauTemParcelaTotal(transacao);
     const valorTotal=_convItauValorTotal(transacao);
@@ -8508,8 +8521,9 @@ function renderConvItauPendentesForm(eid,pendentes){
 function salvarClassificacaoLinhaConvItau(eid,i){
   const pendentes=_convItauPendentes[eid];
   if(!pendentes)return;
-  const desc=pendentes.descricoes[i];
-  if(desc===undefined)return;
+  const item=pendentes.descricoes[i];
+  if(item===undefined)return;
+  const desc=item.desc, sinalItem=item.sinal;
   const chave=(document.getElementById('convItauChave_'+eid+'_'+i)?.value||'').trim();
   const contaDebito=(document.getElementById('convItauContaDeb_'+eid+'_'+i)?.value||'').trim();
   const historicoPersonalizado=(document.getElementById('convItauHist_'+eid+'_'+i)?.value||'').trim();
@@ -8517,7 +8531,7 @@ function salvarClassificacaoLinhaConvItau(eid,i){
   const usarComoRegra=!!document.getElementById('convItauUsarRegra_'+eid+'_'+i)?.checked;
   if(!chave||!contaDebito){toast('Preencha fornecedor e conta.','err');return;}
 
-  const transacao=_convItauTransacaoPendente(eid,pendentes,desc);
+  const transacao=_convItauTransacaoPendente(eid,pendentes,desc,sinalItem);
   const valorBase=_convItauValorTotal(transacao);
   let valorOverride=null;
   if(overrideRaw){
@@ -8543,14 +8557,14 @@ function salvarClassificacaoLinhaConvItau(eid,i){
   }
 
   // Reaplica as regras (incluindo a que acabou de ser salva) contra todas as
-  // descrições ainda pendentes — sem isso, outro fornecedor que já "contém"
-  // o mesmo trecho ficava preso pedindo classificação de novo, mesmo já
-  // coberto pela regra recém-criada.
+  // pendências restantes — sem isso, outro fornecedor (ou o outro sinal do
+  // mesmo fornecedor) que já "contém" o mesmo trecho ficava preso pedindo
+  // classificação de novo, mesmo já coberto pela regra recém-criada.
   const regrasAtuais=[...getConvItauRegras(eid),...(_convItauRegrasSessao[eid]||[])];
-  pendentes.descricoes=pendentes.descricoes.filter(d=>{
-    if(d===desc)return false;
-    const t=_convItauTransacaoPendente(eid,pendentes,d);
-    return !_convItauClassificar(d,regrasAtuais,t?_convItauValorTotal(t):0);
+  pendentes.descricoes=pendentes.descricoes.filter(it=>{
+    if(it.desc===desc&&it.sinal===sinalItem)return false;
+    const t=_convItauTransacaoPendente(eid,pendentes,it.desc,it.sinal);
+    return !_convItauClassificar(it.desc,regrasAtuais,t?_convItauValorTotal(t):0);
   });
 
   if(!pendentes.descricoes.length){
