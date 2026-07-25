@@ -109,7 +109,10 @@ td{padding:9px 13px;vertical-align:middle}
 /* MODAL */
 .mb{display:none;position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:300;align-items:center;justify-content:center;cursor:pointer}
 .mb.open{display:flex}
-.modal{background:var(--white);border-radius:var(--r2);padding:24px;width:90%;max-width:560px;max-height:90vh;overflow-y:auto;box-shadow:var(--shadow-md)}
+.modal{background:var(--white);border-radius:var(--r2);padding:24px;width:90%;max-width:560px;max-height:90vh;overflow-y:auto;box-shadow:var(--shadow-md);cursor:default}
+.modal .mt{cursor:move;user-select:none}
+.modal .mt:active{cursor:grabbing}
+.modal.dragging{box-shadow:0 20px 50px rgba(0,0,0,.35)}
 .mt{font-size:16px;font-weight:700;color:var(--ink);margin-bottom:16px}
 .ma{display:flex;gap:10px;justify-content:flex-end;margin-top:16px;padding-top:16px;border-top:1px solid var(--border)}
 /* STEPS */
@@ -3032,6 +3035,8 @@ const CORES_GRUPO=['#10B981','#3B82F6','#8B5CF6','#F97316','#EC4899','#06B6D4','
 
 function openModal(id){
   ca2PausarSync();
+  var backdrop0=document.getElementById(id);
+  if(backdrop0){var m0=backdrop0.querySelector('.modal'); if(m0)resetModalPosition(m0);}
   if(id==='mEmp'){openModal_emp(null);return}
   if(id==='mGrupo'){openModal_grupo(null);return}
   if(id==='mUser'){openModal_user(null);return}
@@ -3058,6 +3063,45 @@ function setupBackdropClose(){
       if(e.target.id==='mRazao')razaoReset();
     }
   });
+}
+
+// Modais arrastáveis: clique e arraste pela barra de título (.mt) para tirar
+// o modal do centro da tela (ex: consultar valores na tabela por trás enquanto
+// preenche um ajuste). Um único listener delegado cobre todos os modais.
+function setupModalDrag(){
+  var drag=null;
+  document.addEventListener('mousedown',function(e){
+    var mt=e.target.closest && e.target.closest('.mt');
+    if(!mt)return;
+    var modal=mt.closest('.modal');
+    if(!modal)return;
+    var rect=modal.getBoundingClientRect();
+    drag={modal:modal, offsetX:e.clientX-rect.left, offsetY:e.clientY-rect.top};
+    modal.style.position='fixed';
+    modal.style.margin='0';
+    modal.style.left=rect.left+'px';
+    modal.style.top=rect.top+'px';
+    modal.classList.add('dragging');
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove',function(e){
+    if(!drag)return;
+    var x=Math.max(0,Math.min(e.clientX-drag.offsetX, window.innerWidth-60));
+    var y=Math.max(0,Math.min(e.clientY-drag.offsetY, window.innerHeight-40));
+    drag.modal.style.left=x+'px';
+    drag.modal.style.top=y+'px';
+  });
+  document.addEventListener('mouseup',function(){
+    if(drag){drag.modal.classList.remove('dragging');drag=null;}
+  });
+}
+function resetModalPosition(modalEl){
+  if(!modalEl)return;
+  modalEl.style.position='';
+  modalEl.style.left='';
+  modalEl.style.top='';
+  modalEl.style.margin='';
+  modalEl.classList.remove('dragging');
 }
 
 function openModal_grupo(id){
@@ -4576,6 +4620,24 @@ function lcsLen(a, b){
   return best;
 }
 
+// Igual a lcsLen, mas retorna o texto do trecho comum em vez do tamanho —
+// usado só na hora de registrar o "critério do match" para exibição (não no
+// laço de comparação, que continua usando lcsLen puro por performance).
+function lcsSubstrText(a, b){
+  var m=a.length, n=b.length, best=0, endA=0;
+  var prev=new Array(n+1).fill(0);
+  for(var i=1;i<=m;i++){
+    var cur=new Array(n+1).fill(0);
+    for(var j=1;j<=n;j++){
+      if(a[i-1]===b[j-1]){
+        cur[j]=prev[j-1]+1;
+        if(cur[j]>best){best=cur[j];endA=i;}
+      }
+    }
+    prev=cur;
+  }
+  return a.slice(endA-best, endA).trim();
+}
 
 function conciliarConta(lancamentos, tipo, maxDias) {
   // lancamentos: [{data, numero, historico, debito, credito, saldo, _idx}]
@@ -4595,6 +4657,7 @@ function conciliarConta(lancamentos, tipo, maxDias) {
       status: 'aberto',       // aberto | baixado_exato | baixado_aprox | manual
       matchIdx: -1,
       matchTipo: '',
+      matchDetalhe: '',       // dado concreto que fez o match (nº doc, trecho de texto, valor)
       residual: 0
     };
   });
@@ -4652,14 +4715,16 @@ function conciliarConta(lancamentos, tipo, maxDias) {
 
       if (diff < 0.01) {
         // Exato
-        origem.status = 'baixado_exato'; origem.matchIdx = j; origem.matchTipo = 'Exato (doc)';
-        baixa.status  = 'baixado_exato'; baixa.matchIdx  = i; baixa.matchTipo  = 'Exato (doc)';
+        var docComum1 = numsOrigem.filter(function(n){ return numsCache[j].indexOf(n) >= 0; })[0] || '';
+        origem.status = 'baixado_exato'; origem.matchIdx = j; origem.matchTipo = 'Exato (doc)'; origem.matchDetalhe = 'Doc. '+docComum1;
+        baixa.status  = 'baixado_exato'; baixa.matchIdx  = i; baixa.matchTipo  = 'Exato (doc)'; baixa.matchDetalhe  = 'Doc. '+docComum1;
         used[i] = true; used[j] = true;
         break;
       } else if (pct <= 0.05) {
         // Aproximado por documento
-        origem.status = 'baixado_aprox'; origem.matchIdx = j; origem.matchTipo = 'Aprox. (doc)'; origem.residual = diff;
-        baixa.status  = 'baixado_aprox'; baixa.matchIdx  = i; baixa.matchTipo  = 'Aprox. (doc)'; baixa.residual  = diff;
+        var docComum2 = numsOrigem.filter(function(n){ return numsCache[j].indexOf(n) >= 0; })[0] || '';
+        origem.status = 'baixado_aprox'; origem.matchIdx = j; origem.matchTipo = 'Aprox. (doc)'; origem.residual = diff; origem.matchDetalhe = 'Doc. '+docComum2;
+        baixa.status  = 'baixado_aprox'; baixa.matchIdx  = i; baixa.matchTipo  = 'Aprox. (doc)'; baixa.residual  = diff; baixa.matchDetalhe  = 'Doc. '+docComum2;
         used[i] = true; used[j] = true;
         break;
       }
@@ -4715,6 +4780,7 @@ function conciliarConta(lancamentos, tipo, maxDias) {
         result[k].matchTipo = tipoMatch;
         result[k].matchGroup = allIdxs.filter(function(x){ return x !== k; });
         result[k].matchIdx = result[k].matchGroup[0];
+        result[k].matchDetalhe = 'Doc. '+doc+' ('+allIdxs.length+' lanc.)';
         if (tipoMatch === 'Aprox. (parc.)') result[k].residual = diff;
         used[k] = true;
       });
@@ -4771,11 +4837,13 @@ function conciliarConta(lancamentos, tipo, maxDias) {
           var soma = grupo.reduce(function(s,k){ return s + result[k][outroField]; }, 0);
           if (Math.abs(alvo - soma) < 0.01) {
             var tipoMatch = grupo.length > 1 ? 'Exato (texto, parc.)' : 'Exato (texto)';
-            um.status = 'baixado_exato'; um.matchTipo = tipoMatch; um.matchGroup = grupo.slice(); um.matchIdx = grupo[0];
+            var trecho = lcsSubstrText(norm[oi], norm[grupo[0]]);
+            var detalheTexto = 'Texto: "'+trecho+'"';
+            um.status = 'baixado_exato'; um.matchTipo = tipoMatch; um.matchGroup = grupo.slice(); um.matchIdx = grupo[0]; um.matchDetalhe = detalheTexto;
             used[oi] = true;
             grupo.forEach(function(k){
               result[k].status = 'baixado_exato'; result[k].matchTipo = tipoMatch;
-              result[k].matchGroup = [oi]; result[k].matchIdx = oi;
+              result[k].matchGroup = [oi]; result[k].matchIdx = oi; result[k].matchDetalhe = detalheTexto;
               used[k] = true;
             });
             return;
@@ -4814,8 +4882,9 @@ function conciliarConta(lancamentos, tipo, maxDias) {
       if (diff < 0.01) {
         var sim = similaridade(origem.historico, baixa.historico, numsCache[i], numsCache[j]);
         var tipo_match = sim >= 0.75 ? 'Exato (hist.)' : 'Exato (valor)';
-        origem.status = 'baixado_exato'; origem.matchIdx = j; origem.matchTipo = tipo_match;
-        baixa.status  = 'baixado_exato'; baixa.matchIdx  = i; baixa.matchTipo  = tipo_match;
+        var detalheV2 = 'Valor '+fmt(origem[origemField]);
+        origem.status = 'baixado_exato'; origem.matchIdx = j; origem.matchTipo = tipo_match; origem.matchDetalhe = detalheV2;
+        baixa.status  = 'baixado_exato'; baixa.matchIdx  = i; baixa.matchTipo  = tipo_match; baixa.matchDetalhe  = detalheV2;
         used[i] = true; used[j] = true;
         break;
       }
@@ -4855,8 +4924,9 @@ function conciliarConta(lancamentos, tipo, maxDias) {
       }
       if (bestJ >= 0) {
         var baixaBest = result[bestJ];
-        origem2.status = 'baixado_aprox'; origem2.matchIdx = bestJ; origem2.matchTipo = 'Aprox. (val)'; origem2.residual = bestDiff;
-        baixaBest.status  = 'baixado_aprox'; baixaBest.matchIdx  = i2;     baixaBest.matchTipo  = 'Aprox. (val)'; baixaBest.residual  = bestDiff;
+        var detalheV3 = 'Valor '+fmt(origem2[origemField])+' (dif. '+fmt(bestDiff)+')';
+        origem2.status = 'baixado_aprox'; origem2.matchIdx = bestJ; origem2.matchTipo = 'Aprox. (val)'; origem2.residual = bestDiff; origem2.matchDetalhe = detalheV3;
+        baixaBest.status  = 'baixado_aprox'; baixaBest.matchIdx  = i2;     baixaBest.matchTipo  = 'Aprox. (val)'; baixaBest.residual  = bestDiff; baixaBest.matchDetalhe = detalheV3;
         used[i2] = true; used[bestJ] = true;
       }
     }
@@ -5041,10 +5111,38 @@ function marcarManual(mes, codigo, lancIdx) {
   if (!r || !r.lancamentos[lancIdx]) return;
   var l = r.lancamentos[lancIdx];
   if (l.status === 'manual') {
-    l.status = 'aberto'; l.matchTipo = '';
+    l.status = 'aberto'; l.matchTipo = ''; l.matchDetalhe = '';
   } else {
-    l.status = 'manual'; l.matchTipo = 'Manual';
+    l.status = 'manual'; l.matchTipo = 'Manual'; l.matchDetalhe = 'Marcado manualmente';
   }
+  recalcConciliacaoConta(comp, mes, codigo);
+  S.saveComp(curEmpId, comp);
+}
+
+// Reabre um lançamento (qualquer status conciliado: exato, aproximado ou manual)
+// e segue os parceiros de conciliação (matchIdx / matchGroup), reabrindo-os
+// também — evita deixar um lado "conciliado" apontando para um parceiro que
+// virou "aberto" sozinho. Retorna quantos lançamentos foram reabertos.
+function _reabrirLancPar(lancs, idx, seen){
+  seen = seen || {};
+  if (seen[idx]) return 0;
+  var l = lancs[idx];
+  if (!l || l.status === 'aberto') return 0;
+  seen[idx] = true;
+  var partners = [];
+  if (l.matchGroup && l.matchGroup.length) partners = partners.concat(l.matchGroup);
+  else if (l.matchIdx >= 0) partners.push(l.matchIdx);
+  l.status = 'aberto'; l.matchTipo = ''; l.matchDetalhe = ''; l.matchIdx = -1; l.matchGroup = null; l.residual = 0;
+  var count = 1;
+  partners.forEach(function(pi){ count += _reabrirLancPar(lancs, pi, seen); });
+  return count;
+}
+
+function reabrirLancamento(mes, codigo, lancIdx){
+  var comp = S.comp(curEmpId);
+  var r = comp[mes] && comp[mes].conciliacao && comp[mes].conciliacao[codigo];
+  if (!r || !r.lancamentos[lancIdx]) return;
+  _reabrirLancPar(r.lancamentos, lancIdx);
   recalcConciliacaoConta(comp, mes, codigo);
   S.saveComp(curEmpId, comp);
 }
@@ -5122,10 +5220,10 @@ function exportarLedgerFiltrado(){
 
   if(!rows.length&&!saIncluded){toast('Nenhum lançamento para exportar com os filtros atuais','err');return}
 
-  var aoa=[['Data','Número','Histórico','Cta.C.Part.','Débito','Crédito','Saldo','Conciliação']];
+  var aoa=[['Data','Número','Histórico','Cta.C.Part.','Débito','Crédito','Saldo','Conciliação','Critério do Match']];
 
   if(saIncluded){
-    aoa.push(['','','SALDO ANTERIOR','','','',sa,saConciliado?'Conciliado':'Em aberto']);
+    aoa.push(['','','SALDO ANTERIOR','','','',sa,saConciliado?'Conciliado':'Em aberto','']);
   }
 
   rows.forEach(function(r){
@@ -5142,13 +5240,14 @@ function exportarLedgerFiltrado(){
       l.ctapart||'',
       l.debito||0,
       l.credito||0,
-      (l.saldo!==undefined&&l.saldo!==null)?l.saldo:'',
-      badgeTxt
+      (r.saldoCalc!==undefined&&r.saldoCalc!==null)?r.saldoCalc:'',
+      badgeTxt,
+      r.matchDetalhe||''
     ]);
   });
 
   var ws=XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols']=[{wch:12},{wch:10},{wch:50},{wch:12},{wch:14},{wch:14},{wch:16},{wch:16}];
+  ws['!cols']=[{wch:12},{wch:10},{wch:50},{wch:12},{wch:14},{wch:14},{wch:16},{wch:16},{wch:24}];
   // Format currency columns (E,F,G = Débito, Crédito, Saldo)
   for(var ri=1; ri<aoa.length; ri++){
     ['E','F','G'].forEach(function(col){
@@ -5659,8 +5758,9 @@ function renderContaDetTabela(){
   var rows=lancs.map(function(l,i){
     var status=statuses?statuses[i].status:'aberto';
     var matchTipo=statuses?statuses[i].matchTipo:'';
+    var matchDetalhe=statuses?(statuses[i].matchDetalhe||''):'';
     var flaggedNat=flagsLanc[i]||null; // 'pagamento' | 'recebimento' | null
-    return {kind:'lanc', idx:i, l:l, status:status, matchTipo:matchTipo, flagged:!!flaggedNat, flaggedNat:flaggedNat};
+    return {kind:'lanc', idx:i, l:l, status:status, matchTipo:matchTipo, matchDetalhe:matchDetalhe, flagged:!!flaggedNat, flaggedNat:flaggedNat};
   });
 
   // Adjustment/reclassification rows
@@ -5675,6 +5775,27 @@ function renderContaDetTabela(){
 
   // Sort all rows by date
   rows.sort(function(a,b){return (a.l.data||'').localeCompare(b.l.data||'');});
+
+  // Saldo exibido por linha: para lançamentos do Razão, confia no saldo já
+  // trazido do arquivo importado (evita divergir por arredondamento acumulado
+  // em contas com milhares de linhas), mas desloca esse valor por um offset
+  // acumulado de ajustes/reclassificações — assim um ajuste passa a impactar
+  // visivelmente o saldo de todas as linhas seguintes, como no Razão real.
+  (function(){
+    var saldoBase=contaObj?contaObj.saldoAnterior:(razaoConta?razaoConta.saldoAnterior:0);
+    var ultimoSaldoRazao=saldoBase;
+    var offsetAjustes=0;
+    rows.forEach(function(r){
+      if(r.kind==='ajuste'){
+        offsetAjustes += (r.l.debito||0)-(r.l.credito||0);
+        r.saldoCalc = ultimoSaldoRazao + offsetAjustes;
+      } else {
+        var base=(r.l.saldo!==undefined&&r.l.saldo!==null)?r.l.saldo:(ultimoSaldoRazao+(r.l.debito||0)-(r.l.credito||0));
+        ultimoSaldoRazao=base;
+        r.saldoCalc = base + offsetAjustes;
+      }
+    });
+  })();
 
   var rowsFiltered=rows.filter(function(r){
     if(fData&&!(r.l.data||'').startsWith(fData))return false;
@@ -5727,7 +5848,7 @@ function renderContaDetTabela(){
     '<th><input type="checkbox" id="contaDetSelAll" onchange="toggleSelAllLanc(this)"></th>'+
     '<th>Data</th><th>Número</th><th>Histórico</th><th>Cta.C.Part.</th>'+
     '<th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th>'+
-    '<th>Conciliação</th>'+
+    '<th>Conciliação</th><th>Critério do Match</th>'+
     '<th style="text-align:center">Baixa em<br>Andamento <input type="checkbox" id="baixaAndamentoSelAll" onchange="toggleSelAllBaixaAndamento(this)" title="Marcar/desmarcar todos os itens filtrados" style="vertical-align:middle;margin-left:4px"></th>'+
     '<th style="text-align:center">Saldo<br>Anterior <input type="checkbox" id="saldoAnteriorSelAll" onchange="toggleSelAllSaldoAnteriorSel(this)" title="Marcar/desmarcar todos os itens filtrados" style="vertical-align:middle;margin-left:4px"></th>'+
     '<th></th>'+
@@ -5742,6 +5863,7 @@ function renderContaDetTabela(){
       '<td colspan="6">SALDO ANTERIOR</td>'+
       '<td class="tr">'+fmt(sa)+'</td>'+
       '<td><span class="concil-badge '+(saConciliado?'cb-exato':'cb-aberto')+'">'+(saConciliado?'Conciliado':'Em aberto')+'</span></td>'+
+      '<td></td>'+
       '<td style="text-align:center"><input type="checkbox" class="baixaAndChk" data-idx="SA"'+saBaixaAndCk+'></td>'+
       '<td style="text-align:center"><input type="checkbox" class="saldoAntSelChk" data-idx="SA"'+saSaldoAntSelCk+'></td>'+
       '<td></td></tr>';
@@ -5749,7 +5871,7 @@ function renderContaDetTabela(){
 
   // Lançamentos de meses anteriores em aberto
   if(prevRows.length){
-    html+='<tr style="background:#DBEAFE"><td colspan="12" style="padding:5px 13px;font-size:11px;font-weight:600;color:#1D4ED8;border-top:2px solid #BFDBFE;border-bottom:1px solid #BFDBFE">'+
+    html+='<tr style="background:#DBEAFE"><td colspan="13" style="padding:5px 13px;font-size:11px;font-weight:600;color:#1D4ED8;border-top:2px solid #BFDBFE;border-bottom:1px solid #BFDBFE">'+
       '↩ Lançamentos de meses anteriores em aberto ('+prevRows.length+' item'+( prevRows.length>1?'s':'')+' — constituem o Saldo Anterior)</td></tr>';
     prevRows.forEach(function(r){
       var l=r.l;
@@ -5764,6 +5886,7 @@ function renderContaDetTabela(){
         '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
         '<td class="mn tr"><b>'+(l.saldo!==undefined&&l.saldo!==null?fmt(l.saldo):'—')+'</b></td>'+
         '<td><span class="concil-badge cb-aberto">Em aberto</span></td>'+
+        '<td></td>'+
         '<td></td><td></td><td></td></tr>';
     });
   }
@@ -5790,8 +5913,9 @@ function renderContaDetTabela(){
       '<td class="mn">'+(l.ctapart||'—')+'</td>'+
       '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
       '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
-      '<td class="mn tr"><b>'+(l.saldo!==undefined&&l.saldo!==null?fmt(l.saldo):'—')+'</b></td>'+
+      '<td class="mn tr"><b>'+(r.saldoCalc!==undefined&&r.saldoCalc!==null?fmt(r.saldoCalc):'—')+'</b></td>'+
       '<td><span class="concil-badge '+badgeCls+'">'+badgeTxt+'</span></td>'+
+      '<td style="font-size:11px;color:var(--slate)">'+(r.matchDetalhe||'—')+'</td>'+
       '<td style="text-align:center">'+(r.kind==='lanc'?'<input type="checkbox" class="baixaAndChk" data-idx="'+r.idx+'" data-cre="'+(l.credito||0)+'" data-deb="'+(l.debito||0)+'"'+baixaAndCk+'>':'')+'</td>'+
       '<td style="text-align:center">'+(r.kind==='lanc'?'<input type="checkbox" class="saldoAntSelChk" data-idx="'+r.idx+'" data-cre="'+(l.credito||0)+'" data-deb="'+(l.debito||0)+'"'+saldoAntSelCk+'>':'')+'</td>'+
       '<td></td>'+
@@ -5886,8 +6010,12 @@ function renderContaDetTabela(){
       btnConcil.style.fontSize='10.5px';
       btnConcil.style.padding='3px 7px';
       btnConcil.textContent=r.status==='aberto'?'✓ Baixar':'↩';
-      btnConcil.title=r.status==='aberto'?'Marcar como conciliado manualmente':'Reabrir lançamento';
-      btnConcil.onclick=(function(idx){return function(){marcarManual(contaDetMes,contaDetCodigo,idx);renderContaDetHeader();renderContaDetTabela();};})(r.idx);
+      btnConcil.title=r.status==='aberto'?'Marcar como conciliado manualmente':'Reabrir lançamento (e o parceiro de conciliação, se houver)';
+      btnConcil.onclick=(function(idx,statusAtual){return function(){
+        if(statusAtual==='aberto')marcarManual(contaDetMes,contaDetCodigo,idx);
+        else reabrirLancamento(contaDetMes,contaDetCodigo,idx);
+        renderContaDetHeader();renderContaDetTabela();
+      };})(r.idx,r.status);
       actionTd.appendChild(btnConcil);
     }
 
@@ -6142,11 +6270,11 @@ function bulkConciliar(novoStatus){
       return;
     }
     if(!d.conciliacao||!d.conciliacao[contaDetCodigo])return;
-    var lc=d.conciliacao[contaDetCodigo].lancamentos[r.idx];
+    var lancs=d.conciliacao[contaDetCodigo].lancamentos;
+    var lc=lancs[r.idx];
     if(!lc)return;
-    if(novoStatus==='conciliar'&&lc.status==='aberto'){lc.status='manual';lc.matchTipo='Manual';changed++;}
-    else if(novoStatus==='abrir'&&lc.status!=='aberto'&&lc.status!=='baixado_exato'&&lc.status!=='baixado_aprox'){lc.status='aberto';lc.matchTipo='';changed++;}
-    else if(novoStatus==='abrir'&&lc.status==='manual'){lc.status='aberto';lc.matchTipo='';changed++;}
+    if(novoStatus==='conciliar'&&lc.status==='aberto'){lc.status='manual';lc.matchTipo='Manual';lc.matchDetalhe='Marcado manualmente';changed++;}
+    else if(novoStatus==='abrir'&&lc.status!=='aberto'){changed+=_reabrirLancPar(lancs,r.idx);}
   });
   if(d.conciliacao&&d.conciliacao[contaDetCodigo])recalcConciliacaoConta(comp,contaDetMes,contaDetCodigo);
   S.saveComp(curEmpId,comp);
@@ -6209,6 +6337,7 @@ function bootstrap(){
   setupDragDrop('uzRazao','fileRazao',handleRazao);
   setupDragDrop('uzSubRazao','fileSubRazao',handleSubstituirRazao);
   setupBackdropClose();
+  setupModalDrag();
   // Wire up export period selector
   var expPer=document.getElementById('expPeriodo');
   if(expPer) expPer.onchange=function(){
