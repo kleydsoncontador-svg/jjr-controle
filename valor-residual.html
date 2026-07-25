@@ -78,6 +78,11 @@ td{padding:9px 12px;vertical-align:middle}
 .emp-card:hover{border-color:var(--teal);box-shadow:var(--shadow)}
 .upload-box{border:2px dashed var(--teal);background:var(--teal-bg);border-radius:var(--r2);padding:16px 18px;margin-bottom:16px}
 .upload-box input[type=file]{font-size:12.5px}
+.item-nf-card{display:flex;align-items:center;justify-content:space-between;gap:10px;border:1.5px solid var(--border);border-radius:var(--r);padding:10px 12px;margin-bottom:6px;cursor:pointer;transition:.15s;background:var(--white)}
+.item-nf-card:hover{border-color:var(--teal)}
+.item-nf-card.on{border-color:var(--teal);background:var(--teal-bg)}
+.item-nf-desc{flex:1;font-size:13px}
+.item-nf-valor{font-family:var(--mono);font-weight:700;color:var(--teal);white-space:nowrap}
 @media print{
   .no-print{display:none!important}
   main{padding:0;max-width:none}
@@ -140,6 +145,10 @@ td{padding:9px 12px;vertical-align:middle}
         <input type="file" id="vrArquivoNF" accept=".xml,.pdf" onchange="processarArquivoNF(event)">
         <button class="btn bo bsm" id="btnBaixarRenomeado" style="display:none;margin-left:8px" onclick="baixarArquivoRenomeadoAtual()">⬇ Baixar cópia renomeada</button>
         <div id="vrArquivoStatus" style="margin-top:8px;font-size:12px"></div>
+        <div id="vrItensNFWrap" style="display:none;margin-top:10px">
+          <div class="fl" style="margin-bottom:8px">📋 Esta NF tem vários itens — clique no que você está analisando agora:</div>
+          <div id="vrItensNFLista"></div>
+        </div>
       </div>
 
       <div class="sc">
@@ -516,6 +525,9 @@ function limparFormulario(silencioso){
   document.getElementById('vrArquivoStatus').innerHTML='';
   document.getElementById('btnBaixarRenomeado').style.display='none';
   _vrArquivoOriginal = null;
+  _vrItensNF = [];
+  _vrItemNFSelecionado = -1;
+  document.getElementById('vrItensNFWrap').style.display='none';
   fatoresObsolescencia = [];
   renderFatores();
   cenarioSelecionado = 'realista';
@@ -688,18 +700,31 @@ async function extrairDadosXML(file){
   const valorFrete = icmsTot ? parseFloat(tag1(icmsTot,'vFrete')||'0') : 0;
 
   const dets = doc.getElementsByTagName('det');
-  let descricao='', ncm='', quantidade=1, aviso='';
-  if(dets.length){
-    const prod = dets[0].getElementsByTagName('prod')[0];
-    if(prod){
-      descricao = tag1(prod,'xProd');
-      ncm = tag1(prod,'NCM');
-      quantidade = parseFloat(tag1(prod,'qCom')||'1') || 1;
-    }
-    if(dets.length>1) aviso = dets.length+' itens nesta NF — usei o 1º; confira se é o ativo certo ou crie uma análise por item';
+  const itens = [];
+  for(let i=0;i<dets.length;i++){
+    const prod = dets[i].getElementsByTagName('prod')[0];
+    if(!prod) continue;
+    itens.push({
+      descricao: tag1(prod,'xProd'),
+      ncm: tag1(prod,'NCM'),
+      quantidade: parseFloat(tag1(prod,'qCom')||'1')||1,
+      valorTotal: parseFloat(tag1(prod,'vProd')||'0')||0
+    });
   }
   if(!nNF) throw new Error('Não encontrei os campos de NF-e neste XML');
-  return { nfNumero:nNF, nfSerie:serie, dataAquisicao, fornecedor, cnpjFornecedor, adquirente, cnpjAdquirente, valorProdutos, valorFrete, descricao, ncm, quantidade, _aviso: aviso };
+  const dados = { nfNumero:nNF, nfSerie:serie, dataAquisicao, fornecedor, cnpjFornecedor, adquirente, cnpjAdquirente, valorFrete, _aviso:'' };
+  if(itens.length > 1){
+    dados.itens = itens;
+    dados._aviso = itens.length+' itens nesta NF — escolha qual você está analisando na lista abaixo';
+  } else if(itens.length === 1){
+    dados.descricao = itens[0].descricao;
+    dados.ncm = itens[0].ncm;
+    dados.quantidade = itens[0].quantidade;
+    dados.valorProdutos = itens[0].valorTotal;
+  } else {
+    dados.valorProdutos = valorProdutos;
+  }
+  return dados;
 }
 
 let _pdfjsWorkerReady = false;
@@ -735,7 +760,8 @@ async function extrairDadosPDF(file){
   if(cnpjs[0]) dados.cnpjFornecedor = cnpjs[0];
   if(cnpjs[1]) dados.cnpjAdquirente = cnpjs[1];
   // "V. TOTAL PRODUTOS" / "VALOR TOTAL DOS PRODUTOS" — emissores abreviam de formas diferentes.
-  m = texto.match(/V(?:ALOR)?\.?\s*TOTAL\s+(?:DOS?\s+)?PRODUTOS?\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorProdutos = parseNum(m[1]);
+  m = texto.match(/V(?:ALOR)?\.?\s*TOTAL\s+(?:DOS?\s+)?PRODUTOS?\s*[:.]?\s*([\d.,]+)/i);
+  const valorProdutosNF = m ? parseNum(m[1]) : undefined;
   m = texto.match(/VALOR\s+(?:DO\s+)?FRETE\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorFrete = parseNum(m[1]);
 
   // Razão social do emitente (fornecedor) e do destinatário (adquirente): o texto do
@@ -750,6 +776,30 @@ async function extrairDadosPDF(file){
   if(fornecedorLinha) dados.fornecedor = fornecedorLinha;
   const adquirenteLinha = acharProximaLinha(/NOME\s*\/\s*RAZ[ÃA]O\s+SOCIAL/i);
   if(adquirenteLinha) dados.adquirente = adquirenteLinha;
+
+  // Itens da tabela de produtos — ancorado no cabeçalho da tabela ("ALÍQ. IPI",
+  // última coluna) até "DADOS ADICIONAIS", pra não capturar texto de fora dela.
+  const headerIdx = texto.search(/AL[IÍ]Q\.?\s*IPI/i);
+  let textoItens = headerIdx >= 0 ? texto.slice(headerIdx) : '';
+  const endIdx = textoItens.search(/DADOS\s+ADICIONAIS/i);
+  if(endIdx >= 0) textoItens = textoItens.slice(0, endIdx);
+  const itemRegex = /([A-Z]{2,}\d[A-Z0-9]{6,})\s+(.+?)\s*-?\s*-?\s*(\d{8})\s+(\d{2,3})\s+(\d{3,4})\s+([A-Z]{2,3})\s+([\d.]+,\d{4})\s+([\d.]+,\d{4})\s+([\d.]+,\d{2})/g;
+  const itens = [];
+  let mm;
+  while((mm = itemRegex.exec(textoItens))){
+    itens.push({ descricao: mm[2].trim(), ncm: mm[3], valorTotal: parseNum(mm[9]) });
+  }
+
+  if(itens.length > 1){
+    dados.itens = itens;
+    dados._aviso += ' — '+itens.length+' itens nesta NF, escolha qual você está analisando na lista abaixo';
+  } else if(itens.length === 1){
+    dados.descricao = itens[0].descricao;
+    dados.ncm = itens[0].ncm;
+    dados.valorProdutos = itens[0].valorTotal;
+  } else if(valorProdutosNF !== undefined){
+    dados.valorProdutos = valorProdutosNF;
+  }
 
   if(!dados.fornecedor || !dados.adquirente){
     dados._aviso += ' — fornecedor/adquirente pode não ter vindo certo, confira';
@@ -796,6 +846,38 @@ function baixarArquivoRenomeadoAtual(){
   showToast('Baixando: '+novoNome);
 }
 
+// Quando a NF tem mais de um item (comum em compra de vários móveis/equipamentos
+// numa nota só), cada item vira uma análise separada — a lista deixa escolher
+// qual item preenche o formulário agora; os demais dá pra escolher depois,
+// reanexando a mesma NF numa nova análise.
+let _vrItensNF = [];
+let _vrItemNFSelecionado = -1;
+function renderItensNFPicker(itens){
+  _vrItensNF = itens || [];
+  const wrap = document.getElementById('vrItensNFWrap');
+  const lista = document.getElementById('vrItensNFLista');
+  if(!itens || itens.length < 2){ wrap.style.display = 'none'; return; }
+  lista.innerHTML = itens.map((it,i)=>
+    `<div class="item-nf-card${i===_vrItemNFSelecionado?' on':''}" onclick="escolherItemNF(${i})">
+      <div class="item-nf-desc"><b>${esc(it.descricao)}</b>${it.ncm?(' <span style="color:var(--slate);font-size:11px">NCM '+esc(it.ncm)+'</span>'):''}</div>
+      <div class="item-nf-valor">${formatBRL(it.valorTotal)}</div>
+    </div>`
+  ).join('');
+  wrap.style.display = 'block';
+}
+function escolherItemNF(i){
+  const it = _vrItensNF[i];
+  if(!it) return;
+  _vrItemNFSelecionado = i;
+  document.getElementById('vrDescricao').value = it.descricao;
+  if(it.ncm) document.getElementById('vrNcm').value = it.ncm;
+  if(it.quantidade) document.getElementById('vrQuantidade').value = it.quantidade;
+  document.getElementById('vrValorProdutos').value = String(it.valorTotal).replace('.',',');
+  recalcular();
+  renderItensNFPicker(_vrItensNF);
+  showToast('Item selecionado: '+it.descricao);
+}
+
 async function processarArquivoNF(ev){
   const file = ev.target.files[0];
   if(!file) return;
@@ -809,6 +891,8 @@ async function processarArquivoNF(ev){
     else if(ext==='pdf') dados = await extrairDadosPDF(file);
     else throw new Error('Formato não suportado — use .xml ou .pdf');
     preencherFormularioComDados(dados);
+    _vrItemNFSelecionado = -1;
+    renderItensNFPicker(dados.itens || []);
     recalcular();
 
     _vrArquivoOriginal = file;
