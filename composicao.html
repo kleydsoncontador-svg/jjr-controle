@@ -41,7 +41,7 @@ aside{background:var(--ink2);padding:16px 0;border-right:1px solid rgba(255,255,
 #empSelSearch{cursor:text}
 #empSelSearch::placeholder{color:#94A3B8}
 #empSelSearch:focus{border-color:var(--teal-l)}
-main{padding:24px}
+main{padding:24px;min-width:0}
 .page{display:none}.page.on{display:block}
 /* TYPOGRAPHY */
 .ptitle{font-size:18px;font-weight:700;color:var(--ink);margin-bottom:3px}
@@ -443,6 +443,7 @@ td{padding:9px 13px;vertical-align:middle}
     </div>
   </div>
 
+  <div id="contaDetTopScroll" style="overflow-x:auto;overflow-y:hidden;height:14px;margin:8px 0 4px"><div id="contaDetTopScrollInner" style="height:1px"></div></div>
   <div class="tw ledger-wrap"><div id="contaDetBody"></div></div>
 </div>
 
@@ -4522,14 +4523,14 @@ function extrairNumeroDoc(historico) {
   return [...new Set(nums)];
 }
 
-function similaridade(h1, h2) {
+function similaridade(h1, h2, nums1, nums2) {
   if (!h1 || !h2) return 0;
   var a = h1.toUpperCase().replace(/[^A-Z0-9]/g,'');
   var b = h2.toUpperCase().replace(/[^A-Z0-9]/g,'');
   if (a === b) return 1;
-  // Check common doc numbers
-  var nums1 = extrairNumeroDoc(h1);
-  var nums2 = extrairNumeroDoc(h2);
+  // Check common doc numbers (usa cache pré-computado quando disponível, evita reprocessar regex)
+  nums1 = nums1 || extrairNumeroDoc(h1);
+  nums2 = nums2 || extrairNumeroDoc(h2);
   var common = nums1.filter(function(n){ return nums2.indexOf(n) >= 0; });
   if (common.length > 0) return 0.95;
   // Partial overlap
@@ -4603,23 +4604,46 @@ function conciliarConta(lancamentos, tipo, maxDias) {
   var origemField  = tipo === 'Passivo' ? 'credito' : 'debito';
   var baixaField   = tipo === 'Passivo' ? 'debito'  : 'credito';
 
+  // Extrai os números de documento de cada lançamento UMA única vez e reaproveita
+  // em todos os passos abaixo — em ledgers grandes (milhares de linhas), recalcular
+  // isso a cada comparação (como era feito antes, dentro de loops O(n²)) é o que
+  // trava o navegador.
+  var numsCache = result.map(function(l){ return extrairNumeroDoc(l.historico); });
+
+  // Índice número-de-documento → lista de índices que o contêm, construído uma vez.
+  // Usado pelos PASSOs 1 e 1.5 para não precisar varrer todos os n×n pares.
+  var byDocAll = {};
+  for (var k0 = 0; k0 < result.length; k0++) {
+    numsCache[k0].forEach(function(n){
+      if (!byDocAll[n]) byDocAll[n] = [];
+      byDocAll[n].push(k0);
+    });
+  }
+
   // ── PASSO 1: Matching por número de documento ──
+  // Em vez de comparar a origem contra TODOS os lançamentos (O(n²)), usa o índice
+  // byDocAll para olhar só os candidatos que compartilham pelo menos um número de
+  // documento — mesmo resultado do algoritmo original (menor índice primeiro),
+  // muito mais rápido em ledgers grandes.
   for (var i = 0; i < result.length; i++) {
     if (used[i]) continue;
     var origem = result[i];
     if (origem[origemField] <= 0) continue;
-    var numsOrigem = extrairNumeroDoc(origem.historico);
+    var numsOrigem = numsCache[i];
     if (numsOrigem.length === 0) continue;
 
-    for (var j = 0; j < result.length; j++) {
+    var candSet = {};
+    numsOrigem.forEach(function(n){
+      (byDocAll[n] || []).forEach(function(k){ candSet[k] = true; });
+    });
+    var cands = Object.keys(candSet).map(Number).sort(function(a,b){ return a-b; });
+
+    for (var ci = 0; ci < cands.length; ci++) {
+      var j = cands[ci];
       if (used[j] || i === j) continue;
       var baixa = result[j];
       if (baixa[baixaField] <= 0) continue;
       if (dateDiff(origem.data, baixa.data) > maxDias) continue;
-
-      var numsBaixa = extrairNumeroDoc(baixa.historico);
-      var common = numsOrigem.filter(function(n){ return numsBaixa.indexOf(n) >= 0; });
-      if (common.length === 0) continue;
 
       var diff = Math.abs(origem[origemField] - baixa[baixaField]);
       var pct  = diff / origem[origemField];
@@ -4650,7 +4674,7 @@ function conciliarConta(lancamentos, tipo, maxDias) {
     var byDoc = {};
     for (var k = 0; k < result.length; k++) {
       if (used[k]) continue;
-      var nums = extrairNumeroDoc(result[k].historico);
+      var nums = numsCache[k];
       nums.forEach(function(n){
         if (!byDoc[n]) byDoc[n] = [];
         byDoc[n].push(k);
@@ -4709,6 +4733,11 @@ function conciliarConta(lancamentos, tipo, maxDias) {
       if (result[k][origemField] <= 0 && result[k][baixaField] <= 0) continue;
       pendentes.push(k);
     }
+    // Essa etapa compara texto par a par (LCS) — custo cresce com o quadrado da
+    // quantidade de pendentes. Em contas muito grandes isso travaria o navegador,
+    // então acima de um limite ela é pulada (os passos por documento/valor já
+    // cobrem a maioria dos casos; o restante fica para conciliação manual).
+    if (pendentes.length > 600) { result._textMatchSkipped = true; return; }
     var norm = {};
     pendentes.forEach(function(k){ norm[k] = normalizeHistForLCS(result[k].historico); });
 
@@ -4756,20 +4785,32 @@ function conciliarConta(lancamentos, tipo, maxDias) {
 
 
   // ── PASSO 2: Matching por valor exato ──
+  // Indexa os candidatos a baixa por valor (centavos) para não varrer todo o
+  // ledger a cada origem — mesmo resultado (menor índice primeiro), sem O(n²).
+  var byValueBaixa = {};
+  for (var kv = 0; kv < result.length; kv++) {
+    if (result[kv][baixaField] > 0) {
+      var vkey = result[kv][baixaField].toFixed(2);
+      if (!byValueBaixa[vkey]) byValueBaixa[vkey] = [];
+      byValueBaixa[vkey].push(kv);
+    }
+  }
   for (var i = 0; i < result.length; i++) {
     if (used[i]) continue;
     var origem = result[i];
     if (origem[origemField] <= 0) continue;
 
-    for (var j = 0; j < result.length; j++) {
+    var candsV = byValueBaixa[origem[origemField].toFixed(2)];
+    if (!candsV) continue;
+    for (var cvi = 0; cvi < candsV.length; cvi++) {
+      var j = candsV[cvi];
       if (used[j] || i === j) continue;
       var baixa = result[j];
-      if (baixa[baixaField] <= 0) continue;
       if (dateDiff(origem.data, baixa.data) > maxDias) continue;
 
       var diff = Math.abs(origem[origemField] - baixa[baixaField]);
       if (diff < 0.01) {
-        var sim = similaridade(origem.historico, baixa.historico);
+        var sim = similaridade(origem.historico, baixa.historico, numsCache[i], numsCache[j]);
         var tipo_match = sim >= 0.75 ? 'Exato (hist.)' : 'Exato (valor)';
         origem.status = 'baixado_exato'; origem.matchIdx = j; origem.matchTipo = tipo_match;
         baixa.status  = 'baixado_exato'; baixa.matchIdx  = i; baixa.matchTipo  = tipo_match;
@@ -4780,31 +4821,42 @@ function conciliarConta(lancamentos, tipo, maxDias) {
   }
 
   // ── PASSO 3: Matching por valor aproximado (≤1%) com histórico similar ──
-  for (var i = 0; i < result.length; i++) {
-    if (used[i]) continue;
-    var origem = result[i];
-    if (origem[origemField] <= 0) continue;
+  // Sem uma chave exata para indexar (a tolerância é percentual), esse passo
+  // continua O(n²). Em contas com um volume muito grande de itens ainda em
+  // aberto nesse ponto, ele é pulado para não travar o navegador — os passos
+  // anteriores (documento e valor exato) já resolvem a grande maioria dos casos
+  // reais; o restante pode ser conciliado manualmente.
+  var pendentesP3 = 0;
+  for (var kp = 0; kp < result.length; kp++) if (!used[kp] && (result[kp][origemField] > 0 || result[kp][baixaField] > 0)) pendentesP3++;
+  if (pendentesP3 > 4000) {
+    result._valueMatchSkipped = true;
+  } else {
+    for (var i2 = 0; i2 < result.length; i2++) {
+      if (used[i2]) continue;
+      var origem2 = result[i2];
+      if (origem2[origemField] <= 0) continue;
 
-    var bestJ = -1, bestSim = 0, bestDiff = 9999;
-    for (var j = 0; j < result.length; j++) {
-      if (used[j] || i === j) continue;
-      var baixa = result[j];
-      if (baixa[baixaField] <= 0) continue;
-      if (dateDiff(origem.data, baixa.data) > maxDias) continue;
+      var bestJ = -1, bestSim = 0, bestDiff = 9999;
+      for (var j2 = 0; j2 < result.length; j2++) {
+        if (used[j2] || i2 === j2) continue;
+        var baixa2 = result[j2];
+        if (baixa2[baixaField] <= 0) continue;
+        if (dateDiff(origem2.data, baixa2.data) > maxDias) continue;
 
-      var diff = Math.abs(origem[origemField] - baixa[baixaField]);
-      var pct  = diff / (origem[origemField] || 1);
-      if (pct > 0.01) continue;
-      var sim = similaridade(origem.historico, baixa.historico);
-      if (sim > bestSim || (sim === bestSim && diff < bestDiff)) {
-        bestJ = j; bestSim = sim; bestDiff = diff;
+        var diff2 = Math.abs(origem2[origemField] - baixa2[baixaField]);
+        var pct2  = diff2 / (origem2[origemField] || 1);
+        if (pct2 > 0.01) continue;
+        var sim2 = similaridade(origem2.historico, baixa2.historico, numsCache[i2], numsCache[j2]);
+        if (sim2 > bestSim || (sim2 === bestSim && diff2 < bestDiff)) {
+          bestJ = j2; bestSim = sim2; bestDiff = diff2;
+        }
       }
-    }
-    if (bestJ >= 0) {
-      var baixa = result[bestJ];
-      origem.status = 'baixado_aprox'; origem.matchIdx = bestJ; origem.matchTipo = 'Aprox. (val)'; origem.residual = bestDiff;
-      baixa.status  = 'baixado_aprox'; baixa.matchIdx  = i;     baixa.matchTipo  = 'Aprox. (val)'; baixa.residual  = bestDiff;
-      used[i] = true; used[bestJ] = true;
+      if (bestJ >= 0) {
+        var baixaBest = result[bestJ];
+        origem2.status = 'baixado_aprox'; origem2.matchIdx = bestJ; origem2.matchTipo = 'Aprox. (val)'; origem2.residual = bestDiff;
+        baixaBest.status  = 'baixado_aprox'; baixaBest.matchIdx  = i2;     baixaBest.matchTipo  = 'Aprox. (val)'; baixaBest.residual  = bestDiff;
+        used[i2] = true; used[bestJ] = true;
+      }
     }
   }
 
@@ -4973,7 +5025,11 @@ function conciliarContaIndividual(mes, codigo) {
     renderContaDetHeader();
     renderContaDetTabela();
   }
-  toast('Conta ' + codigo + ': ' + matched/2 + ' pares conciliados, ' + abertos + ' em aberto');
+  var msg = 'Conta ' + codigo + ': ' + matched/2 + ' pares conciliados, ' + abertos + ' em aberto';
+  if (conciliados._textMatchSkipped || conciliados._valueMatchSkipped) {
+    msg += ' (volume alto: alguns passos de comparação por texto/valor aproximado foram pulados — revise os itens em aberto restantes manualmente)';
+  }
+  toast(msg);
 }
 
 function marcarManual(mes, codigo, lancIdx) {
@@ -5932,6 +5988,37 @@ function renderContaDetTabela(){
 
   // Store current filtered rows for bulk actions
   window._contaDetRows=rowsFiltered;
+
+  syncContaDetTopScroll();
+}
+
+// Barra de rolagem horizontal "espelho" logo acima da tabela — em ledgers longos
+// a barra nativa fica lá embaixo, fora de alcance. Essa fica fixa perto do topo
+// (abaixo dos filtros) e mantém o scroll sincronizado nos dois sentidos.
+var _contaDetScrollSynced=false;
+function syncContaDetTopScroll(){
+  var top=document.getElementById('contaDetTopScroll');
+  var inner=document.getElementById('contaDetTopScrollInner');
+  var wrap=document.querySelector('#page-conta .ledger-wrap');
+  var table=wrap?wrap.querySelector('table'):null;
+  if(!top||!inner||!wrap)return;
+
+  inner.style.width=(table?table.scrollWidth:wrap.scrollWidth)+'px';
+  top.scrollLeft=wrap.scrollLeft;
+
+  if(_contaDetScrollSynced)return;
+  _contaDetScrollSynced=true;
+  var syncing=false;
+  top.addEventListener('scroll',function(){
+    if(syncing)return; syncing=true;
+    wrap.scrollLeft=top.scrollLeft;
+    syncing=false;
+  });
+  wrap.addEventListener('scroll',function(){
+    if(syncing)return; syncing=true;
+    top.scrollLeft=wrap.scrollLeft;
+    syncing=false;
+  });
 }
 
 // Recalcula e exibe o "Saldo da Baixa em Andamento" (crédito - débito dos itens flegados
