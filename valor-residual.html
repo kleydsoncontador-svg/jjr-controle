@@ -354,7 +354,7 @@ function formatBRL(n) {
 }
 function parseNum(v){
   if(v===null||v===undefined) return 0;
-  v = String(v).trim();
+  v = String(v).replace(/\s+/g,'').trim(); // alguns PDFs saem com espaço depois da vírgula (ex: "0, 00")
   if(!v) return 0;
   return parseFloat(v.replace(/\./g,'').replace(',','.')) || 0;
 }
@@ -722,16 +722,38 @@ async function extrairTextoPDF(file){
 }
 async function extrairDadosPDF(file){
   const texto = await extrairTextoPDF(file);
+  window._vrUltimoTextoPDF = texto;
   const dados = { _aviso: 'extraído de PDF (DANFE) — o layout varia entre emissores, revise TODOS os campos com atenção' };
   let m;
-  m = texto.match(/N[º°oO]\.?\s*(\d[\d.]{2,})/); if(m) dados.nfNumero = m[1].replace(/\./g,'');
+  // "Nº"/"N°" só com o indicador ordinal de verdade — um "N" seguido de "o"/"O" comuns
+  // já deu falso positivo pegando um número de endereço (ex: "...FLORIANO 466 SALA...").
+  m = texto.match(/N[º°]\.?\s*(\d[\d.]{2,})/); if(m) dados.nfNumero = m[1].replace(/\./g,'');
   m = texto.match(/S[EÉé]RIE\s*[:.]?\s*(\d+)/i); if(m) dados.nfSerie = m[1];
-  m = texto.match(/(\d{2}\/\d{2}\/\d{4})/); if(m){ const p=m[1].split('/'); dados.dataAquisicao = p[2]+'-'+p[1]+'-'+p[0]; }
+  m = texto.match(/DATA\s+DA\s+EMISS[ÃA]O\D{0,15}?(\d{2}\/\d{2}\/\d{4})/i) || texto.match(/(\d{2}\/\d{2}\/\d{4})/);
+  if(m){ const p=m[1].split('/'); dados.dataAquisicao = p[2]+'-'+p[1]+'-'+p[0]; }
   const cnpjs = Array.from(texto.matchAll(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/g)).map(x=>x[1]);
   if(cnpjs[0]) dados.cnpjFornecedor = cnpjs[0];
   if(cnpjs[1]) dados.cnpjAdquirente = cnpjs[1];
-  m = texto.match(/VALOR\s+TOTAL\s+DOS?\s+PRODUTOS?\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorProdutos = parseNum(m[1]);
+  // "V. TOTAL PRODUTOS" / "VALOR TOTAL DOS PRODUTOS" — emissores abreviam de formas diferentes.
+  m = texto.match(/V(?:ALOR)?\.?\s*TOTAL\s+(?:DOS?\s+)?PRODUTOS?\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorProdutos = parseNum(m[1]);
   m = texto.match(/VALOR\s+(?:DO\s+)?FRETE\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorFrete = parseNum(m[1]);
+
+  // Razão social do emitente (fornecedor) e do destinatário (adquirente): o texto do
+  // DANFE preserva a quebra de linha original como sequências de 2+ espaços — dá pra
+  // reconstruir "linhas" e pegar o texto logo após cada rótulo conhecido.
+  const linhas = texto.split(/\s{2,}/).map(l=>l.trim()).filter(Boolean);
+  const acharProximaLinha = (regexRotulo) => {
+    const idx = linhas.findIndex(l => regexRotulo.test(l));
+    return (idx>=0 && linhas[idx+1]) ? linhas[idx+1] : '';
+  };
+  const fornecedorLinha = acharProximaLinha(/IDENTIFICA[ÇC][ÃA]O\s+DO\s+EMITENTE/i);
+  if(fornecedorLinha) dados.fornecedor = fornecedorLinha;
+  const adquirenteLinha = acharProximaLinha(/NOME\s*\/\s*RAZ[ÃA]O\s+SOCIAL/i);
+  if(adquirenteLinha) dados.adquirente = adquirenteLinha;
+
+  if(!dados.fornecedor || !dados.adquirente){
+    dados._aviso += ' — fornecedor/adquirente pode não ter vindo certo, confira';
+  }
   return dados;
 }
 function preencherFormularioComDados(d){
@@ -795,12 +817,39 @@ async function processarArquivoNF(ev){
     baixarArquivoRenomeadoAtual();
 
     statusEl.style.color = 'var(--green)';
-    statusEl.innerHTML = '✓ Dados extraídos de '+esc(file.name)+' — revise os campos abaixo'+(dados._aviso?' ('+esc(dados._aviso)+')':'')+'.<br>'
+    let statusHTML = '✓ Dados extraídos de '+esc(file.name)+' — revise os campos abaixo'+(dados._aviso?' ('+esc(dados._aviso)+')':'')+'.<br>'
       + '⬇ Cópia renomeada baixada como <b>'+esc(novoNome)+'</b> — corrija algum campo e clique em "Baixar cópia renomeada" para gerar de novo.';
+    if(ext==='pdf' && window._vrUltimoTextoPDF){
+      statusHTML += '<br><a href="#" onclick="toggleTextoExtraidoPDF();return false;" style="color:var(--teal);font-weight:600">🔍 Ver texto extraído (para diagnóstico)</a>'
+        + '<div id="vrTextoExtraidoWrap" style="display:none;margin-top:8px">'
+        + '<textarea id="vrTextoExtraidoArea" readonly style="width:100%;min-height:140px;font-family:var(--mono);font-size:11px;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--white)"></textarea>'
+        + '<div style="margin-top:6px"><button class="btn bo bsm" onclick="copiarTextoExtraidoPDF()">📋 Copiar texto</button></div>'
+        + '<div style="font-size:11px;color:var(--slate);margin-top:4px">Se algum campo não veio certo, copie esse texto e cole na conversa para ajustar a extração automática.</div>'
+        + '</div>';
+    }
+    statusEl.innerHTML = statusHTML;
+    if(ext==='pdf' && window._vrUltimoTextoPDF){
+      document.getElementById('vrTextoExtraidoArea').value = window._vrUltimoTextoPDF;
+    }
   }catch(e){
     console.error(e);
     statusEl.style.color = 'var(--red)';
     statusEl.textContent = '⚠ Não foi possível extrair automaticamente ('+e.message+'). Preencha os campos manualmente abaixo.';
+  }
+}
+function toggleTextoExtraidoPDF(){
+  const wrap = document.getElementById('vrTextoExtraidoWrap');
+  if(wrap) wrap.style.display = (wrap.style.display==='none') ? 'block' : 'none';
+}
+function copiarTextoExtraidoPDF(){
+  const area = document.getElementById('vrTextoExtraidoArea');
+  if(!area) return;
+  area.select();
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(area.value).then(()=>showToast('Texto copiado!')).catch(()=>{ document.execCommand('copy'); showToast('Texto copiado!'); });
+  } else {
+    document.execCommand('copy');
+    showToast('Texto copiado!');
   }
 }
 
