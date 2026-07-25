@@ -21,6 +21,22 @@
   --r:10px;--r2:14px;--shadow:0 1px 2px rgba(15,23,42,.04),0 4px 14px rgba(15,23,42,.06);
   --shadow-md:0 8px 28px rgba(15,23,42,.12);--glow:0 0 0 3px rgba(15,123,108,.12);
 }
+/* Este arquivo abre num iframe dentro do index.html — o modo escuro de lá não
+   atravessa pra cá sozinho (documento separado), então essas variáveis são as
+   MESMAS do modo escuro do site principal, aplicadas via classe sincronizada
+   por localStorage (ver script no fim do arquivo). */
+html.dark-mode{
+  --ink:#E8ECF3;--ink2:#181D28;--ink3:#AEB8C8;
+  --teal:#14B8A6;--teal-l:#2DD4BF;--teal-bg:rgba(20,184,166,.16);
+  --amber:#FBBF24;--amber-bg:rgba(217,119,6,.18);
+  --red:#F87171;--red-bg:rgba(220,38,38,.18);
+  --green:#4ADE80;--green-bg:rgba(34,197,94,.16);
+  --slate:#98A6BA;--border:#262E3D;--bg:#0E1218;--white:#171D28;
+  --shadow:0 1px 3px rgba(0,0,0,.4),0 1px 2px rgba(0,0,0,.3);
+  --shadow-md:0 4px 20px rgba(0,0,0,.5);
+  --glow:0 0 0 3px rgba(20,184,166,.18),0 0 14px rgba(20,184,166,.15);
+  color-scheme:dark;
+}
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 body{font-family:var(--sans);background:var(--bg);color:var(--ink);min-height:100vh;font-size:14px}
 main{padding:24px;min-width:0}
@@ -67,7 +83,7 @@ td{padding:9px 12px;vertical-align:middle}
 .resumo-item-val{font-family:var(--mono);font-size:16px;font-weight:700;color:var(--ink)}
 .doc-pre{white-space:pre-wrap;font-family:var(--mono);font-size:12px;background:var(--bg);border:1px solid var(--border);border-radius:var(--r);padding:14px;line-height:1.6}
 .hist-row{cursor:pointer}
-.hist-row:hover td{background:#F7FAFD}
+.hist-row:hover td{background:var(--teal-bg)}
 .toast{position:fixed;bottom:24px;right:24px;background:var(--ink2);color:#fff;padding:11px 18px;border-radius:var(--r2);font-size:13px;font-weight:500;box-shadow:var(--shadow-md);opacity:0;transform:translateY(10px);transition:.25s;z-index:999;pointer-events:none}
 .toast.show{opacity:1;transform:translateY(0)}
 .toast.err{background:var(--red)}
@@ -163,7 +179,13 @@ td{padding:9px 12px;vertical-align:middle}
           <div class="fg"><label class="fl">Número da NF *</label><input class="fi" id="vrNfNumero" placeholder="Ex: 12345"></div>
           <div class="fg"><label class="fl">Série</label><input class="fi" id="vrNfSerie" placeholder="Ex: 1"></div>
           <div class="fg"><label class="fl">Data de Aquisição *</label><input class="fi" type="date" id="vrDataAquisicao"></div>
-          <div class="fg"><label class="fl">NCM</label><input class="fi" id="vrNcm" placeholder="Ex: 8528.72.00"></div>
+          <div class="fg"><label class="fl">NCM</label>
+            <div style="display:flex;gap:6px">
+              <input class="fi" id="vrNcm" placeholder="Ex: 8528.72.00">
+              <button type="button" class="btn bo bsm" style="white-space:nowrap" onclick="buscarClassificacaoNCM()" title="Buscar a classificação oficial deste NCM">🔍 NCM</button>
+            </div>
+            <div id="vrNcmResultado" style="font-size:11px;margin-top:2px"></div>
+          </div>
         </div>
         <div class="grid2">
           <div class="fg"><label class="fl">Fornecedor</label><input class="fi" id="vrFornecedor" placeholder="Razão social do fornecedor"></div>
@@ -676,6 +698,52 @@ function formatarCnpj(digits){
   if(d.length!==14) return digits||'';
   return d.slice(0,2)+'.'+d.slice(2,5)+'.'+d.slice(5,8)+'/'+d.slice(8,12)+'-'+d.slice(12,14);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// CLASSIFICAÇÃO NCM — consulta a tabela pública oficial (Portal Único
+// Siscomex / Receita Federal). Baixa a tabela completa uma vez e guarda em
+// memória (é grande, então só busca de novo se a aba for recarregada).
+// ═══════════════════════════════════════════════════════════════════════
+const NCM_FONTE_URL = 'https://portalunico.siscomex.gov.br/classif/api/publico/nomenclatura/download/json';
+const NCM_CONSULTA_MANUAL_URL = 'https://portalunico.siscomex.gov.br/classif/#/sumario?perfil=cidadao';
+let _ncmTabelaCache = null;
+async function carregarTabelaNCM(){
+  if(_ncmTabelaCache) return _ncmTabelaCache;
+  const resp = await fetch(NCM_FONTE_URL);
+  if(!resp.ok) throw new Error('Portal Siscomex respondeu com status ' + resp.status);
+  const json = await resp.json();
+  const lista = Array.isArray(json) ? json : (json.Nomenclaturas || json.nomenclaturas || null);
+  if(!Array.isArray(lista)) throw new Error('formato de resposta inesperado');
+  _ncmTabelaCache = lista;
+  return lista;
+}
+async function buscarClassificacaoNCM(){
+  const ncmRaw = (document.getElementById('vrNcm').value||'').replace(/\D/g,'');
+  const resultEl = document.getElementById('vrNcmResultado');
+  if(ncmRaw.length < 2){ showToast('Informe ao menos parte do NCM primeiro.','err'); return; }
+  resultEl.style.color = 'var(--slate)';
+  resultEl.textContent = 'Buscando no Portal Único Siscomex (Receita Federal)...';
+  try{
+    const lista = await carregarTabelaNCM();
+    const alvo = lista.find(function(x){
+      const cod = String(x.Codigo || x.codigo || '').replace(/\D/g,'');
+      return cod === ncmRaw;
+    });
+    if(!alvo){
+      resultEl.style.color = 'var(--amber)';
+      resultEl.innerHTML = 'NCM '+esc(ncmRaw)+' não encontrado na tabela oficial. <a href="'+NCM_CONSULTA_MANUAL_URL+'" target="_blank" rel="noopener">Consultar manualmente →</a>';
+      return;
+    }
+    const desc = alvo.Descricao || alvo.descricao || '(sem descrição)';
+    resultEl.style.color = 'var(--green)';
+    resultEl.innerHTML = '✓ <b>'+esc(desc)+'</b> — fonte: Portal Único Siscomex (Receita Federal)';
+  }catch(e){
+    console.error(e);
+    resultEl.style.color = 'var(--red)';
+    resultEl.innerHTML = '⚠ Não consegui buscar agora ('+esc(e.message)+'). '
+      + '<a href="'+NCM_CONSULTA_MANUAL_URL+'" target="_blank" rel="noopener">Consultar manualmente no Portal Siscomex →</a>';
+  }
+}
 async function extrairDadosXML(file){
   const text = await file.text();
   const doc = new DOMParser().parseFromString(text, 'text/xml');
@@ -1167,6 +1235,19 @@ async function reabrirAnalise(id){
   renderRelatorio(registro);
   irPara('relatorio');
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// MODO ESCURO — sincroniza com o toggle do index.html (documento separado,
+// então lê o mesmo localStorage compartilhado da origem em vez de depender
+// de herdar a classe do <html> pai).
+// ═══════════════════════════════════════════════════════════════════════
+function aplicarDarkModeLocal(){
+  document.documentElement.classList.toggle('dark-mode', localStorage.getItem('jjrDarkMode')==='1');
+}
+aplicarDarkModeLocal();
+window.addEventListener('storage', function(ev){
+  if(ev.key==='jjrDarkMode') aplicarDarkModeLocal();
+});
 
 // ═══════════════════════════════════════════════════════════════════════
 // INIT
