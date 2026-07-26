@@ -8877,6 +8877,30 @@ function setConvAtivoBens(eid,bens){S.s('convAtivo_bens_'+eid,bens);}
 // informada antes. NCM continua servindo só pra Conta/Centro/Taxa/Impostos.
 function getConvAtivoResiduais(eid){return S.g('convAtivo_residuais_'+eid)||[];}
 function setConvAtivoResiduais(eid,residuais){S.s('convAtivo_residuais_'+eid,residuais);}
+
+// Fila de itens enviados do módulo "Análise de Imobilizado" (outro documento,
+// mesma base Supabase — dados_app). Cada entrada já traz o Valor Residual
+// pesquisado lá; só falta Conta Patrimonial/Centro de Custo/Taxa (por NCM,
+// igual toda regra normal). Se o NCM já tiver regra, materializa em bem sem
+// exigir clique nenhum; senão fica esperando classificação manual aqui.
+function getConvAtivoFilaImobilizado(eid){return S.g('convAtivo_filaImobilizado_'+eid)||[];}
+function setConvAtivoFilaImobilizado(eid,fila){S.s('convAtivo_filaImobilizado_'+eid,fila);}
+function _convAtivoProcessarFilaAutomatica(eid){
+  const fila=getConvAtivoFilaImobilizado(eid);
+  if(!fila.length)return;
+  const regras=getConvAtivoRegras(eid);
+  const restantes=[];
+  fila.forEach(entrada=>{
+    const item=entrada.nfInfo.itens[0];
+    const r=_convAtivoClassificar(item.ncm,regras);
+    if(!r){restantes.push(entrada);return;}
+    if(entrada.valorResidualSugerido!=null){
+      _convAtivoRegistrarResidual(eid,item.valorUnitario,r.contaPatrimonial,r.centroCusto,r.taxaDepreciacao,_convAtivoFmtValorTxt(entrada.valorResidualSugerido));
+    }
+    _convAtivoGerarResultado(eid,[entrada.nfInfo],regras);
+  });
+  if(restantes.length!==fila.length)setConvAtivoFilaImobilizado(eid,restantes);
+}
 function _convAtivoBuscarResidual(eid,valorProduto,contaPatrimonial,centroCusto,taxaDepreciacao){
   const valorFmt=_convAtivoFmtValorTxt(_convAtivoParseValor(valorProduto));
   const match=getConvAtivoResiduais(eid).find(r=>
@@ -8984,12 +9008,13 @@ function renderConvAtivoLista(){
     const cfg=getConvAtivoConfig(eid);
     const configurado=!!cfg;
     const aberto=!!_convAtivoExpandido[eid];
+    const filaLen=getConvAtivoFilaImobilizado(eid).length;
     const seta=`<span style="font-size:11px;color:var(--slate);transition:transform .15s;transform:rotate(${aberto?90:0}deg);display:inline-block">▸</span>`;
     html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:white;transition:all .2s" onmouseover="this.style.boxShadow='0 4px 12px rgba(0,0,0,.1)'" onmouseout="this.style.boxShadow=''">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px">
         <div style="flex:1;cursor:pointer;display:flex;align-items:baseline;gap:8px" onclick="toggleConvAtivoCard('${eid}')">
           ${seta}
-          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span style="font-weight:600;color:#1E3558">#${emp.eid} - ${esc(emp.nome)}</span><span style="font-family:var(--mono);font-size:.85rem;color:var(--slate)">${esc(emp.cnpj||'')}</span>${configurado?'<span class="badge b-completo">Configurado</span>':'<span class="badge b-pendencias">Sem configuração</span>'}</div>
+          <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap"><span style="font-weight:600;color:#1E3558">#${emp.eid} - ${esc(emp.nome)}</span><span style="font-family:var(--mono);font-size:.85rem;color:var(--slate)">${esc(emp.cnpj||'')}</span>${configurado?'<span class="badge b-completo">Configurado</span>':'<span class="badge b-pendencias">Sem configuração</span>'}${filaLen?`<span class="badge b-pendencias">📥 ${filaLen} da Análise de Imobilizado</span>`:''}</div>
         </div>
         <button class="icon-btn" onclick="event.stopPropagation();excluirEmpresaMenu('convAtivo','${eid}')" title="Remover da lista" style="padding:8px;background:none;border:none;cursor:pointer;color:#dc2626;font-size:1.2rem">🗑️</button>
       </div>
@@ -9001,6 +9026,7 @@ function renderConvAtivoLista(){
 }
 function toggleConvAtivoCard(eid){
   _convAtivoExpandido[eid]=!_convAtivoExpandido[eid];
+  if(_convAtivoExpandido[eid])_convAtivoProcessarFilaAutomatica(eid);
   renderConvAtivoLista();
 }
 function renderConvAtivoCardExpandido(eid,cfg){
@@ -9034,6 +9060,7 @@ function editarConvAtivoConfig(eid){
 function renderConvAtivoProcessForm(eid,cfg){
   const pendentes=_convAtivoPendentes[eid];
   const regras=getConvAtivoRegras(eid);
+  const filaImobilizado=getConvAtivoFilaImobilizado(eid);
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px;flex-wrap:wrap">
       <button class="action-btn action-btn-excel" onclick="baixarConvAtivoExcelCompleto('${eid}')" style="font-size:11px">📊 Baixar Excel (todos cadastrados)</button>
@@ -9045,8 +9072,65 @@ function renderConvAtivoProcessForm(eid,cfg){
     <button class="btn bp bsm" id="convAtivoBtnProcessar_${eid}" onclick="processarConvAtivo('${eid}')" style="margin-top:10px">&#9881; Processar Arquivo</button>
     <div id="convAtivoStatus_${eid}" style="margin-top:8px;font-size:12px"></div>
     ${pendentes&&pendentes.ncmsFaltando.length?renderConvAtivoPendentesForm(eid,pendentes):''}
+    ${filaImobilizado.length?renderConvAtivoFilaImobilizadoForm(eid,filaImobilizado):''}
     <div id="convAtivoResultado_${eid}">${renderConvAtivoResultado(eid)}</div>
   </div>`;
+}
+function renderConvAtivoFilaImobilizadoForm(eid,fila){
+  if(!fila.length)return '';
+  let html=`<div style="margin-top:12px;background:#EFF6FF;border:1px solid #BFDBFE;border-radius:6px;padding:12px" onclick="event.stopPropagation()">
+    <div style="font-size:12px;font-weight:700;color:#1D4ED8;margin-bottom:8px">📥 Itens vindos da Análise de Imobilizado — classifique pra gerar o bem</div>
+    <div style="font-size:11px;color:#1D4ED8;margin-bottom:10px">O Valor Residual já veio preenchido de lá — falta só Conta Patrimonial, Centro de Custo e Taxa de Depreciação (uma vez por NCM; vira regra pros próximos).</div>`;
+  fila.forEach((entrada,i)=>{
+    const item=entrada.nfInfo.itens[0];
+    const residualInicial=entrada.valorResidualSugerido!=null?_convAtivoFmtValorTxt(entrada.valorResidualSugerido):'';
+    html+=`<div style="margin-bottom:10px;padding-bottom:10px;border-bottom:1px solid #BFDBFE">
+    <div style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap;margin-bottom:8px">
+      <div style="flex:1;min-width:220px"><label style="font-size:10px;color:var(--slate);display:block">NCM ${esc(item.ncm)} — ${esc(item.descricao)}</label><div style="font-size:11px;color:#1D4ED8">NF ${esc(entrada.nfInfo.nfNumero)} · ${esc(entrada.nfInfo.fornecedor)} · R$ ${_fmt(item.valorTotal)}</div></div>
+      <div><label style="font-size:10px;color:var(--slate);display:block">Conta Patrimonial</label><input class="fi" id="convAtivoFilaConta_${eid}_${i}" placeholder="Conta" style="font-size:12px;width:140px"></div>
+      <div><label style="font-size:10px;color:var(--slate);display:block">Centro de Custo</label><input class="fi" id="convAtivoFilaCentro_${eid}_${i}" placeholder="Centro" style="font-size:12px;width:120px"></div>
+      <div><label style="font-size:10px;color:var(--slate);display:block">Taxa Depreciação (%)</label><input class="fi" id="convAtivoFilaTaxa_${eid}_${i}" placeholder="Ex: 10" style="font-size:12px;width:100px"></div>
+      <div><label style="font-size:10px;color:var(--slate);display:block">Valor Residual</label><input class="fi" id="convAtivoFilaResidual_${eid}_${i}" value="${esc(residualInicial)}" style="font-size:12px;width:110px"></div>
+    </div>
+    <div style="display:flex;gap:16px;align-items:center;flex-wrap:wrap">
+      <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--slate)"><input type="checkbox" id="convAtivoFilaIgnoraIcms_${eid}_${i}" checked> Ignorar ICMS</label>
+      <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--slate)"><input type="checkbox" id="convAtivoFilaIgnoraPis_${eid}_${i}" checked> Ignorar PIS</label>
+      <label style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--slate)"><input type="checkbox" id="convAtivoFilaIgnoraCofins_${eid}_${i}" checked> Ignorar COFINS</label>
+      <label style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--slate);white-space:nowrap"><input type="checkbox" id="convAtivoFilaUsarRegra_${eid}_${i}" checked> Salvar como regra</label>
+      <button class="btn bp bsm" onclick="salvarClassificacaoFilaImobilizado('${eid}',${i})">&#10003; Salvar e Gerar Bem</button>
+    </div>
+    </div>`;
+  });
+  html+='</div>';
+  return html;
+}
+function salvarClassificacaoFilaImobilizado(eid,i){
+  const fila=getConvAtivoFilaImobilizado(eid);
+  const entrada=fila[i];
+  if(!entrada)return;
+  const contaPatrimonial=(document.getElementById('convAtivoFilaConta_'+eid+'_'+i)?.value||'').trim();
+  const centroCusto=(document.getElementById('convAtivoFilaCentro_'+eid+'_'+i)?.value||'').trim();
+  const taxaDepreciacao=(document.getElementById('convAtivoFilaTaxa_'+eid+'_'+i)?.value||'').trim();
+  const valorResidualRaw=(document.getElementById('convAtivoFilaResidual_'+eid+'_'+i)?.value||'').trim();
+  const valorResidual=valorResidualRaw?_convAtivoFmtValorTxt(_convAtivoParseValor(valorResidualRaw)):'';
+  const ignorarIcms=!!document.getElementById('convAtivoFilaIgnoraIcms_'+eid+'_'+i)?.checked;
+  const ignorarPis=!!document.getElementById('convAtivoFilaIgnoraPis_'+eid+'_'+i)?.checked;
+  const ignorarCofins=!!document.getElementById('convAtivoFilaIgnoraCofins_'+eid+'_'+i)?.checked;
+  const usarComoRegra=!!document.getElementById('convAtivoFilaUsarRegra_'+eid+'_'+i)?.checked;
+  if(!contaPatrimonial||!centroCusto||!taxaDepreciacao){toast('Preencha conta patrimonial, centro de custo e taxa de depreciação.','err');return;}
+  const item=entrada.nfInfo.itens[0];
+  if(valorResidual)_convAtivoRegistrarResidual(eid,item.valorUnitario,contaPatrimonial,centroCusto,taxaDepreciacao,valorResidual);
+  const regra={ncm:item.ncm,contaPatrimonial,centroCusto,taxaDepreciacao,ignorarIcms,ignorarPis,ignorarCofins};
+  let regras=getConvAtivoRegras(eid);
+  if(usarComoRegra){
+    regras.push(regra);
+    setConvAtivoRegras(eid,regras);
+  } else {
+    regras=[...regras,regra];
+  }
+  fila.splice(i,1);
+  setConvAtivoFilaImobilizado(eid,fila);
+  _convAtivoGerarResultado(eid,[entrada.nfInfo],regras);
 }
 function _convAtivoSetStatus(eid,msg,tipo){
   const el=document.getElementById('convAtivoStatus_'+eid);

@@ -151,7 +151,7 @@ td{padding:9px 12px;vertical-align:middle}
 
       <div class="sc" style="padding:0;overflow-x:auto">
         <table>
-          <thead><tr><th>Descrição</th><th>NF</th><th>Fornecedor</th><th>Aquisição</th><th>Valor</th><th>Salvo em</th></tr></thead>
+          <thead><tr><th>Descrição</th><th>NF</th><th>Fornecedor</th><th>Aquisição</th><th>Valor</th><th>Salvo em</th><th class="no-print">Ações</th></tr></thead>
           <tbody id="listaBody"></tbody>
         </table>
       </div>
@@ -694,7 +694,7 @@ function renderLista(){
     : analises;
   const tbody = document.getElementById('listaBody');
   if(!filtradas.length){
-    tbody.innerHTML = `<tr><td colspan="6" style="text-align:center;color:var(--slate);padding:30px">Nenhuma análise ainda para esta empresa.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:var(--slate);padding:30px">Nenhuma análise ainda para esta empresa.</td></tr>`;
     return;
   }
   tbody.innerHTML = filtradas.map(a => `
@@ -705,6 +705,9 @@ function renderLista(){
       <td>${a.dataAquisicao ? new Date(a.dataAquisicao+'T00:00:00').toLocaleDateString('pt-BR') : '—'}</td>
       <td>${formatBRL(a.valorCusto)}</td>
       <td style="font-size:11.5px;color:var(--slate)">${new Date(a.salvoEm).toLocaleDateString('pt-BR')}</td>
+      <td class="no-print" onclick="event.stopPropagation()">${a.enviadoNFAtivoFixo
+        ? '<span style="font-size:11.5px;color:var(--green);font-weight:600">✓ Enviado</span>'
+        : `<button class="btn bo bsm" onclick="enviarParaNFAtivoFixo('${a.id}')">→ NF Ativo Fixo</button>`}</td>
     </tr>`).join('');
 }
 function exportarListaExcel(){
@@ -727,6 +730,167 @@ function exportarListaExcel(){
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, 'Análises');
   XLSX.writeFile(wb, 'analises_imobilizado_'+(empresaAtualNome||'empresa').replace(/[^\w]+/g,'_').slice(0,40)+'.xlsx');
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// INTEGRAÇÃO — envia a análise pronta pro módulo "NF Ativo Fixo" (index.html)
+// Mesma base Supabase (tabela dados_app) — não há chamada de função entre os
+// dois documentos, só dados compartilhados nas mesmas chaves que o índice usa
+// (S.g/S.s lá, VRGet/VRSet aqui). Layout de 81 colunas replicado aqui é o
+// mesmo do index.html (CONV_ATIVO_CAMPOS) — mantenha os dois em sincronia se
+// esse layout mudar.
+// ═══════════════════════════════════════════════════════════════════════
+const VR_CONV_ATIVO_CAMPOS=[
+  {idx:0,label:'Código Empresa'},{idx:1,label:'Cód. Bem'},{idx:2,label:'Identificador'},
+  {idx:3,label:'Descrição'},{idx:4,label:'Data Aquisição'},{idx:5,label:'Data Baixa'},
+  {idx:6,label:'Conta Patrimonial'},{idx:7,label:'Centro de Custo'},{idx:8,label:'Histórico'},
+  {idx:9,label:'Tipo'},{idx:10,label:'Classificação'},{idx:11,label:'Vinculado a'},
+  {idx:12,label:'Oriundo do Ativo Circulante'},{idx:13,label:'Função'},{idx:14,label:'Vlr da Aquisição'},
+  {idx:15,label:'Alíquota ICMS'},{idx:16,label:'Vlr do ICMS'},{idx:17,label:'Vlr ICMS - Subst Trib'},
+  {idx:18,label:'Vlr ICMS - Dif Alíquota'},{idx:19,label:'Vlr ICMS s/ Frete'},{idx:20,label:'Valor Tot do Créd do ICMS'},
+  {idx:21,label:'Alíquota PIS'},{idx:22,label:'Vlr do Créd PIS'},{idx:23,label:'Alíquota COFINS'},
+  {idx:24,label:'Vlr Créd COFINS'},{idx:25,label:'Vlr Original'},{idx:26,label:'Correção Mon. Acum.'},
+  {idx:27,label:'Vlr Residual'},{idx:28,label:'Base de Cálc da Deprec.'},{idx:29,label:'Calc Créd ICMS'},
+  {idx:30,label:'Calc Créd PIS e COFINS'},{idx:31,label:'Deprecia Bem'},{idx:32,label:'Calc Fiscal Deprec 100% Mês Início'},
+  {idx:33,label:'Calc Fiscal - Data Início'},{idx:34,label:'Calc Fiscal - Info Deprec Acum Até'},{idx:35,label:'Calc Fiscal - Info Deprec Acum Até (2)'},
+  {idx:36,label:'Calc Fiscal Vlr Deprec Acum'},{idx:37,label:'Calc Fiscal Tx Alternativa'},{idx:38,label:'Calc Socie Data Início'},
+  {idx:39,label:'Calc Societário - Info Deprec Acum Até'},{idx:40,label:'Calc Socie - Deprec Acum Até'},{idx:41,label:'Calc Socie - Vlr Deprec Acum'},
+  {idx:42,label:'Calc Socie - Tx Inicial'},{idx:43,label:'Doc Fiscal - Número'},{idx:44,label:'Doc Fiscal - Série'},
+  {idx:45,label:'Doc Fiscal - Data Emissão'},{idx:46,label:'Doc Fiscal - Espécie'},{idx:47,label:'Doc Fiscal - Chave NFe'},
+  {idx:48,label:'Doc Fiscal - Forn'},{idx:49,label:'Doc Fiscal - Emitente'},{idx:50,label:'Doc Fiscal Prod'},
+  {idx:51,label:'Doc Fiscal - Sequencial do Item'},{idx:52,label:'Apropiar Créd Somente Bem Result'},{idx:53,label:'Créd ICMS Pró Cargas'},
+  {idx:54,label:'Prod Aquiq Estado'},{idx:55,label:'Util Créd ICMS Mês Início Efetivo Ativ'},{idx:56,label:'Mês Início Efetivo Ativ'},
+  {idx:57,label:'Recolher Débito ICMS'},{idx:58,label:'PIS/COFINS - Calc c/ Base Enc de Deprec'},{idx:59,label:'PIS/COFINS - Calc Base Vlr Aquis'},
+  {idx:60,label:'PIS/COFINS - Início Calc'},{idx:61,label:'PIS/COFINS - Origem Bem'},{idx:62,label:'PIS/COFINS - Base Crédito'},
+  {idx:63,label:'PIS/COFINS - Espécie'},{idx:64,label:'PIS/COFINS - Tipo Utilizado'},{idx:65,label:'PIS/COFINS - Base Cálc'},
+  {idx:66,label:'PIS/COFINS - Período Cálc'},{idx:67,label:'PIS/COFINS - CST'},{idx:68,label:'PIS/COFINS - Vinc do Crédito'},
+  {idx:69,label:'PIS/COFINS - Desc Complem'},{idx:70,label:'PIS/COFINS - Possui Processo Refer'},{idx:71,label:'PIS/COFINS - Ident'},
+  {idx:72,label:'PIS/COFINS - Origem'},{idx:73,label:'PIS/COFINS - Seção Jurídica'},{idx:74,label:'PIS/COFINS - Vara'},
+  {idx:75,label:'PIS/COFINS - Nat da Ação'},{idx:76,label:'PIS/COFINS - Data da Sent ou Despacho'},{idx:77,label:'PIS/COFINS - Descrição do Processo'},
+  {idx:78,label:'Data de Cad do Bem'},{idx:79,label:'Quant Origem do Registro'},{idx:80,label:'NCM'}
+];
+function _vrConvAtivoGruposDoCampo(idx){
+  const l=VR_CONV_ATIVO_CAMPOS[idx].label.toUpperCase();
+  const g=[];
+  if(l.includes('ICMS'))g.push('icms');
+  if(l.includes('PIS'))g.push('pis');
+  if(l.includes('COFINS'))g.push('cofins');
+  return g;
+}
+function _vrConvAtivoIdxDoGrupo(grupo){
+  return VR_CONV_ATIVO_CAMPOS.map(c=>c.idx).filter(i=>_vrConvAtivoGruposDoCampo(i).includes(grupo));
+}
+function _vrConvAtivoFmtValorTxt(v){
+  v=parseFloat(v)||0;
+  if(Math.abs(v-Math.round(v))<0.001)return String(Math.round(v));
+  return v.toFixed(2).replace('.',',');
+}
+function _vrConvAtivoDistribuirValores(valorTotal,n){
+  const centavosTotal=Math.round(valorTotal*100);
+  const centavosBase=Math.floor(centavosTotal/n);
+  const resto=centavosTotal-centavosBase*n;
+  const valores=[];
+  for(let i=0;i<n;i++){ const extra=i>=n-resto?1:0; valores.push((centavosBase+extra)/100); }
+  return valores;
+}
+function _vrConvAtivoIgnoradosIniciais(r){
+  if(!r)return[];
+  const ign=new Set();
+  if(r.ignorarIcms)_vrConvAtivoIdxDoGrupo('icms').forEach(i=>ign.add(i));
+  if(r.ignorarPis)_vrConvAtivoIdxDoGrupo('pis').forEach(i=>ign.add(i));
+  if(r.ignorarCofins)_vrConvAtivoIdxDoGrupo('cofins').forEach(i=>ign.add(i));
+  return[...ign];
+}
+function _vrConvAtivoValoresIniciais(ctx){
+  const v=Array(81).fill('');
+  v[0]=ctx.eid;v[1]=ctx.codigoBem;v[2]=ctx.codigoBem;v[3]=ctx.descricao;v[4]=ctx.dataAquisicao;
+  v[6]=ctx.contaPatrimonial;v[7]=ctx.centroCusto;v[8]=ctx.historico;v[9]='B';v[10]='I';
+  v[14]=_vrConvAtivoFmtValorTxt(ctx.valor);v[25]=_vrConvAtivoFmtValorTxt(ctx.valor);v[27]=ctx.valorResidual||'';
+  v[31]='S';v[32]='N';v[33]=ctx.dataAquisicao;v[34]='N';v[37]=String(ctx.taxaDepreciacao||'');
+  v[38]=ctx.dataAquisicao;v[39]='N';v[42]=String(ctx.taxaDepreciacao||'');v[79]='1';v[80]=ctx.ncm||'';
+  return v;
+}
+// Gera o(s) bem(ns) direto na lista do NF Ativo Fixo (mesma numeração de
+// código que ele usaria) — só é chamado quando o NCM já tem regra cadastrada
+// lá (Conta/Centro/Taxa), senão o item cai na fila pra classificação manual.
+async function _vrGerarBensNFAtivoFixo(eid,item,nfInfo,regra,qtd,valorTotalItem,valorResidualUnitario){
+  const bensAtuais=(await VRGet('convAtivo_bens_'+eid))||[];
+  const cfg=(await VRGet('convAtivo_config_'+eid))||{proximoCodigo:1};
+  const maiorCodigoUsado=bensAtuais.reduce((max,b)=>Math.max(max,b.codigoBem),0);
+  let proximoCodigo=maiorCodigoUsado>0?maiorCodigoUsado+1:(cfg.proximoCodigo||1);
+  const valoresDistribuidos=_vrConvAtivoDistribuirValores(valorTotalItem,qtd);
+  const dataAquisicaoYYYYMMDD=(nfInfo.dataEmissao||'').replace(/-/g,'');
+  const valorResidualFmt=_vrConvAtivoFmtValorTxt(valorResidualUnitario);
+  const novosBens=[];
+  for(let i=1;i<=qtd;i++){
+    const qtdLabel=qtd>1?(i+'/'+qtd):'1';
+    const codigoBem=proximoCodigo++;
+    const historico=`<NF ${nfInfo.nfNumero}> ${nfInfo.fornecedor} |  QTD. ${qtdLabel}_${item.descricao} [via Análise de Imobilizado]`;
+    novosBens.push({
+      codigoBem,nfNumero:nfInfo.nfNumero,fornecedor:nfInfo.fornecedor,semClassificacao:false,
+      ignorados:_vrConvAtivoIgnoradosIniciais(regra),
+      valores:_vrConvAtivoValoresIniciais({
+        eid,codigoBem,descricao:item.descricao,dataAquisicao:dataAquisicaoYYYYMMDD,
+        contaPatrimonial:regra.contaPatrimonial,centroCusto:regra.centroCusto,
+        historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:regra.taxaDepreciacao,
+        ncm:item.ncm,valorResidual:valorResidualFmt
+      })
+    });
+  }
+  await VRSet('convAtivo_bens_'+eid,[...bensAtuais,...novosBens]);
+  await VRSet('convAtivo_config_'+eid,{...cfg,proximoCodigo});
+  await VRSet('convAtivo_ultimoLote_'+eid,novosBens.map(b=>b.codigoBem));
+  // registra o residual no cache por (valorProduto+conta+centro+taxa), igual ao fluxo manual do NF Ativo Fixo
+  const residuais=(await VRGet('convAtivo_residuais_'+eid))||[];
+  const valorUnitario=valorTotalItem/qtd;
+  const valorFmt=_vrConvAtivoFmtValorTxt(valorUnitario);
+  const idx=residuais.findIndex(x=>_vrConvAtivoFmtValorTxt(x.valorProduto)===valorFmt&&x.contaPatrimonial===regra.contaPatrimonial&&x.centroCusto===regra.centroCusto&&String(x.taxaDepreciacao)===String(regra.taxaDepreciacao));
+  const registro={valorProduto:valorFmt,contaPatrimonial:regra.contaPatrimonial,centroCusto:regra.centroCusto,taxaDepreciacao:regra.taxaDepreciacao,valorResidual:valorResidualFmt};
+  if(idx>=0)residuais[idx]=registro;else residuais.push(registro);
+  await VRSet('convAtivo_residuais_'+eid,residuais);
+}
+async function enviarParaNFAtivoFixo(id){
+  const r=await VRGet('vr_relatorio_'+id);
+  if(!r){ showToast('Análise não encontrada.','err'); return; }
+  if(!r.ncm||!String(r.ncm).replace(/\D/g,'')){ showToast('Preencha o NCM desta análise antes de enviar pro NF Ativo Fixo.','err'); return; }
+  if(!r.nfNumero||!r.dataAquisicao){ showToast('Faltam dados da NF (número/data) nesta análise.','err'); return; }
+  const eid=r.empresaEid;
+  const ncmLimpo=String(r.ncm).replace(/\D/g,'');
+  const qtd=Math.max(1,Math.round(r.quantidade||1));
+  const valorTotalItem=r.custoBase||0;
+  const valorResidualUnitario=(r.valorResidual||0)/qtd;
+  const item={descricao:r.descricao,ncm:ncmLimpo,qtd,valorUnitario:valorTotalItem/qtd,valorTotal:valorTotalItem};
+  const nfInfo={nfNumero:r.nfNumero,dataEmissao:r.dataAquisicao,fornecedor:r.fornecedor||'',itens:[item]};
+
+  const adicionadas=(await VRGet('menuAdicionadas_convAtivo'))||{};
+  if(!adicionadas[String(eid)]){
+    adicionadas[String(eid)]=true;
+    await VRSet('menuAdicionadas_convAtivo',adicionadas);
+  }
+
+  const regras=(await VRGet('convAtivo_regras_'+eid))||[];
+  const regra=regras.find(x=>x.ncm===ncmLimpo);
+
+  try{
+    if(regra){
+      await _vrGerarBensNFAtivoFixo(eid,item,nfInfo,regra,qtd,valorTotalItem,valorResidualUnitario);
+      showToast('Enviado! '+qtd+' bem(ns) já cadastrado(s) no NF Ativo Fixo (regra do NCM já existia).','ok');
+    } else {
+      const fila=(await VRGet('convAtivo_filaImobilizado_'+eid))||[];
+      fila.push({ nfInfo, valorResidualSugerido: valorResidualUnitario, origemAnaliseId: id });
+      await VRSet('convAtivo_filaImobilizado_'+eid, fila);
+      showToast('Enviado! Esse NCM ainda não tem Conta/Centro/Taxa no NF Ativo Fixo — classifique uma vez lá pra gerar o bem.','info');
+    }
+    r.enviadoNFAtivoFixo=true;
+    await VRSet('vr_relatorio_'+id, r);
+    if(analiseAtual && analiseAtual.id===id) analiseAtual.enviadoNFAtivoFixo=true;
+    const cacheEntry=_vrIndexCache.find(x=>x.id===id);
+    if(cacheEntry){ cacheEntry.enviadoNFAtivoFixo=true; await VRSet('vr_index', _vrIndexCache); }
+    renderLista();
+  }catch(e){
+    console.error(e);
+    showToast('Erro ao enviar pro NF Ativo Fixo: '+e.message,'err');
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════

@@ -40,9 +40,11 @@ Deno.serve(async (req: Request) => {
     const prompt = `Você é um perito em avaliação de bens do ativo imobilizado para fins contábeis/fiscais no Brasil.
 
 Ativo: "${descricao}"
-Categoria contábil: ${categoriaLabel ?? ''}
+Categoria contábil (fonte confiável do TIPO de bem): ${categoriaLabel ?? ''}
 Valor de custo (nota fiscal, já incluindo frete): R$ ${custoFmt}
 Vida útil estimada: ${vidaUtilAnos ?? ''} anos
+
+Atenção: a descrição do ativo vem direto da nota fiscal e costuma vir abreviada com jargão/códigos internos do fornecedor (sigla de modelo, cor, tecido, acabamento, medidas) — não é uma frase em português natural. NÃO tente decifrar cada sigla isoladamente nem invente um tipo de produto diferente a partir de uma palavra ambígua (ex: não conclua "equipamento de pintura" só porque aparece algo como "PINT" ou "TINTA" na descrição). Use a Categoria contábil acima como referência principal do tipo de bem, e a descrição apenas como pista de modelo/acabamento dentro dessa categoria.
 
 Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usados, e responda SOMENTE com um JSON válido, exatamente neste formato:
 
