@@ -1,10 +1,10 @@
-// Edge Function: pesquisa de mercado + obsolescência via IA (Google Gemini)
+// Edge Function: pesquisa de mercado + obsolescência via IA (Groq)
 // Usada pelo botão "🔍 Pesquisar Mercado (IA)" em valor-residual.html
 //
 // Deploy: Supabase Dashboard → Edge Functions → New Function → nome
 // "vr-pesquisa-mercado" → colar este código.
-// Secret necessário: GEMINI_API_KEY (Project Settings → Edge Functions → Secrets)
-// Obtenha a chave GRÁTIS (sem cartão de crédito) em https://aistudio.google.com/apikey
+// Secret necessário: GROQ_API_KEY (Project Settings → Edge Functions → Secrets)
+// Obtenha a chave GRÁTIS (sem cartão de crédito) em https://console.groq.com/keys
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -12,7 +12,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -28,9 +28,9 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const apiKey = Deno.env.get('GEMINI_API_KEY');
+    const apiKey = Deno.env.get('GROQ_API_KEY');
     if (!apiKey) {
-      return new Response(JSON.stringify({ error: 'GEMINI_API_KEY não configurada nos secrets da function' }), {
+      return new Response(JSON.stringify({ error: 'GROQ_API_KEY não configurada nos secrets da function' }), {
         status: 500,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
       });
@@ -44,7 +44,7 @@ Categoria contábil: ${categoriaLabel ?? ''}
 Valor de custo (nota fiscal, já incluindo frete): R$ ${custoFmt}
 Vida útil estimada: ${vidaUtilAnos ?? ''} anos
 
-Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usados, e responda no formato JSON abaixo:
+Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usados, e responda SOMENTE com um JSON válido, exatamente neste formato:
 
 {
   "mercado": {
@@ -72,27 +72,26 @@ Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usa
 
 Use valores realistas para o mercado brasileiro — não invente números absurdos, e mantenha conservador_pct < realista_pct < otimista_pct.`;
 
-    const aiResp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: prompt }] }],
-          generationConfig: {
-            responseMimeType: 'application/json',
-            temperature: 0.4,
-          },
-        }),
-      }
-    );
+    const aiResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer ' + apiKey,
+      },
+      body: JSON.stringify({
+        model: GROQ_MODEL,
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' },
+        temperature: 0.4,
+      }),
+    });
 
     if (!aiResp.ok) {
       const errText = await aiResp.text();
       throw new Error('Erro na API da IA (' + aiResp.status + '): ' + errText.slice(0, 300));
     }
     const aiData = await aiResp.json();
-    let raw: string = aiData?.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    let raw: string = aiData?.choices?.[0]?.message?.content || '';
     raw = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
     const dados = JSON.parse(raw);
 
