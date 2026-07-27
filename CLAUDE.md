@@ -29,7 +29,7 @@ Node.js instalado em: `C:\Program Files\nodejs\node.exe` (v24.17.0)
 
 ## Localização do projeto
 
-`C:\Users\Pichau\OneDrive - JJR ORGANIZACAO CONTABIL S S\Depto. Contábil\Site-JJR\jjr-controle\`
+`C:\jjr-controle\` — pasta local, fora do OneDrive (não sincroniza automaticamente entre PCs; a fonte de verdade entre máquinas é o GitHub).
 
 ## Observações
 
