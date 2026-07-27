@@ -7,6 +7,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230F7B6C'/%3E%3Crect x='12' y='8' width='40' height='48' rx='5' fill='white'/%3E%3Crect x='16' y='12' width='32' height='12' rx='2' fill='%230F7B6C'/%3E%3Crect x='16' y='30' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='28' y='30' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='40' y='30' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='16' y='42' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='28' y='42' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='40' y='42' width='8' height='14' rx='2' fill='%230F7B6C'/%3E%3C/svg%3E">
 <meta name="theme-color" content="#0F7B6C">
 <link rel="manifest" href="manifest.json">
@@ -16606,61 +16607,61 @@ function lucEmpresasVisiveis(){
   return lucEmps().filter(function(e){ return !busca||(e.nome||'').toLowerCase().includes(busca)||(e.cnpj||'').includes(busca); });
 }
 
-function lucConfirmExportAll(){
+async function lucConfirmExportAll(){
   var ano=lucCurrentAno;
   var selecionados=lucEmpresasVisiveis();
   if(!selecionados.length){ alert('Nenhuma empresa visível na tela pra exportar.'); return; }
 
-  var XLSX=window.XLSX;
-  if(!XLSX){ alert('Biblioteca Excel não carregada.'); return; }
+  // ExcelJS (não o SheetJS/XLSX) é quem grava esta exportação — é a única das
+  // duas bibliotecas carregadas no site que sabe gravar cor de fundo de
+  // célula de verdade (necessário pro destaque amarelo do "Creditado no Mês
+  // Anterior" logo abaixo). SheetJS continua sendo usado nas outras telas.
+  if(!window.ExcelJS){ alert('Biblioteca Excel não carregada.'); return; }
+  var NUMFMT='#,##0.00;[Red]-#,##0.00';
+  var PCTFMT='0.00%';
+  var AMARELO={type:'pattern',pattern:'solid',fgColor:{argb:'FFFFFF00'}};
 
   var gridItems=[
     {id:'lpm_acum',     label:'Lucro/Prej. Saldo de Abertura',       auto:false},
     {id:'lpm',          label:'Lucro/Prejuízo Mensal',                auto:false},
     {id:'ajustes_cred', label:'Ajustes Credores de Ex. Anteriores',   auto:false},
     {id:'ajustes_dev',  label:'Ajustes Devedores de Ex. Anteriores',  auto:false},
-    {id:'creditado_ant',label:'(-) Creditado no Mês Anterior',        auto:true},
+    {id:'creditado_ant',label:'(-) Creditado no Mês Anterior',        auto:true, destaque:true},
     {id:'saldo_ant',    label:'Saldo de Lucro/Prejuízo Anterior',     auto:true},
     {id:'saldo',        label:'Saldo de Lucro/Prejuízo',              auto:true},
   ];
   var mLabels=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
   var mCodes=['01','02','03','04','05','06','07','08','09','10','11','12'];
-  var wb=XLSX.utils.book_new();
+  var wb=new ExcelJS.Workbook();
 
   /* ── ABA 1: Indicadores (grid mensal por empresa) ── */
-  var ws1=[];
-  ws1.push(['Empresa','CNPJ','Indicador'].concat(mLabels));
+  var ws1=wb.addWorksheet('Indicadores');
+  ws1.getColumn(1).width=42; ws1.getColumn(2).width=22; ws1.getColumn(3).width=44;
+  for(var c1=0;c1<mLabels.length;c1++) ws1.getColumn(4+c1).width=14;
+  ws1.addRow(['Empresa','CNPJ','Indicador'].concat(mLabels));
   selecionados.forEach(function(emp,ei){
-    if(ei>0) ws1.push([]);
+    if(ei>0) ws1.addRow([]);
     gridItems.forEach(function(item,ii){
       var row=[ii===0?emp.nome:'', ii===0?fmtDoc(emp.cnpj):'', item.label];
       mCodes.forEach(function(m){
         var v=item.auto?lucCalcTopAuto(item.id,ano,emp.eid,m):lucTopGetMes(item.id,ano,emp.eid,m);
         row.push(v);
       });
-      ws1.push(row);
+      var excelRow=ws1.addRow(row);
+      for(var col1=4;col1<=15;col1++) excelRow.getCell(col1).numFmt=NUMFMT;
+      if(item.destaque) excelRow.eachCell({includeEmpty:true},function(cell){ cell.fill=AMARELO; });
     });
   });
-  var sheet1=XLSX.utils.aoa_to_sheet(ws1);
-  sheet1['!cols']=[{wch:42},{wch:22},{wch:44}].concat(mLabels.map(function(){ return {wch:14}; }));
-  // Formatar números com separador de milhar e negativos em vermelho
-  for(var col1=3;col1<sheet1['!cols'].length;col1++){
-    for(var row1=1;row1<ws1.length;row1++){
-      var cellRef1=XLSX.utils.encode_col(col1)+XLSX.utils.encode_row(row1);
-      if(sheet1[cellRef1]&&typeof sheet1[cellRef1].v==='number'){
-        sheet1[cellRef1].z='#,##0.00;[Red]-#,##0.00';
-      }
-    }
-  }
-  XLSX.utils.book_append_sheet(wb,sheet1,'Indicadores');
 
   /* ── ABA 2: Percentual de Participação por sócio ── */
-  var ws2=[];
-  ws2.push(['Empresa','CNPJ Empresa','Sócio / Acionista','CPF / CNPJ Sócio'].concat(mLabels));
+  var ws2=wb.addWorksheet('Percentuais');
+  ws2.getColumn(1).width=42; ws2.getColumn(2).width=22; ws2.getColumn(3).width=36; ws2.getColumn(4).width=22;
+  for(var c2=0;c2<mLabels.length;c2++) ws2.getColumn(5+c2).width=10;
+  ws2.addRow(['Empresa','CNPJ Empresa','Sócio / Acionista','CPF / CNPJ Sócio'].concat(mLabels));
   selecionados.forEach(function(emp,ei){
     var socios=lucSocGet(emp.eid);
     if(!socios.length){
-      ws2.push([emp.nome, fmtDoc(emp.cnpj),'(sem sócios cadastrados)',''].concat(mCodes.map(function(){ return ''; })));
+      ws2.addRow([emp.nome, fmtDoc(emp.cnpj),'(sem sócios cadastrados)',''].concat(mCodes.map(function(){ return ''; })));
       return;
     }
     socios.forEach(function(soc,si){
@@ -16670,39 +16671,28 @@ function lucConfirmExportAll(){
         var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
         row.push(pct/100); /* como decimal para o Excel formatar como % */
       });
-      ws2.push(row);
+      var excelRow=ws2.addRow(row);
+      for(var colp=5;colp<=16;colp++) excelRow.getCell(colp).numFmt=PCTFMT;
     });
-    if(ei<selecionados.length-1) ws2.push([]);
+    if(ei<selecionados.length-1) ws2.addRow([]);
   });
-  var sheet2=XLSX.utils.aoa_to_sheet(ws2);
-  sheet2['!cols']=[{wch:42},{wch:22},{wch:36},{wch:22}].concat(mLabels.map(function(){ return {wch:10}; }));
-  // Formatar percentuais como 0.00% (decimais)
-  for(var i=4;i<sheet2['!cols'].length+4;i++){
-    for(var j=1;j<ws2.length;j++){
-      var cellRef=XLSX.utils.encode_col(i)+XLSX.utils.encode_row(j);
-      if(sheet2[cellRef]&&typeof sheet2[cellRef].v==='number'){
-        sheet2[cellRef].z='0.00%';
-      }
-    }
-  }
-  XLSX.utils.book_append_sheet(wb,sheet2,'Percentuais');
 
   /* ── ABA 3: Distribuição mensal por sócio ── */
-  var ws3=[];
-  ws3.push(['Empresa','CNPJ Empresa','Mês','Sócio / Acionista','CPF / CNPJ Sócio',
+  var ws3=wb.addWorksheet('Distribuicao_Mensal');
+  ws3.columns=[{width:42},{width:22},{width:12},{width:36},{width:22},{width:16},{width:16},{width:14},{width:18},{width:20}];
+  ws3.addRow(['Empresa','CNPJ Empresa','Mês','Sócio / Acionista','CPF / CNPJ Sócio',
             'Saldo Ant.','Crédito no Mês','Baixas no Mês','Saldo p/ Próx. Mês','Conta Contábil']);
   selecionados.forEach(function(emp,ei){
     var eid=emp.eid;
     var socios=lucSocGet(eid);
     var isFirst=true;
     mCodes.forEach(function(m,mi){
-      var isJan=m==='01';
       socios.forEach(function(soc){
         var row=lucGetMesRow(eid,ano,m,soc.id);
         var saldoAnt=lucCalcSaldoAnt(eid,ano,m,soc.id);
         var creditoVal=lucCalcCreditoEfetivo(eid,ano,m,soc.id);
         var saldoProx=lucCalcSaldoProx(saldoAnt,creditoVal,row.baixas);
-        ws3.push([
+        var excelRow=ws3.addRow([
           isFirst?emp.nome:'', isFirst?fmtDoc(emp.cnpj):'',
           mLabels[mi], soc.nome, fmtDoc(soc.doc),
           saldoAnt, creditoVal,
@@ -16710,39 +16700,30 @@ function lucConfirmExportAll(){
           saldoProx,
           soc.conta||''
         ]);
+        for(var col3=6;col3<=9;col3++) excelRow.getCell(col3).numFmt=NUMFMT;
         isFirst=false;
       });
     });
-    if(ei<selecionados.length-1) ws3.push([]);
+    if(ei<selecionados.length-1) ws3.addRow([]);
   });
-  var sheet3=XLSX.utils.aoa_to_sheet(ws3);
-  sheet3['!cols']=[{wch:42},{wch:22},{wch:12},{wch:36},{wch:22},{wch:16},{wch:16},{wch:14},{wch:18},{wch:20}];
-  // Formatar números com separador de milhar e negativos em vermelho
-  for(var col=5;col<=8;col++){
-    for(var row=1;row<ws3.length;row++){
-      var cellRef=XLSX.utils.encode_col(col)+XLSX.utils.encode_row(row);
-      if(sheet3[cellRef]&&typeof sheet3[cellRef].v==='number'){
-        sheet3[cellRef].z='#,##0.00;[Red]-#,##0.00';
-      }
-    }
-  }
-  XLSX.utils.book_append_sheet(wb,sheet3,'Distribuicao_Mensal');
 
   /* ── ABA 4: Lucros / Dividendos 2025 ── */
   var eids2025=getLuc2025Empresas();
   var selecionados2025=selecionados.filter(function(emp){return eids2025.indexOf(String(emp.eid))>=0;});
-  var ws4=[];
-  ws4.push(['Empresa','CNPJ Empresa','Sócio / Acionista','CPF / CNPJ Sócio','Conta Contábil','%','Saldo Inicial']
+  var ws4=wb.addWorksheet('Lucros_Dividendos_2025');
+  ws4.columns=[{width:42},{width:22},{width:36},{width:22},{width:20},{width:10},{width:14}]
+    .concat(mLabels.map(function(){return {width:14};})).concat([{width:16}]);
+  ws4.addRow(['Empresa','CNPJ Empresa','Sócio / Acionista','CPF / CNPJ Sócio','Conta Contábil','%','Saldo Inicial']
     .concat(mLabels.map(function(l){return l+'/2026';})).concat(['Saldo Atual']));
   if(!selecionados2025.length){
-    ws4.push(['(nenhuma das empresas selecionadas está cadastrada em Lucros / Dividendos 2025)']);
+    ws4.addRow(['(nenhuma das empresas selecionadas está cadastrada em Lucros / Dividendos 2025)']);
   } else {
     selecionados2025.forEach(function(emp,ei){
       var eid=emp.eid;
       var socios=lucSocGet(eid);
       var dados2025=getLuc2025Dados(eid);
       if(!socios.length){
-        ws4.push([emp.nome, fmtDoc(emp.cnpj),'(sem sócios cadastrados)','','','',''].concat(mCodes.map(function(){return '';})).concat(['']));
+        ws4.addRow([emp.nome, fmtDoc(emp.cnpj),'(sem sócios cadastrados)','','','',''].concat(mCodes.map(function(){return '';})).concat(['']));
         return;
       }
       socios.forEach(function(soc,si){
@@ -16753,26 +16734,21 @@ function lucConfirmExportAll(){
         var row=[si===0?emp.nome:'', si===0?fmtDoc(emp.cnpj):'', soc.nome, fmtDoc(soc.doc), d.conta||'', (soc.pct_ant||0)/100, saldoInicial];
         mCodes.forEach(function(m){ row.push(parseFloat(d.meses&&d.meses[m])||0); });
         row.push(saldoAtual);
-        ws4.push(row);
+        var excelRow=ws4.addRow(row);
+        excelRow.getCell(6).numFmt=PCTFMT;
+        for(var col4=7;col4<=20;col4++) excelRow.getCell(col4).numFmt=NUMFMT;
       });
-      if(ei<selecionados2025.length-1) ws4.push([]);
+      if(ei<selecionados2025.length-1) ws4.addRow([]);
     });
   }
-  var sheet4=XLSX.utils.aoa_to_sheet(ws4);
-  sheet4['!cols']=[{wch:42},{wch:22},{wch:36},{wch:22},{wch:20},{wch:10},{wch:14}].concat(mLabels.map(function(){return {wch:14};})).concat([{wch:16}]);
-  if(selecionados2025.length){
-    for(var row4=1;row4<ws4.length;row4++){
-      var refPct4=XLSX.utils.encode_col(5)+XLSX.utils.encode_row(row4);
-      if(sheet4[refPct4]&&typeof sheet4[refPct4].v==='number')sheet4[refPct4].z='0.00%';
-      for(var col4=6;col4<=19;col4++){
-        var refVal4=XLSX.utils.encode_col(col4)+XLSX.utils.encode_row(row4);
-        if(sheet4[refVal4]&&typeof sheet4[refVal4].v==='number')sheet4[refVal4].z='#,##0.00;[Red]-#,##0.00';
-      }
-    }
-  }
-  XLSX.utils.book_append_sheet(wb,sheet4,'Lucros_Dividendos_2025');
 
-  XLSX.writeFile(wb,'Lucros_Dividendos_'+ano+'.xlsx');
+  var buffer=await wb.xlsx.writeBuffer();
+  var blob=new Blob([buffer],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'});
+  var a=document.createElement('a');
+  a.href=URL.createObjectURL(blob);
+  a.download='Lucros_Dividendos_'+ano+'.xlsx';
+  document.body.appendChild(a);a.click();document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
 }
 
 function lucConfirmExportAllPDF(){
