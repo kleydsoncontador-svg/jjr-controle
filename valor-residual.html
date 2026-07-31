@@ -1059,7 +1059,7 @@ async function extrairDadosPDF(file){
   let m;
   // "Nº"/"N°" só com o indicador ordinal de verdade — um "N" seguido de "o"/"O" comuns
   // já deu falso positivo pegando um número de endereço (ex: "...FLORIANO 466 SALA...").
-  m = texto.match(/N[º°]\.?\s*(\d[\d.]{2,})/); if(m) dados.nfNumero = m[1].replace(/\./g,'');
+  m = texto.match(/N[º°]\.?:?\s*(\d[\d.]{2,})/); if(m) dados.nfNumero = m[1].replace(/\./g,'');
   m = texto.match(/S[EÉé]RIE\s*[:.]?\s*(\d+)/i); if(m) dados.nfSerie = m[1];
   m = texto.match(/DATA\s+DA\s+EMISS[ÃA]O\D{0,15}?(\d{2}\/\d{2}\/\d{4})/i) || texto.match(/(\d{2}\/\d{2}\/\d{4})/);
   if(m){ const p=m[1].split('/'); dados.dataAquisicao = p[2]+'-'+p[1]+'-'+p[0]; }
@@ -1083,7 +1083,18 @@ async function extrairDadosPDF(file){
   };
   const fornecedorLinha = acharProximaLinha(/IDENTIFICA[ÇC][ÃA]O\s+DO\s+EMITENTE/i);
   if(fornecedorLinha) dados.fornecedor = fornecedorLinha;
-  const adquirenteLinha = acharProximaLinha(/NOME\s*\/\s*RAZ[ÃA]O\s+SOCIAL/i);
+  let adquirenteLinha = acharProximaLinha(/NOME\s*\/\s*RAZ[ÃA]O\s+SOCIAL/i);
+  if(!adquirenteLinha){
+    // Alguns emissores usam só "RAZÃO SOCIAL" (sem o prefixo "NOME/") dentro da
+    // seção DESTINATÁRIO/REMETENTE — procura ali especificamente, pra não
+    // confundir com a "RAZÃO SOCIAL" do Transportador (que vem depois).
+    const destIdx = linhas.findIndex(l => /DESTINAT[ÁA]RIO\s*\/\s*REMETENTE/i.test(l));
+    if(destIdx >= 0){
+      for(let i = destIdx + 1; i < Math.min(destIdx + 6, linhas.length); i++){
+        if(/^RAZ[ÃA]O\s+SOCIAL$/i.test(linhas[i]) && linhas[i+1]){ adquirenteLinha = linhas[i+1]; break; }
+      }
+    }
+  }
   if(adquirenteLinha) dados.adquirente = adquirenteLinha;
 
   // Itens da tabela de produtos — ancorado no cabeçalho da tabela ("ALÍQ. IPI",
@@ -1095,11 +1106,17 @@ async function extrairDadosPDF(file){
   // Código do produto varia bastante entre emissores: pode ser alfanumérico
   // (ex: "CDT388PWBT0000") ou só números (ex: "3981165927"); a unidade também
   // vem ora "UN" ora "Un" — por isso [A-Z0-9] sem exigir letra e [A-Za-z] na UN.
-  const itemRegex = /([A-Z0-9]{6,})\s+(.+?)\s*-?\s*-?\s*(\d{8})\s+(\d{2,3})\s+(\d{3,4})\s+([A-Za-z]{2,3})\s+([\d.]+,\d{4})\s+([\d.]+,\d{4})\s+([\d.]+,\d{2})/g;
+  // CFOP às vezes vem formatado com ponto (ex: "5.405") em vez de dígitos puros
+  // ("5405"); quantidade/valor unitário às vezes vêm com 2 casas decimais em vez
+  // das 4 do padrão NF-e — aceita as duas variações pra não quebrar a linha toda.
+  const itemRegex = /([A-Z0-9]{6,})\s+(.+?)\s*-?\s*-?\s*(\d{8})\s+(\d{2,3})\s+(\d\.?\d{3}|\d{3,4})\s+([A-Za-z]{2,3})\s+([\d.]+,\d{2,4})\s+([\d.]+,\d{2,4})\s+([\d.]+,\d{2})/g;
   const itens = [];
   let mm;
   while((mm = itemRegex.exec(textoItens))){
-    itens.push({ descricao: mm[2].trim(), ncm: mm[3], valorTotal: parseNum(mm[9]) });
+    // Remove o CEST (ex: "CEST:2109800"), que às vezes vem grudado no fim da
+    // descrição por causa de como o texto do PDF é lido em sequência única.
+    const descricaoLimpa = mm[2].trim().replace(/\s*CEST\s*:?\s*[\d.]+\s*$/i,'').trim();
+    itens.push({ descricao: descricaoLimpa, ncm: mm[3], valorTotal: parseNum(mm[9]) });
   }
 
   if(itens.length > 1){
