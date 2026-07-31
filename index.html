@@ -2706,6 +2706,10 @@ const cccLocalUpdatedAt = {};
 const CCC_META_KEY = '__ccc_local_updated_at__';
 let cccDb = null;
 let _supaClient = null;  // Supabase client (inicializado no bootstrap)
+// null = nunca tentou carregar; true = última leitura do Supabase confirmada
+// com sucesso (mesmo que vazia); false = falhou (rede, RLS, etc). Usado pra
+// nunca tratar uma falha de leitura como "banco vazio" e sobrescrever a nuvem.
+let _supaLastLoadOk = null;
 
 function cccIdbOpen(){
   return new Promise(function(resolve){
@@ -3175,7 +3179,14 @@ function seedData(){
     S.s(SEED_FLAG, true);
     return;
   }
-  // Sem nenhuma empresa — carga inicial limpa
+  // Sem nenhuma empresa — só faz a carga inicial se isso for confirmado (nuvem
+  // não configurada, ou leitura da nuvem confirmou 0 registros). Se a nuvem
+  // está configurada mas a leitura falhou (rede, sessão inválida, RLS), NÃO
+  // grava a lista padrão por cima — isso já causou perda de dados reais antes.
+  if(_supaClient && _supaLastLoadOk!==true){
+    console.warn('seedData: leitura da nuvem não confirmada — abortando carga inicial para não sobrescrever dados existentes.');
+    return;
+  }
   S.saveEmps(EMP_SEED);
   S.saveMeses(MESES_SEED);
   S.saveFechAtual('2026-01');
@@ -5228,24 +5239,29 @@ function getV(id){ return (document.getElementById(id)?.value||'').trim(); }
 // ─── Busca a versão mais recente de 'emps' direto do Supabase antes de editar,
 // para reduzir o risco de dois operadores sobrescreverem um ao outro (last-write-wins
 // no array inteiro). Não elimina o risco por completo, mas encurta bastante a janela.
+// Retorna null se não for possível confirmar a versão mais recente (nuvem
+// configurada mas leitura falhou) — NUNCA cai pra cópia local nesse caso,
+// porque o chamador vai regravar o array inteiro por cima da nuvem, e uma
+// cópia local desatualizada apagaria o progresso de outros operadores.
 async function fetchFreshEmps(){
-  if(_supaClient){
-    try{
-      const r = await _supaClient.from('dados_app').select('value').eq('key','emps').maybeSingle();
-      if(!r.error && r.data && r.data.value){
-        cccCache['emps'] = r.data.value;
-        cccIdbSet('emps', r.data.value);
-        return r.data.value;
-      }
-    }catch(e){ console.warn('fetchFreshEmps err', e); }
-  }
-  return S.emps();
+  if(!_supaClient) return S.emps();
+  try{
+    const r = await _supaClient.from('dados_app').select('value').eq('key','emps').maybeSingle();
+    if(!r.error && r.data && r.data.value){
+      cccCache['emps'] = r.data.value;
+      cccIdbSet('emps', r.data.value);
+      return r.data.value;
+    }
+    console.warn('fetchFreshEmps: leitura falhou ou veio vazia', r.error);
+  }catch(e){ console.warn('fetchFreshEmps err', e); }
+  return null;
 }
 
 // ─── Fechamento cell toggle (Fopag/Fiscal/Financeiro/Balancete) ───────────────
 async function toggleFechCell(evt, eid, campo){
   evt.stopPropagation();
   const emps = await fetchFreshEmps();
+  if(!emps){ toast('Não foi possível confirmar os dados mais recentes da nuvem. Verifique sua conexão e tente novamente.','err'); return; }
   const idx  = emps.findIndex(e=>String(e.eid)===String(eid));
   if(idx<0) return;
   const fech = S.fechAtual();
@@ -5288,6 +5304,7 @@ async function toggleFechCell(evt, eid, campo){
 // ─── Data de saída ────────────────────────────────────────────────────────────
 async function setSaida(eid, val){
   const emps = await fetchFreshEmps();
+  if(!emps){ toast('Não foi possível confirmar os dados mais recentes da nuvem. Verifique sua conexão e tente novamente.','err'); return; }
   const idx  = emps.findIndex(e=>String(e.eid)===String(eid));
   if(idx<0) return;
   emps[idx].dataSaida = val||'';
@@ -5298,6 +5315,7 @@ async function setSaida(eid, val){
 
 async function setUltimoFechamento(eid, val){
   const emps = await fetchFreshEmps();
+  if(!emps){ toast('Não foi possível confirmar os dados mais recentes da nuvem. Verifique sua conexão e tente novamente.','err'); return; }
   const idx  = emps.findIndex(e=>String(e.eid)===String(eid));
   if(idx<0) return;
   emps[idx].ultimoFechamento = val||'';
@@ -5662,7 +5680,8 @@ async function _loadFromSupabase(){
   if(!_supaClient)return;
   try{
     var r=await _supaClient.from('dados_app').select('key,value,updated_at').order('updated_at', {ascending: false});
-    if(r.error){console.warn('SB load err:',r.error);return;}
+    if(r.error){console.warn('SB load err:',r.error);_supaLastLoadOk=false;return;}
+    _supaLastLoadOk=true;
     var serverTsByKey={};
     if(r.data&&r.data.length){
       r.data.forEach(function(row){
@@ -5691,7 +5710,7 @@ async function _loadFromSupabase(){
         _supaClient.from('dados_app').upsert({key:key,value:cccCache[key],updated_at:localTs}).then(function(res){if(res.error)console.warn('SB resync err',key,res.error);});
       }
     });
-  }catch(e){console.warn('_loadFromSupabase:',e);}
+  }catch(e){console.warn('_loadFromSupabase:',e);_supaLastLoadOk=false;}
 }
 
 async function bootstrap(){
@@ -5712,8 +5731,7 @@ async function bootstrap(){
   }
   await cccInitStorage();
   // â”€â”€ Restaurar sessÃ£o ou exibir tela de login â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-  var isGithubPages = window.location.hostname === 'kleydsoncontador-svg.github.io';
-  var ok = isGithubPages || (await tentarRestaurarSessao());
+  var ok = await tentarRestaurarSessao();
   if(ok){
     await _loadFromSupabase();
     seedData();
