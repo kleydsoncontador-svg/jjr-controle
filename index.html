@@ -16114,6 +16114,95 @@ function _parseEmp(id){
 function _calcEmpTotalFinanciado(){
   return _parseEmp('empValorCredito')+_parseEmp('empTarifa')+_parseEmp('empIOF')+_parseEmp('empSeguro')+_parseEmp('empOutrosCustos');
 }
+// Extrai o texto de um PDF (contrato, apólice, etc.) usando pdf.js — mesma
+// infraestrutura já usada pra extrair faturas (_convItauExtrairPaginas /
+// _convItauAgruparLinhas), só que genérica, sem parsing específico de banco.
+// Limita a maxPaginas porque as informações relevantes de um contrato (CCB,
+// Pronampe, etc.) ficam sempre no preâmbulo/quadro-resumo, no início — o
+// resto costuma ser cláusula padrão que só infla o texto enviado pra IA.
+async function _empExtrairTextoPDF(file,maxPaginas){
+  const paginas=await _convItauExtrairPaginas(file);
+  const usar=maxPaginas?paginas.slice(0,maxPaginas):paginas;
+  return usar.map(function(pg){ return _convItauAgruparLinhas(pg.itens).map(function(l){return l.texto;}).join('\n'); }).join('\n');
+}
+// Lê o(s) PDF(s) anexado(s) (contrato + apólice de seguro, se houver), manda
+// o texto pra Edge Function emp-extrair-contrato (Groq) e pré-preenche os
+// campos do formulário — o usuário sempre revisa/ajusta antes de salvar.
+async function _empExtrairContratoIA(){
+  const input=document.getElementById('empArquivosContrato');
+  const statusEl=document.getElementById('empStatusExtracao');
+  const btn=document.getElementById('empBtnExtrairIA');
+  if(!input||!input.files||!input.files.length){ toast('Anexe ao menos um PDF primeiro.','err'); return; }
+  const btnTextoOriginal=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Lendo PDF(s)...';
+  statusEl.style.color='var(--slate)';
+  statusEl.textContent='Extraindo texto dos arquivos...';
+  try{
+    let textoCombinado='';
+    for(const file of input.files){
+      const texto=await _empExtrairTextoPDF(file,10);
+      textoCombinado+='=== '+file.name+' ===\n'+texto+'\n\n';
+    }
+    btn.textContent='Consultando IA...';
+    statusEl.textContent='Analisando o contrato com IA...';
+    const resp=await fetch(SUPABASE_URL+'/functions/v1/emp-extrair-contrato',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+      body:JSON.stringify({texto:textoCombinado})
+    });
+    if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
+    const d=await resp.json();
+    if(d.error) throw new Error(d.error);
+    const setIf=(id,val)=>{ if(val==null||val==='') return; const el=document.getElementById(id); if(el) el.value=val; };
+    const setMoneyIf=(id,val)=>{ if(val==null) return; const el=document.getElementById(id); if(el) el.value=_fmtInputEmp(parseFloat(val)||0); };
+    setIf('empCredorNome',d.credorNome);
+    if(d.credorTipo){ const sel=document.getElementById('empCredorTipo'); if(sel) sel.value=d.credorTipo; }
+    setIf('empContratoNumero',d.contratoNumero);
+    setIf('empNome',d.nomeEmprestimo);
+    setMoneyIf('empValorCredito',d.valorCredito);
+    setMoneyIf('empTarifa',d.valorTarifa);
+    setMoneyIf('empIOF',d.valorIOF);
+    setMoneyIf('empSeguro',d.valorSeguro);
+    setMoneyIf('empOutrosCustos',d.outrosCustosFinanciados);
+    if(d.taxaJurosMensal!=null){ const el=document.getElementById('empTaxa'); if(el) el.value=String(d.taxaJurosMensal).replace('.',','); }
+    if(d.sistemaAmortizacao){ const sel=document.getElementById('empSistema'); if(sel) sel.value=d.sistemaAmortizacao; }
+    if(d.totalParcelas!=null){ const el=document.getElementById('empTotalParc'); if(el) el.value=d.totalParcelas; }
+    setIf('empDataContratacao',d.dataContratacao);
+    setIf('empPrimVenc',d.primeiroVencimento);
+    _calcEmpPreview();
+    _empCalcularCarenciaAuto();
+    let msg='✓ Dados extraídos — revise os campos antes de salvar.';
+    if(d.valorParcelaInformado!=null) msg+=' Parcela informada no contrato: R$ '+_fmt(parseFloat(d.valorParcelaInformado)||0)+'.';
+    if(d.observacoes) msg+=' '+d.observacoes;
+    statusEl.style.color='var(--green)';
+    statusEl.textContent=msg;
+    toast('Dados extraídos do contrato — confira antes de salvar.','ok');
+  }catch(e){
+    console.error('_empExtrairContratoIA erro:',e);
+    statusEl.style.color='#dc2626';
+    statusEl.textContent='Erro: '+e.message;
+    toast('Erro ao extrair dados do contrato: '+e.message,'err');
+  }finally{
+    btn.disabled=false;
+    btn.textContent=btnTextoOriginal;
+  }
+}
+// Carência = meses entre a Contratação e o 1º Vencimento, menos 1 (1 mês de
+// intervalo = sem carência). Recalcula sozinho sempre que uma das duas datas
+// perde o foco — se o intervalo não fizer sentido (datas incompletas/1º
+// Vencimento antes da Contratação), não mexe no campo.
+function _empCalcularCarenciaAuto(){
+  const dc=_parseDataBR(document.getElementById('empDataContratacao')?.value);
+  const pv=_parseDataBR(document.getElementById('empPrimVenc')?.value);
+  if(!dc||!pv) return;
+  const meses=(pv.getFullYear()-dc.getFullYear())*12+(pv.getMonth()-dc.getMonth());
+  if(meses<1) return;
+  const campo=document.getElementById('empCarencia');
+  if(!campo) return;
+  campo.value=meses-1;
+  _calcEmpPreview();
+}
 function _calcEmpPreview(){
   const principal=_calcEmpTotalFinanciado();
   const totalEl=document.getElementById('empValorTotalFinanciado');
@@ -16156,6 +16245,17 @@ function abrirFormEmp(eid,id){
       <h2 style="margin:0;font-size:1.2rem;color:#1E3558">${titulo}</h2>
       <button class="btn bo bsm" onclick="fecharFormEmp()">← Voltar ${_empFormReturnView==='detalhe'?'ao Empréstimo':'à Lista de Empréstimos'}</button>
     </div>
+    ${!id?`<div style="background:var(--white);border:2px dashed #94a3b8;border-radius:8px;margin-bottom:16px;overflow:hidden">
+      <div style="background:#1E3558;padding:8px 14px;font-size:.82rem;font-weight:700;color:#fff">📎 Anexar Contrato (opcional) — preenche os campos abaixo automaticamente</div>
+      <div style="padding:14px">
+        <input type="file" id="empArquivosContrato" accept="application/pdf" multiple style="margin-bottom:10px;font-size:.8rem">
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button type="button" class="btn bp bsm" id="empBtnExtrairIA" onclick="_empExtrairContratoIA()">🔍 Extrair Dados do Contrato (IA)</button>
+          <span id="empStatusExtracao" style="font-size:.78rem"></span>
+        </div>
+        <div style="font-size:.68rem;color:var(--slate);margin-top:6px">Anexe o contrato (e a apólice de seguro, se houver) em PDF — a IA sugere os valores abaixo pra você revisar e ajustar antes de salvar. Nada é salvo automaticamente.</div>
+      </div>
+    </div>`:''}
     <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
       <div style="background:#1E3558;padding:8px 14px;font-size:.82rem;font-weight:700;color:#fff">Credor e Identificação</div>
       <div style="padding:12px 14px;display:grid;grid-template-columns:repeat(3,1fr);gap:12px">
@@ -16200,8 +16300,8 @@ function abrirFormEmp(eid,id){
         <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;overflow:hidden">
           <div style="background:#1E3558;padding:8px 14px;font-size:.82rem;font-weight:700;color:#fff">Datas</div>
           <div style="padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <div>${lbl('Data de Contratação')}${fi('empDataContratacao',p.dataContratacao,'DD/MM/AAAA')}</div>
-            <div>${lbl('1º Vencimento')}${fi('empPrimVenc',p.primeiroVencimento,'DD/MM/AAAA')}</div>
+            <div>${lbl('Data de Contratação')}<input id="empDataContratacao" class="fi" value="${esc(String(p.dataContratacao??''))}" placeholder="DD/MM/AAAA" style="margin-top:3px;width:100%" onblur="_empCalcularCarenciaAuto()"></div>
+            <div>${lbl('1º Vencimento')}<input id="empPrimVenc" class="fi" value="${esc(String(p.primeiroVencimento??''))}" placeholder="DD/MM/AAAA" style="margin-top:3px;width:100%" onblur="_empCalcularCarenciaAuto()"></div>
           </div>
         </div>
         <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;overflow:hidden">
@@ -16324,6 +16424,7 @@ function _renderDetalheEmp(p){
       <span style="font-size:.72rem;font-weight:700;color:${cor};background:${cor}22;padding:3px 10px;border-radius:20px">${esc(p.situacao||'Ativo')}</span>
     </div>
     <div style="display:flex;gap:8px">
+      <button class="action-btn action-btn-txt" onclick="abrirPeriodoTXTEmp()">📝 Gerar TXT</button>
       <button class="btn bp bsm" onclick="abrirFormEmp('${_empEid}','${p.id}')" style="font-size:.75rem">✎ Editar</button>
       <button class="btn bd bsm" onclick="excluirEmp('${_empEid}','${p.id}')" style="font-size:.75rem">✕ Excluir</button>
     </div>
