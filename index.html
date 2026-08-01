@@ -6923,6 +6923,41 @@ function _calcLinhaParcParaMes(p, selMes, selAno){
   const dataBalPad=ln.dataBalaanco||_ultimoDiaMesParc(primDate,n);
   return {primDate,saldoBase,vlr,txAdic,vlrAdic,linhas,ln,n,found,selic,selicAcum,valorSelic,bloqSelic,bloqAdic,vlrAdicRow,vlrAt,saldoResid,saldoOrig,saldoAtu,juros,periodo,baseAtualVal,avpVal,jmVal,dataBalPad};
 }
+// Valor da prestação atualizado (vlrAt) de cada linha do cronograma do
+// parcelamento, do n=0 até o saldo de prestações — usado só pro lookahead
+// de Saldo Circulante/Não Circulante (soma das próximas 12 prestações).
+function _parcVlrAtArray(p){
+  const vlr=parseFloat(p.valorParcela)||0;
+  const saldoBase=p.saldoPrestacoes||Math.max(0,parseInt(p.totalParcelas||0)-(parseFloat(p.entrada||0)>0?1:0));
+  const txAdic=parseFloat(p.txAdicional)||1;
+  const vlrAdic=vlr*txAdic/100;
+  const linhas=p.linhas||[];
+  let primDate=null;
+  if(p.primeiroVencimento){const pts=p.primeiroVencimento.split('/');if(pts.length===3)primDate=new Date(parseInt(pts[2]),parseInt(pts[1])-1,1);}
+  let selicAcum=0;
+  const arr=[vlr];
+  for(let n=1;n<=saldoBase;n++){
+    const ln=linhas[n]||{};
+    const bloqSelic=_parcBloqueiaSelicPrimeiro(p,n);
+    const bloqAdic=_parcBloqueiaAdicionalPrimeiro(p,n);
+    const selic=bloqSelic?0:(ln.selicMensal!=null&&ln.selicMensal!==''?parseFloat(ln.selicMensal)||0:_selicAutoParc(primDate,n));
+    selicAcum+=selic;
+    const valorSelic=vlr*selicAcum/100;
+    const vlrAdicRow=bloqAdic?0:vlrAdic;
+    arr.push(vlr+valorSelic+vlrAdicRow);
+  }
+  return arr;
+}
+// Soma das próximas 12 prestações (n+1..n+12) a partir da linha n, limitada
+// ao saldoAtu daquela linha (Circulante), com o restante como Não
+// Circulante — mesma lógica já usada em Empréstimos (NBC TG 26).
+function _parcCirculanteNaoCirculante(vlrAtArr,saldoBase,n,saldoAtu){
+  let circulante=0;
+  for(let j=n+1;j<=Math.min(n+12,saldoBase);j++) circulante+=vlrAtArr[j]||0;
+  const saldoCirculante=Math.min(circulante,saldoAtu);
+  const saldoNaoCirculante=Math.max(0,saldoAtu-saldoCirculante);
+  return {saldoCirculante,saldoNaoCirculante};
+}
 
 // Converter string DD/MM/YYYY para Date
 function parseDataDD(str){
@@ -14481,7 +14516,7 @@ function _renderParcListTabela(){
       <th rowspan="2" style="${ch}">Data do<br>Balanço</th>
       <th rowspan="2" style="${ch}">Período</th>
       <th rowspan="2" style="${ch}">Saldo Nº das<br>Prestações Residuais</th>
-      <th colspan="3" style="${chs}">SALDO</th>
+      <th colspan="5" style="${chs}">SALDO</th>
       <th colspan="2" style="${chc}">CONTABILIZAÇÃO</th>
       <th rowspan="2" style="${ch}">Pgto.<br>Pendente</th>
     </tr>
@@ -14489,20 +14524,24 @@ function _renderParcListTabela(){
       <th style="${chs}">Saldo a Pagar<br>(Original)</th>
       <th style="${chs}">Saldo a Pagar<br>(Atualizado)</th>
       <th style="${chs}">Juros</th>
+      <th style="${chs}">Saldo<br>Circulante</th>
+      <th style="${chs}">Saldo Não<br>Circulante</th>
       <th style="${chc}">Base</th>
       <th style="${chc}">Apropriação Juros<br>a Transcorrer</th>
     </tr>
   </thead>`;
   let rows='';
-  let totVlr=0,totSelicV=0,totAdicV=0,totVlrAt=0,totSaldoResid=0,totSaldoOrig=0,totSaldoAtu=0,totJuros=0,totAvp=0,totBase=0;
+  let totVlr=0,totSelicV=0,totAdicV=0,totVlrAt=0,totSaldoResid=0,totSaldoOrig=0,totSaldoAtu=0,totJuros=0,totAvp=0,totBase=0,totCirc=0,totNaoCirc=0;
   const ST_COR={Ativo:'#166534',Quitado:'#1d4ed8',Rescindido:'#dc2626',Suspenso:'#d97706'};
   parcs.forEach(p=>{
     const r=_calcLinhaParcParaMes(p,selMes,selAno);
     const {found,n,ln,vlr,selic,selicAcum,valorSelic,bloqAdic,vlrAdicRow,vlrAt,saldoResid,saldoOrig,saldoAtu,juros,periodo,txAdic,avpVal,baseAtualVal}=r;
+    const {saldoCirculante,saldoNaoCirculante}=found?_parcCirculanteNaoCirculante(_parcVlrAtArray(p),r.saldoBase,n,saldoAtu):{saldoCirculante:0,saldoNaoCirculante:0};
     if(found){
       totVlr+=vlr;totSelicV+=valorSelic;totAdicV+=vlrAdicRow;totVlrAt+=vlrAt;
       totSaldoResid+=saldoResid;totSaldoOrig+=saldoOrig;
       totSaldoAtu+=saldoAtu;totJuros+=juros;totAvp+=avpVal;totBase+=baseAtualVal;
+      totCirc+=saldoCirculante;totNaoCirc+=saldoNaoCirculante;
     }
     const sc=ST_COR[p.situacao]||'var(--slate)';
     const nome=esc(p.parcelNome||p.orgao||'Parcelamento');
@@ -14529,6 +14568,8 @@ function _renderParcListTabela(){
       <td style="${cs}">${found?('R$ '+_fmt(saldoOrig)):'—'}</td>
       <td style="${cs}">${found?('R$ '+_fmt(saldoAtu)):'—'}</td>
       <td style="${cs}${juros>0?';color:#dc2626':''}">${found?('R$ '+_fmt(juros)):'—'}</td>
+      <td style="${cs}">${found?('R$ '+_fmt(saldoCirculante)):'—'}</td>
+      <td style="${cs}">${found?('R$ '+_fmt(saldoNaoCirculante)):'—'}</td>
       <td style="${cs}">${found?fv(avpVal):'—'}</td>
       <td style="${cs}">${found?fv(baseAtualVal):'—'}</td>
       <td style="${cs};text-align:center" onclick="event.stopPropagation()">${found&&n>0?`<input type="checkbox" ${ln.pgtoPendente?'checked':''} onchange="_parcTogglePgtoPendenteById('${pid}',${n},this.checked,${vlrAt},'${mesIso}','${esc(dataBalPad||'')}')">`:'—'}</td>
@@ -14551,6 +14592,8 @@ function _renderParcListTabela(){
       <td style="${ct}">R$ ${_fmt(totSaldoOrig)}</td>
       <td style="${ct}">R$ ${_fmt(totSaldoAtu)}</td>
       <td style="${ct}">R$ ${_fmt(totJuros)}</td>
+      <td style="${ct}">R$ ${_fmt(totCirc)}</td>
+      <td style="${ct}">R$ ${_fmt(totNaoCirc)}</td>
       <td style="${ct}">R$ ${_fmt(totAvp)}</td>
       <td style="${ct}">R$ ${_fmt(totBase)}</td>
       <td style="${ct}">—</td>
@@ -14586,6 +14629,12 @@ function _renderDetalheParc(p){
   const saldoDevedor=linhaFech.found?linhaFech.saldoAtu:(restantes*vlrParc);
   const saldoDevedorOriginal=linhaFech.found?linhaFech.saldoOrig:(restantes*vlrParc);
   const saldoDevedorJuros=linhaFech.found?linhaFech.juros:0;
+  // Circulante/Não Circulante do mês de fechamento atual — a mesma conta de
+  // sempre (próximas 12 prestações a partir daqui), não afetada por "Pgto.
+  // Pendente": marcar uma parcela como pendente só a manda pra cobrança em
+  // Tributos/Encargos em Atraso, ela continua contando na dívida normalmente
+  // até o usuário desmarcar o flag (aí sim, indica que foi paga).
+  const {saldoCirculante:saldoCircCard,saldoNaoCirculante:saldoNaoCircCard}=_parcCirculanteNaoCirculante(_parcVlrAtArray(p),saldo,linhaFech.found?linhaFech.n:0,saldoDevedor);
   const ST_COR={Ativo:'#166534',Quitado:'#1d4ed8',Rescindido:'#dc2626',Suspenso:'#d97706'};
   const sc=ST_COR[p.situacao]||'var(--slate)';
   const lv=(label,val,bold,red)=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #f0f0f0"><span style="font-size:.7rem;color:var(--slate)">${label}</span><span style="font-size:.72rem;font-weight:${bold?'700':'500'};color:${red?'#dc2626':'inherit'}">${val}</span></div>`;
@@ -14595,7 +14644,7 @@ function _renderDetalheParc(p){
   const datasEntradaLista=(p.dataEntradas&&p.dataEntradas.length)?p.dataEntradas:(p.dataEntrada?[p.dataEntrada]:[]);
   const datasEntradaLv=datasEntradaLista.length>1?lv('Datas de Entrada',datasEntradaLista.join(', ')):lv('Data Entrada',datasEntradaLista[0]||'—');
   const c3=card('Dados do Parcelamento',`${lv('Data Consolidação',p.dataConsolidacao||'—')}${lv('1º Vencimento',p.primeiroVencimento||'—')}${lv('Recibo',p.recibo||'—')}${lv('Parcelamento',p.parcelNome||'—')}${lv('Unidade',p.unidade||'—')}${lv('CNPJ',p.cnpj||'—')}${datasEntradaLv}${lv('Selic anterior no 1º pagto?',(p.selicMesAntPrimeiroPag||'sim')==='sim'?'Sim':'Não')}${lv('1% adicional no 1º pagto?',(p.adicionalPrimeiroPag||'sim')==='sim'?'Sim':'Não')}`);
-  const c4=card('Contabilização',`${lv('Ct. Passivo',p.contaPassivo||'—',true)}${lv('Órgão',p.orgao||'—')}${p.obs?lv('Obs.',p.obs.substring(0,30)+(p.obs.length>30?'…':'')):''}${lv('Situação',p.situacao||'Ativo')}<div style="padding-top:8px;margin-top:4px;border-top:1px solid var(--border)">${lv('Saldo Devedor Original',f(saldoDevedorOriginal),true)}${lv('Saldo de Juros',f(saldoDevedorJuros),true)}<div style="font-size:.7rem;color:var(--slate);margin:6px 0 2px">Saldo Devedor Atualizado</div><div style="font-size:.88rem;font-weight:700;color:${restantes>0?'#b45309':'#166534'}">${f(saldoDevedor)}</div></div>`);
+  const c4=card('Contabilização',`${lv('Ct. Passivo',p.contaPassivo||'—',true)}${lv('Órgão',p.orgao||'—')}${p.obs?lv('Obs.',p.obs.substring(0,30)+(p.obs.length>30?'…':'')):''}${lv('Situação',p.situacao||'Ativo')}<div style="padding-top:8px;margin-top:4px;border-top:1px solid var(--border)">${lv('Saldo Devedor Original',f(saldoDevedorOriginal),true)}${lv('Saldo de Juros',f(saldoDevedorJuros),true)}${lv('Saldo Circulante',f(saldoCircCard),true)}${lv('Saldo Não Circulante',f(saldoNaoCircCard),true)}<div style="font-size:.7rem;color:var(--slate);margin:6px 0 2px">Saldo Devedor Atualizado</div><div style="font-size:.88rem;font-weight:700;color:${restantes>0?'#b45309':'#166534'}">${f(saldoDevedor)}</div></div>`);
   const nome=esc(p.parcelNome||p.orgao||'Parcelamento');
   const el=document.getElementById('parcDetalheView');
   el.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
@@ -14877,16 +14926,18 @@ function _renderDetalheTabela(p){
     <th rowspan="2" style="${ch}">Valor da Prestação<br>Atualizado (R$)</th>
     <th rowspan="2" style="${ch}">Data do<br>Balanço</th><th rowspan="2" style="${ch}">Período</th>
     <th rowspan="2" style="${ch}">Saldo Nº das<br>Prestações Residuais</th>
-    <th colspan="3" style="${chs}">SALDO</th><th colspan="2" style="${chc}">CONTABILIZAÇÃO</th>
+    <th colspan="5" style="${chs}">SALDO</th><th colspan="2" style="${chc}">CONTABILIZAÇÃO</th>
     <th rowspan="2" style="${ch}">Pgto.<br>Pendente</th>
     </tr><tr>
     <th style="${chs}">Saldo a Pagar<br>(Original)</th><th style="${chs}">Saldo a Pagar<br>(Atualizado)</th><th style="${chs}">Juros</th>
+    <th style="${chs}">Saldo<br>Circulante</th><th style="${chs}">Saldo Não<br>Circulante</th>
     <th style="${chc}">Base</th><th style="${chc}">Apropriação Juros<br>a Transcorrer</th>
     </tr></thead>`;
   let selicAcum=0,rows='';
   const pagas=parseInt(p.parcelasPagas)||0;
   const fechAtualParc=S.fechAtual()||'';
   let vlrAtAnterior=vlr;
+  const vlrAtArr=_parcVlrAtArray(p);
   for(let n=0;n<=saldoBase;n++){
     const ln=linhas[n]||{};
     const bloqSelic=_parcBloqueiaSelicPrimeiro(p,n);
@@ -14906,6 +14957,7 @@ function _renderDetalheTabela(p){
     const saldoOrig=vlr*saldoResid;
     const saldoAtu=vlrAt*saldoResid;
     const juros=saldoAtu-saldoOrig;
+    const {saldoCirculante,saldoNaoCirculante}=_parcCirculanteNaoCirculante(vlrAtArr,saldoBase,n,saldoAtu);
     const isPaga=n>0&&n<=pagas;
     const mesVenc=getMes(n);
     const mesVencIso=/^(\d{2})\/(\d{4})$/.test(mesVenc)?mesVenc.split('/').reverse().join('-'):null;
@@ -14928,6 +14980,8 @@ function _renderDetalheTabela(p){
       <td style="${cs}">R$ ${f(saldoOrig)}</td>
       <td style="${cs}">R$ ${f(saldoAtu)}</td>
       <td style="${cs};${juros>0?'color:#dc2626':''}">R$ ${f(juros)}</td>
+      <td style="${cs}">R$ ${f(saldoCirculante)}</td>
+      <td style="${cs}">R$ ${f(saldoNaoCirculante)}</td>
       <td style="${csBase}">${n===0?'—':inpMBase(n,'baseAtualizacao',baseAtualVal,76)}</td>
       <td style="${cs}">${n===0?'—':inpM(n,'avp',avpVal,86)}</td>
       <td style="${cs};text-align:center">${n===0?'—':`<input type="checkbox" ${ln.pgtoPendente?'checked':''} onchange="_parcTogglePgtoPendente(${n},this.checked,${vlrAt},'${mesVencIso||''}','${esc(dataBalPad||'')}')">`}</td>
@@ -15348,7 +15402,7 @@ function _renderParcColsInline(p){
       <th rowspan="2" style="${ch}">Data do<br>Balanço</th>
       <th rowspan="2" style="${ch}">Período</th>
       <th rowspan="2" style="${ch}">Saldo Nº das<br>Prestações Residuais</th>
-      <th colspan="3" style="${chs}">SALDO</th>
+      <th colspan="5" style="${chs}">SALDO</th>
       <th colspan="2" style="${chc}">CONTABILIZAÇÃO</th>
       <th rowspan="2" style="${ch}">Pgto.<br>Pendente</th>
     </tr>
@@ -15356,6 +15410,8 @@ function _renderParcColsInline(p){
       <th style="${chs}">Saldo a Pagar<br>(Original)</th>
       <th style="${chs}">Saldo a Pagar<br>(Atualizado)</th>
       <th style="${chs}">Juros</th>
+      <th style="${chs}">Saldo<br>Circulante</th>
+      <th style="${chs}">Saldo Não<br>Circulante</th>
       <th style="${chc}">Base</th>
       <th style="${chc}">Apropriação Juros<br>a Transcorrer</th>
     </tr>
@@ -15364,6 +15420,7 @@ function _renderParcColsInline(p){
   const pagas=parseInt(p.parcelasPagas)||0;
   const fechAtualParc=S.fechAtual()||'';
   let vlrAtAnterior=vlr;
+  const vlrAtArr=_parcVlrAtArray(p);
   for(let n=0;n<=saldoBase;n++){
     const ln=linhas[n]||{};
     const bloqSelic=_parcBloqueiaSelicPrimeiro(p,n);
@@ -15383,6 +15440,7 @@ function _renderParcColsInline(p){
     const saldoOrig=vlr*saldoResid;
     const saldoAtu=vlrAt*saldoResid;
     const juros=saldoAtu-saldoOrig;
+    const {saldoCirculante,saldoNaoCirculante}=_parcCirculanteNaoCirculante(vlrAtArr,saldoBase,n,saldoAtu);
     const isPaga=n>0&&n<=pagas;
     const mesVenc=getMes(n);
     const mesVencIso=/^(\d{2})\/(\d{4})$/.test(mesVenc)?mesVenc.split('/').reverse().join('-'):null;
@@ -15405,6 +15463,8 @@ function _renderParcColsInline(p){
       <td style="${cs}">R$ ${f(saldoOrig)}</td>
       <td style="${cs}">R$ ${f(saldoAtu)}</td>
       <td style="${cs};${juros>0?'color:#dc2626':''}">R$ ${f(juros)}</td>
+      <td style="${cs}">R$ ${f(saldoCirculante)}</td>
+      <td style="${cs}">R$ ${f(saldoNaoCirculante)}</td>
       <td style="${csBase}">${n===0?'—':inpMBase(n,'baseAtualizacao',baseAtualVal,76)}</td>
       <td style="${cs}">${n===0?'—':inpM(n,'avp',avpVal,86)}</td>
       <td style="${cs};text-align:center">${n===0?'—':`<input type="checkbox" ${ln.pgtoPendente?'checked':''} onchange="_parcTogglePgtoPendenteById('${pid}',${n},this.checked,${vlrAt},'${mesVencIso||''}','${esc(dataBalPad||'')}')">`}</td>
@@ -15481,7 +15541,7 @@ function _renderParcTabela(p){
       <th rowspan="2" style="${ch}">Data do<br>Balanço</th>
       <th rowspan="2" style="${ch}">Período</th>
       <th rowspan="2" style="${ch}">Saldo Nº das<br>Prestações Residuais</th>
-      <th colspan="3" style="${chs}">SALDO</th>
+      <th colspan="5" style="${chs}">SALDO</th>
       <th colspan="2" style="${chc}">CONTABILIZAÇÃO</th>
       <th rowspan="2" style="${ch}">Pgto.<br>Pendente</th>
     </tr>
@@ -15489,6 +15549,8 @@ function _renderParcTabela(p){
       <th style="${chs}">Saldo a Pagar<br>(Original)</th>
       <th style="${chs}">Saldo a Pagar<br>(Atualizado)</th>
       <th style="${chs}">Juros</th>
+      <th style="${chs}">Saldo<br>Circulante</th>
+      <th style="${chs}">Saldo Não<br>Circulante</th>
       <th style="${chc}">Base</th>
       <th style="${chc}">Apropriação Juros<br>a Transcorrer</th>
     </tr>
@@ -15498,6 +15560,7 @@ function _renderParcTabela(p){
   let vlrAtAnterior=vlr;
   const fechAtualParc=S.fechAtual()||'';
   const pagas=p.parcelasPagas||0;
+  const vlrAtArr=_parcVlrAtArray(p);
   for(let n=0;n<=saldoBase;n++){
     const ln=linhas[n]||{};
     const bloqSelic=_parcBloqueiaSelicPrimeiro(p,n);
@@ -15517,6 +15580,7 @@ function _renderParcTabela(p){
     const saldoOrig=vlr*saldoResid;
     const saldoAtu=vlrAt*saldoResid;
     const juros=saldoAtu-saldoOrig;
+    const {saldoCirculante,saldoNaoCirculante}=_parcCirculanteNaoCirculante(vlrAtArr,saldoBase,n,saldoAtu);
     const isPaga=n>0&&n<=pagas;
     const mesVenc=getMes(n);
     const mesVencIso=/^(\d{2})\/(\d{4})$/.test(mesVenc)?mesVenc.split('/').reverse().join('-'):null;
@@ -15539,6 +15603,8 @@ function _renderParcTabela(p){
       <td style="${cs}">R$ ${f(saldoOrig)}</td>
       <td style="${cs}">R$ ${f(saldoAtu)}</td>
       <td style="${cs};${juros>0?'color:#dc2626':''}">R$ ${f(juros)}</td>
+      <td style="${cs}">R$ ${f(saldoCirculante)}</td>
+      <td style="${cs}">R$ ${f(saldoNaoCirculante)}</td>
       <td style="${csBase}">${n===0?'—':inpMBase(n,'baseAtualizacao',baseAtualVal,80)}</td>
       <td style="${cs}">${n===0?'—':inpM(n,'avp',avpVal,90)}</td>
       <td style="${cs};text-align:center">${n===0?'—':`<input type="checkbox" ${ln.pgtoPendente?'checked':''} onchange="_parcTogglePgtoPendente(${n},this.checked,${vlrAt},'${mesVencIso||''}','${esc(dataBalPad||'')}')">`}</td>
