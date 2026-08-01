@@ -1,77 +1,57 @@
-# 📁 Sistema de Backup Automático
+# 📁 Sistema de Backup Automático Diário
 
-## Localização dos Backups
-```
-C:\jjr-controle\backups\
-```
+## Como funciona
 
-## Como Funciona
+O backup roda sozinho, todos os dias, no **GitHub Actions** — não depende de
+nenhum PC ligado nem de ninguém abrir o servidor local. Ele lê todos os
+registros da tabela `dados_app` (Supabase) e salva num repositório **privado**
+separado (não é o mesmo do site, que é público — assim os dados reais dos
+clientes nunca ficam expostos).
 
-✅ **Automático**: Executa **a cada hora** (00:00, 01:00, 02:00, etc)
-✅ **Formato**: JSON com todos os dados da Supabase
-✅ **Nomeação**: `backup_YYYY-MM-DD.json` (pode ter múltiplos por dia)
-✅ **Retenção**: Mantém **últimos 7 dias** automaticamente
-✅ **Execução Extra**: Primeiro backup 5 minutos após servidor iniciar
+- **Repositório dos backups**: `kleydsoncontador-svg/jjr-controle-backups` (privado)
+- **Horário**: todo dia às 03:00 (horário de Brasília)
+- **Formato dos arquivos**: `AAAA-MM/backup_AAAA-MM-DD.json` — uma pasta por
+  mês, um arquivo por dia. **Nada é sobrescrito**: cada dia fica guardado
+  pra sempre, dá pra voltar a qualquer data anterior.
+- **Também dá pra rodar na hora**: no repositório do site, aba **Actions** →
+  workflow **"Backup diário do banco de dados"** → botão **"Run workflow"**.
 
-## Sincronizar com OneDrive
+## Configuração necessária (só uma vez)
 
-### Opção 1: Sincronização Automática (RECOMENDADO)
+Pra esse sistema funcionar, dois segredos precisam estar cadastrados no
+repositório do site (`jjr-controle` → Settings → Secrets and variables →
+Actions → New repository secret):
 
-1. Abra **Explorador de Arquivos**
-2. Navegue para `C:\jjr-controle\backups\`
-3. Clique com botão direito → **Enviar para** → **OneDrive**
-4. A pasta agora sincroniza automaticamente!
+1. **`SUPABASE_SERVICE_ROLE_KEY`** — a chave de administrador do Supabase
+   (bypassa as regras de segurança pra conseguir ler tudo). Pegue em:
+   Supabase Dashboard → seu projeto → Project Settings → API →
+   "service_role" (não é a mesma chave pública "anon" usada pelo site).
+   ⚠ Essa chave é sensível — nunca cole ela em nenhum arquivo do código,
+   só no campo de secret do GitHub.
 
-### Opção 2: Adicionar ao OneDrive manualmente
+2. **`BACKUP_REPO_TOKEN`** — um Personal Access Token do GitHub com permissão
+   de escrita só no repositório `jjr-controle-backups`. Gere em:
+   GitHub → foto de perfil → Settings → Developer settings →
+   Personal access tokens → Fine-grained tokens → Generate new token →
+   selecione o repositório `jjr-controle-backups` → permissão
+   "Contents: Read and write".
 
-1. Abra **Configurações do OneDrive**
-2. Vá para **Pasta do OneDrive**
-3. Crie uma pasta `JJR-Backups-Contábil`
-4. Copie `C:\jjr-controle\backups\*.json` para lá
+## Restaurar um backup
 
-### Opção 3: Script de Sincronização (manual)
-
-```powershell
-# Execute no PowerShell para copiar para OneDrive
-Copy-Item "C:\jjr-controle\backups\*.json" `
-  "C:\Users\kleyd\OneDrive\JJR-Backups-Contábil" -Force
-```
-
-## Restaurar um Backup
-
-Se precisar restaurar dados:
-
-1. Faça download do arquivo `backup_YYYY-MM-DD.json`
-2. Abra em um editor de texto
-3. Copie os dados da seção `dados`
-4. Entre em contato para restauração manual (ou implemente via API)
-
-## Verificar Backups
-
-```bash
-# Listar todos os backups
-dir C:\jjr-controle\backups\
-
-# Ver tamanho dos backups
-dir C:\jjr-controle\backups\ /s
-```
-
-## Log de Execução
-
-Os backups automáticos aparecem no console do servidor:
-
-```
-⏰ Executando backup automático diário...
-✅ Backup criado: backup_2026-06-26.json (45.32 KB)
-📁 Localização: C:\jjr-controle\backups\backup_2026-06-26.json
-📊 Total de registros: 12
-```
+1. Acesse `github.com/kleydsoncontador-svg/jjr-controle-backups` (repositório
+   privado).
+2. Entre na pasta do mês e baixe o arquivo `backup_AAAA-MM-DD.json` do dia
+   desejado.
+3. O arquivo tem um campo `dados`, que é a lista de registros exatamente como
+   estavam na tabela `dados_app` naquele dia — cada um com `key` e `value`.
+4. Restaurar de volta no Supabase é uma operação manual e cuidadosa (não é
+   automática de propósito, pra sempre ter uma revisão humana antes de
+   sobrescrever dados em produção). Peça ajuda ao Claude Code quando precisar.
 
 ---
 
-**Dica de Ouro**: Sincronize a pasta `backups\` com OneDrive para ter redundância de dados em 3 lugares:
-1. Local (C:\jjr-controle\backups\)
-2. Supabase (banco de dados)
-3. OneDrive (nuvem da Microsoft)
-
-🔒 Seus dados estão segurísimos!
+**Nota histórica**: existia antes um sistema de backup horário local
+(`backup.js`, salvando em `C:\jjr-controle\backups\`), mas ele apontava pra
+um projeto Supabase errado e só rodava enquanto alguém tivesse o servidor
+local aberto — na prática, quase nunca protegeu os dados reais. Foi
+substituído por este sistema em 2026-07-31.
