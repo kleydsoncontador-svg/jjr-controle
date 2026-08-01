@@ -15948,7 +15948,16 @@ function _empUsaSelicCorrecao(p){
 // Cada linha traz: n, data, saldoInicial, juros, amortizacao, parcela,
 // saldoFinal — e, no sistema Selic, também selicMes (taxa usada naquele mês).
 function _gerarCronogramaEmp(p){
-  const principalOriginal=parseFloat(p.valorPrincipal)||0;
+  // Custo amortizado (NBC TG 48): os juros incidem só sobre o Valor do
+  // Crédito líquido — Tarifa/IOF/Outros Custos são "custos de transação"
+  // (CPC 08), deduzidos do passivo por uma conta redutora e amortizados
+  // linearmente (não rendem juros); Seguro é um ativo à parte ("Seguros a
+  // Apropriar"), também amortizado linearmente, sem relação com o passivo
+  // do empréstimo. Empréstimos salvos antes dessa separação existir só
+  // tinham valorPrincipal (já composto) — mantido como fallback.
+  const principalOriginal=parseFloat(p.valorCredito)||parseFloat(p.valorPrincipal)||0;
+  const custosTransacaoTotal=(parseFloat(p.valorTarifa)||0)+(parseFloat(p.valorIOF)||0)+(parseFloat(p.outrosCustosFinanciados)||0);
+  const seguroTotal=parseFloat(p.valorSeguro)||0;
   const usaSelic=_empUsaSelicCorrecao(p);
   const temCustom=p.taxaPersonalizada!=null&&p.taxaPersonalizada!==''&&!isNaN(parseFloat(p.taxaPersonalizada));
   const i=(temCustom?parseFloat(p.taxaPersonalizada):(parseFloat(p.taxaJurosMensal)||0))/100;
@@ -15957,16 +15966,20 @@ function _gerarCronogramaEmp(p){
   const sistema=usaSelic?'SELIC':(p.sistemaAmortizacao==='SAC'?'SAC':'PRICE');
   const overrides=p.linhas||[];
   const primDate=_parseDataBR(p.primeiroVencimento);
+  const custosTransacaoPorParcela=n>0?custosTransacaoTotal/n:0;
+  const seguroPorParcela=n>0?seguroTotal/n:0;
 
   // Carência: juros capitalizam (juros compostos) sobre o saldo, sem
   // gerar parcela nem entrada de caixa nesses meses.
   let saldoPosCarencia=principalOriginal;
   for(let c=0;c<carencia;c++) saldoPosCarencia*=(1+i);
 
-  const linhas=[{n:0,data:p.dataContratacao||'',saldoInicial:principalOriginal,juros:0,amortizacao:0,parcela:0,saldoFinal:saldoPosCarencia}];
+  const linhas=[{n:0,data:p.dataContratacao||'',saldoInicial:principalOriginal,juros:0,amortizacao:0,parcela:0,saldoFinal:saldoPosCarencia,saldoRedutora:custosTransacaoTotal,saldoSeguroAApropriar:seguroTotal}];
   if(n<=0) return linhas;
 
   let saldoAtual=saldoPosCarencia;
+  let saldoRedutoraAtual=custosTransacaoTotal;
+  let saldoSeguroAtual=seguroTotal;
   const pmtBase=n>0?(i>0?saldoPosCarencia*i*Math.pow(1+i,n)/(Math.pow(1+i,n)-1):saldoPosCarencia/n):0;
   const amortConstSAC=saldoPosCarencia/n;
   for(let k=1;k<=n;k++){
@@ -15994,8 +16007,14 @@ function _gerarCronogramaEmp(p){
     const saldoFinal=Math.max(0,saldoAtual-amort);
     const valorPago=(ov.valorPago!=null&&ov.valorPago!=='')?parseFloat(ov.valorPago)||0:null;
     const dataBalanco=ov.dataBalanco||dataVenc;
-    linhas.push({n:k,data:dataVenc,saldoInicial:saldoAtual,juros,jurosResultado,correcaoVP,amortizacao:amort,parcela,saldoFinal,selicMes,valorPago,dataBalanco});
+    const custosTransacaoAmortizado=k===n?saldoRedutoraAtual:custosTransacaoPorParcela;
+    const saldoRedutora=Math.max(0,saldoRedutoraAtual-custosTransacaoAmortizado);
+    const seguroAmortizado=k===n?saldoSeguroAtual:seguroPorParcela;
+    const saldoSeguroAApropriar=Math.max(0,saldoSeguroAtual-seguroAmortizado);
+    linhas.push({n:k,data:dataVenc,saldoInicial:saldoAtual,juros,jurosResultado,correcaoVP,amortizacao:amort,parcela,saldoFinal,selicMes,valorPago,dataBalanco,custosTransacaoAmortizado,saldoRedutora,seguroAmortizado,saldoSeguroAApropriar});
     saldoAtual=saldoFinal;
+    saldoRedutoraAtual=saldoRedutora;
+    saldoSeguroAtual=saldoSeguroAApropriar;
   }
   // Circulante/Não Circulante (NBC TG 26) — parte do saldo devedor de cada
   // linha que vence dentro dos próximos 12 meses (Circulante) vs depois
@@ -16107,10 +16126,12 @@ function _parseEmp(id){
   const raw=(document.getElementById(id)?.value||'').replace(/\./g,'').replace(',','.');
   return parseFloat(raw)||0;
 }
-// Soma os componentes do valor financiado (Crédito + Tarifa + IOF + Seguro +
-// Outros) — igual em espírito à "Consolidação 1º" do Parcelamentos. É esse
-// total (não só o Valor do Crédito) que o banco usa como base dos juros,
-// conforme o próprio contrato ("Valor Total Financiado").
+// Soma os componentes do contrato (Crédito + Tarifa + IOF + Seguro +
+// Outros) só pra exibição do total desembolsado/comprometido — igual em
+// espírito à "Consolidação 1º" do Parcelamentos. Custo amortizado (NBC TG
+// 48): os JUROS incidem só sobre o Valor do Crédito (ver _gerarCronogramaEmp)
+// — Tarifa/IOF/Outros são custos de transação (CPC 08, conta redutora) e
+// Seguro é ativo à parte, nenhum dos dois rende juros do empréstimo.
 function _calcEmpTotalFinanciado(){
   return _parseEmp('empValorCredito')+_parseEmp('empTarifa')+_parseEmp('empIOF')+_parseEmp('empSeguro')+_parseEmp('empOutrosCustos');
 }
@@ -16204,9 +16225,10 @@ function _empCalcularCarenciaAuto(){
   _calcEmpPreview();
 }
 function _calcEmpPreview(){
-  const principal=_calcEmpTotalFinanciado();
+  const totalComposto=_calcEmpTotalFinanciado();
   const totalEl=document.getElementById('empValorTotalFinanciado');
-  if(totalEl) totalEl.textContent='R$ '+_fmt(principal);
+  if(totalEl) totalEl.textContent='R$ '+_fmt(totalComposto);
+  const valorCredito=_parseEmp('empValorCredito');
   const taxa=parseFloat((document.getElementById('empTaxa')?.value||'').replace(',','.'))||0;
   const taxaPersonalizadaStr=(document.getElementById('empTaxaPersonalizada')?.value||'').replace(',','.').trim();
   const nParc=parseInt(document.getElementById('empTotalParc')?.value)||0;
@@ -16214,8 +16236,8 @@ function _calcEmpPreview(){
   const sistema=document.getElementById('empSistema')?.value||'PRICE';
   const el=document.getElementById('empPrimeiraParcelaPreview');
   if(!el) return;
-  if(!principal||!nParc){ el.textContent='—'; return; }
-  const pPrev={valorPrincipal:principal,taxaJurosMensal:taxa,taxaPersonalizada:taxaPersonalizadaStr,totalParcelas:nParc,carenciaMeses:carencia,sistemaAmortizacao:sistema,primeiroVencimento:'01/01/2000'};
+  if(!valorCredito||!nParc){ el.textContent='—'; return; }
+  const pPrev={valorCredito,taxaJurosMensal:taxa,taxaPersonalizada:taxaPersonalizadaStr,totalParcelas:nParc,carenciaMeses:carencia,sistemaAmortizacao:sistema,primeiroVencimento:'01/01/2000'};
   const linhas=_gerarCronogramaEmp(pPrev);
   const usaSelic=_empUsaSelicCorrecao(pPrev);
   el.textContent=linhas.length>1?'R$ '+_fmt(linhas[1].parcela)+(sistema==='SAC'?' (1ª — decresce a cada parcela)':usaSelic?' (nominal, sem a correção Selic)':taxaPersonalizadaStr?' (com taxa personalizada)':''):'—';
@@ -16309,9 +16331,13 @@ function abrirFormEmp(eid,id){
           <div style="padding:12px 14px;display:grid;grid-template-columns:1fr 1fr;gap:8px">
             <div>${lbl('Conta Contábil do Passivo')}${fi('empCtPassivo',p.contaPassivo,'Ex: 20105')}</div>
             <div>${lbl('Conta de Despesa de Juros')}${fi('empCtJuros',p.contaJurosDespesa,'Ex: 41230')}</div>
+            <div>${lbl('Conta Redutora (Custos de Transação)')}<input id="empCtRedutora" class="fi" value="${esc(p.contaRedutora||'')}" placeholder="Ex: 20106" style="margin-top:3px;width:100%;color:#dc2626;font-weight:700"></div>
+            <div>${lbl('Conta Ativo (Seguros a Apropriar)')}${fi('empCtSeguroAtivo',p.contaSeguroAtivo,'Ex: 13850')}</div>
+            <div>${lbl('Conta de Despesa de Seguros')}${fi('empCtSeguroDespesa',p.contaSeguroDespesa,'Ex: 41240')}</div>
             <div>${lbl('Situação')}<select id="empSituacao" class="fi" style="margin-top:3px;width:100%">${stOpts}</select></div>
             <div>${lbl('Parcelas Pagas')}<input id="empParcelasPagas" class="fi" value="${esc(String(p.parcelasPagas??'0'))}" style="margin-top:3px;width:100%;text-align:right"></div>
           </div>
+          <div style="padding:0 14px 12px;font-size:.68rem;color:var(--slate)">Custos de Transação (Tarifa+IOF+Outros) não rendem juros — só são amortizados linearmente contra a Conta Redutora. Seguro é um ativo à parte, amortizado linearmente pra despesa de seguros.</div>
         </div>
       </div>
     </div>
@@ -16340,15 +16366,16 @@ function salvarEmp(){
   const g=id=>document.getElementById(id)?.value||'';
   const nome=g('empNome')||g('empCredorNome')||'Empréstimo';
   const valorTotalFinanciado=_calcEmpTotalFinanciado();
+  const valorCredito=_parseEmp('empValorCredito');
   if(!valorTotalFinanciado||!parseInt(g('empTotalParc'))){toast('Informe o valor do crédito (ou algum componente do valor financiado) e o número de parcelas.','err');return;}
   const emps=getEmprestimos(eid);
   const id=_empId||('emp'+Date.now());
   const existing=emps[id]||{};
   emps[id]={...existing,id,
     credorTipo:g('empCredorTipo'),credorNome:g('empCredorNome'),contratoNumero:g('empContratoNumero'),nomeEmprestimo:nome,
-    valorCredito:_parseEmp('empValorCredito'),valorTarifa:_parseEmp('empTarifa'),valorIOF:_parseEmp('empIOF'),
+    valorCredito,valorTarifa:_parseEmp('empTarifa'),valorIOF:_parseEmp('empIOF'),
     valorSeguro:_parseEmp('empSeguro'),outrosCustosFinanciados:_parseEmp('empOutrosCustos'),
-    valorPrincipal:valorTotalFinanciado,
+    valorPrincipal:valorCredito,
     taxaJurosMensal:parseFloat(g('empTaxa').replace(',','.'))||0,
     taxaPersonalizada:g('empTaxaPersonalizada').replace(',','.').trim(),
     sistemaAmortizacao:g('empSistema')||'PRICE',
@@ -16356,6 +16383,7 @@ function salvarEmp(){
     carenciaMeses:parseInt(g('empCarencia'))||0,
     dataContratacao:g('empDataContratacao'),primeiroVencimento:g('empPrimVenc'),
     contaPassivo:g('empCtPassivo'),contaJurosDespesa:g('empCtJuros'),
+    contaRedutora:g('empCtRedutora'),contaSeguroAtivo:g('empCtSeguroAtivo'),contaSeguroDespesa:g('empCtSeguroDespesa'),
     situacao:g('empSituacao')||'Ativo',
     parcelasPagas:parseInt(g('empParcelasPagas'))||0,
     obs:g('emprObs'),
@@ -16401,21 +16429,25 @@ function _renderDetalheEmp(p){
   const sistemaLabel=(EMP_SISTEMAS.find(s=>s.id===p.sistemaAmortizacao)||{}).label||p.sistemaAmortizacao;
   const lv=(label,val,bold,red)=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #f0f0f0"><span style="font-size:.7rem;color:var(--slate)">${label}</span><span style="font-size:.72rem;font-weight:${bold?'700':'500'};color:${red?'#dc2626':'inherit'}">${val}</span></div>`;
   const card=(title,body)=>`<div style="background:var(--white);border:1px solid var(--border);border-radius:7px;overflow:hidden"><div style="background:#1E3558;padding:6px 10px;font-size:.72rem;font-weight:700;color:#fff;text-align:center">${title}</div><div style="padding:8px 10px">${body}</div></div>`;
-  const totalFinanciado=parseFloat(p.valorPrincipal)||0;
+  const valorCredito=parseFloat(p.valorCredito??p.valorPrincipal)||0;
+  const totalContrato=valorCredito+(parseFloat(p.valorTarifa)||0)+(parseFloat(p.valorIOF)||0)+(parseFloat(p.valorSeguro)||0)+(parseFloat(p.outrosCustosFinanciados)||0);
   const linhas=_gerarCronogramaEmp(p);
   const fech=S.fechAtual();
   const [fechAno,fechMes]=fech?fech.split('-').map(Number):[(new Date()).getFullYear(),(new Date()).getMonth()+1];
   const linhaFech=_calcLinhaEmpParaMes(p,fechMes,fechAno);
   const ultimaLinha=linhas[linhas.length-1]||{};
   const linhaAtual=linhaFech.found?linhaFech:ultimaLinha;
-  const saldoFinalAtual=linhaAtual.saldoFinal!=null?linhaAtual.saldoFinal:totalFinanciado;
+  const saldoFinalAtual=linhaAtual.saldoFinal!=null?linhaAtual.saldoFinal:valorCredito;
   const saldoCirc=linhaAtual.saldoCirculante||0;
   const saldoNaoCirc=linhaAtual.saldoNaoCirculante!=null?linhaAtual.saldoNaoCirculante:saldoFinalAtual;
-  const c1=card('Condições',`${lv('Valor do Crédito',f(p.valorCredito??p.valorPrincipal))}${p.valorTarifa?lv('Tarifa de Contratação',f(p.valorTarifa)):''}${p.valorIOF?lv('IOF',f(p.valorIOF)):''}${p.valorSeguro?lv('Seguro',f(p.valorSeguro)):''}${p.outrosCustosFinanciados?lv('Outros Custos',f(p.outrosCustosFinanciados)):''}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558;display:flex;justify-content:space-between"><span style="font-size:.74rem;font-weight:700">Valor Total Financiado</span><span style="font-size:.82rem;font-weight:700;color:#1E3558">${f(totalFinanciado)}</span></div>`);
+  const redutoraSaldo=linhaAtual.saldoRedutora!=null?linhaAtual.saldoRedutora:((parseFloat(p.valorTarifa)||0)+(parseFloat(p.valorIOF)||0)+(parseFloat(p.outrosCustosFinanciados)||0));
+  const seguroSaldo=linhaAtual.saldoSeguroAApropriar!=null?linhaAtual.saldoSeguroAApropriar:(parseFloat(p.valorSeguro)||0);
+  const c1=card('Condições',`${lv('Valor do Crédito (base de juros)',f(valorCredito),true)}${p.valorTarifa?lv('Tarifa de Contratação',f(p.valorTarifa)):''}${p.valorIOF?lv('IOF',f(p.valorIOF)):''}${p.valorSeguro?lv('Seguro',f(p.valorSeguro)):''}${p.outrosCustosFinanciados?lv('Outros Custos',f(p.outrosCustosFinanciados)):''}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558;display:flex;justify-content:space-between"><span style="font-size:.74rem;font-weight:700">Valor Total do Contrato</span><span style="font-size:.82rem;font-weight:700;color:#1E3558">${f(totalContrato)}</span></div>`);
   const temCustom=p.taxaPersonalizada!=null&&p.taxaPersonalizada!==''&&!isNaN(parseFloat(p.taxaPersonalizada));
   const c2=card('Amortização',`${lv('Taxa Contratual',(parseFloat(p.taxaJurosMensal)||0).toFixed(2)+'% a.m.')}${temCustom?lv('Taxa Personalizada (em uso)',parseFloat(p.taxaPersonalizada).toFixed(4)+'% a.m.',true):''}${lv('Sistema',sistemaLabel+(temCustom&&p.sistemaAmortizacao==='SELIC'?' (correção Selic desativada)':''))}${lv('Nº de Parcelas',p.totalParcelas||0)}${lv('Carência',(p.carenciaMeses||0)+' mês(es)')}${lv('Parcelas Pagas',(p.parcelasPagas||0)+' / '+(p.totalParcelas||0))}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558"><div style="font-size:.7rem;color:var(--slate);margin-bottom:2px">1ª Parcela</div><div style="background:#fef08a;padding:4px 8px;border-radius:4px;font-size:.88rem;font-weight:700;color:#1E3558;text-align:right">${linhas[1]?f(linhas[1].parcela):'—'}</div></div>`);
   const c3=card('Datas e Saldo Devedor',`${lv('Contratação',p.dataContratacao||'—')}${lv('1º Vencimento',p.primeiroVencimento||'—')}${lv('Contrato/Operação',p.contratoNumero||'—')}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558">${lv('Saldo Circulante',f(saldoCirc),true)}${lv('Saldo Não Circulante',f(saldoNaoCirc),true)}<div style="font-size:.7rem;color:var(--slate);margin:6px 0 2px">Saldo Devedor Total (${String(fechMes).padStart(2,'0')}/${fechAno})</div><div style="font-size:.88rem;font-weight:700;color:#b45309">${f(saldoFinalAtual)}</div></div>`);
   const c4=card('Contabilização',`${lv('Conta Passivo',p.contaPassivo||'—',true)}${lv('Conta Despesa Juros',p.contaJurosDespesa||'—',true)}${lv('Situação',p.situacao||'Ativo')}${lv('Credor',((p.credorTipo||'')+(p.credorNome?' — '+p.credorNome:''))||'—')}`);
+  const c5=card('Custos Diferidos',`${lv('Saldo Redutora (Custos Transação)',f(redutoraSaldo),true)}${lv('Saldo Seguros a Apropriar',f(seguroSaldo),true)}<div style="margin-top:6px;padding-top:6px;border-top:1px solid var(--border)">${p.contaRedutora?lv('Conta Redutora',p.contaRedutora,false,true):''}${p.contaSeguroAtivo?lv('Conta Seguros (Ativo)',p.contaSeguroAtivo):''}${p.contaSeguroDespesa?lv('Conta Desp. Seguros',p.contaSeguroDespesa):''}</div>`);
   const nome=esc(p.nomeEmprestimo||'Empréstimo');
   el.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
     <div style="display:flex;align-items:center;gap:12px">
@@ -16429,7 +16461,7 @@ function _renderDetalheEmp(p){
       <button class="btn bd bsm" onclick="excluirEmp('${_empEid}','${p.id}')" style="font-size:.75rem">✕ Excluir</button>
     </div>
   </div>
-  <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;margin-bottom:20px">${c1}${c2}${c3}${c4}</div>
+  <div style="display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin-bottom:20px">${c1}${c2}${c3}${c4}${c5}</div>
   <div id="empDetalheTabela"></div>`;
   _renderDetalheTabelaEmp(p);
 }
@@ -16440,6 +16472,8 @@ function _renderDetalheTabelaEmp(p){
   const pagas=p.parcelasPagas||0;
   const isSelic=_empUsaSelicCorrecao(p);
   const fechAtualEmp=S.fechAtual()||'';
+  const temRedutora=((parseFloat(p.valorTarifa)||0)+(parseFloat(p.valorIOF)||0)+(parseFloat(p.outrosCustosFinanciados)||0))>0;
+  const temSeguro=(parseFloat(p.valorSeguro)||0)>0;
   const inpM=(n,field,val)=>`<input class="fi" value="${_fmtInputEmp(val)}" style="width:96px;text-align:right;padding:3px 6px;font-size:.78rem" oninput="_formatInputEmp(this)" onblur="_saveEmpLinha(${n},'${field}',parseFloat(this.value.replace(/\\./g,'').replace(',','.'))||0)">`;
   const inpT=(n,field,val)=>`<input class="fi" value="${esc(val||'')}" style="width:86px;padding:3px 6px;font-size:.78rem" onblur="_saveEmpLinha(${n},'${field}',this.value)">`;
   const ch='padding:5px 6px;border:1px solid #999;background:#1E3558;color:#fff;font-weight:700;text-align:center;white-space:nowrap;font-size:10px';
@@ -16454,11 +16488,14 @@ function _renderDetalheTabelaEmp(p){
     <th rowspan="2" style="${ch}">Parcela</th>
     <th colspan="3" style="${chs}">SALDO DEVEDOR</th>
     <th colspan="${isSelic?2:1}" style="${chc}">CONTABILIZAÇÃO</th>
+    ${temRedutora||temSeguro?`<th colspan="${(temRedutora?1:0)+(temSeguro?1:0)}" style="${chc}">CUSTOS DIFERIDOS</th>`:''}
     <th rowspan="2" style="${ch}">Valor Pago</th><th rowspan="2" style="${ch}">Data do<br>Balanço</th>
     </tr><tr>
     <th style="${chs}">Circulante</th><th style="${chs}">Não<br>Circulante</th><th style="${chs}">Total</th>
     <th style="${chc}">Juros a Reconhecer<br>(Resultado)</th>
     ${isSelic?`<th style="${chc}">Correção Monetária<br>(VP)</th>`:''}
+    ${temRedutora?`<th style="${chc}">Saldo Redutora<br>(Custos Transação)</th>`:''}
+    ${temSeguro?`<th style="${chc}">Saldo Seguros<br>a Apropriar</th>`:''}
     </tr></thead>`;
   let rows='';
   linhas.forEach(ln=>{
@@ -16480,6 +16517,8 @@ function _renderDetalheTabelaEmp(p){
       <td style="${cs};font-weight:700">R$ ${f(ln.saldoFinal)}</td>
       <td style="${cs}">${ln.n===0?'—':'R$ '+f(ln.jurosResultado!=null?ln.jurosResultado:ln.juros)}</td>
       ${isSelic?`<td style="${cs}">${ln.n===0?'—':'R$ '+f(ln.correcaoVP||0)}</td>`:''}
+      ${temRedutora?`<td style="${cs}">R$ ${f(ln.saldoRedutora)}</td>`:''}
+      ${temSeguro?`<td style="${cs}">R$ ${f(ln.saldoSeguroAApropriar)}</td>`:''}
       <td style="${cs}">${ln.n===0?'—':inpM(ln.n,'valorPago',ln.valorPago)}</td>
       <td style="${cs}">${ln.n===0?'—':inpT(ln.n,'dataBalanco',ln.dataBalanco)}</td>
     </tr>`;
@@ -16570,10 +16609,12 @@ function abrirPeriodoTXTEmp(){
 // Gera um TXT de lançamentos contábeis de todos os empréstimos ATIVOS da
 // empresa, mês a mês, pro período escolhido — mesmo padrão de linha usado
 // no TXT de Parcelamentos (data;contaDebito;contaCredito;valor;;historico;1;eid;;).
-// Duas linhas por parcela quando aplicável: (1) Juros a Reconhecer no
-// Resultado (despesa financeira contratual) e (2) Correção Monetária/VP —
-// só nos empréstimos indexados à Selic — que é o valor que só modifica o
-// saldo da dívida (redutor/aumento de VP), sem transitar como juros normal.
+// Até 4 linhas por parcela, conforme o que existir: (1) Juros a Reconhecer
+// no Resultado (despesa financeira sobre o Valor do Crédito); (2) Correção
+// Monetária/VP — só nos empréstimos indexados à Selic; (3) Amortização de
+// Custos de Transação (Tarifa+IOF+Outros, contra a Conta Redutora, CPC 08);
+// (4) Apropriação do Seguro a Apropriar (ativo à parte, sem relação com o
+// passivo do empréstimo).
 function gerarTXTEmprestimos(){
   const eid=_empEid;
   const iniStr=document.getElementById('empTxtInicio')?.value||'';
@@ -16610,6 +16651,14 @@ function gerarTXTEmprestimos(){
       if(r.correcaoVP){
         const historico=`${nomeEmprestimo} - Parcela ${r.n} - ${mesAnoStr} - Correção Monetária (Selic) - Redutor VP`;
         linhas.push(`${r.dataBalanco||''};${p.contaJurosDespesa||''};${p.contaPassivo||''};${fmtValor(r.correcaoVP)};;${historico};1;${eid};;`);
+      }
+      if(r.custosTransacaoAmortizado){
+        const historico=`${nomeEmprestimo} - Parcela ${r.n} - ${mesAnoStr} - Amortização de Custos de Transação (Redutora)`;
+        linhas.push(`${r.dataBalanco||''};${p.contaJurosDespesa||''};${p.contaRedutora||''};${fmtValor(r.custosTransacaoAmortizado)};;${historico};1;${eid};;`);
+      }
+      if(r.seguroAmortizado){
+        const historico=`${nomeEmprestimo} - Parcela ${r.n} - ${mesAnoStr} - Apropriação de Seguro a Apropriar`;
+        linhas.push(`${r.dataBalanco||''};${p.contaSeguroDespesa||''};${p.contaSeguroAtivo||''};${fmtValor(r.seguroAmortizado)};;${historico};1;${eid};;`);
       }
     });
   }
