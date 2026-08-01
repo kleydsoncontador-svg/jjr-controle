@@ -6958,6 +6958,24 @@ function _parcCirculanteNaoCirculante(vlrAtArr,saldoBase,n,saldoAtu){
   const saldoNaoCirculante=Math.max(0,saldoAtu-saldoCirculante);
   return {saldoCirculante,saldoNaoCirculante};
 }
+// Soma os juros de mora + multa já acumulados (calculados com a mesma regra
+// do módulo Tributos/Encargos em Atraso: multa 0,33%/dia até 20%, juros
+// Selic mensal) das parcelas deste parcelamento que estão marcadas como
+// "Pgto. Pendente" — usado pro cardizinho de resumo. Some enquanto o flag
+// estiver marcado; ao desmarcar (pagamento confirmado), sai do cálculo.
+function _parcJurosMultaPendentes(p,eid){
+  const linhas=p.linhas||[];
+  const taList=getTaList(eid);
+  let extra=0;
+  linhas.forEach(ln=>{
+    if(!ln||!ln.pgtoPendente||!ln.taId) return;
+    const trib=taList.find(t=>t.id===ln.taId);
+    if(!trib) return;
+    const atualizado=calcularSaldoAtualizadoTributo(trib,new Date());
+    extra+=Math.max(0,atualizado-(trib.valor||0));
+  });
+  return extra;
+}
 
 // Converter string DD/MM/YYYY para Date
 function parseDataDD(str){
@@ -14634,7 +14652,13 @@ function _renderDetalheParc(p){
   // Pendente": marcar uma parcela como pendente só a manda pra cobrança em
   // Tributos/Encargos em Atraso, ela continua contando na dívida normalmente
   // até o usuário desmarcar o flag (aí sim, indica que foi paga).
-  const {saldoCirculante:saldoCircCard,saldoNaoCirculante:saldoNaoCircCard}=_parcCirculanteNaoCirculante(_parcVlrAtArray(p),saldo,linhaFech.found?linhaFech.n:0,saldoDevedor);
+  const {saldoCirculante:saldoCircCardBase,saldoNaoCirculante:saldoNaoCircCard}=_parcCirculanteNaoCirculante(_parcVlrAtArray(p),saldo,linhaFech.found?linhaFech.n:0,saldoDevedor);
+  // Juros de mora + multa acumulados das parcelas "Pgto. Pendente" (puxados
+  // do módulo Tributos/Encargos em Atraso) somam no Saldo Devedor e no
+  // Circulante, já que são valores vencidos/exigíveis agora.
+  const jurosMultaPendentes=_parcJurosMultaPendentes(p,_parcEid);
+  const saldoDevedorComEncargos=saldoDevedor+jurosMultaPendentes;
+  const saldoCircCard=saldoCircCardBase+jurosMultaPendentes;
   const ST_COR={Ativo:'#166534',Quitado:'#1d4ed8',Rescindido:'#dc2626',Suspenso:'#d97706'};
   const sc=ST_COR[p.situacao]||'var(--slate)';
   const lv=(label,val,bold,red)=>`<div style="display:flex;justify-content:space-between;align-items:center;padding:3px 0;border-bottom:1px solid #f0f0f0"><span style="font-size:.7rem;color:var(--slate)">${label}</span><span style="font-size:.72rem;font-weight:${bold?'700':'500'};color:${red?'#dc2626':'inherit'}">${val}</span></div>`;
@@ -14644,7 +14668,7 @@ function _renderDetalheParc(p){
   const datasEntradaLista=(p.dataEntradas&&p.dataEntradas.length)?p.dataEntradas:(p.dataEntrada?[p.dataEntrada]:[]);
   const datasEntradaLv=datasEntradaLista.length>1?lv('Datas de Entrada',datasEntradaLista.join(', ')):lv('Data Entrada',datasEntradaLista[0]||'—');
   const c3=card('Dados do Parcelamento',`${lv('Data Consolidação',p.dataConsolidacao||'—')}${lv('1º Vencimento',p.primeiroVencimento||'—')}${lv('Recibo',p.recibo||'—')}${lv('Parcelamento',p.parcelNome||'—')}${lv('Unidade',p.unidade||'—')}${lv('CNPJ',p.cnpj||'—')}${datasEntradaLv}${lv('Selic anterior no 1º pagto?',(p.selicMesAntPrimeiroPag||'sim')==='sim'?'Sim':'Não')}${lv('1% adicional no 1º pagto?',(p.adicionalPrimeiroPag||'sim')==='sim'?'Sim':'Não')}`);
-  const c4=card('Contabilização',`${lv('Ct. Passivo',p.contaPassivo||'—',true)}${lv('Órgão',p.orgao||'—')}${p.obs?lv('Obs.',p.obs.substring(0,30)+(p.obs.length>30?'…':'')):''}${lv('Situação',p.situacao||'Ativo')}<div style="padding-top:8px;margin-top:4px;border-top:1px solid var(--border)">${lv('Saldo Devedor Original',f(saldoDevedorOriginal),true)}${lv('Saldo de Juros',f(saldoDevedorJuros),true)}${lv('Saldo Circulante',f(saldoCircCard),true)}${lv('Saldo Não Circulante',f(saldoNaoCircCard),true)}<div style="font-size:.7rem;color:var(--slate);margin:6px 0 2px">Saldo Devedor Atualizado</div><div style="font-size:.88rem;font-weight:700;color:${restantes>0?'#b45309':'#166534'}">${f(saldoDevedor)}</div></div>`);
+  const c4=card('Contabilização',`${lv('Ct. Passivo',p.contaPassivo||'—',true)}${lv('Órgão',p.orgao||'—')}${p.obs?lv('Obs.',p.obs.substring(0,30)+(p.obs.length>30?'…':'')):''}${lv('Situação',p.situacao||'Ativo')}<div style="padding-top:8px;margin-top:4px;border-top:1px solid var(--border)">${lv('Saldo Devedor Original',f(saldoDevedorOriginal),true)}${lv('Saldo de Juros',f(saldoDevedorJuros),true)}${jurosMultaPendentes?lv('Juros/Multa em Atraso',f(jurosMultaPendentes),true,true):''}${lv('Saldo Circulante',f(saldoCircCard),true)}${lv('Saldo Não Circulante',f(saldoNaoCircCard),true)}<div style="font-size:.7rem;color:var(--slate);margin:6px 0 2px">Saldo Devedor Atualizado</div><div style="font-size:.88rem;font-weight:700;color:${restantes>0?'#b45309':'#166534'}">${f(saldoDevedorComEncargos)}</div></div>`);
   const nome=esc(p.parcelNome||p.orgao||'Parcelamento');
   const el=document.getElementById('parcDetalheView');
   el.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:8px">
@@ -15354,7 +15378,7 @@ function _parcTogglePgtoPendente(n,checked,valor,mesAno,dataVenc){
   const parcs=getParcelamentos(_parcEid);
   const p=parcs[_parcTabelaId];if(!p)return;
   _parcTogglePgtoPendenteCore(_parcEid,p,parcs,n,checked,valor,mesAno,dataVenc);
-  if(document.getElementById('parcDetalheView')?.style.display!=='none')_renderDetalheTabela(p);
+  if(document.getElementById('parcDetalheView')?.style.display!=='none')_renderDetalheParc(p);
   else _renderParcTabela(p);
 }
 function _parcTogglePgtoPendenteById(parcId,n,checked,valor,mesAno,dataVenc){
