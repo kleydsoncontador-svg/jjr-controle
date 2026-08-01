@@ -15894,6 +15894,17 @@ function _parseDataBR(s){
   return new Date(parseInt(pts[2]),parseInt(pts[1])-1,parseInt(pts[0])||1);
 }
 
+// Um empréstimo usa correção Selic mês a mês só quando o sistema escolhido
+// é SELIC e não há Taxa Personalizada preenchida — a Taxa Personalizada é
+// pensada pro caso em que o valor da parcela que o banco cobra não bate com
+// a taxa nominal do contrato nem com a Selic histórica (ex: o banco embute
+// uma projeção própria de Selic futura); nesse caso o usuário descobre/digita
+// a taxa efetiva mensal que reproduz o valor real, e ela substitui a Taxa de
+// Juros num cálculo reto (Price/SAC), sem somar mais nenhuma correção.
+function _empUsaSelicCorrecao(p){
+  const temCustom=p.taxaPersonalizada!=null&&p.taxaPersonalizada!==''&&!isNaN(parseFloat(p.taxaPersonalizada));
+  return p.sistemaAmortizacao==='SELIC'&&!temCustom;
+}
 // Gera o cronograma completo do empréstimo (linha 0 = contratação, 1..N =
 // parcelas), aplicando carência (juros capitalizados sobre o saldo, sem
 // linha de pagamento) antes de começar a amortizar pelo sistema escolhido.
@@ -15901,10 +15912,12 @@ function _parseDataBR(s){
 // saldoFinal — e, no sistema Selic, também selicMes (taxa usada naquele mês).
 function _gerarCronogramaEmp(p){
   const principalOriginal=parseFloat(p.valorPrincipal)||0;
-  const i=(parseFloat(p.taxaJurosMensal)||0)/100;
+  const usaSelic=_empUsaSelicCorrecao(p);
+  const temCustom=p.taxaPersonalizada!=null&&p.taxaPersonalizada!==''&&!isNaN(parseFloat(p.taxaPersonalizada));
+  const i=(temCustom?parseFloat(p.taxaPersonalizada):(parseFloat(p.taxaJurosMensal)||0))/100;
   const n=Math.max(0,parseInt(p.totalParcelas)||0);
   const carencia=Math.max(0,parseInt(p.carenciaMeses)||0);
-  const sistema=p.sistemaAmortizacao||'PRICE';
+  const sistema=usaSelic?'SELIC':(p.sistemaAmortizacao==='SAC'?'SAC':'PRICE');
   const overrides=p.linhas||[];
   const primDate=_parseDataBR(p.primeiroVencimento);
 
@@ -16069,14 +16082,17 @@ function _calcEmpPreview(){
   const totalEl=document.getElementById('empValorTotalFinanciado');
   if(totalEl) totalEl.textContent='R$ '+_fmt(principal);
   const taxa=parseFloat((document.getElementById('empTaxa')?.value||'').replace(',','.'))||0;
+  const taxaPersonalizadaStr=(document.getElementById('empTaxaPersonalizada')?.value||'').replace(',','.').trim();
   const nParc=parseInt(document.getElementById('empTotalParc')?.value)||0;
   const carencia=parseInt(document.getElementById('empCarencia')?.value)||0;
   const sistema=document.getElementById('empSistema')?.value||'PRICE';
   const el=document.getElementById('empPrimeiraParcelaPreview');
   if(!el) return;
   if(!principal||!nParc){ el.textContent='—'; return; }
-  const linhas=_gerarCronogramaEmp({valorPrincipal:principal,taxaJurosMensal:taxa,totalParcelas:nParc,carenciaMeses:carencia,sistemaAmortizacao:sistema,primeiroVencimento:'01/01/2000'});
-  el.textContent=linhas.length>1?'R$ '+_fmt(linhas[1].parcela)+(sistema==='SAC'?' (1ª — decresce a cada parcela)':sistema==='SELIC'?' (nominal, sem a correção Selic)':''):'—';
+  const pPrev={valorPrincipal:principal,taxaJurosMensal:taxa,taxaPersonalizada:taxaPersonalizadaStr,totalParcelas:nParc,carenciaMeses:carencia,sistemaAmortizacao:sistema,primeiroVencimento:'01/01/2000'};
+  const linhas=_gerarCronogramaEmp(pPrev);
+  const usaSelic=_empUsaSelicCorrecao(pPrev);
+  el.textContent=linhas.length>1?'R$ '+_fmt(linhas[1].parcela)+(sistema==='SAC'?' (1ª — decresce a cada parcela)':usaSelic?' (nominal, sem a correção Selic)':taxaPersonalizadaStr?' (com taxa personalizada)':''):'—';
 }
 
 function abrirFormEmp(eid,id){
@@ -16131,7 +16147,9 @@ function abrirFormEmp(eid,id){
       <div style="background:var(--white);border:2px solid #1E3558;border-radius:8px;overflow:hidden">
         <div style="background:#1E3558;padding:8px 14px;font-size:.82rem;font-weight:700;color:#fff;text-align:center">Prazo e Amortização</div>
         <div style="padding:14px;display:grid;gap:8px">
-          <div style="display:grid;grid-template-columns:1fr 140px;gap:8px;align-items:center"><span style="font-size:.78rem;color:var(--slate)">Taxa de Juros (% a.m.)</span><input id="empTaxa" class="fi" value="${esc(String(p.taxaJurosMensal??''))}" placeholder="Ex: 1,5" style="margin-top:3px;width:100%;text-align:right" oninput="_calcEmpPreview()"></div>
+          <div style="display:grid;grid-template-columns:1fr 140px;gap:8px;align-items:center"><span style="font-size:.78rem;color:var(--slate)">Taxa de Juros Contratual (% a.m.)</span><input id="empTaxa" class="fi" value="${esc(String(p.taxaJurosMensal??''))}" placeholder="Ex: 1,5" style="margin-top:3px;width:100%;text-align:right" oninput="_calcEmpPreview()"></div>
+          <div style="display:grid;grid-template-columns:1fr 140px;gap:8px;align-items:center"><span style="font-size:.78rem;color:var(--slate)">Taxa Personalizada (% a.m., opcional)</span><input id="empTaxaPersonalizada" class="fi" value="${esc(String(p.taxaPersonalizada??''))}" placeholder="Só se a parcela do banco não bater" style="margin-top:3px;width:100%;text-align:right" oninput="_calcEmpPreview()"></div>
+          <div style="font-size:.68rem;color:var(--slate);margin-top:-4px">Se preenchida, substitui a taxa contratual no cálculo (Price/SAC reto, sem correção Selic) — use quando o valor da parcela do banco não bater com a taxa nominal nem com a Selic histórica.</div>
           <div style="display:grid;grid-template-columns:1fr 140px;gap:8px;align-items:center"><span style="font-size:.78rem;color:var(--slate)">Sistema de Amortização</span><select id="empSistema" class="fi" style="margin-top:3px;width:100%" onchange="_calcEmpPreview()">${sistemaOpts}</select></div>
           <div style="display:grid;grid-template-columns:1fr 140px;gap:8px;align-items:center"><span style="font-size:.78rem;color:var(--slate)">Nº de Parcelas</span><input id="empTotalParc" class="fi" value="${esc(String(p.totalParcelas??''))}" placeholder="Ex: 48" style="margin-top:3px;width:100%;text-align:right" oninput="_calcEmpPreview()"></div>
           <div style="display:grid;grid-template-columns:1fr 140px;gap:8px;align-items:center"><span style="font-size:.78rem;color:var(--slate)">Carência (meses sem pagar, juros capitalizam)</span><input id="empCarencia" class="fi" value="${esc(String(p.carenciaMeses??'0'))}" placeholder="0" style="margin-top:3px;width:100%;text-align:right" oninput="_calcEmpPreview()"></div>
@@ -16195,6 +16213,7 @@ function salvarEmp(){
     valorSeguro:_parseEmp('empSeguro'),outrosCustosFinanciados:_parseEmp('empOutrosCustos'),
     valorPrincipal:valorTotalFinanciado,
     taxaJurosMensal:parseFloat(g('empTaxa').replace(',','.'))||0,
+    taxaPersonalizada:g('empTaxaPersonalizada').replace(',','.').trim(),
     sistemaAmortizacao:g('empSistema')||'PRICE',
     totalParcelas:parseInt(g('empTotalParc'))||0,
     carenciaMeses:parseInt(g('empCarencia'))||0,
@@ -16256,7 +16275,8 @@ function _renderDetalheEmp(p){
   const saldoCirc=linhaAtual.saldoCirculante||0;
   const saldoNaoCirc=linhaAtual.saldoNaoCirculante!=null?linhaAtual.saldoNaoCirculante:saldoFinalAtual;
   const c1=card('Condições',`${lv('Valor do Crédito',f(p.valorCredito??p.valorPrincipal))}${p.valorTarifa?lv('Tarifa de Contratação',f(p.valorTarifa)):''}${p.valorIOF?lv('IOF',f(p.valorIOF)):''}${p.valorSeguro?lv('Seguro',f(p.valorSeguro)):''}${p.outrosCustosFinanciados?lv('Outros Custos',f(p.outrosCustosFinanciados)):''}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558;display:flex;justify-content:space-between"><span style="font-size:.74rem;font-weight:700">Valor Total Financiado</span><span style="font-size:.82rem;font-weight:700;color:#1E3558">${f(totalFinanciado)}</span></div>`);
-  const c2=card('Amortização',`${lv('Taxa de Juros',(parseFloat(p.taxaJurosMensal)||0).toFixed(2)+'% a.m.')}${lv('Sistema',sistemaLabel)}${lv('Nº de Parcelas',p.totalParcelas||0)}${lv('Carência',(p.carenciaMeses||0)+' mês(es)')}${lv('Parcelas Pagas',(p.parcelasPagas||0)+' / '+(p.totalParcelas||0))}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558"><div style="font-size:.7rem;color:var(--slate);margin-bottom:2px">1ª Parcela</div><div style="background:#fef08a;padding:4px 8px;border-radius:4px;font-size:.88rem;font-weight:700;color:#1E3558;text-align:right">${linhas[1]?f(linhas[1].parcela):'—'}</div></div>`);
+  const temCustom=p.taxaPersonalizada!=null&&p.taxaPersonalizada!==''&&!isNaN(parseFloat(p.taxaPersonalizada));
+  const c2=card('Amortização',`${lv('Taxa Contratual',(parseFloat(p.taxaJurosMensal)||0).toFixed(2)+'% a.m.')}${temCustom?lv('Taxa Personalizada (em uso)',parseFloat(p.taxaPersonalizada).toFixed(4)+'% a.m.',true):''}${lv('Sistema',sistemaLabel+(temCustom&&p.sistemaAmortizacao==='SELIC'?' (correção Selic desativada)':''))}${lv('Nº de Parcelas',p.totalParcelas||0)}${lv('Carência',(p.carenciaMeses||0)+' mês(es)')}${lv('Parcelas Pagas',(p.parcelasPagas||0)+' / '+(p.totalParcelas||0))}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558"><div style="font-size:.7rem;color:var(--slate);margin-bottom:2px">1ª Parcela</div><div style="background:#fef08a;padding:4px 8px;border-radius:4px;font-size:.88rem;font-weight:700;color:#1E3558;text-align:right">${linhas[1]?f(linhas[1].parcela):'—'}</div></div>`);
   const c3=card('Datas e Saldo Devedor',`${lv('Contratação',p.dataContratacao||'—')}${lv('1º Vencimento',p.primeiroVencimento||'—')}${lv('Contrato/Operação',p.contratoNumero||'—')}<div style="margin-top:6px;padding-top:6px;border-top:2px solid #1E3558">${lv('Saldo Circulante',f(saldoCirc),true)}${lv('Saldo Não Circulante',f(saldoNaoCirc),true)}<div style="font-size:.7rem;color:var(--slate);margin:6px 0 2px">Saldo Devedor Total (${String(fechMes).padStart(2,'0')}/${fechAno})</div><div style="font-size:.88rem;font-weight:700;color:#b45309">${f(saldoFinalAtual)}</div></div>`);
   const c4=card('Contabilização',`${lv('Conta Passivo',p.contaPassivo||'—',true)}${lv('Conta Despesa Juros',p.contaJurosDespesa||'—',true)}${lv('Situação',p.situacao||'Ativo')}${lv('Credor',((p.credorTipo||'')+(p.credorNome?' — '+p.credorNome:''))||'—')}`);
   const nome=esc(p.nomeEmprestimo||'Empréstimo');
@@ -16280,7 +16300,7 @@ function _renderDetalheTabelaEmp(p){
   const f=v=>_fmt(parseFloat(v)||0);
   const linhas=_gerarCronogramaEmp(p);
   const pagas=p.parcelasPagas||0;
-  const isSelic=p.sistemaAmortizacao==='SELIC';
+  const isSelic=_empUsaSelicCorrecao(p);
   const fechAtualEmp=S.fechAtual()||'';
   const inpM=(n,field,val)=>`<input class="fi" value="${_fmtInputEmp(val)}" style="width:96px;text-align:right;padding:3px 6px;font-size:.78rem" oninput="_formatInputEmp(this)" onblur="_saveEmpLinha(${n},'${field}',parseFloat(this.value.replace(/\\./g,'').replace(',','.'))||0)">`;
   const inpT=(n,field,val)=>`<input class="fi" value="${esc(val||'')}" style="width:86px;padding:3px 6px;font-size:.78rem" onblur="_saveEmpLinha(${n},'${field}',this.value)">`;
