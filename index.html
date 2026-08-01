@@ -2286,8 +2286,11 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <button onclick="fecharTabelaParc()" class="btn bo bsm">← Voltar aos Parcelamentos</button>
     </div>
     <div id="parcTabelaHeader" style="margin-bottom:16px"></div>
-    <div style="overflow:auto;max-height:70vh">
-      <table id="parcTabelaTabela" style="border-collapse:collapse;font-size:11px;min-width:2400px;width:100%"></table>
+    <div id="parcTabelaWrap">
+      <div id="parcTabelaWrap_scrolltop" style="overflow-x:auto;overflow-y:hidden;height:14px"><div style="height:1px"></div></div>
+      <div class="scroll-wrap" style="overflow:auto;max-height:70vh">
+        <table id="parcTabelaTabela" style="border-collapse:collapse;font-size:11px;min-width:2400px;width:100%"></table>
+      </div>
     </div>
   </div>
 </div>
@@ -6783,14 +6786,44 @@ function saveTribAtraso(){
   }
 }
 
+// Marca/reabre um tributo em atraso. Ao marcar como pago, pergunta a data
+// do pagamento (não usa a data de hoje sozinha) — e, se o lançamento veio
+// automaticamente de um Parcelamento ("Pgto. Pendente"), dá baixa na
+// parcela de origem, tirando ela do cálculo de juros/multa do cardizinho.
 function marcarPago(eid, idx){
   const list = getTaList(eid);
-  if(!list[idx]) return;
-  list[idx].pago = !list[idx].pago;
-  list[idx].dataPagto = list[idx].pago ? new Date().toLocaleDateString('pt-BR') : '';
+  const trib = list[idx];
+  if(!trib) return;
+  if(trib.pago){
+    trib.pago = false;
+    trib.dataPagto = '';
+    saveTaList(eid, list);
+    renderTribAtraso();
+    toast('Reaberto.', 'ok');
+    return;
+  }
+  const dataInformada = prompt('Data do pagamento (DD/MM/AAAA):', new Date().toLocaleDateString('pt-BR'));
+  if(dataInformada===null) return;
+  const dataOk = parseDataDD(dataInformada.trim());
+  if(!dataOk || isNaN(dataOk.getTime())){ toast('Data inválida. Use o formato DD/MM/AAAA.', 'err'); return; }
+  trib.pago = true;
+  trib.dataPagto = dataInformada.trim();
   saveTaList(eid, list);
+  if(trib.origemTipo==='parcelamento' && trib.origemParcId){
+    const parcs = getParcelamentos(trib.origemEid||eid);
+    const p = parcs[trib.origemParcId];
+    if(p){
+      p.linhas = p.linhas||[];
+      const ln = p.linhas[trib.origemN];
+      if(ln && ln.pgtoPendente){
+        ln.pgtoPendente = false;
+        ln.taId = null;
+        setParcelamentos(trib.origemEid||eid, parcs);
+      }
+    }
+  }
   renderTribAtraso();
-  toast(list[idx].pago ? 'Marcado como pago!':'Reaberto.', 'ok');
+  toast('Marcado como pago!'+(trib.origemTipo==='parcelamento'?' Baixa refletida no parcelamento de origem.':''), 'ok');
 }
 
 function editarTrib(eid, idx){
@@ -6977,6 +7010,25 @@ function _parcJurosMultaPendentes(p,eid){
   return extra;
 }
 
+// Cria (ou atualiza) uma barra de rolagem horizontal ACIMA de uma tabela
+// larga, sincronizada com a rolagem real da tabela — evita ter que descer
+// até o fim pra achar a barra de rolagem. Espera que o container já tenha
+// sido montado com essa estrutura: <div id="X_scrolltop">...</div><div
+// class="scroll-wrap">...<table>...</table></div>. Chamar depois de
+// montar o innerHTML do container. Usado nas tabelas de cronograma de
+// Parcelamentos e Empréstimos.
+function _criarScrollTopo(containerId){
+  const container=document.getElementById(containerId);
+  if(!container) return;
+  const topBar=document.getElementById(containerId+'_scrolltop');
+  const scrollWrap=container.querySelector('.scroll-wrap');
+  const table=scrollWrap?scrollWrap.querySelector('table'):null;
+  if(!topBar||!scrollWrap||!table) return;
+  topBar.firstElementChild.style.width=table.scrollWidth+'px';
+  let syncing=false;
+  topBar.onscroll=function(){ if(syncing)return; syncing=true; scrollWrap.scrollLeft=topBar.scrollLeft; syncing=false; };
+  scrollWrap.onscroll=function(){ if(syncing)return; syncing=true; topBar.scrollLeft=scrollWrap.scrollLeft; syncing=false; };
+}
 // Converter string DD/MM/YYYY para Date
 function parseDataDD(str){
   if(!str || typeof str !== 'string') return null;
@@ -14942,7 +14994,7 @@ function _renderDetalheTabela(p){
   const inpT=(n,fld,val,w)=>`<input type="text" value="${esc(val||'')}" style="width:${w||86}px;border:none;background:transparent;font-size:11px" onchange="_saveParcLinha(${n},'${fld}',this.value)">`;
   const inpM=(n,fld,val,w)=>`<input type="text" value="${val!=null&&val!==''?_fmt(parseFloat(val)||0):''}" style="width:${w||86}px;border:none;background:transparent;text-align:right;font-size:11px" oninput="_formatInputParc(this)" onblur="_formatInputParc(this);_saveParcLinha(${n},'${fld}',_parseParcBR(this.value))">`;
   const inpMBase=(n,fld,val,w)=>`<input type="text" value="${val!=null&&val!==''?_fmt(parseFloat(val)||0):''}" style="width:${w||76}px;border:none;background:transparent;color:#fff;text-align:right;font-size:11px" oninput="_formatInputParc(this)" onblur="_formatInputParc(this);_saveParcLinha(${n},'${fld}',_parseParcBR(this.value))">`;
-  const thead=`<thead><tr>
+  const thead=`<thead style="position:sticky;top:0;z-index:5"><tr>
     <th rowspan="2" style="${ch}">Nº</th><th rowspan="2" style="${ch}">Mês de<br>Vencimento</th>
     <th rowspan="2" style="${ch}">Valor da Prestação<br>Original (R$)</th><th rowspan="2" style="${ch}">Tx. Selic<br>Mensal</th>
     <th rowspan="2" style="${ch}">Tx. Selic<br>Acumulada</th><th rowspan="2" style="${ch}">Valor<br>(R$)</th>
@@ -15011,7 +15063,8 @@ function _renderDetalheTabela(p){
       <td style="${cs};text-align:center">${n===0?'—':`<input type="checkbox" ${ln.pgtoPendente?'checked':''} onchange="_parcTogglePgtoPendente(${n},this.checked,${vlrAt},'${mesVencIso||''}','${esc(dataBalPad||'')}')">`}</td>
     </tr>`;
   }
-  el.innerHTML=`<div style="overflow:auto;max-height:65vh;border-top:2px solid #1E3558"><table style="border-collapse:collapse;min-width:2200px;width:100%">${thead}<tbody>${rows}</tbody></table></div>`;
+  el.innerHTML=`<div id="${el.id}_scrolltop" style="overflow-x:auto;overflow-y:hidden;height:14px"><div style="height:1px"></div></div><div class="scroll-wrap" style="overflow:auto;max-height:65vh;border-top:2px solid #1E3558"><table style="border-collapse:collapse;min-width:2200px;width:100%">${thead}<tbody>${rows}</tbody></table></div>`;
+  _criarScrollTopo(el.id);
 }
 
 function abrirFormParc(eid,id){
@@ -15356,7 +15409,7 @@ function _parcTogglePgtoPendenteCore(eid,p,parcs,n,checked,valor,mesAno,dataVenc
   if(checked){
     const nome=(p.parcelNome||p.orgao||'Parcelamento')+' - Parcela '+n;
     const taList=getTaList(eid);
-    const rec={nome,comp:mesAno||'',valor:parseFloat(valor)||0,obs:'Enviado automaticamente do Parcelamento',dataVencimento:dataVenc||'',contaCredito:p.contaPassivo||'',pago:false,dataPagto:'',id:Date.now()+Math.random()};
+    const rec={nome,comp:mesAno||'',valor:parseFloat(valor)||0,obs:'Enviado automaticamente do Parcelamento',dataVencimento:dataVenc||'',contaCredito:p.contaPassivo||'',pago:false,dataPagto:'',id:Date.now()+Math.random(),origemTipo:'parcelamento',origemEid:eid,origemParcId:p.id,origemN:n};
     taList.push(rec);
     saveTaList(eid,taList);
     ln.pgtoPendente=true;
@@ -15412,7 +15465,7 @@ function _renderParcColsInline(p){
   const inpT=(n,fld,val,w)=>`<input type="text" value="${esc(val||'')}" style="width:${w||86}px;border:none;background:transparent;font-size:11px" onchange="_saveParcLinhaById('${pid}',${n},'${fld}',this.value)">`;
   const inpM=(n,fld,val,w)=>`<input type="text" value="${val!=null&&val!==''?_fmt(parseFloat(val)||0):''}" style="width:${w||86}px;border:none;background:transparent;text-align:right;font-size:11px" oninput="_formatInputParc(this)" onblur="_formatInputParc(this);_saveParcLinhaById('${pid}',${n},'${fld}',_parseParcBR(this.value))">`;
   const inpMBase=(n,fld,val,w)=>`<input type="text" value="${val!=null&&val!==''?_fmt(parseFloat(val)||0):''}" style="width:${w||76}px;border:none;background:transparent;color:#fff;text-align:right;font-size:11px" oninput="_formatInputParc(this)" onblur="_formatInputParc(this);_saveParcLinhaById('${pid}',${n},'${fld}',_parseParcBR(this.value))">`;
-  const thead=`<thead>
+  const thead=`<thead style="position:sticky;top:0;z-index:5">
     <tr>
       <th rowspan="2" style="${ch}">Nº</th>
       <th rowspan="2" style="${ch}">Mês de<br>Vencimento</th>
@@ -15494,7 +15547,8 @@ function _renderParcColsInline(p){
       <td style="${cs};text-align:center">${n===0?'—':`<input type="checkbox" ${ln.pgtoPendente?'checked':''} onchange="_parcTogglePgtoPendenteById('${pid}',${n},this.checked,${vlrAt},'${mesVencIso||''}','${esc(dataBalPad||'')}')">`}</td>
     </tr>`;
   }
-  el.innerHTML=`<div style="overflow:auto;max-height:65vh;border-top:2px solid #1E3558"><table style="border-collapse:collapse;min-width:2200px;width:100%">${thead}<tbody>${rows}</tbody></table></div>`;
+  el.innerHTML=`<div id="${el.id}_scrolltop" style="overflow-x:auto;overflow-y:hidden;height:14px"><div style="height:1px"></div></div><div class="scroll-wrap" style="overflow:auto;max-height:65vh;border-top:2px solid #1E3558"><table style="border-collapse:collapse;min-width:2200px;width:100%">${thead}<tbody>${rows}</tbody></table></div>`;
+  _criarScrollTopo(el.id);
 }
 function _renderParcTabela(p){
   const f=v=>_fmt(parseFloat(v)||0);
@@ -15551,7 +15605,7 @@ function _renderParcTabela(p){
   const inpT=(n,fld,val,w)=>`<input type="text" value="${esc(val||'')}" style="width:${w||90}px;border:none;background:transparent;font-size:11px" onchange="_saveParcLinha(${n},'${fld}',this.value)">`;
   const inpM=(n,fld,val,w)=>`<input type="text" value="${val!=null&&val!==''?_fmt(parseFloat(val)||0):''}" style="width:${w||90}px;border:none;background:transparent;text-align:right;font-size:11px" oninput="_formatInputParc(this)" onblur="_formatInputParc(this);_saveParcLinha(${n},'${fld}',_parseParcBR(this.value))">`;
   const inpMBase=(n,fld,val,w)=>`<input type="text" value="${val!=null&&val!==''?_fmt(parseFloat(val)||0):''}" style="width:${w||80}px;border:none;background:transparent;color:#fff;text-align:right;font-size:11px" oninput="_formatInputParc(this)" onblur="_formatInputParc(this);_saveParcLinha(${n},'${fld}',_parseParcBR(this.value))">`;
-  let thead=`<thead>
+  let thead=`<thead style="position:sticky;top:0;z-index:5">
     <tr>
       <th rowspan="2" style="${ch}">Nº</th>
       <th rowspan="2" style="${ch}">Mês de<br>Vencimento</th>
@@ -15635,6 +15689,7 @@ function _renderParcTabela(p){
     </tr>`;
   }
   document.getElementById('parcTabelaTabela').innerHTML=thead+'<tbody>'+rows+'</tbody>';
+  _criarScrollTopo('parcTabelaWrap');
 }
 
 function renderImoveis(){ prepararAdicionarEmpresa('imoveis'); }
@@ -16572,7 +16627,7 @@ function _renderDetalheTabelaEmp(p){
   const chs='padding:5px 6px;border:1px solid #999;background:#d4a0a0;color:#333;font-weight:700;text-align:center;white-space:nowrap;font-size:10px';
   const chc='padding:5px 6px;border:1px solid #999;background:#c8b4e8;color:#333;font-weight:700;text-align:center;white-space:nowrap;font-size:10px';
   const cs='padding:4px 6px;border:1px solid #ddd;white-space:nowrap;text-align:right;font-size:11px';
-  const thead=`<thead><tr>
+  const thead=`<thead style="position:sticky;top:0;z-index:5"><tr>
     <th rowspan="2" style="${ch}">Nº</th><th rowspan="2" style="${ch}">Vencimento</th>
     <th rowspan="2" style="${ch}">Saldo Inicial</th>
     ${isSelic?`<th rowspan="2" style="${ch}">Selic<br>do Mês</th>`:''}
@@ -16615,7 +16670,8 @@ function _renderDetalheTabelaEmp(p){
       <td style="${cs}">${ln.n===0?'—':inpT(ln.n,'dataBalanco',ln.dataBalanco)}</td>
     </tr>`;
   });
-  el.innerHTML=`<div style="overflow:auto;max-height:65vh;border-top:2px solid #1E3558"><table style="border-collapse:collapse;min-width:1400px;width:100%">${thead}<tbody>${rows}</tbody></table></div>`;
+  el.innerHTML=`<div id="${el.id}_scrolltop" style="overflow-x:auto;overflow-y:hidden;height:14px"><div style="height:1px"></div></div><div class="scroll-wrap" style="overflow:auto;max-height:65vh;border-top:2px solid #1E3558"><table style="border-collapse:collapse;min-width:1400px;width:100%">${thead}<tbody>${rows}</tbody></table></div>`;
+  _criarScrollTopo(el.id);
 }
 
 function exportarListaEmp(formato){
