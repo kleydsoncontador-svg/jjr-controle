@@ -2907,6 +2907,54 @@ async function cccInitStorage(){
   Object.assign(cccCache, data);
 }
 
+// ─── Aviso de falha ao sincronizar com a nuvem (Supabase) ───────────────────
+// Antes, se uma gravação falhasse (sem internet, Supabase fora do ar, etc.),
+// só ficava um console.warn escondido — o operador continuava vendo o valor
+// certo na tela dele (o cache local já foi atualizado), sem saber que aquilo
+// nunca chegou pra outros operadores. Agora aparece um aviso fixo na tela,
+// que só some quando o operador clica em "Tentar novamente" (e funciona) ou
+// no "✕" — nunca sozinho.
+let _syncErrosPendentes={};
+function _mostrarErroSincronizacao(k){
+  _syncErrosPendentes[k]=(_syncErrosPendentes[k]||0)+1;
+  _renderSyncErrosBanner();
+}
+function _limparErroSincronizacao(k){
+  delete _syncErrosPendentes[k];
+  _renderSyncErrosBanner();
+}
+function _renderSyncErrosBanner(){
+  let el=document.getElementById('syncErrosBanner');
+  if(!el){
+    el=document.createElement('div');
+    el.id='syncErrosBanner';
+    el.style.cssText='position:fixed;bottom:16px;right:16px;z-index:99999;display:flex;flex-direction:column;gap:8px;max-width:360px';
+    document.body.appendChild(el);
+  }
+  const chaves=Object.keys(_syncErrosPendentes);
+  if(!chaves.length){ el.innerHTML=''; return; }
+  el.innerHTML=chaves.map(function(k){
+    const tentativas=_syncErrosPendentes[k];
+    return '<div style="background:#FEE2E2;border:1px solid #DC2626;border-radius:8px;padding:10px 12px;box-shadow:0 4px 14px rgba(0,0,0,.2);font-size:12.5px;color:#7F1D1D;font-family:var(--sans)">'
+      +'<div style="display:flex;justify-content:space-between;align-items:start;gap:10px">'
+      +'<b>⚠ Não foi possível salvar na nuvem</b>'
+      +'<span onclick="_limparErroSincronizacao(\''+k.replace(/'/g,"\\'")+'\')" title="Fechar (a alteração continua só neste computador)" style="cursor:pointer;font-weight:700;padding:0 2px;flex-shrink:0">✕</span>'
+      +'</div>'
+      +'<div style="margin-top:4px">Essa alteração está salva só neste computador'+(tentativas>1?' ('+tentativas+' tentativas)':'')+'. Outros operadores não vão vê-la até sincronizar.</div>'
+      +'<button class="btn bd bsm" style="margin-top:8px" onclick="_retentarSincronizacao(\''+k.replace(/'/g,"\\'")+'\')">🔄 Tentar novamente</button>'
+      +'</div>';
+  }).join('');
+}
+function _retentarSincronizacao(k){
+  if(!_supaClient){ toast('Ainda sem conexão com o Supabase.','err'); return; }
+  const v=cccCache[k];
+  const ts=new Date().toISOString();
+  _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
+    if(r&&r.error){ console.warn('SB retry err',k,r.error); _mostrarErroSincronizacao(k); }
+    else { cccLocalUpdatedAt[k]=ts; cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt); _limparErroSincronizacao(k); toast('Sincronizado com sucesso!','ok'); }
+  }, function(e){ console.warn('SB retry err',k,e); _mostrarErroSincronizacao(k); });
+}
+
 const S = {
   g:(k)=>(k in cccCache)?cccCache[k]:null,
   s:(k,v)=>{
@@ -2916,10 +2964,23 @@ const S = {
     cccLocalUpdatedAt[k]=ts;
     cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
     if(_supaClient&&k!=='ccc_session'){
-      _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){if(r.error)console.warn('SB save err',k,r.error);});
+      _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
+        if(r.error){ console.warn('SB save err',k,r.error); _mostrarErroSincronizacao(k); }
+        else { _limparErroSincronizacao(k); }
+      }, function(e){ console.warn('SB save err',k,e); _mostrarErroSincronizacao(k); });
     } else if(!_supaClient&&k!=='ccc_session') {
       // Se Supabase não está pronto, tenta novamente em 500ms
-      setTimeout(()=>{ if(_supaClient) _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){if(r&&r.error)console.warn('SB retry err',k,r.error);}, function(e){console.warn('SB retry err',k,e);}); }, 500);
+      setTimeout(()=>{
+        if(_supaClient){
+          _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
+            if(r&&r.error){ console.warn('SB retry err',k,r.error); _mostrarErroSincronizacao(k); }
+            else { _limparErroSincronizacao(k); }
+          }, function(e){ console.warn('SB retry err',k,e); _mostrarErroSincronizacao(k); });
+        } else {
+          console.warn('SB retry err',k,'Supabase ainda não disponível após 500ms');
+          _mostrarErroSincronizacao(k);
+        }
+      }, 500);
     }
   },
   emps:()=>S.g('emps')||[],
