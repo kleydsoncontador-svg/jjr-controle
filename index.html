@@ -17683,9 +17683,14 @@ function lucSalvarConta2025(inp){
 // trimestre (mesmo % de Percentual de Participação — Mar/Jun/Set/Dez).
 function getLucFiscalEmpresas(){ return S.g('lucFiscal_empresas')||[]; }
 function setLucFiscalEmpresas(arr){ S.s('lucFiscal_empresas',arr); }
-function getLucFiscalDados(eid,ano,trim){ return S.g('lucFiscal_dados_'+ano+'_'+trim+'_'+eid)||{receita:0,pis:0,cofins:0,csll:0,irpj:0}; }
+function getLucFiscalDados(eid,ano,trim){ return S.g('lucFiscal_dados_'+ano+'_'+trim+'_'+eid)||{receita:0,pis:0,cofins:0,csll:0,irpj:0,receitaPdfLog:[]}; }
 function setLucFiscalDados(eid,ano,trim,data){ S.s('lucFiscal_dados_'+ano+'_'+trim+'_'+eid,data); }
 function _lucFiscalResultado(d){ return (parseFloat(d.receita)||0)-(parseFloat(d.pis)||0)-(parseFloat(d.cofins)||0)-(parseFloat(d.csll)||0)-(parseFloat(d.irpj)||0); }
+// Mês → trimestre (1º Trim = Jan/Fev/Mar, etc.) — usado pra saber em qual
+// coluna trimestral o valor extraído do PDF de faturamento deve entrar.
+function _lucTrimDoMes(mes){ return Math.ceil(parseInt(mes,10)/3); }
+let _lucFaturamentoFormAberto={};
+let _lucFaturamentoHistoricoAberto={};
 function lucRenderLucrosFiscal(el){
   var eids=getLucFiscalEmpresas();
   var busca=((document.getElementById('lucBusca')||{}).value||'').toLowerCase().trim();
@@ -17761,6 +17766,8 @@ function lucRenderFiscalEmpBody(eid){
   var trims=[1,2,3,4];
   var socios=lucSocGet(eid);
 
+  var h0='<div style="padding:10px 16px 0">'+_lucRenderFaturamentoForm(eid)+'</div>';
+
   var linhas=[
     {campo:'receita', label:'Receita do Trimestre'},
     {campo:'pis',     label:'(-) PIS'},
@@ -17770,7 +17777,7 @@ function lucRenderFiscalEmpBody(eid){
   ];
   var thStyle='padding:7px 10px;font-size:11px;font-weight:700;text-align:right;white-space:nowrap;background:var(--ink2);color:#fff;border-bottom:1px solid var(--border)';
   var thStyleL=thStyle+';text-align:left';
-  var h='<div style="overflow-x:auto;padding:0 16px 6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px">'
+  var h=h0+'<div style="overflow-x:auto;padding:0 16px 6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px">'
     +'<thead><tr><th style="'+thStyleL+'">Trimestre</th>';
   trims.forEach(function(t){ h+='<th style="'+thStyle+'">'+t+'º Trim/'+ano+'</th>'; });
   h+='</tr></thead><tbody>';
@@ -17792,6 +17799,7 @@ function lucRenderFiscalEmpBody(eid){
     h+='<td style="padding:6px 10px;text-align:right;font-family:var(--mono);font-weight:700;color:'+(res<0?'var(--red)':'var(--ink)')+'">'+lucFmt2025(res)+'</td>';
   });
   h+='</tr></tbody></table></div>';
+  h+='<div style="padding:0 16px 10px">'+_lucRenderFaturamentoHistorico(eid,ano,trims)+'</div>';
 
   if(!socios.length){
     h+='<div style="padding:0 16px 14px;color:var(--slate);font-size:12.5px">Nenhum sócio cadastrado em "Percentual de Participação".</div>';
@@ -17831,6 +17839,130 @@ function lucSalvarFiscalCampo(inp){
   setLucFiscalDados(eid,ano,trim,d);
   var container=document.getElementById('lucFiscalEmpBody_'+eid);
   if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
+}
+
+// ── Incluir PDF Faturamento (IA) ─────────────────────────────────────────────
+// Lê um relatório mensal de faturamento (PDF) via IA (Groq) e SOMA o valor
+// extraído na Receita do trimestre correspondente ao mês escolhido — o
+// controle continua sendo por trimestre, só ganha uma forma automática de
+// alimentar a Receita mês a mês, com um histórico de onde cada valor veio
+// (pra permitir conferir/desfazer se o PDF errado for anexado).
+function _lucRenderFaturamentoForm(eid){
+  var aberto=!!_lucFaturamentoFormAberto[eid];
+  var ano=lucCurrentAno||'2026';
+  var mesAtual=String(new Date().getMonth()+1).padStart(2,'0');
+  var html='<button class="btn bo bsm" onclick="_lucFaturamentoToggleForm(\''+eid+'\')">📎 Incluir PDF Faturamento</button>';
+  if(aberto){
+    var mesOpts=LUC_MESES.map(function(m,i){ return '<option value="'+m+'"'+(m===mesAtual?' selected':'')+'>'+LUC_MESES_FULL[i]+'/'+ano+'</option>'; }).join('');
+    html+='<div style="margin-top:8px;padding:10px 12px;border:1px dashed var(--border);border-radius:6px;background:var(--bg);max-width:560px">'
+      +'<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">'
+      +'<label style="font-size:12px;color:var(--slate)">Mês do relatório:</label>'
+      +'<select class="si" id="lucFatMes_'+eid+'" style="width:150px">'+mesOpts+'</select>'
+      +'<input type="file" id="lucFatArquivo_'+eid+'" accept=".pdf" class="fi" style="flex:1;min-width:180px">'
+      +'</div>'
+      +'<div style="margin-top:8px;display:flex;align-items:center;gap:10px">'
+      +'<button class="btn bp bsm" id="lucFatBtn_'+eid+'" onclick="_lucFaturamentoExtrairIncluir(\''+eid+'\')">🔍 Extrair e Incluir</button>'
+      +'<span id="lucFatStatus_'+eid+'" style="font-size:12px;color:var(--slate)"></span>'
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--slate);margin-top:6px">O valor lido é somado à Receita do trimestre do mês escolhido — anexe um PDF por mês pra ir compondo o trimestre.</div>'
+      +'</div>';
+  }
+  return html;
+}
+function _lucFaturamentoToggleForm(eid){
+  _lucFaturamentoFormAberto[eid]=!_lucFaturamentoFormAberto[eid];
+  var container=document.getElementById('lucFiscalEmpBody_'+eid);
+  if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
+}
+async function _lucFaturamentoExtrairIncluir(eid){
+  var ano=lucCurrentAno||'2026';
+  var mesSel=document.getElementById('lucFatMes_'+eid).value;
+  var input=document.getElementById('lucFatArquivo_'+eid);
+  var statusEl=document.getElementById('lucFatStatus_'+eid);
+  var btn=document.getElementById('lucFatBtn_'+eid);
+  if(!input||!input.files||!input.files.length){ toast('Anexe o PDF do relatório de faturamento primeiro.','err'); return; }
+  var btnTextoOriginal=btn.textContent;
+  btn.disabled=true; btn.textContent='Lendo PDF...';
+  statusEl.style.color='var(--slate)'; statusEl.textContent='Extraindo texto do relatório...';
+  try{
+    var file=input.files[0];
+    var texto=await _empExtrairTextoPDF(file,15);
+    btn.textContent='Consultando IA...';
+    statusEl.textContent='Analisando o relatório com IA...';
+    var resp=await fetch(SUPABASE_URL+'/functions/v1/luc-extrair-faturamento',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+      body:JSON.stringify({texto:texto})
+    });
+    if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
+    var d=await resp.json();
+    if(d.error) throw new Error(d.error);
+    var valor=parseFloat(d.valorFaturamento);
+    if(!valor||isNaN(valor)) throw new Error('Não foi possível identificar o valor de faturamento no PDF.');
+    var trim=_lucTrimDoMes(mesSel);
+    var dados=getLucFiscalDados(eid,ano,trim);
+    dados.receita=(parseFloat(dados.receita)||0)+valor;
+    dados.receitaPdfLog=dados.receitaPdfLog||[];
+    dados.receitaPdfLog.push({mes:mesSel, arquivo:file.name, valor:valor, dataInclusao:new Date().toLocaleDateString('pt-BR')});
+    setLucFiscalDados(eid,ano,trim,dados);
+    var msg='✓ R$ '+valor.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})+' incluído na Receita do '+trim+'º Trimestre.';
+    if(d.competenciaMes&&d.competenciaMes!==mesSel) msg+=' Atenção: a IA identificou competência '+d.competenciaMes+'/'+(d.competenciaAno||ano)+' no PDF — confira se é o mês certo.';
+    if(d.observacoes) msg+=' '+d.observacoes;
+    toast('Faturamento incluído: R$ '+valor.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}),'ok');
+    _lucFaturamentoFormAberto[eid]=false;
+    var container=document.getElementById('lucFiscalEmpBody_'+eid);
+    if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
+    if(msg.indexOf('Atenção')>=0) toast(msg,'warn');
+  }catch(e){
+    console.error('_lucFaturamentoExtrairIncluir erro:',e);
+    statusEl.style.color='#dc2626'; statusEl.textContent='Erro: '+e.message;
+    toast('Erro ao extrair faturamento: '+e.message,'err');
+    btn.disabled=false; btn.textContent=btnTextoOriginal;
+  }
+}
+function _lucRenderFaturamentoHistorico(eid,ano,trims){
+  var total=0;
+  trims.forEach(function(t){ total+=(getLucFiscalDados(eid,ano,t).receitaPdfLog||[]).length; });
+  if(!total) return '';
+  var aberto=!!_lucFaturamentoHistoricoAberto[eid];
+  var html='<button class="btn bo bsm" style="font-size:11px" onclick="_lucFaturamentoToggleHistorico(\''+eid+'\')">📄 '+(aberto?'Ocultar':'Ver')+' histórico de PDFs incluídos ('+total+')</button>';
+  if(aberto){
+    html+='<div style="overflow-x:auto;margin-top:8px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:11.5px">'
+      +'<thead><tr><th style="padding:5px 8px;text-align:left;background:var(--ink2);color:#fff">Mês</th><th style="padding:5px 8px;text-align:left;background:var(--ink2);color:#fff">Trim.</th>'
+      +'<th style="padding:5px 8px;text-align:left;background:var(--ink2);color:#fff">Arquivo</th><th style="padding:5px 8px;text-align:right;background:var(--ink2);color:#fff">Valor</th>'
+      +'<th style="padding:5px 8px;text-align:left;background:var(--ink2);color:#fff">Incluído em</th><th style="padding:5px 8px;background:var(--ink2);color:#fff"></th></tr></thead><tbody>';
+    trims.forEach(function(t){
+      var dados=getLucFiscalDados(eid,ano,t);
+      (dados.receitaPdfLog||[]).forEach(function(log,idx){
+        html+='<tr><td style="padding:4px 8px">'+(LUC_MESES_FULL[parseInt(log.mes,10)-1]||log.mes)+'</td>'
+          +'<td style="padding:4px 8px">'+t+'º</td>'
+          +'<td style="padding:4px 8px">'+esc(log.arquivo||'')+'</td>'
+          +'<td style="padding:4px 8px;text-align:right;font-family:var(--mono)">'+lucFmtBRL(log.valor)+'</td>'
+          +'<td style="padding:4px 8px">'+esc(log.dataInclusao||'')+'</td>'
+          +'<td style="padding:4px 8px"><button class="btn bd bsm" style="font-size:10px" onclick="_lucFaturamentoRemoverLog(\''+eid+'\','+t+','+idx+')">🗑</button></td></tr>';
+      });
+    });
+    html+='</tbody></table></div>';
+  }
+  return html;
+}
+function _lucFaturamentoToggleHistorico(eid){
+  _lucFaturamentoHistoricoAberto[eid]=!_lucFaturamentoHistoricoAberto[eid];
+  var container=document.getElementById('lucFiscalEmpBody_'+eid);
+  if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
+}
+function _lucFaturamentoRemoverLog(eid,trim,idx){
+  if(!confirm('Remover este PDF do histórico? O valor será subtraído da Receita do trimestre.')) return;
+  var ano=lucCurrentAno||'2026';
+  var dados=getLucFiscalDados(eid,ano,trim);
+  var log=(dados.receitaPdfLog||[])[idx];
+  if(!log) return;
+  dados.receita=(parseFloat(dados.receita)||0)-(parseFloat(log.valor)||0);
+  dados.receitaPdfLog.splice(idx,1);
+  setLucFiscalDados(eid,ano,trim,dados);
+  var container=document.getElementById('lucFiscalEmpBody_'+eid);
+  if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
+  toast('Removido do histórico e subtraído da Receita.','ok');
 }
 
 function lucRenderPlaceholder(el, sub, emps){
