@@ -1,4 +1,5 @@
-// Edge Function: extração do valor de faturamento de um relatório mensal via IA (Groq)
+// Edge Function: extração de valores de faturamento (Saídas/Serviços/Outros,
+// mês a mês) de um relatório de faturamento via IA (Groq)
 // Usada pelo botão "📎 Incluir PDF Faturamento" em Lucros / Dividendos Fiscal, em index.html
 //
 // Deploy: Supabase Dashboard → Edge Functions → Deploy a new function → Via Editor
@@ -39,24 +40,30 @@ Deno.serve(async (req: Request) => {
 
     const textoLimitado = texto.slice(0, 24000);
 
-    const prompt = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo o valor de faturamento (receita bruta) de um relatório mensal de faturamento de uma empresa, para lançamento no controle de Lucros/Dividendos do escritório.
+    const prompt = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo valores de faturamento (Saídas/Vendas, Serviços e Outros) de um relatório de faturamento de uma empresa, para lançamento no controle de Lucros/Dividendos Fiscal do escritório. O relatório pode trazer um único mês ou vários meses em linhas separadas (ex: uma tabela com uma linha por mês, de Janeiro a Dezembro).
 
-Texto extraído do PDF:
+Texto extraído do(s) PDF(s) (pode incluir mais de um documento, cada um identificado por "=== NOME DO ARQUIVO ==="):
 
 """
 ${textoLimitado}
 """
 
-Extraia os dados e responda SOMENTE com um JSON válido, exatamente neste formato (use null para o que não encontrar — não invente valores):
+Extraia os dados e responda SOMENTE com um JSON válido, exatamente neste formato (use null pro que não encontrar — não invente valores):
 
 {
-  "competenciaMes": "MM" (mês de competência do relatório, 2 dígitos, ex: "03" pra março) ou null,
-  "competenciaAno": "AAAA" (ano de competência, ex: "2026") ou null,
-  "valorFaturamento": número (valor total de faturamento/receita bruta do período do relatório — geralmente o total geral de vendas/notas emitidas no mês; se o relatório trouxer várias subtotais, some pra chegar no total geral do período) ou null,
-  "observacoes": "1-2 frases em português caso haja ambiguidade sobre qual valor é o faturamento total, ou se o período do relatório não for exatamente um mês fechado"
+  "lancamentos": [
+    {
+      "mes": "MM" (mês de competência, 2 dígitos, ex: "03" pra março),
+      "ano": "AAAA" (ano de competência, ex: "2026"),
+      "saidas": número (valor de Saídas/Vendas de mercadorias/produtos do mês — 0 se não houver),
+      "servicos": número (valor de Serviços prestados no mês — 0 se não houver),
+      "outros": número (outras receitas do mês que não sejam Saídas nem Serviços, se o relatório trouxer essa coluna — 0 se não houver)
+    }
+  ],
+  "observacoes": "1-2 frases em português caso haja ambiguidade sobre a classificação dos valores, meses não identificados, ou linhas de total que não devem ser incluídas como um mês"
 }
 
-Valores monetários sempre em número puro (sem "R$", sem separador de milhar, com ponto decimal — ex: 61150.00).`;
+Um item no array "lancamentos" para cada mês encontrado no relatório (não inclua a linha de "Total/Totais" do relatório como um lançamento — ela é apenas a soma dos meses). Se o relatório trouxer só um mês, retorne um array com um único item. Valores monetários sempre em número puro (sem "R$", sem separador de milhar, com ponto decimal — ex: 61150.00).`;
 
     const aiResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
