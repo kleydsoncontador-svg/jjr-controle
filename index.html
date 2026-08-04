@@ -16444,6 +16444,17 @@ function abrirFormImovel(eid,id){
       <h2 style="margin:0;font-size:1.2rem;color:#1E3558">${titulo}</h2>
       <button class="btn bo bsm" onclick="fecharFormImovel()">← Voltar à Lista de Imóveis</button>
     </div>
+    <div style="border:1px dashed #4a6a8a;border-radius:8px;margin-bottom:16px;overflow:hidden">
+      <div style="background:#1E3558;padding:10px 16px;font-size:.85rem;font-weight:700;color:#fff">📎 Anexar Documentos (opcional) — preenche os campos abaixo automaticamente</div>
+      <div style="padding:16px;background:var(--white)">
+        <input type="file" id="imovArquivosDocs" accept=".pdf" multiple class="fi" style="width:100%">
+        <div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <button type="button" class="btn bp bsm" id="imovBtnExtrairIA" onclick="_imovExtrairDocsIA()">🔍 Extrair Dados dos Documentos (IA)</button>
+          <span id="imovStatusExtracao" style="font-size:.78rem;color:var(--slate)"></span>
+        </div>
+        <div style="font-size:.72rem;color:var(--slate);margin-top:8px">Anexe a escritura, matrícula, contrato de compra e venda ou carnê de IPTU (pode selecionar mais de um) — a IA sugere os valores abaixo pra você revisar e ajustar antes de salvar. Nada é salvo automaticamente.</div>
+      </div>
+    </div>
     <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
       <div style="background:#1E3558;padding:10px 16px;font-size:.85rem;font-weight:700;color:#fff">Informações Básicas</div>
       <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
@@ -16539,6 +16550,74 @@ function abrirFormImovel(eid,id){
 function fecharFormImovel(){
   document.getElementById('imoveisListView').style.display='block';
   document.getElementById('imoveisFormView').style.display='none';
+}
+// Lê o(s) PDF(s) anexado(s) (escritura, matrícula, contrato de compra e venda,
+// carnê de IPTU, etc.), manda o texto pra Edge Function imv-extrair-dados
+// (Groq) e pré-preenche os campos do formulário de Imóveis — o usuário sempre
+// revisa/ajusta antes de salvar. Reaproveita a extração de texto genérica de
+// PDF já usada em Empréstimos (_empExtrairTextoPDF, via pdf.js).
+async function _imovExtrairDocsIA(){
+  const input=document.getElementById('imovArquivosDocs');
+  const statusEl=document.getElementById('imovStatusExtracao');
+  const btn=document.getElementById('imovBtnExtrairIA');
+  if(!input||!input.files||!input.files.length){ toast('Anexe ao menos um PDF primeiro.','err'); return; }
+  const btnTextoOriginal=btn.textContent;
+  btn.disabled=true;
+  btn.textContent='Lendo PDF(s)...';
+  statusEl.style.color='var(--slate)';
+  statusEl.textContent='Extraindo texto dos arquivos...';
+  try{
+    let textoCombinado='';
+    for(const file of input.files){
+      const texto=await _empExtrairTextoPDF(file,12);
+      textoCombinado+='=== '+file.name+' ===\n'+texto+'\n\n';
+    }
+    btn.textContent='Consultando IA...';
+    statusEl.textContent='Analisando os documentos com IA...';
+    const resp=await fetch(SUPABASE_URL+'/functions/v1/imv-extrair-dados',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+      body:JSON.stringify({texto:textoCombinado})
+    });
+    if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
+    const d=await resp.json();
+    if(d.error) throw new Error(d.error);
+    const setIf=(id,val)=>{ if(val==null||val==='') return; const el=document.getElementById(id); if(el) el.value=val; };
+    const setMoneyIf=(id,val)=>{ if(val==null) return; const el=document.getElementById(id); if(el) el.value=_fmtMoneyOpt(parseFloat(val)||0); };
+    setIf('imovDesc',d.descricaoSugerida);
+    if(d.tipoImovel){ const sel=document.getElementById('imovTipo'); if(sel&&IMOVEL_TIPOS.includes(d.tipoImovel)) sel.value=d.tipoImovel; }
+    setIf('imovDataAq',d.dataAquisicao);
+    setMoneyIf('imovValor',d.valorTotalAquisicao);
+    setIf('imovCep',d.cep);
+    setIf('imovEnd',d.logradouro);
+    setIf('imovNum',d.numero);
+    setIf('imovComp',d.complemento);
+    setIf('imovBairro',d.bairro);
+    setIf('imovCidade',d.cidade);
+    setIf('imovUf',d.uf);
+    setIf('imovArea',d.areaTotal);
+    setIf('imovMatricula',d.numeroMatricula);
+    setIf('imovCartorio',d.cartorioRegistro);
+    setIf('imovIptu',d.iptuInscricao);
+    if(Array.isArray(d.vendedores)&&d.vendedores.length){
+      _imovVends=d.vendedores.map(v=>({nome:v.nome||'',cpfCnpj:v.cpfCnpj||'',participacao:v.participacao||''}));
+      _renderVendedores();
+    }
+    calcularGanhoCapital();
+    let msg='✓ Dados extraídos — revise os campos antes de salvar.';
+    if(d.observacoes) msg+=' '+d.observacoes;
+    statusEl.style.color='var(--green)';
+    statusEl.textContent=msg;
+    toast('Dados extraídos dos documentos — confira antes de salvar.','ok');
+  }catch(e){
+    console.error('_imovExtrairDocsIA erro:',e);
+    statusEl.style.color='#dc2626';
+    statusEl.textContent='Erro: '+e.message;
+    toast('Erro ao extrair dados dos documentos: '+e.message,'err');
+  }finally{
+    btn.disabled=false;
+    btn.textContent=btnTextoOriginal;
+  }
 }
 async function buscarCep(){
   const cepEl=document.getElementById('imovCep');
