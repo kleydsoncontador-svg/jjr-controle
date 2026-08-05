@@ -401,11 +401,28 @@ function buildSchedule({ dataAquisicao, dataFinal, valorCusto, valorResidualPct,
 function formatBRL(n) {
   return Number(n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
+// Detecta automaticamente formatação BR (ponto = milhar, vírgula = decimal,
+// ex: "119.416,54") ou internacional (vírgula = milhar, ponto = decimal, ex:
+// "147,057.60") — algumas NF-e de emissores com sistema internacional (ex:
+// montadoras multinacionais) saem no segundo formato mesmo sendo documento
+// brasileiro. O separador que aparece por ÚLTIMO na string é o decimal.
 function parseNum(v){
   if(v===null||v===undefined) return 0;
-  v = String(v).replace(/\s+/g,'').trim(); // alguns PDFs saem com espaço depois da vírgula (ex: "0, 00")
-  if(!v) return 0;
-  return parseFloat(v.replace(/\./g,'').replace(',','.')) || 0;
+  let s = String(v).replace(/\s+/g,'').trim(); // alguns PDFs saem com espaço depois da vírgula (ex: "0, 00")
+  if(!s) return 0;
+  const lastComma = s.lastIndexOf(',');
+  const lastDot = s.lastIndexOf('.');
+  if(lastComma>-1 && lastDot>-1){
+    if(lastComma>lastDot) s = s.replace(/\./g,'').replace(',','.'); // BR: 119.416,54
+    else s = s.replace(/,/g,''); // internacional: 147,057.60
+  } else if(lastComma>-1){
+    s = s.replace(',','.'); // só vírgula — decimal BR, ex "0,00"
+  } else if(lastDot>-1){
+    // só ponto — decimal (ex "12.00") se sobram 1-2 dígitos depois dele,
+    // senão é separador de milhar BR sem decimais (ex "1.234")
+    if(s.length-lastDot-1>2) s = s.replace(/\./g,'');
+  }
+  return parseFloat(s) || 0;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -1086,21 +1103,47 @@ async function extrairDadosPDF(file){
   window._vrUltimoTextoPDF = texto;
   const dados = { _aviso: 'extraído de PDF (DANFE) — o layout varia entre emissores, revise TODOS os campos com atenção' };
   let m;
-  // "Nº"/"N°" só com o indicador ordinal de verdade — um "N" seguido de "o"/"O" comuns
-  // já deu falso positivo pegando um número de endereço (ex: "...FLORIANO 466 SALA...").
-  m = texto.match(/N[º°]\.?:?\s*(\d[\d.]{2,})/); if(m) dados.nfNumero = m[1].replace(/\./g,'');
+  // "Nº"/"N°" só com o indicador ordinal de verdade, ou "No." (com ponto) —
+  // um "N" seguido de "o"/"O" SEM ponto já deu falso positivo pegando um
+  // número de endereço (ex: "...FLORIANO 466 SALA...").
+  m = texto.match(/N(?:[º°]\.?|[Oo]\.)\s*:?\s*(\d[\d.]{2,})/); if(m) dados.nfNumero = m[1].replace(/\./g,'');
   m = texto.match(/S[EÉé]RIE\s*[:.]?\s*(\d+)/i); if(m) dados.nfSerie = m[1];
+  // Data de emissão sai DD/MM/AAAA na maioria dos emissores, mas alguns
+  // sistemas internacionais (ex: montadoras) usam AAAA.MM.DD com pontos.
   m = texto.match(/DATA\s+DA\s+EMISS[ÃA]O\D{0,15}?(\d{2}\/\d{2}\/\d{4})/i) || texto.match(/(\d{2}\/\d{2}\/\d{4})/);
   if(m){ const p=m[1].split('/'); dados.dataAquisicao = p[2]+'-'+p[1]+'-'+p[0]; }
+  else {
+    m = texto.match(/DATA\s+DA\s+EMISS[ÃA]O\D{0,15}?(\d{4}\.\d{2}\.\d{2})/i) || texto.match(/(\d{4}\.\d{2}\.\d{2})/);
+    if(m) dados.dataAquisicao = m[1].replace(/\./g,'-');
+  }
   const cnpjs = Array.from(texto.matchAll(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/g)).map(x=>x[1]);
   if(cnpjs[0]) dados.cnpjFornecedor = cnpjs[0];
   if(cnpjs[1]) dados.cnpjAdquirente = cnpjs[1];
   // "V. TOTAL PRODUTOS" / "VALOR TOTAL DOS PRODUTOS" — emissores abreviam de formas diferentes.
   m = texto.match(/V(?:ALOR)?\.?\s*TOTAL\s+(?:DOS?\s+)?PRODUTOS?\s*[:.]?\s*([\d.,]+)/i);
-  const valorProdutosNF = m ? parseNum(m[1]) : undefined;
+  let valorProdutosNF = m ? parseNum(m[1]) : undefined;
   m = texto.match(/VALOR\s+(?:DO\s+)?FRETE\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorFrete = parseNum(m[1]);
-  // "V. TOTAL DA NOTA" — total geral da NF, distinto do total só dos produtos.
-  m = texto.match(/V(?:ALOR)?\.?\s*TOTAL\s+DA\s+NOTA\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorTotalNF = parseNum(m[1]);
+  // "V. TOTAL DA NOTA"/"...DA NF" — total geral da NF, distinto do total só dos produtos.
+  m = texto.match(/V(?:ALOR)?\.?\s*TOTAL\s+DA\s+(?:NOTA|NF)\b\s*[:.]?\s*([\d.,]+)/i); if(m) dados.valorTotalNF = parseNum(m[1]);
+  // Reforço posicional: o quadro "CÁLCULO DO IMPOSTO" tem layout padronizado
+  // pela SEFAZ (mesmos campos, mesma ordem, em toda DANFE) — em alguns
+  // emissores (sistemas internacionais, ex: montadoras) o PDF extrai a linha
+  // inteira de rótulos separada da linha inteira de valores, e aí a extração
+  // acima pega o número do campo ERRADO (o seguinte), sem nem dar erro. Aqui,
+  // dentro de cada "linha" do quadro (do início dela até o próximo rótulo
+  // conhecido), pega sempre o ÚLTIMO número — que é o campo totalizador,
+  // sempre o último de cada linha, tanto faz o layout.
+  const calcIdx = texto.search(/C[ÁA]LCULO\s+DO\s+IMPOSTO/i);
+  const freteIdx = texto.search(/VALOR\s+(?:DO\s+)?FRETE/i);
+  if(calcIdx>=0 && freteIdx>calcIdx){
+    const fimIdx = texto.search(/TRANSPORTADOR|DADOS\s+DOS\s+PRODUTOS/i);
+    const linha1 = texto.slice(calcIdx, freteIdx);
+    const linha2 = texto.slice(freteIdx, fimIdx>freteIdx?fimIdx:freteIdx+400);
+    const nums1 = linha1.match(/\d[\d.,]*/g) || [];
+    const nums2 = linha2.match(/\d[\d.,]*/g) || [];
+    if(nums1.length) valorProdutosNF = parseNum(nums1[nums1.length-1]);
+    if(nums2.length) dados.valorTotalNF = parseNum(nums2[nums2.length-1]);
+  }
 
   // Razão social do emitente (fornecedor) e do destinatário (adquirente): o texto do
   // DANFE preserva a quebra de linha original como sequências de 2+ espaços — dá pra
@@ -1126,19 +1169,28 @@ async function extrairDadosPDF(file){
   }
   if(adquirenteLinha) dados.adquirente = adquirenteLinha;
 
-  // Itens da tabela de produtos — ancorado no cabeçalho da tabela ("ALÍQ. IPI",
-  // última coluna) até "DADOS ADICIONAIS", pra não capturar texto de fora dela.
-  const headerIdx = texto.search(/AL[IÍ]Q\.?\s*IPI/i);
+  // Itens da tabela de produtos — ancorado no título da seção "DADOS DO(S)
+  // PRODUTO(S)/SERVIÇO(S)" (texto fixo, igual em toda DANFE por exigência da
+  // SEFAZ) até "DADOS ADICIONAIS". Antes usava o cabeçalho de coluna "ALÍQ.
+  // IPI", mas alguns emissores abreviam diferente (ex: "Al. IPI"), o que fazia
+  // a tabela inteira nem ser localizada — mantido como 2ª tentativa.
+  let headerIdx = texto.search(/DADOS\s+DOS?\s+PRODUTOS?\s*\/?\s*SERVI[ÇC]OS?/i);
+  if(headerIdx<0) headerIdx = texto.search(/AL[IÍ]Q\.?\s*IPI/i);
   let textoItens = headerIdx >= 0 ? texto.slice(headerIdx) : '';
   const endIdx = textoItens.search(/DADOS\s+ADICIONAIS/i);
   if(endIdx >= 0) textoItens = textoItens.slice(0, endIdx);
   // Código do produto varia bastante entre emissores: pode ser alfanumérico
-  // (ex: "CDT388PWBT0000") ou só números (ex: "3981165927"); a unidade também
-  // vem ora "UN" ora "Un" — por isso [A-Z0-9] sem exigir letra e [A-Za-z] na UN.
-  // CFOP às vezes vem formatado com ponto (ex: "5.405") em vez de dígitos puros
-  // ("5405"); quantidade/valor unitário às vezes vêm com 2 casas decimais em vez
-  // das 4 do padrão NF-e — aceita as duas variações pra não quebrar a linha toda.
-  const itemRegex = /([A-Z0-9]{6,})\s+(.+?)\s*-?\s*-?\s*(\d{8})\s+(\d{2,3})\s+(\d\.?\d{3}|\d{3,4})\s+([A-Za-z]{2,3})\s+([\d.]+,\d{2,4})\s+([\d.]+,\d{2,4})\s+([\d.]+,\d{2})/g;
+  // (ex: "CDT388PWBT0000") ou só números (ex: "3981165927"), às vezes com um
+  // sufixo "-00"; a unidade também vem ora "UN" ora "Un" — por isso [A-Z0-9]
+  // sem exigir letra e [A-Za-z] na UN. NCM às vezes sai com pontos (ex:
+  // "8703.60.00" em vez de "87036000"). CFOP às vezes vem formatado com ponto
+  // (ex: "5.405") ou com um sufixo colado (ex: "6403/AA"). Quantidade/valor
+  // unitário/valor total às vezes vêm com 2 casas decimais em vez das 4 do
+  // padrão NF-e, sem decimais nenhuma (quantidade inteira), ou em formatação
+  // internacional (vírgula de milhar, ponto decimal, ex: "147,057.60" em vez
+  // de "147.057,60") — aceita todas as variações pra não quebrar a linha
+  // toda; parseNum() já detecta sozinho qual formatação numérica é essa.
+  const itemRegex = /([A-Z0-9]{6,}(?:-\d+)?)\s+(.+?)\s*-?\s*-?\s*(\d{4}\.?\d{2}\.?\d{2})\s+(\d{2,3})\s+(\d\.?\d{3}|\d{3,4})(?:\/[A-Z0-9]{1,3})?\s+([A-Za-z]{2,3})\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/g;
   const itens = [];
   let mm;
   while((mm = itemRegex.exec(textoItens))){
