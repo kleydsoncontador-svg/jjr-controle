@@ -8018,7 +8018,7 @@ function renderLucNav(){
 
 // v2 storage helpers
 function lucSocGet(eid){ return S.g('luc_soc2_'+eid)||[]; }
-function lucSocSet(eid,list){ S.s('luc_soc2_'+eid,list); }
+function lucSocSet(eid,list){ S.s('luc_soc2_'+eid,list); if(typeof _lucCalcCache!=='undefined') _lucCalcCache={}; }
 
 function lucGetRes(eid){ return S.g('luc_res_'+eid)||{}; }
 function lucSetRes(eid, data){ S.s('luc_res_'+eid, data); }
@@ -18243,6 +18243,7 @@ function lucGetMesData(eid, ano, mes){
 function lucSaveMesData(eid, ano, mes, rows){
   var k='luc_mes_'+ano+'_'+mes+'_'+eid;
   S.s(k, rows);
+  _lucCalcCache={};
 }
 
 function lucGetMesRow(eid, ano, mes, sid){
@@ -18262,20 +18263,38 @@ function lucSaveMesRow(eid, ano, mes, row){
 // mesmo valor "efetivo" — senão o crédito sugerido (que aparece na tela mas
 // nunca foi de fato salvo em disco) nunca entra no saldo anterior do mês
 // seguinte, e o saldo anterior volta a zero mesmo com crédito visível.
+// Memoização: lucCalcCreditoEfetivo/lucCalcSaldo se chamam mutuamente mês a
+// mês (saldo de um mês depende do crédito efetivo do mês anterior de TODOS
+// os sócios, que por sua vez depende do saldo do mês anterior...) — sem
+// cache isso explode exponencialmente com o número de sócios x meses (uma
+// tela que soma vários meses/empresas, como o DIRPF, travava o navegador).
+// _lucCalcCache é limpo em qualquer gravação que possa mudar o resultado.
+var _lucCalcCache={};
 function lucCalcCreditoEfetivo(eid, ano, mes, sid){
+  var key='ce|'+eid+'|'+ano+'|'+mes+'|'+sid;
+  if(Object.prototype.hasOwnProperty.call(_lucCalcCache,key)) return _lucCalcCache[key];
   var row=lucGetMesRow(eid, ano, mes, sid);
   var salvo=parseFloat(row.credito)||0;
-  if(salvo!==0||row.credito_editado)return salvo;
-  var socios=lucSocGet(eid);
-  var soc=socios.find(function(s){return s.id===sid;});
-  if(!soc)return 0;
-  var pctKey=ano+'-'+mes;
-  var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
-  var saldoEmpMes=lucCalcSaldo(ano,eid,mes);
-  var sugestao=(saldoEmpMes>0)?(saldoEmpMes*pct/100):0;
-  // A sugestão automática nunca passa de R$ 50.000,00 — acima disso o valor
-  // exato é uma decisão manual do contador, não algo pra sugerir sozinho.
-  return Math.min(sugestao, 50000);
+  var result;
+  if(salvo!==0||row.credito_editado){
+    result=salvo;
+  } else {
+    var socios=lucSocGet(eid);
+    var soc=socios.find(function(s){return s.id===sid;});
+    if(!soc){
+      result=0;
+    } else {
+      var pctKey=ano+'-'+mes;
+      var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
+      var saldoEmpMes=lucCalcSaldo(ano,eid,mes);
+      var sugestao=(saldoEmpMes>0)?(saldoEmpMes*pct/100):0;
+      // A sugestão automática nunca passa de R$ 50.000,00 — acima disso o valor
+      // exato é uma decisão manual do contador, não algo pra sugerir sozinho.
+      result=Math.min(sugestao, 50000);
+    }
+  }
+  _lucCalcCache[key]=result;
+  return result;
 }
 function lucCalcSaldoAnt(eid, ano, mes, sid){
   /* Jan → usa saldo_ant_jan manual; demais → saldo_próx do mês anterior */
@@ -18584,7 +18603,7 @@ function fmtDoc(v){
 
 /* ── Lucros Top-Grid: Lucro/Prej, Ajustes, Acumulado, Saldo ─────── */
 function lucTopGet(subId,ano,eid){ return S.g('luc_top_'+subId+'_'+ano+'_'+eid)||{}; }
-function lucTopSet(subId,ano,eid,data){ S.s('luc_top_'+subId+'_'+ano+'_'+eid,data); }
+function lucTopSet(subId,ano,eid,data){ S.s('luc_top_'+subId+'_'+ano+'_'+eid,data); _lucCalcCache={}; }
 function lucTopGetMes(subId,ano,eid,mes){ return parseFloat((lucTopGet(subId,ano,eid))[mes])||0; }
 
 /* lpm_acum: sempre manual — retorna o valor salvo */
@@ -18603,13 +18622,17 @@ function lucCalcCreditadoAnt(ano,eid,mes){
 }
 
 function lucCalcSaldo(ano,eid,mes){
-  return lucTopGetMes('lpm',ano,eid,mes)
+  var key='sd|'+ano+'|'+eid+'|'+mes;
+  if(Object.prototype.hasOwnProperty.call(_lucCalcCache,key)) return _lucCalcCache[key];
+  var v=lucTopGetMes('lpm',ano,eid,mes)
         +lucTopGetMes('ajustes_cred',ano,eid,mes)
         +lucTopGetMes('ajustes_dev',ano,eid,mes)
         +lucTopGetMes('reservas',ano,eid,mes)
         +lucGetLpmAcum(ano,eid,mes)
         +lucCalcSaldoAntMes(ano,eid,mes)
         -lucCalcCreditadoAnt(ano,eid,mes);
+  _lucCalcCache[key]=v;
+  return v;
 }
 
 function lucCalcSaldoAntMes(ano,eid,mes){
