@@ -984,6 +984,32 @@ async function buscarClassificacaoNCM(){
     }
   }
 }
+// O Valor Total dos Produtos de uma NF quase nunca fecha com o Valor Total da
+// Nota — a diferença é IPI (e eventualmente outros acréscimos não destacados
+// por item, tipo frete). Pra cada item da NF fechar exatamente com o total,
+// distribui essa diferença proporcionalmente ao valor de cada item, com o
+// último item absorvendo o resíduo de arredondamento (garante fechamento
+// exato ao centavo, não só "aproximado").
+function _vrReconciliarItensComNF(itens, valorTotalNF){
+  if(!itens || !itens.length || !valorTotalNF) return;
+  const somaItens = itens.reduce((s,it)=>s+(it.valorTotal||0),0);
+  const diferenca = Math.round((valorTotalNF-somaItens)*100)/100;
+  if(Math.abs(diferenca)<0.01 || somaItens<=0) return;
+  let somaNova = 0;
+  itens.forEach((it,i)=>{
+    const original = it.valorTotal||0;
+    if(i===itens.length-1){
+      const novoValor = Math.round((valorTotalNF-somaNova)*100)/100;
+      it.valorIpiRateado = Math.round((novoValor-original)*100)/100;
+      it.valorTotal = novoValor;
+    } else {
+      const parte = Math.round(diferenca*(original/somaItens)*100)/100;
+      it.valorIpiRateado = parte;
+      it.valorTotal = Math.round((original+parte)*100)/100;
+      somaNova += it.valorTotal;
+    }
+  });
+}
 async function extrairDadosXML(file){
   const text = await file.text();
   const doc = new DOMParser().parseFromString(text, 'text/xml');
@@ -1021,6 +1047,7 @@ async function extrairDadosXML(file){
     });
   }
   if(!nNF) throw new Error('Não encontrei os campos de NF-e neste XML');
+  _vrReconciliarItensComNF(itens, valorTotalNF);
   const dados = { nfNumero:nNF, nfSerie:serie, dataAquisicao, fornecedor, cnpjFornecedor, adquirente, cnpjAdquirente, valorFrete, valorTotalNF, _aviso:'' };
   if(itens.length > 1){
     dados.itens = itens;
@@ -1121,6 +1148,7 @@ async function extrairDadosPDF(file){
     itens.push({ descricao: descricaoLimpa, ncm: mm[3], valorTotal: parseNum(mm[9]) });
   }
 
+  _vrReconciliarItensComNF(itens, dados.valorTotalNF);
   if(itens.length > 1){
     dados.itens = itens;
     dados._aviso += ' — '+itens.length+' itens nesta NF, escolha qual você está analisando na lista abaixo';
@@ -1193,13 +1221,30 @@ function renderItensNFPicker(itens){
   const wrap = document.getElementById('vrItensNFWrap');
   const lista = document.getElementById('vrItensNFLista');
   if(!_vrItensNF || _vrItensNF.length < 2){ wrap.style.display = 'none'; return; }
-  lista.innerHTML = _vrItensNF.map((it,i)=>
+  // Itens marcados como despesa (não são ativo imobilizado) somem da lista de
+  // seleção — continuam guardados em _vrItensNF (pelo índice original, usado
+  // no onclick), só não aparecem mais como opção pra analisar.
+  const visiveis = _vrItensNF.map((it,i)=>({it,i})).filter(x=>!x.it.despesa);
+  lista.innerHTML = visiveis.length ? visiveis.map(({it,i})=>
     `<div class="item-nf-card${i===_vrItemNFSelecionado?' on':''}${it.salvo?' item-nf-done':''}" onclick="escolherItemNF(${i})">
-      <div class="item-nf-desc">${it.salvo?'✓ ':''}<b>${esc(it.descricao)}</b>${it.ncm?(' <span style="color:var(--slate);font-size:11px">NCM '+esc(it.ncm)+'</span>'):''}</div>
+      <div style="flex:1;min-width:0">
+        <div class="item-nf-desc">${it.salvo?'✓ ':''}<b>${esc(it.descricao)}</b>${it.ncm?(' <span style="color:var(--slate);font-size:11px">NCM '+esc(it.ncm)+'</span>'):''}</div>
+        <div style="margin-top:4px"><a href="#" onclick="marcarItemNFDespesa(${i},event);return false;" style="font-size:10px;color:var(--red)">🚫 Marcar como despesa</a></div>
+      </div>
       <div class="item-nf-valor">${formatBRL(it.valorTotal)}</div>
     </div>`
-  ).join('');
+  ).join('') : '<div style="padding:10px;color:var(--slate);font-size:12px">Todos os itens desta NF foram marcados como despesa.</div>';
   wrap.style.display = 'block';
+}
+function marcarItemNFDespesa(i, ev){
+  if(ev) ev.stopPropagation();
+  const it = _vrItensNF[i];
+  if(!it) return;
+  if(!confirm('Marcar "'+it.descricao+'" como despesa?\n\nEsse item some da lista de seleção — use quando o item não deve virar bem do ativo imobilizado.')) return;
+  it.despesa = true;
+  if(_vrItemNFSelecionado===i) _vrItemNFSelecionado = -1;
+  renderItensNFPicker(_vrItensNF);
+  showToast('Item marcado como despesa.');
 }
 function escolherItemNF(i){
   const it = _vrItensNF[i];
