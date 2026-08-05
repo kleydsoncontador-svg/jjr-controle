@@ -1416,11 +1416,17 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <button class="btn bp bsm" onclick="lucAddAno()">+ Ano</button>
       <button class="btn bd bsm" onclick="lucRemoverAno()" title="Remover o ano selecionado da lista">🗑️ Remover Ano</button>
       <!-- botões contextuais: percentual -->
-      <div id="lucBtnsPerc">
+      <div id="lucBtnsPerc" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
         <label class="btn bo bsm" style="cursor:pointer" title="Importar sócios do Excel">
           &#128196; Importar Sócios
           <input type="file" accept=".xlsx,.xls" onchange="lucImportExcel(this)" style="display:none">
         </label>
+        <span style="width:1px;height:20px;background:var(--border);margin:0 2px"></span>
+        <span style="font-size:11px;color:var(--slate)" title="Excel simples só com os valores creditados do trimestre">Créditos:</span>
+        <button class="btn bo bsm" onclick="lucExportarCreditadoTrim(1)" title="Gerar Excel com os valores creditados no 1º Trimestre">1º TRIM</button>
+        <button class="btn bo bsm" onclick="lucExportarCreditadoTrim(2)" title="Gerar Excel com os valores creditados no 2º Trimestre">2º TRIM</button>
+        <button class="btn bo bsm" onclick="lucExportarCreditadoTrim(3)" title="Gerar Excel com os valores creditados no 3º Trimestre">3º TRIM</button>
+        <button class="btn bo bsm" onclick="lucExportarCreditadoTrim(4)" title="Gerar Excel com os valores creditados no 4º Trimestre">4º TRIM</button>
       </div>
       <!-- botões contextuais: grid mensal -->
       <div id="lucBtnsGrid" style="display:none;gap:6px;display:none">
@@ -18699,6 +18705,124 @@ function lucSaveTopField(inp,subId,ano,eid,mes){
 function lucEmpresasVisiveis(){
   var busca=((document.getElementById('lucBusca')||{}).value||'').toLowerCase().trim();
   return lucEmps().filter(function(e){ return !busca||(e.nome||'').toLowerCase().includes(busca)||(e.cnpj||'').includes(busca); });
+}
+
+/* ── Exportar Excel simples — só os valores creditados de um trimestre ──── */
+// Relatório enxuto pra conferência rápida (não é o Excel completo de
+// "Gerar Excel"): uma linha por sócio que teve crédito em pelo menos um dos
+// 3 meses do trimestre — sócios/empresas sem nada creditado nem aparecem.
+// 3 abas: o trimestre selecionado (créditos do ano corrente), os pagamentos
+// de 2025 (aba separada, já que é um controle à parte) e o Lucro Fiscal
+// (Lucro Presumido/Resultado distribuído) do mesmo trimestre.
+const LUC_TRIM_MESES={1:['01','02','03'],2:['04','05','06'],3:['07','08','09'],4:['10','11','12']};
+const LUC_TRIM_LABELS={1:'1º Trimestre',2:'2º Trimestre',3:'3º Trimestre',4:'4º Trimestre'};
+async function lucExportarCreditadoTrim(trim){
+  var ano=lucCurrentAno;
+  var selecionados=lucEmpresasVisiveis();
+  if(!selecionados.length){ alert('Nenhuma empresa visível na tela pra exportar.'); return; }
+  if(!window.ExcelJS){ alert('Biblioteca Excel não carregada.'); return; }
+  var NUMFMT='#,##0.00;[Red]-#,##0.00';
+  var PCTFMT='0.00%';
+  var BORDA_TOPO={top:{style:'medium',color:{argb:'FF1E3558'}}};
+  var meses=LUC_TRIM_MESES[trim];
+  var mesLabels=meses.map(function(m){ return LUC_MESES_FULL[parseInt(m,10)-1]; });
+  var wb=new ExcelJS.Workbook();
+
+  /* ── ABA 1: créditos do trimestre selecionado (ano corrente) ── */
+  var ws1=wb.addWorksheet(LUC_TRIM_LABELS[trim]);
+  ws1.columns=[{width:38},{width:32},{width:20},{width:26},{width:14},{width:14},{width:14},{width:16}];
+  ws1.addRow(['Empresa','Sócio / Acionista','CPF / CNPJ','Conta Contábil'].concat(mesLabels).concat(['Total']));
+  ws1.getRow(1).font={bold:true};
+  selecionados.forEach(function(emp){
+    var eid=emp.eid;
+    var socios=lucSocGet(eid);
+    var linhas=[];
+    socios.forEach(function(soc){
+      var valores=meses.map(function(m){ return lucCalcCreditoEfetivo(eid,ano,m,soc.id); });
+      var total=valores.reduce(function(a,b){ return a+b; },0);
+      if(!total) return; // só sócio com crédito em algum mês do trimestre
+      var conta='';
+      meses.forEach(function(m){ if(!conta) conta=lucGetMesRow(eid,ano,m,soc.id).conta||''; });
+      linhas.push({soc:soc, valores:valores, total:total, conta:conta});
+    });
+    linhas.forEach(function(l,li){
+      var row=[li===0?emp.nome:'', l.soc.nome, fmtDoc(l.soc.doc), l.conta].concat(l.valores).concat([l.total]);
+      var excelRow=ws1.addRow(row);
+      for(var c=5;c<=8;c++) excelRow.getCell(c).numFmt=NUMFMT;
+      if(li===0) excelRow.eachCell({includeEmpty:true},function(cell){ cell.border=BORDA_TOPO; });
+    });
+  });
+
+  /* ── ABA 2: pagamentos de 2025 (controle à parte) ── */
+  var eids2025=getLuc2025Empresas();
+  var selecionados2025=selecionados.filter(function(emp){ return eids2025.indexOf(String(emp.eid))>=0; });
+  var ws2=wb.addWorksheet('2025');
+  ws2.columns=[{width:38},{width:32},{width:20},{width:26},{width:14},{width:14},{width:14},{width:16}];
+  ws2.addRow(['Empresa','Sócio / Acionista','CPF / CNPJ','Conta Contábil'].concat(mesLabels.map(function(l){ return l+'/2025'; })).concat(['Total']));
+  ws2.getRow(1).font={bold:true};
+  selecionados2025.forEach(function(emp){
+    var eid=emp.eid;
+    var socios=lucSocGet(eid);
+    var dados2025=getLuc2025Dados(eid);
+    var linhas=[];
+    socios.forEach(function(soc){
+      var d=dados2025[soc.id]||{meses:{},conta:''};
+      var valores=meses.map(function(m){ return parseFloat(d.meses&&d.meses[m])||0; });
+      var total=valores.reduce(function(a,b){ return a+b; },0);
+      if(!total) return;
+      linhas.push({soc:soc, valores:valores, total:total, conta:d.conta||''});
+    });
+    linhas.forEach(function(l,li){
+      var row=[li===0?emp.nome:'', l.soc.nome, fmtDoc(l.soc.doc), l.conta].concat(l.valores).concat([l.total]);
+      var excelRow=ws2.addRow(row);
+      for(var c=5;c<=8;c++) excelRow.getCell(c).numFmt=NUMFMT;
+      if(li===0) excelRow.eachCell({includeEmpty:true},function(cell){ cell.border=BORDA_TOPO; });
+    });
+  });
+  if(!selecionados2025.length) ws2.addRow(['(nenhuma das empresas visíveis está cadastrada em Lucros / Dividendos 2025)']);
+
+  /* ── ABA 3: Lucro Fiscal (Lucro Presumido / Resultado distribuído) ── */
+  var eidsFiscal=getLucFiscalEmpresas();
+  var selecionadosFiscal=selecionados.filter(function(emp){ return eidsFiscal.indexOf(String(emp.eid))>=0; });
+  var ws3=wb.addWorksheet('Lucro Fiscal');
+  ws3.columns=[{width:38},{width:32},{width:20},{width:12},{width:20},{width:20}];
+  ws3.addRow(['Empresa','Sócio / Acionista','CPF / CNPJ','% Participação','Resultado do Trimestre','Valor Distribuído']);
+  ws3.getRow(1).font={bold:true};
+  selecionadosFiscal.forEach(function(emp){
+    var eid=emp.eid;
+    var socios=lucSocGet(eid);
+    var dadosFiscal=getLucFiscalDados(eid,ano,trim);
+    var resultado=_lucFiscalResultado(dadosFiscal);
+    var mesFinal=LUC_FISCAL_MES_FINAL[trim];
+    var linhas=[];
+    socios.forEach(function(soc){
+      var pctKey=ano+'-'+mesFinal;
+      var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
+      var manualMap=dadosFiscal.distribuicaoManual||{};
+      var manual=manualMap[soc.id];
+      var distrib=(manual!==undefined&&manual!==null)?parseFloat(manual):resultado*(parseFloat(pct)||0)/100;
+      if(!distrib) return;
+      linhas.push({soc:soc, pct:pct, distrib:distrib});
+    });
+    linhas.forEach(function(l,li){
+      var row=[li===0?emp.nome:'', l.soc.nome, fmtDoc(l.soc.doc), (l.pct||0)/100, li===0?resultado:'', l.distrib];
+      var excelRow=ws3.addRow(row);
+      excelRow.getCell(4).numFmt=PCTFMT;
+      excelRow.getCell(5).numFmt=NUMFMT;
+      excelRow.getCell(6).numFmt=NUMFMT;
+      if(li===0) excelRow.eachCell({includeEmpty:true},function(cell){ cell.border=BORDA_TOPO; });
+    });
+  });
+  if(!selecionadosFiscal.length) ws3.addRow(['(nenhuma das empresas visíveis está cadastrada em Lucros / Dividendos Fiscal)']);
+
+  var buf=await wb.xlsx.writeBuffer();
+  var blob=new Blob([buf],{type:'application/octet-stream'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url; a.download='Lucros_Creditados_'+trim+'Trim_'+ano+'.xlsx';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+  toast('Excel do '+LUC_TRIM_LABELS[trim]+' gerado!','ok');
 }
 
 async function lucConfirmExportAll(){
