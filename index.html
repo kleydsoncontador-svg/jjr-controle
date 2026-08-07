@@ -17919,7 +17919,9 @@ function lucRenderLucrosFiscal(el){
     +disponiveis.map(function(e){return '<option value="'+esc(e.eid)+'">'+esc(e.eid)+' - '+esc(e.nome)+'</option>';}).join('')
     +'</select>'
     +'<button class="btn bp bsm" onclick="lucAdicionarEmpresaFiscal()">+ Adicionar Empresa</button>'
-    +'</div></div>';
+    +'</div>'
+    +'<div style="margin-top:10px">'+_lucRenderBulkForm()+'</div>'
+    +'</div>';
 
   var empsAdicionadas=eids.map(function(eid){return todasEmps.find(function(e){return String(e.eid)===String(eid);});}).filter(Boolean);
   if(_empresaGlobal){
@@ -18121,6 +18123,122 @@ function lucResetDistribManual(eid,trim,socioId){
   var container=document.getElementById('lucFiscalEmpBody_'+eid);
   if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
   toast('Voltou a calcular automaticamente pelo %.','ok');
+}
+
+// ── Anexar Vários Relatórios (IA, multi-empresa) ────────────────────────────
+// Permite anexar de uma vez os relatórios de faturamento de várias empresas
+// diferentes: a IA extrai o CNPJ de cada arquivo, correlaciona com o Cadastro
+// de Empresas (ignora relatórios de empresas não cadastradas), adiciona a
+// empresa em Lucros/Dividendos Fiscal automaticamente se ainda não estiver, e
+// lança os meses igual ao botão "Incluir PDF Faturamento" individual. Meses
+// que já tiverem um lançamento (mesmo mês) nunca são refeitos — o contador
+// sempre reanexa o relatório acumulado do ano inteiro até a data.
+let _lucBulkFormAberto=false;
+let _lucBulkUltimoResultadoHtml='';
+function _lucNormCnpj(v){ return String(v||'').replace(/\D/g,''); }
+function _lucFindEmpresaPorCnpj(cnpj){
+  var alvo=_lucNormCnpj(cnpj);
+  if(!alvo) return null;
+  return S.emps().find(function(e){ return _lucNormCnpj(e.cnpjNum||e.cnpj)===alvo; })||null;
+}
+function _lucRenderBulkForm(){
+  var html='<button class="btn bo bsm" onclick="_lucBulkToggleForm()">📎 Anexar Vários Relatórios</button>';
+  if(_lucBulkFormAberto){
+    html+='<div style="margin-top:8px;padding:10px 12px;border:1px dashed var(--border);border-radius:6px;background:var(--bg);max-width:640px">'
+      +'<input type="file" id="lucBulkArquivos" accept=".pdf" multiple class="fi" style="width:100%">'
+      +'<div style="margin-top:8px;display:flex;align-items:center;gap:10px">'
+      +'<button class="btn bp bsm" id="lucBulkBtn" onclick="_lucBulkExtrairIncluir()">🔍 Extrair e Incluir Tudo</button>'
+      +'<span id="lucBulkStatus" style="font-size:12px;color:var(--slate)"></span>'
+      +'</div>'
+      +'<div style="font-size:11px;color:var(--slate);margin-top:6px">Anexe os relatórios de faturamento de várias empresas de uma vez — a IA identifica o CNPJ de cada relatório e adiciona a empresa aqui automaticamente (se ela existir no Cadastro de Empresas). Relatórios de empresas não cadastradas são ignorados. Meses já preenchidos nunca são alterados, mesmo que o relatório seja reanexado.</div>'
+      +'<div id="lucBulkResultado" style="margin-top:8px">'+_lucBulkUltimoResultadoHtml+'</div>'
+      +'</div>';
+  }
+  return html;
+}
+function _lucBulkToggleForm(){
+  _lucBulkFormAberto=!_lucBulkFormAberto;
+  if(!_lucBulkFormAberto) _lucBulkUltimoResultadoHtml='';
+  renderLucros();
+}
+async function _lucBulkExtrairIncluir(){
+  var input=document.getElementById('lucBulkArquivos');
+  var statusEl=document.getElementById('lucBulkStatus');
+  var btn=document.getElementById('lucBulkBtn');
+  if(!input||!input.files||!input.files.length){ toast('Anexe ao menos um PDF primeiro.','err'); return; }
+  var arquivos=Array.prototype.slice.call(input.files);
+  var btnTextoOriginal=btn.textContent;
+  btn.disabled=true;
+  var empresasAdicionadas=[], mesesIncluidos=[], mesesJaPreenchidos=[], arquivosIgnorados=[];
+  try{
+    for(var i=0;i<arquivos.length;i++){
+      var f=arquivos[i];
+      statusEl.style.color='var(--slate)';
+      statusEl.textContent='Lendo arquivo '+(i+1)+'/'+arquivos.length+': '+f.name+'...';
+      btn.textContent='Processando '+(i+1)+'/'+arquivos.length+'...';
+      var texto;
+      try{ texto=await _empExtrairTextoPDF(f,15); }
+      catch(errPdf){ arquivosIgnorados.push({arquivo:f.name,motivo:'Não foi possível ler o PDF ('+errPdf.message+').'}); continue; }
+      statusEl.textContent='Analisando '+(i+1)+'/'+arquivos.length+' com IA: '+f.name+'...';
+      var resp;
+      try{
+        resp=await fetch(SUPABASE_URL+'/functions/v1/luc-extrair-faturamento',{
+          method:'POST',
+          headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+          body:JSON.stringify({texto:'=== '+f.name+' ===\n'+texto})
+        });
+      }catch(errNet){ arquivosIgnorados.push({arquivo:f.name,motivo:'Falha de conexão com o serviço de IA.'}); continue; }
+      if(!resp.ok){ arquivosIgnorados.push({arquivo:f.name,motivo:'A extração retornou status '+resp.status+'.'}); continue; }
+      var d=await resp.json();
+      if(d.error){ arquivosIgnorados.push({arquivo:f.name,motivo:d.error}); continue; }
+      var empresa=_lucFindEmpresaPorCnpj(d.cnpj);
+      if(!empresa){
+        arquivosIgnorados.push({arquivo:f.name,motivo:d.cnpj?('CNPJ '+d.cnpj+(d.razaoSocial?' ('+d.razaoSocial+')':'')+' não encontrado no Cadastro de Empresas.'):'Não foi possível identificar o CNPJ no relatório.'});
+        continue;
+      }
+      var eid=empresa.eid;
+      var eids=getLucFiscalEmpresas();
+      if(eids.indexOf(String(eid))<0){
+        eids.push(String(eid));
+        setLucFiscalEmpresas(eids);
+        empresasAdicionadas.push(empresa.nome);
+      }
+      var lancamentos=Array.isArray(d.lancamentos)?d.lancamentos:[];
+      lancamentos.forEach(function(l){
+        var mes=(l.mes||'').padStart(2,'0');
+        var anoLanc=String(l.ano||lucCurrentAno||'2026');
+        if(!mes||!LUC_MESES.includes(mes)) return;
+        var saidas=parseFloat(l.saidas)||0, servicos=parseFloat(l.servicos)||0, outros=parseFloat(l.outros)||0;
+        if(!saidas&&!servicos&&!outros) return;
+        var trim=_lucTrimDoMes(mes);
+        var dados=getLucFiscalDados(eid,anoLanc,trim);
+        var jaTem=(dados.faturamentoPdfLog||[]).some(function(log){return log.mes===mes;});
+        if(jaTem){ mesesJaPreenchidos.push(empresa.nome+' — '+(LUC_MESES_FULL[parseInt(mes,10)-1]||mes)+'/'+anoLanc); return; }
+        dados.saidas=(parseFloat(dados.saidas)||0)+saidas;
+        dados.servicos=(parseFloat(dados.servicos)||0)+servicos;
+        dados.outros=(parseFloat(dados.outros)||0)+outros;
+        dados.faturamentoPdfLog=dados.faturamentoPdfLog||[];
+        dados.faturamentoPdfLog.push({mes:mes, arquivo:f.name, saidas:saidas, servicos:servicos, outros:outros, dataInclusao:new Date().toLocaleDateString('pt-BR')});
+        setLucFiscalDados(eid,anoLanc,trim,dados);
+        mesesIncluidos.push(empresa.nome+' — '+(LUC_MESES_FULL[parseInt(mes,10)-1]||mes)+'/'+anoLanc);
+      });
+    }
+    var html='<div style="font-size:12px;border:1px solid var(--border);border-radius:6px;overflow:hidden">'
+      +'<div style="padding:8px 10px;background:var(--bg);font-weight:700;color:var(--ink)">Resultado: '+mesesIncluidos.length+' mês(es) incluído(s)'+(empresasAdicionadas.length?', '+empresasAdicionadas.length+' empresa(s) adicionada(s) automaticamente':'')+'</div>';
+    if(empresasAdicionadas.length) html+='<div style="padding:8px 10px;color:var(--teal)">✓ Empresas adicionadas: '+empresasAdicionadas.map(esc).join(', ')+'</div>';
+    if(mesesIncluidos.length) html+='<div style="padding:8px 10px;color:var(--teal)">✓ Meses incluídos: '+mesesIncluidos.map(esc).join(' · ')+'</div>';
+    if(mesesJaPreenchidos.length) html+='<div style="padding:8px 10px;color:var(--slate)">↷ Já estavam preenchidos (não alterados): '+mesesJaPreenchidos.map(esc).join(' · ')+'</div>';
+    if(arquivosIgnorados.length) html+='<div style="padding:8px 10px;color:#dc2626">⚠ Arquivos ignorados: '+arquivosIgnorados.map(function(a){return esc(a.arquivo)+' — '+esc(a.motivo);}).join(' · ')+'</div>';
+    html+='</div>';
+    _lucBulkUltimoResultadoHtml=html;
+    toast(mesesIncluidos.length?'Faturamento incluído com sucesso!':'Nenhum mês novo incluído — veja o resultado abaixo.', mesesIncluidos.length?'ok':'warn');
+  }catch(e){
+    console.error('_lucBulkExtrairIncluir erro:',e);
+    toast('Erro ao processar os relatórios: '+e.message,'err');
+  }finally{
+    btn.disabled=false; btn.textContent=btnTextoOriginal;
+    renderLucros();
+  }
 }
 
 // ── Incluir PDF Faturamento (IA) ─────────────────────────────────────────────

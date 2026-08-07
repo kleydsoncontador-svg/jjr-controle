@@ -51,6 +51,8 @@ ${textoLimitado}
 Extraia os dados e responda SOMENTE com um JSON válido, exatamente neste formato (use null pro que não encontrar — não invente valores):
 
 {
+  "cnpj": "CNPJ da empresa dona do faturamento (emitente do relatório), formatado como 00.000.000/0000-00 se possível" ou null,
+  "razaoSocial": "razão social/nome da empresa dona do faturamento, se identificado no relatório" ou null,
   "lancamentos": [
     {
       "mes": "MM" (mês de competência, 2 dígitos, ex: "03" pra março),
