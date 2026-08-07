@@ -5519,47 +5519,69 @@ async function fetchFreshEmps(){
 }
 
 // ─── Fechamento cell toggle (Fopag/Fiscal/Financeiro/Balancete) ───────────────
-async function toggleFechCell(evt, eid, campo){
-  evt.stopPropagation();
-  const emps = await fetchFreshEmps();
-  if(!emps){ toast('Não foi possível confirmar os dados mais recentes da nuvem. Verifique sua conexão e tente novamente.','err'); return; }
-  const idx  = emps.findIndex(e=>String(e.eid)===String(eid));
-  if(idx<0) return;
+// Calcula (sem gravar nada ainda) qual vai ser o novo valor do ciclo
+// vazio→ok→na→sm→vazio e quais meses futuros mudam junto. Fica separado de
+// _aplicarResultadoToggleFechCell pra o cálculo do "próximo estado" rodar só
+// UMA vez (a partir do estado salvo antes do clique) — se recalculássemos o
+// ciclo de novo na hora de confirmar com a nuvem, ele avançaria mais um passo
+// por engano, porque nesse momento a cópia otimista já mostra o valor novo.
+function _calcToggleFechCell(emps, eid, campo){
+  const idx = emps.findIndex(e=>String(e.eid)===String(eid));
+  if(idx<0) return null;
   const fech = S.fechAtual();
-  if(!emps[idx].fechMes) emps[idx].fechMes = {};
-  if(!emps[idx].fechMes[fech]) emps[idx].fechMes[fech] = {};
-  const cur  = emps[idx].fechMes[fech][campo]||'';
-  // Ciclo: vazio→ok→na→sm→vazio
+  const cur = ((emps[idx].fechMes||{})[fech]||{})[campo]||'';
   const novo = cur===''?'ok':cur==='ok'?'na':cur==='na'?'sm':'';
-  emps[idx].fechMes[fech][campo] = novo;
-  // Salvar timestamp de quando foi marcado
-  if(novo!=='') emps[idx].fechMes[fech][campo+'_data'] = new Date().toISOString();
-
-  // Propagação apenas para fopag, fiscal e financeiro (não balancete)
+  let futurosNa=null, futurosLimpa=null;
   if(campo !== 'balancete'){
     const meses = S.meses();
     const idxMes = meses.indexOf(fech);
     if(idxMes >= 0){
       const futuros = meses.slice(idxMes + 1);
-      if(novo === 'na'){
-        // Propaga N/A para todos os meses seguintes
-        futuros.forEach(function(m){
-          if(!emps[idx].fechMes[m]) emps[idx].fechMes[m] = {};
-          emps[idx].fechMes[m][campo] = 'na';
-        });
-      } else if(cur === 'na'){
-        // Saiu de N/A (foi para feito): limpa N/A nos meses seguintes
-        futuros.forEach(function(m){
-          if(emps[idx].fechMes[m] && emps[idx].fechMes[m][campo] === 'na'){
-            emps[idx].fechMes[m][campo] = '';
-          }
-        });
-      }
+      if(novo === 'na') futurosNa = futuros;
+      else if(cur === 'na') futurosLimpa = futuros;
     }
   }
+  return {eid, campo, fech, novo, futurosNa, futurosLimpa};
+}
+function _aplicarResultadoToggleFechCell(emps, r){
+  const idx = emps.findIndex(e=>String(e.eid)===String(r.eid));
+  if(idx<0) return;
+  if(!emps[idx].fechMes) emps[idx].fechMes = {};
+  if(!emps[idx].fechMes[r.fech]) emps[idx].fechMes[r.fech] = {};
+  emps[idx].fechMes[r.fech][r.campo] = r.novo;
+  if(r.novo!=='') emps[idx].fechMes[r.fech][r.campo+'_data'] = new Date().toISOString();
+  if(r.futurosNa) r.futurosNa.forEach(function(m){
+    if(!emps[idx].fechMes[m]) emps[idx].fechMes[m] = {};
+    emps[idx].fechMes[m][r.campo] = 'na';
+  });
+  if(r.futurosLimpa) r.futurosLimpa.forEach(function(m){
+    if(emps[idx].fechMes[m] && emps[idx].fechMes[m][r.campo] === 'na'){
+      emps[idx].fechMes[m][r.campo] = '';
+    }
+  });
+}
+// Clique tem que responder na hora — antes esperava uma consulta à nuvem
+// terminar pra só então mudar a tela, o que deixava o clique lento. Agora
+// aplica o mesmo resultado numa CÓPIA local pra feedback visual instantâneo
+// (sem sequer chamar S.s()/subir pra nuvem ainda) e só depois, em segundo
+// plano, confirma com a versão mais recente da nuvem antes de salvar de
+// verdade, pra não sobrescrever o progresso de outro operador.
+function toggleFechCell(evt, eid, campo){
+  evt.stopPropagation();
+  const r = _calcToggleFechCell(S.emps(), eid, campo);
+  if(!r) return;
 
-  S.saveEmps(emps);
+  const copiaOtimista = JSON.parse(JSON.stringify(S.emps()));
+  _aplicarResultadoToggleFechCell(copiaOtimista, r);
+  cccCache['emps'] = copiaOtimista;
   renderEmpsTable();
+
+  fetchFreshEmps().then(function(freshEmps){
+    const base = freshEmps || S.emps();
+    _aplicarResultadoToggleFechCell(base, r);
+    S.saveEmps(base);
+    renderEmpsTable();
+  });
 }
 
 // ─── Data de saída ────────────────────────────────────────────────────────────
