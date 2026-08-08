@@ -5152,16 +5152,35 @@ function salvarAlerta(eid, index){
 }
 
 // ─── Demonstrativos Contábeis ────────────────────────────────────────────────
-// Repositório central de documentos contábeis mensais por empresa (por ora,
-// Balancete — DRE, Livro Razão e Faturamento entram em etapas futuras). Outros
-// módulos (ex: futura Análise do Simples Nacional) vão ler os dados daqui em
-// vez de cada um ter seu próprio upload. A empresa é identificada pelo CNPJ
-// extraído do próprio documento: se já existir no Cadastro de Empresas, usa o
-// eid de lá; senão, cria um registro "externo" (eid sintético "ext:<cnpj>")
-// só pra este módulo, sem mexer no Cadastro de Empresas.
+// Repositório central de documentos contábeis mensais por empresa: Balancete,
+// DRE, Livro Razão (resumo por conta) e Faturamento. Outros módulos (ex:
+// futura Análise do Simples Nacional, e Lucros Fiscal) vão ler os dados
+// daqui em vez de cada um ter seu próprio upload. A empresa é identificada
+// pelo CNPJ extraído do próprio documento: se já existir no Cadastro de
+// Empresas, usa o eid de lá; senão, cria um registro "externo" (eid
+// sintético "ext:<cnpj>") só pra este módulo, sem mexer no Cadastro de
+// Empresas.
 //
 // Só guardamos os dados já extraídos (contas + saldo), nunca o texto bruto do
 // PDF — mesmo cuidado já usado em Lucros Fiscal, pra não pesar o banco.
+//
+// Balancete/DRE/Livro Razão compartilham o mesmo formato de dado (uma lista
+// de "contas" com código+nome+saldo) e a mesma semântica: o documento de um
+// mês é uma "fotografia" do período — reanexar o mesmo mês SUBSTITUI o
+// anterior por inteiro (não soma). Faturamento é diferente: um relatório traz
+// vários meses de uma vez e cada mês é um lançamento aditivo — reanexar um
+// mês que já existe NUNCA altera o valor já gravado (mesma regra usada em
+// Lucros Fiscal: o contador sempre reanexa o relatório acumulado do ano).
+const DEMOC_TIPOS_CONTAS={
+  balancete:{label:'Balancete', labelPlural:'Balancetes', labelPluralMin:'balancetes', edgeFn:'democ-extrair-balancete'},
+  dre:{label:'DRE', labelPlural:'DREs', labelPluralMin:'DREs', edgeFn:'democ-extrair-dre'},
+  livrorazao:{label:'Livro Razão', labelPlural:'Livros Razão', labelPluralMin:'livros razão', edgeFn:'democ-extrair-livrorazao'},
+};
+const DEMOC_TIPOS_ORDEM=['balancete','dre','livrorazao','faturamento'];
+function _democLabelTipo(tipo){ return tipo==='faturamento'?'Faturamento':DEMOC_TIPOS_CONTAS[tipo].label; }
+function _democLabelPluralTipo(tipo){ return tipo==='faturamento'?'Relatórios de Faturamento':DEMOC_TIPOS_CONTAS[tipo].labelPlural; }
+function _democEdgeFnTipo(tipo){ return tipo==='faturamento'?'luc-extrair-faturamento':DEMOC_TIPOS_CONTAS[tipo].edgeFn; }
+
 function democGetEmpresas(){ return S.g('democ_empresas')||[]; }
 function democSetEmpresas(arr){ S.s('democ_empresas',arr); }
 function democGetExternas(){ return JSON.parse(S.g('democ_externas')||'{}'); }
@@ -5192,41 +5211,43 @@ function democResolverEidPorCnpj(cnpj, nomeSugerido){
   }
   return {eid:eidExt, criouExterna:false};
 }
-function democGetBalancete(eid,ano,mes){ return JSON.parse(S.g('democ_balancete_'+eid+'_'+ano+'_'+mes)||'null'); }
-function democSetBalancete(eid,ano,mes,dados){ S.s('democ_balancete_'+eid+'_'+ano+'_'+mes, JSON.stringify(dados)); }
-function democExcluirBalancete(eid,ano,mes){
-  if(!confirm('Excluir o balancete de '+mes+'/'+ano+'? Esta ação não pode ser desfeita.'))return;
-  S.s('democ_balancete_'+eid+'_'+ano+'_'+mes, undefined);
-  var lista=democGetBalancetesLista(eid).filter(function(x){ return !(x.ano===ano&&x.mes===mes); });
-  democSetBalancetesLista(eid, lista);
+
+// ── Balancete / DRE / Livro Razão (motor genérico por "contas") ────────────
+function democGetDoc(tipo,eid,ano,mes){ return JSON.parse(S.g('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes)||'null'); }
+function democSetDoc(tipo,eid,ano,mes,dados){ S.s('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes, JSON.stringify(dados)); }
+function democGetDocsLista(tipo,eid){ return JSON.parse(S.g('democ_'+tipo+'_lista_'+eid)||'[]'); }
+function democSetDocsLista(tipo,eid,arr){ S.s('democ_'+tipo+'_lista_'+eid, JSON.stringify(arr)); }
+function democExcluirDoc(tipo,eid,ano,mes){
+  if(!confirm('Excluir '+(tipo==='dre'?'a':'o')+' '+_democLabelTipo(tipo)+' de '+mes+'/'+ano+'? Esta ação não pode ser desfeita.'))return;
+  S.s('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes, undefined);
+  var lista=democGetDocsLista(tipo,eid).filter(function(x){ return !(x.ano===ano&&x.mes===mes); });
+  democSetDocsLista(tipo,eid,lista);
   renderDemoc();
-  toast('Balancete excluído.','ok');
+  toast(_democLabelTipo(tipo)+' excluído(a).','ok');
 }
-function democGetBalancetesLista(eid){ return JSON.parse(S.g('democ_balancetes_lista_'+eid)||'[]'); }
-function democSetBalancetesLista(eid,arr){ S.s('democ_balancetes_lista_'+eid, JSON.stringify(arr)); }
-function democGetContasConhecidas(eid){ return JSON.parse(S.g('democ_contas_conhecidas_'+eid)||'[]'); }
-function democSetContasConhecidas(eid,arr){ S.s('democ_contas_conhecidas_'+eid, JSON.stringify(arr)); }
-function democGetNovasContasPendentes(eid){ return JSON.parse(S.g('democ_novas_contas_'+eid)||'[]'); }
-function democSetNovasContasPendentes(eid,arr){ S.s('democ_novas_contas_'+eid, JSON.stringify(arr)); }
-function democMarcarContaRevisada(eid, codigo){
-  var pend=democGetNovasContasPendentes(eid).filter(function(c){ return c.codigo_analitico!==codigo; });
-  democSetNovasContasPendentes(eid,pend);
+function democGetContasConhecidas(tipo,eid){ return JSON.parse(S.g('democ_contas_conhecidas_'+tipo+'_'+eid)||'[]'); }
+function democSetContasConhecidas(tipo,eid,arr){ S.s('democ_contas_conhecidas_'+tipo+'_'+eid, JSON.stringify(arr)); }
+function democGetNovasContasPendentes(tipo,eid){ return JSON.parse(S.g('democ_novas_contas_'+tipo+'_'+eid)||'[]'); }
+function democSetNovasContasPendentes(tipo,eid,arr){ S.s('democ_novas_contas_'+tipo+'_'+eid, JSON.stringify(arr)); }
+function democMarcarContaRevisada(tipo,eid,codigo){
+  var pend=democGetNovasContasPendentes(tipo,eid).filter(function(c){ return c.codigo_analitico!==codigo; });
+  democSetNovasContasPendentes(tipo,eid,pend);
   renderDemoc();
 }
 
-// Aplica um balancete já extraído (mes/ano/contas) a um eid: sempre substitui
-// o balancete daquele mês/ano por inteiro (é uma "fotografia" do período, não
-// um somatório — diferente do Faturamento em Lucros Fiscal). Detecta contas
-// novas (códigos nunca vistos antes para esta empresa) a partir do 2º
-// balancete em diante, pra não alertar tudo de uma vez no primeiro upload.
-function _democAplicarBalancete(eid, dados, arquivoNome){
+// Aplica um documento já extraído (mes/ano/contas) a um eid: sempre substitui
+// o documento daquele tipo/mês/ano por inteiro (é uma "fotografia" do
+// período). Detecta contas novas (códigos nunca vistos antes para esta
+// empresa, neste tipo de documento) a partir do 2º documento em diante, pra
+// não alertar tudo de uma vez no primeiro upload.
+function _democAplicarDocContas(tipo, eid, dados, arquivoNome){
   var mes=(dados.mes||'').padStart(2,'0');
   var ano=String(dados.ano||'');
-  if(!mes||!LUC_MESES.includes(mes)||!ano) return {ok:false, motivo:'Mês/ano do balancete não identificado.'};
+  if(!mes||!LUC_MESES.includes(mes)||!ano) return {ok:false, motivo:'Mês/ano não identificado no documento.'};
   var contas=(Array.isArray(dados.contas)?dados.contas:[]).filter(function(c){ return c && (c.nome_conta||c.codigo_analitico); });
-  if(!contas.length) return {ok:false, motivo:'Nenhuma conta identificada no balancete.'};
+  if(!contas.length) return {ok:false, motivo:'Nenhuma conta identificada no documento.'};
 
-  var conhecidas=democGetContasConhecidas(eid);
+  var conhecidas=democGetContasConhecidas(tipo,eid);
   var primeiraVez=!conhecidas.length;
   var conhecidasSet={}; conhecidas.forEach(function(c){ conhecidasSet[c]=true; });
   var novas=[];
@@ -5237,27 +5258,61 @@ function _democAplicarBalancete(eid, dados, arquivoNome){
       if(!primeiraVez) novas.push({codigo_analitico:cod, nome_conta:c.nome_conta||'', primeiraVez:mes+'/'+ano});
     }
   });
-  democSetContasConhecidas(eid, Object.keys(conhecidasSet));
+  democSetContasConhecidas(tipo,eid, Object.keys(conhecidasSet));
   if(novas.length){
-    var pendentes=democGetNovasContasPendentes(eid);
+    var pendentes=democGetNovasContasPendentes(tipo,eid);
     var jaPendentes={}; pendentes.forEach(function(p){ jaPendentes[p.codigo_analitico]=true; });
     novas.forEach(function(n){ if(!jaPendentes[n.codigo_analitico]) pendentes.push(n); });
-    democSetNovasContasPendentes(eid, pendentes);
+    democSetNovasContasPendentes(tipo,eid, pendentes);
   }
 
-  var jaExistia=!!democGetBalancete(eid,ano,mes);
-  democSetBalancete(eid,ano,mes,{contas:contas, arquivo:arquivoNome, dataInclusao:new Date().toLocaleDateString('pt-BR')});
-  var lista=democGetBalancetesLista(eid).filter(function(x){ return !(x.ano===ano&&x.mes===mes); });
+  var jaExistia=!!democGetDoc(tipo,eid,ano,mes);
+  democSetDoc(tipo,eid,ano,mes,{contas:contas, arquivo:arquivoNome, dataInclusao:new Date().toLocaleDateString('pt-BR')});
+  var lista=democGetDocsLista(tipo,eid).filter(function(x){ return !(x.ano===ano&&x.mes===mes); });
   lista.push({ano:ano, mes:mes});
   lista.sort(function(a,b){ return (a.ano+a.mes)<(b.ano+b.mes)?-1:1; });
-  democSetBalancetesLista(eid, lista);
+  democSetDocsLista(tipo,eid, lista);
 
   return {ok:true, mes:mes, ano:ano, qtdContas:contas.length, atualizado:jaExistia, novasContas:novas.length};
 }
 
-async function _democExtrairTextoEChamarIA(file){
+// ── Faturamento (formato próprio: mês a mês, aditivo, nunca sobrescreve) ───
+function democGetFaturamento(eid,ano,mes){ return JSON.parse(S.g('democ_faturamento_'+eid+'_'+ano+'_'+mes)||'null'); }
+function democSetFaturamento(eid,ano,mes,dados){ S.s('democ_faturamento_'+eid+'_'+ano+'_'+mes, JSON.stringify(dados)); }
+function democGetFaturamentoLista(eid){ return JSON.parse(S.g('democ_faturamento_lista_'+eid)||'[]'); }
+function democSetFaturamentoLista(eid,arr){ S.s('democ_faturamento_lista_'+eid, JSON.stringify(arr)); }
+function democExcluirFaturamento(eid,ano,mes){
+  if(!confirm('Excluir o faturamento de '+mes+'/'+ano+'? Esta ação não pode ser desfeita.'))return;
+  S.s('democ_faturamento_'+eid+'_'+ano+'_'+mes, undefined);
+  var lista=democGetFaturamentoLista(eid).filter(function(x){ return !(x.ano===ano&&x.mes===mes); });
+  democSetFaturamentoLista(eid,lista);
+  renderDemoc();
+  toast('Faturamento excluído.','ok');
+}
+function _democAplicarFaturamento(eid, dadosResposta, arquivoNome){
+  var lancamentos=Array.isArray(dadosResposta.lancamentos)?dadosResposta.lancamentos:[];
+  var incluidos=[], jaExistiam=[];
+  lancamentos.forEach(function(l){
+    var mes=(l.mes||'').padStart(2,'0');
+    var ano=String(l.ano||'');
+    if(!mes||!LUC_MESES.includes(mes)||!ano) return;
+    var saidas=parseFloat(l.saidas)||0, servicos=parseFloat(l.servicos)||0, outros=parseFloat(l.outros)||0;
+    if(!saidas&&!servicos&&!outros) return;
+    if(democGetFaturamento(eid,ano,mes)){ jaExistiam.push(mes+'/'+ano); return; }
+    democSetFaturamento(eid,ano,mes,{saidas:saidas, servicos:servicos, outros:outros, arquivo:arquivoNome, dataInclusao:new Date().toLocaleDateString('pt-BR')});
+    var lista=democGetFaturamentoLista(eid);
+    lista.push({ano:ano, mes:mes});
+    lista.sort(function(a,b){ return (a.ano+a.mes)<(b.ano+b.mes)?-1:1; });
+    democSetFaturamentoLista(eid, lista);
+    incluidos.push(mes+'/'+ano);
+  });
+  if(!incluidos.length && !jaExistiam.length) return {ok:false, motivo:'Nenhum lançamento de faturamento identificado no arquivo.'};
+  return {ok:true, incluidos:incluidos, jaExistiam:jaExistiam};
+}
+
+async function _democExtrairTextoEChamarIA(edgeFnNome, file){
   var texto=await _empExtrairTextoPDF(file,30);
-  var resp=await fetch(SUPABASE_URL+'/functions/v1/democ-extrair-balancete',{
+  var resp=await fetch(SUPABASE_URL+'/functions/v1/'+edgeFnNome,{
     method:'POST',
     headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
     body:JSON.stringify({texto:texto})
@@ -5273,12 +5328,13 @@ function renderDemoc(){
   if(!container) return;
   var eids=democGetEmpresas();
   var html='<div class="hide-in-print" style="padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--border)">'
-    +'<label style="font-weight:600;color:#1E3558;display:block;margin-bottom:8px;font-size:12.5px">Anexar balancetes:</label>'
-    +_democRenderBulkForm()
-    +'</div>';
+    +'<label style="font-weight:600;color:#1E3558;display:block;margin-bottom:8px;font-size:12.5px">Anexar documentos:</label>'
+    +'<div style="display:flex;flex-direction:column;gap:10px;align-items:flex-start">'
+    +DEMOC_TIPOS_ORDEM.map(function(tipo){ return _democRenderBulkForm(tipo); }).join('')
+    +'</div></div>';
 
   if(!eids.length){
-    html+='<div style="text-align:center;color:var(--slate);padding:30px 10px;font-size:13px">Nenhuma empresa com balancete anexado ainda. Use o botão acima pra anexar o(s) primeiro(s) arquivo(s).</div>';
+    html+='<div style="text-align:center;color:var(--slate);padding:30px 10px;font-size:13px">Nenhuma empresa com documento anexado ainda. Use um dos botões acima pra anexar o(s) primeiro(s) arquivo(s).</div>';
     container.innerHTML=html;
     return;
   }
@@ -5301,38 +5357,43 @@ function renderDemoc(){
 }
 
 function democRemoverEmpresa(eid){
-  if(!confirm('Remover esta empresa de Demonstrativos Contábeis? Os balancetes já anexados continuam salvos, só deixam de aparecer aqui.'))return;
+  if(!confirm('Remover esta empresa de Demonstrativos Contábeis? Os documentos já anexados continuam salvos, só deixam de aparecer aqui.'))return;
   democSetEmpresas(democGetEmpresas().filter(function(x){ return x!==eid; }));
   renderDemoc();
   toast('Empresa removida.','ok');
 }
 
-let _democBulkFormAberto=false;
-let _democBulkUltimoResultadoHtml='';
-function _democRenderBulkForm(){
-  var html='<button class="btn bp bsm" onclick="_democBulkToggleForm()">📎 Anexar Balancetes (várias empresas)</button>';
-  if(_democBulkFormAberto){
-    html+='<div style="margin-top:8px;padding:10px 12px;border:1px dashed var(--border);border-radius:6px;background:var(--bg);max-width:640px">'
-      +'<input type="file" id="democBulkArquivos" accept=".pdf" multiple class="fi" style="width:100%">'
+let _democBulkFormAberto={};
+let _democBulkUltimoResultadoHtml={};
+function _democAjudaTipo(tipo){
+  if(tipo==='faturamento') return 'Anexe os relatórios de faturamento de várias empresas de uma vez — a IA identifica o CNPJ e os meses de cada relatório. Meses já incluídos nunca são alterados, mesmo que o relatório seja reanexado.';
+  return 'Anexe '+DEMOC_TIPOS_CONTAS[tipo].labelPluralMin+' de várias empresas de uma vez — a IA identifica o CNPJ, o mês/ano e as contas de cada arquivo. Se o CNPJ ainda não estiver no Cadastro de Empresas, a empresa é criada aqui mesmo (sem afetar o Cadastro de Empresas). Reanexar o mesmo mês substitui o documento anterior.';
+}
+function _democRenderBulkForm(tipo){
+  var aberto=!!_democBulkFormAberto[tipo];
+  var html='<button class="btn bp bsm" onclick="_democBulkToggleForm(\''+tipo+'\')">📎 Anexar '+_democLabelPluralTipo(tipo)+' (várias empresas)</button>';
+  if(aberto){
+    html+='<div style="padding:10px 12px;border:1px dashed var(--border);border-radius:6px;background:var(--bg);max-width:640px;width:100%">'
+      +'<input type="file" id="democBulkArquivos_'+tipo+'" accept=".pdf" multiple class="fi" style="width:100%">'
       +'<div style="margin-top:8px;display:flex;align-items:center;gap:10px">'
-      +'<button class="btn bp bsm" id="democBulkBtn" onclick="_democBulkExtrairIncluir()">🔍 Extrair e Incluir Tudo</button>'
-      +'<span id="democBulkStatus" style="font-size:12px;color:var(--slate)"></span>'
+      +'<button class="btn bp bsm" id="democBulkBtn_'+tipo+'" onclick="_democBulkExtrairIncluir(\''+tipo+'\')">🔍 Extrair e Incluir Tudo</button>'
+      +'<span id="democBulkStatus_'+tipo+'" style="font-size:12px;color:var(--slate)"></span>'
       +'</div>'
-      +'<div style="font-size:11px;color:var(--slate);margin-top:6px">Anexe os balancetes de várias empresas de uma vez — a IA identifica o CNPJ, o mês/ano e as contas de cada arquivo. Se o CNPJ ainda não estiver no Cadastro de Empresas, a empresa é criada aqui mesmo (sem afetar o Cadastro de Empresas). Reanexar o balancete do mesmo mês substitui o anterior.</div>'
-      +'<div id="democBulkResultado" style="margin-top:8px">'+_democBulkUltimoResultadoHtml+'</div>'
+      +'<div style="font-size:11px;color:var(--slate);margin-top:6px">'+_democAjudaTipo(tipo)+'</div>'
+      +'<div id="democBulkResultado_'+tipo+'" style="margin-top:8px">'+(_democBulkUltimoResultadoHtml[tipo]||'')+'</div>'
       +'</div>';
   }
   return html;
 }
-function _democBulkToggleForm(){
-  _democBulkFormAberto=!_democBulkFormAberto;
-  if(!_democBulkFormAberto) _democBulkUltimoResultadoHtml='';
+function _democBulkToggleForm(tipo){
+  _democBulkFormAberto[tipo]=!_democBulkFormAberto[tipo];
+  if(!_democBulkFormAberto[tipo]) _democBulkUltimoResultadoHtml[tipo]='';
   renderDemoc();
 }
-async function _democBulkExtrairIncluir(){
-  var input=document.getElementById('democBulkArquivos');
-  var statusEl=document.getElementById('democBulkStatus');
-  var btn=document.getElementById('democBulkBtn');
+async function _democBulkExtrairIncluir(tipo){
+  var input=document.getElementById('democBulkArquivos_'+tipo);
+  var statusEl=document.getElementById('democBulkStatus_'+tipo);
+  var btn=document.getElementById('democBulkBtn_'+tipo);
   if(!input||!input.files||!input.files.length){ toast('Anexe ao menos um PDF primeiro.','err'); return; }
   var arquivos=Array.prototype.slice.call(input.files);
   var btnTextoOriginal=btn.textContent;
@@ -5345,32 +5406,41 @@ async function _democBulkExtrairIncluir(){
       statusEl.textContent='Lendo arquivo '+(i+1)+'/'+arquivos.length+': '+f.name+'...';
       btn.textContent='Processando '+(i+1)+'/'+arquivos.length+'...';
       var d;
-      try{ d=await _democExtrairTextoEChamarIA(f); }
+      try{ d=await _democExtrairTextoEChamarIA(_democEdgeFnTipo(tipo), f); }
       catch(err){ arquivosIgnorados.push({arquivo:f.name,motivo:err.message}); continue; }
       var res=democResolverEidPorCnpj(d.cnpj, d.razaoSocial);
-      if(!res){ arquivosIgnorados.push({arquivo:f.name,motivo:'Não foi possível identificar o CNPJ no balancete.'}); continue; }
+      if(!res){ arquivosIgnorados.push({arquivo:f.name,motivo:'Não foi possível identificar o CNPJ no arquivo.'}); continue; }
       var eid=res.eid;
       var eids=democGetEmpresas();
       if(eids.indexOf(eid)<0){ eids.push(eid); democSetEmpresas(eids); }
-      if(res.criouExterna) empresasNovas.push(d.razaoSocial||d.cnpj);
-      var aplicado=_democAplicarBalancete(eid, d, f.name);
-      if(!aplicado.ok){ arquivosIgnorados.push({arquivo:f.name,motivo:aplicado.motivo}); continue; }
+      if(res.criouExterna && empresasNovas.indexOf(d.razaoSocial||d.cnpj)<0) empresasNovas.push(d.razaoSocial||d.cnpj);
       var nomeEmp=democInfoEmpresa(eid).nome;
-      var label=nomeEmp+' — '+aplicado.mes+'/'+aplicado.ano+(aplicado.novasContas?' ('+aplicado.novasContas+' conta(s) nova(s))':'');
-      if(aplicado.atualizado) atualizados.push(label); else incluidos.push(label);
+
+      if(tipo==='faturamento'){
+        var aplicadoFat=_democAplicarFaturamento(eid, d, f.name);
+        if(!aplicadoFat.ok){ arquivosIgnorados.push({arquivo:f.name,motivo:aplicadoFat.motivo}); continue; }
+        aplicadoFat.incluidos.forEach(function(mesAno){ incluidos.push(nomeEmp+' — '+mesAno); });
+        aplicadoFat.jaExistiam.forEach(function(mesAno){ atualizados.push(nomeEmp+' — '+mesAno); });
+      } else {
+        var aplicado=_democAplicarDocContas(tipo, eid, d, f.name);
+        if(!aplicado.ok){ arquivosIgnorados.push({arquivo:f.name,motivo:aplicado.motivo}); continue; }
+        var label=nomeEmp+' — '+aplicado.mes+'/'+aplicado.ano+(aplicado.novasContas?' ('+aplicado.novasContas+' conta(s) nova(s))':'');
+        if(aplicado.atualizado) atualizados.push(label); else incluidos.push(label);
+      }
     }
+    var tituloAtualizado=tipo==='faturamento'?'já existiam (mantidos)':'atualizado(s)';
     var html='<div style="font-size:12px;border:1px solid var(--border);border-radius:6px;overflow:hidden">'
-      +'<div style="padding:8px 10px;background:var(--bg);font-weight:700;color:var(--ink)">Resultado: '+incluidos.length+' balancete(s) novo(s), '+atualizados.length+' atualizado(s)'+(empresasNovas.length?', '+empresasNovas.length+' empresa(s) nova(s)':'')+'</div>';
+      +'<div style="padding:8px 10px;background:var(--bg);font-weight:700;color:var(--ink)">Resultado: '+incluidos.length+' novo(s), '+atualizados.length+' '+tituloAtualizado+(empresasNovas.length?', '+empresasNovas.length+' empresa(s) nova(s)':'')+'</div>';
     if(empresasNovas.length) html+='<div style="padding:8px 10px;color:var(--teal)">✓ Empresas novas (não estavam no Cadastro de Empresas): '+empresasNovas.map(esc).join(', ')+'</div>';
     if(incluidos.length) html+='<div style="padding:8px 10px;color:var(--teal)">✓ Incluídos: '+incluidos.map(esc).join(' · ')+'</div>';
-    if(atualizados.length) html+='<div style="padding:8px 10px;color:var(--slate)">↻ Atualizados (já existiam, foram substituídos): '+atualizados.map(esc).join(' · ')+'</div>';
+    if(atualizados.length) html+='<div style="padding:8px 10px;color:var(--slate)">↻ '+(tipo==='faturamento'?'Já existiam (não alterados)':'Atualizados (já existiam, foram substituídos)')+': '+atualizados.map(esc).join(' · ')+'</div>';
     if(arquivosIgnorados.length) html+='<div style="padding:8px 10px;color:#dc2626">⚠ Arquivos ignorados: '+arquivosIgnorados.map(function(a){return esc(a.arquivo)+' — '+esc(a.motivo);}).join(' · ')+'</div>';
     html+='</div>';
-    _democBulkUltimoResultadoHtml=html;
-    toast((incluidos.length+atualizados.length)?'Balancete(s) processado(s) com sucesso!':'Nenhum balancete processado — veja o resultado abaixo.', (incluidos.length+atualizados.length)?'ok':'warn');
+    _democBulkUltimoResultadoHtml[tipo]=html;
+    toast((incluidos.length+atualizados.length)?'Processado com sucesso!':'Nada processado — veja o resultado abaixo.', (incluidos.length+atualizados.length)?'ok':'warn');
   }catch(e){
     console.error('_democBulkExtrairIncluir erro:',e);
-    toast('Erro ao processar os balancetes: '+e.message,'err');
+    toast('Erro ao processar: '+e.message,'err');
   }finally{
     btn.disabled=false; btn.textContent=btnTextoOriginal;
     renderDemoc();
@@ -5379,36 +5449,45 @@ async function _democBulkExtrairIncluir(){
 
 let _democUnicoFormAberto={};
 function _democRenderEmpBody(eid){
-  var aberto=!!_democUnicoFormAberto[eid];
-  var balancetes=democGetBalancetesLista(eid);
-  var pendentes=democGetNovasContasPendentes(eid);
-  var h='<div style="padding:12px 16px">';
-
+  var h='<div style="padding:12px 16px;display:flex;flex-direction:column;gap:18px">';
+  DEMOC_TIPOS_ORDEM.forEach(function(tipo){
+    h+='<div>'
+      +'<div style="font-size:11px;font-weight:700;color:var(--slate);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">'+_democLabelPluralTipo(tipo)+'</div>'
+      +(tipo==='faturamento'?_democRenderFaturamentoSecao(eid):_democRenderContasSecao(tipo,eid))
+      +'</div>';
+  });
+  h+='</div>';
+  return h;
+}
+function _democRenderContasSecao(tipo, eid){
+  var chave=tipo+'|'+eid;
+  var aberto=!!_democUnicoFormAberto[chave];
+  var docs=democGetDocsLista(tipo,eid);
+  var pendentes=democGetNovasContasPendentes(tipo,eid);
+  var h='';
   if(pendentes.length){
-    h+='<div style="background:#FEF3C7;border:1px solid #F59E0B;border-radius:6px;padding:10px 12px;margin-bottom:12px">'
+    h+='<div style="background:#FEF3C7;border:1px solid #F59E0B;border-radius:6px;padding:10px 12px;margin-bottom:10px">'
       +'<div style="font-weight:700;font-size:12px;color:#92400E;margin-bottom:6px">⚠ Conta(s) nova(s) detectada(s) — confira se deve(m) entrar em alguma análise:</div>';
     pendentes.forEach(function(p){
       h+='<div style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:3px 0">'
         +'<span>'+esc(p.codigo_analitico)+' — '+esc(p.nome_conta)+' <span style="color:var(--slate)">(apareceu em '+esc(p.primeiraVez)+')</span></span>'
-        +'<button class="btn bo bsm" style="font-size:10px" onclick="democMarcarContaRevisada(\''+eid+'\',\''+esc(p.codigo_analitico).replace(/'/g,"\\'")+'\')">Já revisei</button>'
+        +'<button class="btn bo bsm" style="font-size:10px" onclick="democMarcarContaRevisada(\''+tipo+'\',\''+eid+'\',\''+esc(p.codigo_analitico).replace(/'/g,"\\'")+'\')">Já revisei</button>'
         +'</div>';
     });
     h+='</div>';
   }
-
-  h+='<button class="btn bo bsm" onclick="_democUnicoToggleForm(\''+eid+'\')">📎 Importar Balancete (um arquivo)</button>';
+  h+='<button class="btn bo bsm" style="font-size:11px" onclick="_democUnicoToggleForm(\''+tipo+'\',\''+eid+'\')">📎 Importar '+DEMOC_TIPOS_CONTAS[tipo].label+' (um arquivo)</button>';
   if(aberto){
     h+='<div style="margin-top:8px;padding:10px 12px;border:1px dashed var(--border);border-radius:6px;background:var(--bg);max-width:560px">'
-      +'<input type="file" id="democUnico_'+eid+'" accept=".pdf" class="fi" style="width:100%">'
+      +'<input type="file" id="democUnico_'+tipo+'_'+eid+'" accept=".pdf" class="fi" style="width:100%">'
       +'<div style="margin-top:8px;display:flex;align-items:center;gap:10px">'
-      +'<button class="btn bp bsm" id="democUnicoBtn_'+eid+'" onclick="_democUnicoExtrairIncluir(\''+eid+'\')">🔍 Extrair e Incluir</button>'
-      +'<span id="democUnicoStatus_'+eid+'" style="font-size:12px;color:var(--slate)"></span>'
+      +'<button class="btn bp bsm" id="democUnicoBtn_'+tipo+'_'+eid+'" onclick="_democUnicoExtrairIncluir(\''+tipo+'\',\''+eid+'\')">🔍 Extrair e Incluir</button>'
+      +'<span id="democUnicoStatus_'+tipo+'_'+eid+'" style="font-size:12px;color:var(--slate)"></span>'
       +'</div></div>';
   }
-
-  h+='<div style="margin-top:14px">';
-  if(!balancetes.length){
-    h+='<div style="color:var(--slate);font-size:12.5px">Nenhum balancete anexado ainda.</div>';
+  h+='<div style="margin-top:10px">';
+  if(!docs.length){
+    h+='<div style="color:var(--slate);font-size:12.5px">Nenhum documento anexado ainda.</div>';
   } else {
     h+='<table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px">'
       +'<thead><tr>'
@@ -5418,45 +5497,96 @@ function _democRenderEmpBody(eid){
       +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Incluído em</th>'
       +'<th style="padding:6px 10px;background:var(--ink2);color:#fff"></th>'
       +'</tr></thead><tbody>';
-    balancetes.slice().reverse().forEach(function(b,i){
-      var dados=democGetBalancete(eid,b.ano,b.mes);
+    docs.slice().reverse().forEach(function(b,i){
+      var dados=democGetDoc(tipo,eid,b.ano,b.mes);
       h+='<tr style="background:'+(i%2===0?'var(--white)':'var(--bg)')+'">'
         +'<td style="padding:6px 10px">'+(LUC_MESES_FULL[parseInt(b.mes,10)-1]||b.mes)+'/'+b.ano+'</td>'
         +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono)">'+(dados?dados.contas.length:'—')+'</td>'
         +'<td style="padding:6px 10px">'+esc(dados?dados.arquivo:'')+'</td>'
         +'<td style="padding:6px 10px">'+esc(dados?dados.dataInclusao:'')+'</td>'
-        +'<td style="padding:6px 10px"><button class="btn bd bsm" style="font-size:10px" onclick="democExcluirBalancete(\''+eid+'\',\''+b.ano+'\',\''+b.mes+'\')">🗑</button></td>'
+        +'<td style="padding:6px 10px"><button class="btn bd bsm" style="font-size:10px" onclick="democExcluirDoc(\''+tipo+'\',\''+eid+'\',\''+b.ano+'\',\''+b.mes+'\')">🗑</button></td>'
         +'</tr>';
     });
     h+='</tbody></table>';
   }
-  h+='</div></div>';
+  h+='</div>';
   return h;
 }
-function _democUnicoToggleForm(eid){
-  _democUnicoFormAberto[eid]=!_democUnicoFormAberto[eid];
+function _democRenderFaturamentoSecao(eid){
+  var chave='faturamento|'+eid;
+  var aberto=!!_democUnicoFormAberto[chave];
+  var docs=democGetFaturamentoLista(eid);
+  var h='<button class="btn bo bsm" style="font-size:11px" onclick="_democUnicoToggleForm(\'faturamento\',\''+eid+'\')">📎 Importar Faturamento (um arquivo)</button>';
+  if(aberto){
+    h+='<div style="margin-top:8px;padding:10px 12px;border:1px dashed var(--border);border-radius:6px;background:var(--bg);max-width:560px">'
+      +'<input type="file" id="democUnico_faturamento_'+eid+'" accept=".pdf" class="fi" style="width:100%">'
+      +'<div style="margin-top:8px;display:flex;align-items:center;gap:10px">'
+      +'<button class="btn bp bsm" id="democUnicoBtn_faturamento_'+eid+'" onclick="_democUnicoExtrairIncluir(\'faturamento\',\''+eid+'\')">🔍 Extrair e Incluir</button>'
+      +'<span id="democUnicoStatus_faturamento_'+eid+'" style="font-size:12px;color:var(--slate)"></span>'
+      +'</div></div>';
+  }
+  h+='<div style="margin-top:10px">';
+  if(!docs.length){
+    h+='<div style="color:var(--slate);font-size:12.5px">Nenhum faturamento anexado ainda.</div>';
+  } else {
+    h+='<table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px">'
+      +'<thead><tr>'
+      +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Mês/Ano</th>'
+      +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saídas</th>'
+      +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Serviços</th>'
+      +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Outros</th>'
+      +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Arquivo</th>'
+      +'<th style="padding:6px 10px;background:var(--ink2);color:#fff"></th>'
+      +'</tr></thead><tbody>';
+    docs.slice().reverse().forEach(function(b,i){
+      var dados=democGetFaturamento(eid,b.ano,b.mes);
+      h+='<tr style="background:'+(i%2===0?'var(--white)':'var(--bg)')+'">'
+        +'<td style="padding:6px 10px">'+(LUC_MESES_FULL[parseInt(b.mes,10)-1]||b.mes)+'/'+b.ano+'</td>'
+        +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono)">'+(dados?lucFmtBRL(dados.saidas):'—')+'</td>'
+        +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono)">'+(dados?lucFmtBRL(dados.servicos):'—')+'</td>'
+        +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono)">'+(dados?lucFmtBRL(dados.outros):'—')+'</td>'
+        +'<td style="padding:6px 10px">'+esc(dados?dados.arquivo:'')+'</td>'
+        +'<td style="padding:6px 10px"><button class="btn bd bsm" style="font-size:10px" onclick="democExcluirFaturamento(\''+eid+'\',\''+b.ano+'\',\''+b.mes+'\')">🗑</button></td>'
+        +'</tr>';
+    });
+    h+='</tbody></table>';
+  }
+  h+='</div>';
+  return h;
+}
+function _democUnicoToggleForm(tipo, eid){
+  var chave=tipo+'|'+eid;
+  _democUnicoFormAberto[chave]=!_democUnicoFormAberto[chave];
   renderDemoc();
 }
-async function _democUnicoExtrairIncluir(eid){
-  var input=document.getElementById('democUnico_'+eid);
-  var statusEl=document.getElementById('democUnicoStatus_'+eid);
-  var btn=document.getElementById('democUnicoBtn_'+eid);
-  if(!input||!input.files||!input.files.length){ toast('Anexe o PDF do balancete primeiro.','err'); return; }
+async function _democUnicoExtrairIncluir(tipo, eid){
+  var input=document.getElementById('democUnico_'+tipo+'_'+eid);
+  var statusEl=document.getElementById('democUnicoStatus_'+tipo+'_'+eid);
+  var btn=document.getElementById('democUnicoBtn_'+tipo+'_'+eid);
+  if(!input||!input.files||!input.files.length){ toast('Anexe o PDF primeiro.','err'); return; }
   var f=input.files[0];
   var btnTextoOriginal=btn.textContent;
   btn.disabled=true; btn.textContent='Lendo PDF...';
   statusEl.style.color='var(--slate)'; statusEl.textContent='Extraindo texto e analisando com IA...';
   try{
-    var d=await _democExtrairTextoEChamarIA(f);
-    var aplicado=_democAplicarBalancete(eid, d, f.name);
-    if(!aplicado.ok) throw new Error(aplicado.motivo);
-    _democUnicoFormAberto[eid]=false;
-    toast('Balancete de '+aplicado.mes+'/'+aplicado.ano+' incluído!'+(aplicado.novasContas?' '+aplicado.novasContas+' conta(s) nova(s) detectada(s).':''),'ok');
+    var d=await _democExtrairTextoEChamarIA(_democEdgeFnTipo(tipo), f);
+    if(tipo==='faturamento'){
+      var aplicadoFat=_democAplicarFaturamento(eid, d, f.name);
+      if(!aplicadoFat.ok) throw new Error(aplicadoFat.motivo);
+      _democUnicoFormAberto['faturamento|'+eid]=false;
+      var msg=(aplicadoFat.incluidos.length?aplicadoFat.incluidos.length+' mês(es) incluído(s)':'')+(aplicadoFat.jaExistiam.length?(aplicadoFat.incluidos.length?', ':'')+aplicadoFat.jaExistiam.length+' já existia(m) (mantido(s))':'');
+      toast('Faturamento processado: '+msg,'ok');
+    } else {
+      var aplicado=_democAplicarDocContas(tipo, eid, d, f.name);
+      if(!aplicado.ok) throw new Error(aplicado.motivo);
+      _democUnicoFormAberto[tipo+'|'+eid]=false;
+      toast(DEMOC_TIPOS_CONTAS[tipo].label+' de '+aplicado.mes+'/'+aplicado.ano+' incluído!'+(aplicado.novasContas?' '+aplicado.novasContas+' conta(s) nova(s) detectada(s).':''),'ok');
+    }
     renderDemoc();
   }catch(e){
     console.error('_democUnicoExtrairIncluir erro:',e);
     statusEl.style.color='#dc2626'; statusEl.textContent='Erro: '+e.message;
-    toast('Erro ao extrair balancete: '+e.message,'err');
+    toast('Erro ao extrair: '+e.message,'err');
     btn.disabled=false; btn.textContent=btnTextoOriginal;
   }
 }
