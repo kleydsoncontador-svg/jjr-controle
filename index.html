@@ -5200,10 +5200,21 @@ function _democLabelTipo(tipo){ return tipo==='faturamento'?'Faturamento':DEMOC_
 function _democLabelPluralTipo(tipo){ return tipo==='faturamento'?'Relatórios de Faturamento':DEMOC_TIPOS_CONTAS[tipo].labelPlural; }
 function _democEdgeFnTipo(tipo){ return tipo==='faturamento'?'luc-extrair-faturamento':DEMOC_TIPOS_CONTAS[tipo].edgeFn; }
 
+// S.s()/S.g() já guardam o valor como veio (o Supabase serializa/desserializa
+// a coluna jsonb sozinho) — nunca fazer JSON.stringify/JSON.parse manual em
+// cima disso, senão o valor pode voltar do banco já como objeto/array (não
+// mais como texto), e um JSON.parse manual quebra tentando parsear um objeto
+// como se fosse string. _democVal() tolera as duas formas (por segurança,
+// caso ainda exista algum valor antigo salvo como texto).
+function _democVal(v, def){
+  if(v===null||v===undefined) return def;
+  if(typeof v==='string'){ try{ return JSON.parse(v); }catch(e){ return def; } }
+  return v;
+}
 function democGetEmpresas(){ return S.g('democ_empresas')||[]; }
 function democSetEmpresas(arr){ S.s('democ_empresas',arr); }
-function democGetExternas(){ return JSON.parse(S.g('democ_externas')||'{}'); }
-function democSetExternas(obj){ S.s('democ_externas', JSON.stringify(obj)); }
+function democGetExternas(){ return _democVal(S.g('democ_externas'), {}); }
+function democSetExternas(obj){ S.s('democ_externas', obj); }
 function democNormCnpj(v){ return String(v||'').replace(/\D/g,''); }
 function democInfoEmpresa(eid){
   if(String(eid).indexOf('ext:')===0){
@@ -5232,22 +5243,27 @@ function democResolverEidPorCnpj(cnpj, nomeSugerido){
 }
 
 // ── Balancete / DRE / Livro Razão (motor genérico por "contas") ────────────
-function democGetDoc(tipo,eid,ano,mes){ return JSON.parse(S.g('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes)||'null'); }
-function democSetDoc(tipo,eid,ano,mes,dados){ S.s('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes, JSON.stringify(dados)); }
-function democGetDocsLista(tipo,eid){ return JSON.parse(S.g('democ_'+tipo+'_lista_'+eid)||'[]'); }
-function democSetDocsLista(tipo,eid,arr){ S.s('democ_'+tipo+'_lista_'+eid, JSON.stringify(arr)); }
+function democGetDoc(tipo,eid,ano,mes){ return _democVal(S.g('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes), null); }
+function democSetDoc(tipo,eid,ano,mes,dados){ S.s('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes, dados); }
+function democGetDocsLista(tipo,eid){ return _democVal(S.g('democ_'+tipo+'_lista_'+eid), []); }
+function democSetDocsLista(tipo,eid,arr){ S.s('democ_'+tipo+'_lista_'+eid, arr); }
 function democExcluirDoc(tipo,eid,ano,mes){
   if(!confirm('Excluir '+(tipo==='dre'?'a':'o')+' '+_democLabelTipo(tipo)+' de '+mes+'/'+ano+'? Esta ação não pode ser desfeita.'))return;
-  S.s('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes, undefined);
+  // Nunca usar S.s(chave, undefined) pra "limpar" — undefined some do JSON
+  // antes de chegar no Supabase e o upsert simplesmente não atualiza a
+  // coluna, deixando o valor antigo intacto no banco (some só localmente,
+  // na sessão atual, e volta no próximo carregamento). null serializa e
+  // limpa de verdade.
+  S.s('democ_'+tipo+'_'+eid+'_'+ano+'_'+mes, null);
   var lista=democGetDocsLista(tipo,eid).filter(function(x){ return !(x.ano===ano&&x.mes===mes); });
   democSetDocsLista(tipo,eid,lista);
   renderDemoc();
   toast(_democLabelTipo(tipo)+' excluído(a).','ok');
 }
-function democGetContasConhecidas(tipo,eid){ return JSON.parse(S.g('democ_contas_conhecidas_'+tipo+'_'+eid)||'[]'); }
-function democSetContasConhecidas(tipo,eid,arr){ S.s('democ_contas_conhecidas_'+tipo+'_'+eid, JSON.stringify(arr)); }
-function democGetNovasContasPendentes(tipo,eid){ return JSON.parse(S.g('democ_novas_contas_'+tipo+'_'+eid)||'[]'); }
-function democSetNovasContasPendentes(tipo,eid,arr){ S.s('democ_novas_contas_'+tipo+'_'+eid, JSON.stringify(arr)); }
+function democGetContasConhecidas(tipo,eid){ return _democVal(S.g('democ_contas_conhecidas_'+tipo+'_'+eid), []); }
+function democSetContasConhecidas(tipo,eid,arr){ S.s('democ_contas_conhecidas_'+tipo+'_'+eid, arr); }
+function democGetNovasContasPendentes(tipo,eid){ return _democVal(S.g('democ_novas_contas_'+tipo+'_'+eid), []); }
+function democSetNovasContasPendentes(tipo,eid,arr){ S.s('democ_novas_contas_'+tipo+'_'+eid, arr); }
 function democMarcarContaRevisada(tipo,eid,codigo){
   var pend=democGetNovasContasPendentes(tipo,eid).filter(function(c){ return c.codigo_analitico!==codigo; });
   democSetNovasContasPendentes(tipo,eid,pend);
@@ -5296,13 +5312,13 @@ function _democAplicarDocContas(tipo, eid, dados, arquivoNome){
 }
 
 // ── Faturamento (formato próprio: mês a mês, aditivo, nunca sobrescreve) ───
-function democGetFaturamento(eid,ano,mes){ return JSON.parse(S.g('democ_faturamento_'+eid+'_'+ano+'_'+mes)||'null'); }
-function democSetFaturamento(eid,ano,mes,dados){ S.s('democ_faturamento_'+eid+'_'+ano+'_'+mes, JSON.stringify(dados)); }
-function democGetFaturamentoLista(eid){ return JSON.parse(S.g('democ_faturamento_lista_'+eid)||'[]'); }
-function democSetFaturamentoLista(eid,arr){ S.s('democ_faturamento_lista_'+eid, JSON.stringify(arr)); }
+function democGetFaturamento(eid,ano,mes){ return _democVal(S.g('democ_faturamento_'+eid+'_'+ano+'_'+mes), null); }
+function democSetFaturamento(eid,ano,mes,dados){ S.s('democ_faturamento_'+eid+'_'+ano+'_'+mes, dados); }
+function democGetFaturamentoLista(eid){ return _democVal(S.g('democ_faturamento_lista_'+eid), []); }
+function democSetFaturamentoLista(eid,arr){ S.s('democ_faturamento_lista_'+eid, arr); }
 function democExcluirFaturamento(eid,ano,mes){
   if(!confirm('Excluir o faturamento de '+mes+'/'+ano+'? Esta ação não pode ser desfeita.'))return;
-  S.s('democ_faturamento_'+eid+'_'+ano+'_'+mes, undefined);
+  S.s('democ_faturamento_'+eid+'_'+ano+'_'+mes, null);
   var lista=democGetFaturamentoLista(eid).filter(function(x){ return !(x.ano===ano&&x.mes===mes); });
   democSetFaturamentoLista(eid,lista);
   renderDemoc();
