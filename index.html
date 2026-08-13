@@ -2939,6 +2939,101 @@ function _mostrarErroSincronizacao(k){
   _syncErrosPendentes[k]=(_syncErrosPendentes[k]||0)+1;
   _renderSyncErrosBanner();
 }
+
+// ─── Sessão expirada / sem permissão de gravar ──────────────────────────────
+// Já aconteceu de TODAS as gravações na nuvem falharem por horas (sessão
+// expirada ou permissão do banco), com os operadores continuando a trabalhar
+// achando que estava tudo salvo — só o avisozinho de canto aparecia, e dava
+// pra fechar e seguir digitando. Isso custou um dia de trabalho. Agora, se a
+// falha for de autenticação/permissão (o app não tem MAIS como salvar nada,
+// não é uma falha pontual de rede), o trabalho é interrompido na cara do
+// operador até religar a sessão.
+function _ehErroDeAutenticacao(err){
+  if(!err) return false;
+  const cod=String(err.code||'');
+  const msg=String(err.message||'').toLowerCase();
+  const status=err.status||err.statusCode;
+  return status===401||status===403
+    ||cod==='42501'||cod==='PGRST301'
+    ||msg.indexOf('row-level security')>=0||msg.indexOf('jwt')>=0
+    ||msg.indexOf('not authenticated')>=0||msg.indexOf('invalid token')>=0;
+}
+let _sessaoExpiradaAtiva=false;
+// Tenta renovar a sessão e regravar. Só incomoda o operador se não der.
+async function _tratarFalhaGravacao(k,err){
+  if(_ehErroDeAutenticacao(err)&&_supaClient){
+    try{
+      const r=await _supaClient.auth.refreshSession();
+      if(r&&!r.error&&r.data&&r.data.session){
+        const ts=new Date().toISOString();
+        const retry=await _supaClient.from('dados_app').upsert({key:k,value:cccCache[k],updated_at:ts});
+        if(!retry.error){
+          cccLocalUpdatedAt[k]=ts; cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt);
+          _limparErroSincronizacao(k); _esconderSessaoExpirada();
+          return;
+        }
+        err=retry.error;
+      }
+    }catch(e){ /* não deu pra renovar — bloqueia abaixo */ }
+    _mostrarSessaoExpirada(err);
+  }
+  _mostrarErroSincronizacao(k);
+}
+function _esconderSessaoExpirada(){
+  _sessaoExpiradaAtiva=false;
+  const el=document.getElementById('sessaoExpiradaOverlay');
+  if(el) el.remove();
+}
+function _mostrarSessaoExpirada(err){
+  if(_sessaoExpiradaAtiva) return;
+  _sessaoExpiradaAtiva=true;
+  const detalhe=err?((err.code?err.code+' — ':'')+(err.message||'')):'';
+  const el=document.createElement('div');
+  el.id='sessaoExpiradaOverlay';
+  el.style.cssText='position:fixed;inset:0;z-index:2147483647;background:rgba(15,23,42,.88);display:flex;align-items:center;justify-content:center;padding:20px;font-family:var(--sans)';
+  el.innerHTML='<div style="background:#fff;border-radius:14px;max-width:520px;width:100%;padding:26px 28px;box-shadow:0 20px 60px rgba(0,0,0,.4);border-top:6px solid #DC2626">'
+    +'<div style="font-size:19px;font-weight:800;color:#7F1D1D;margin-bottom:10px">⚠ O sistema parou de salvar na nuvem</div>'
+    +'<div style="font-size:13.5px;color:#1E3558;line-height:1.6">'
+    +'<b>Pare de digitar agora.</b> A partir deste momento nada mais está sendo salvo para os outros operadores — só neste computador.'
+    +'<br><br>O que você já fez <b>não foi perdido</b>: continua guardado aqui nesta máquina e sobe sozinho assim que a conexão for religada. '
+    +'<b>Não limpe o cache nem troque de computador</b> antes disso.'
+    +'<br><br>Clique abaixo para entrar de novo e retomar a sincronização.'
+    +'</div>'
+    +(detalhe?'<div style="margin-top:12px;font-size:11px;color:#64748B;font-family:var(--mono);word-break:break-word">Detalhe técnico: '+esc(detalhe)+'</div>':'')
+    +'<div style="display:flex;gap:8px;margin-top:20px;flex-wrap:wrap">'
+    +'<button class="btn bp" onclick="_reconectarSessao()" style="flex:1;min-width:180px">🔄 Entrar novamente</button>'
+    +'<button class="btn bo" onclick="_tentarReligarSessao()" title="Tenta religar sem precisar digitar a senha">Tentar religar</button>'
+    +'</div></div>';
+  document.body.appendChild(el);
+}
+// Última tentativa automática (sem pedir senha) antes de mandar refazer login.
+async function _tentarReligarSessao(){
+  if(!_supaClient){ toast('Sem conexão com o servidor.','err'); return; }
+  const r=await _supaClient.auth.refreshSession().catch(function(){ return {error:true}; });
+  if(r&&!r.error&&r.data&&r.data.session){
+    _esconderSessaoExpirada();
+    toast('Conexão religada! Reenviando o que ficou pendente...','ok');
+    Object.keys(_syncErrosPendentes).forEach(_retentarSincronizacao);
+    return;
+  }
+  toast('Não deu pra religar sozinho — entre novamente com sua senha.','err');
+}
+function _reconectarSessao(){
+  _esconderSessaoExpirada();
+  const ls=document.getElementById('loginScreen');
+  if(ls) ls.style.display='flex';
+}
+// Confere na abertura se este computador realmente CONSEGUE gravar na nuvem,
+// antes do operador começar a trabalhar — em vez de descobrir horas depois.
+async function _verificarPermissaoDeGravar(){
+  if(!_supaClient) return;
+  try{
+    const r=await _supaClient.from('dados_app').upsert({
+      key:'_sync_healthcheck', value:{em:new Date().toISOString()}, updated_at:new Date().toISOString()
+    });
+    if(r&&r.error&&_ehErroDeAutenticacao(r.error)) _mostrarSessaoExpirada(r.error);
+  }catch(e){ /* falha de rede pontual não bloqueia a abertura */ }
+}
 function _limparErroSincronizacao(k){
   delete _syncErrosPendentes[k];
   _renderSyncErrosBanner();
@@ -2970,9 +3065,9 @@ function _retentarSincronizacao(k){
   const v=cccCache[k];
   const ts=new Date().toISOString();
   _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
-    if(r&&r.error){ console.warn('SB retry err',k,r.error); _mostrarErroSincronizacao(k); }
+    if(r&&r.error){ console.warn('SB retry err',k,r.error); _tratarFalhaGravacao(k,r.error); }
     else { cccLocalUpdatedAt[k]=ts; cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt); _limparErroSincronizacao(k); toast('Sincronizado com sucesso!','ok'); }
-  }, function(e){ console.warn('SB retry err',k,e); _mostrarErroSincronizacao(k); });
+  }, function(e){ console.warn('SB retry err',k,e); _tratarFalhaGravacao(k,e); });
 }
 
 const S = {
@@ -2985,17 +3080,17 @@ const S = {
     cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
     if(_supaClient&&k!=='ccc_session'){
       _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
-        if(r.error){ console.warn('SB save err',k,r.error); _mostrarErroSincronizacao(k); }
+        if(r.error){ console.warn('SB save err',k,r.error); _tratarFalhaGravacao(k,r.error); }
         else { _limparErroSincronizacao(k); }
-      }, function(e){ console.warn('SB save err',k,e); _mostrarErroSincronizacao(k); });
+      }, function(e){ console.warn('SB save err',k,e); _tratarFalhaGravacao(k,e); });
     } else if(!_supaClient&&k!=='ccc_session') {
       // Se Supabase não está pronto, tenta novamente em 500ms
       setTimeout(()=>{
         if(_supaClient){
           _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
-            if(r&&r.error){ console.warn('SB retry err',k,r.error); _mostrarErroSincronizacao(k); }
+            if(r&&r.error){ console.warn('SB retry err',k,r.error); _tratarFalhaGravacao(k,r.error); }
             else { _limparErroSincronizacao(k); }
-          }, function(e){ console.warn('SB retry err',k,e); _mostrarErroSincronizacao(k); });
+          }, function(e){ console.warn('SB retry err',k,e); _tratarFalhaGravacao(k,e); });
         } else {
           console.warn('SB retry err',k,'Supabase ainda não disponível após 500ms');
           _mostrarErroSincronizacao(k);
@@ -6523,6 +6618,7 @@ async function bootstrap(){
   var ok = await tentarRestaurarSessao();
   if(ok){
     await _loadFromSupabase();
+    _verificarPermissaoDeGravar();
     seedData();
     fillSelects();
     renderPeriodControl();
