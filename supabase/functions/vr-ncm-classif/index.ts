@@ -54,7 +54,8 @@ Deno.serve(async (req: Request) => {
     const nomenclaturas = await carregarNomenclaturas();
     // O código na tabela oficial vem com pontos (ex: "9027.10.00") — compara
     // só pelos dígitos, igual já era feito no navegador.
-    const alvo = nomenclaturas.find((n: any) => String(n.Codigo || '').replace(/\D/g, '') === ncmDigits);
+    const porDigitos = (n: any) => String(n.Codigo || '').replace(/\D/g, '');
+    const alvo = nomenclaturas.find((n: any) => porDigitos(n) === ncmDigits);
 
     if (!alvo) {
       return new Response(JSON.stringify({ encontrado: false }), {
@@ -62,10 +63,24 @@ Deno.serve(async (req: Request) => {
       });
     }
 
+    // Monta o "caminho" hierárquico (capítulo de 2 dígitos, posição de 4,
+    // subposição de 6, item de 8) — cada nível é um registro à parte na
+    // tabela oficial. Nem todo NCM tem os 4 níveis (alguns pulam direto de
+    // posição pra item de 8 dígitos, por exemplo), então só inclui os que
+    // realmente existem, sem repetir o próprio item já encontrado.
+    const caminho: { codigo: string; descricao: string }[] = [];
+    for (const tam of [2, 4, 6]) {
+      if (ncmDigits.length <= tam) break;
+      const prefixo = ncmDigits.slice(0, tam);
+      const nivel = nomenclaturas.find((n: any) => porDigitos(n) === prefixo);
+      if (nivel) caminho.push({ codigo: nivel.Codigo, descricao: nivel.Descricao });
+    }
+
     return new Response(JSON.stringify({
       encontrado: true,
       codigo: alvo.Codigo,
       descricao: alvo.Descricao,
+      caminho,
     }), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
     });
