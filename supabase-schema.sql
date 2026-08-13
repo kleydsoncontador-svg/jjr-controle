@@ -93,6 +93,44 @@ CREATE POLICY "auth_delete" ON public.dados_app
 -- SELECT tablename, rowsecurity FROM pg_tables WHERE tablename = 'dados_app';
 -- SELECT policyname FROM pg_policies WHERE tablename = 'dados_app';
 
+-- ═══════════════════════════════════════════════════════════════════════════
+-- SOCORRO: "Não foi possível salvar na nuvem" para todos os operadores
+-- ═══════════════════════════════════════════════════════════════════════════
+-- Sintoma: ninguém consegue salvar, o app mostra aviso de sessão/permissão, e
+-- no console aparece o erro 42501 "new row violates row-level security policy".
+-- Já aconteceu uma vez (11/08/2026) e custou um dia de trabalho de um operador,
+-- porque na época o app deixava continuar digitando mesmo sem salvar.
+--
+-- ANTES DE MAIS NADA: avise todos a NÃO limparem cache nem trocarem de máquina.
+-- O trabalho não salvo fica no IndexedDB de cada computador e sobe sozinho
+-- quando a conexão voltar (ver _loadFromSupabase no index.html).
+--
+-- Passo 1 — ver o que existe hoje:
+--   SELECT policyname, cmd, roles::text FROM pg_policies WHERE tablename='dados_app';
+--   (o esperado são 4 linhas: auth_select/auth_insert/auth_update/auth_delete,
+--    todas com roles = {authenticated})
+--
+-- Passo 2 — restaurar (seguro rodar mesmo se já existirem):
+--   ALTER TABLE public.dados_app ENABLE ROW LEVEL SECURITY;
+--   DROP POLICY IF EXISTS "auth_select" ON public.dados_app;
+--   CREATE POLICY "auth_select" ON public.dados_app FOR SELECT TO authenticated USING (true);
+--   DROP POLICY IF EXISTS "auth_insert" ON public.dados_app;
+--   CREATE POLICY "auth_insert" ON public.dados_app FOR INSERT TO authenticated WITH CHECK (true);
+--   DROP POLICY IF EXISTS "auth_update" ON public.dados_app;
+--   CREATE POLICY "auth_update" ON public.dados_app FOR UPDATE TO authenticated USING (true) WITH CHECK (true);
+--   DROP POLICY IF EXISTS "auth_delete" ON public.dados_app;
+--   CREATE POLICY "auth_delete" ON public.dados_app FOR DELETE TO authenticated USING (true);
+--
+-- Passo 3 — cada operador faz logout e login de novo (pra pegar sessão nova).
+--
+-- Como confirmar que voltou: basta abrir o sistema. Desde 11/08/2026 o app faz
+-- um teste real de gravação na abertura (_verificarPermissaoDeGravar) e trava a
+-- tela avisando se não conseguir salvar — se abrir sem aviso, está funcionando.
+--
+-- OBS: testar com a anon key (curl sem login) SEMPRE dá esse mesmo erro 42501,
+-- porque as políticas são TO authenticated. Isso não prova que está quebrado —
+-- o teste válido é com um usuário logado.
+
 -- ─── Realtime (sincronização entre operadores sem precisar dar F5) ───────────
 -- OBRIGATÓRIO rodar este comando uma vez para o app atualizar a tela sozinho
 -- quando outro operador salvar algo (ex: marcar fechamento, editar ganhos):
