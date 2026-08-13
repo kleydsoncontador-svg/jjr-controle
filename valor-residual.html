@@ -931,24 +931,12 @@ function formatarCnpj(digits){
 
 // ═══════════════════════════════════════════════════════════════════════
 // CLASSIFICAÇÃO NCM — consulta a tabela pública oficial (Portal Único
-// Siscomex / Receita Federal). Baixa a tabela completa uma vez e guarda em
-// memória (é grande, então só busca de novo se a aba for recarregada).
+// Siscomex / Receita Federal), via a Edge Function vr-ncm-classif (o
+// navegador não consegue chamar a API do Siscomex direto por causa de CORS).
 // ═══════════════════════════════════════════════════════════════════════
-const NCM_FONTE_URL = 'https://portalunico.siscomex.gov.br/classif/api/publico/nomenclatura/download/json';
 const NCM_CONSULTA_MANUAL_URL = 'https://portalunico.siscomex.gov.br/classif/#/sumario?perfil=cidadao';
-let _ncmTabelaCache = null;
-async function carregarTabelaNCM(){
-  if(_ncmTabelaCache) return _ncmTabelaCache;
-  const resp = await fetch(NCM_FONTE_URL);
-  if(!resp.ok) throw new Error('Portal Siscomex respondeu com status ' + resp.status);
-  const json = await resp.json();
-  const lista = Array.isArray(json) ? json : (json.Nomenclaturas || json.nomenclaturas || null);
-  if(!Array.isArray(lista)) throw new Error('formato de resposta inesperado');
-  _ncmTabelaCache = lista;
-  return lista;
-}
 
-// Reserva pra quando o Portal Siscomex está fora do ar (ex: manutenção
+// Reserva pra quando a busca está indisponível (ex: Siscomex em manutenção
 // programada, já vi acontecer). Cobre as posições (4 dígitos) mais comuns
 // pra imobilizado — descrições oficiais da NCM/TIPI, nível de posição (não
 // o item completo de 8 dígitos, por isso vem marcado como "aproximado").
@@ -1264,26 +1252,32 @@ async function buscarClassificacaoNCM(){
   if(ncmRaw.length < 2){ showToast('Informe ao menos parte do NCM primeiro.','err'); return; }
   resultEl.style.color = 'var(--slate)';
   resultEl.textContent = 'Buscando no Portal Único Siscomex (Receita Federal)...';
+  // O navegador não consegue chamar a API do Siscomex direto (bloqueio de
+  // CORS do lado deles, dá "Failed to fetch") — a busca passa por uma Edge
+  // Function nossa, que faz essa chamada do lado do servidor (sem essa
+  // restrição) e devolve só o resultado.
   try{
-    const lista = await carregarTabelaNCM();
-    const alvo = lista.find(function(x){
-      const cod = String(x.Codigo || x.codigo || '').replace(/\D/g,'');
-      return cod === ncmRaw;
+    const resp = await fetch(SUPABASE_URL + '/functions/v1/vr-ncm-classif', {
+      method: 'POST',
+      headers: { 'Content-Type':'application/json', 'Authorization':'Bearer '+SUPABASE_ANON_KEY },
+      body: JSON.stringify({ ncm: ncmRaw }),
     });
-    if(!alvo){
+    if(!resp.ok) throw new Error('A busca retornou status '+resp.status);
+    const d = await resp.json();
+    if(d.error) throw new Error(d.error);
+    if(!d.encontrado){
       resultEl.style.color = 'var(--amber)';
       resultEl.innerHTML = 'NCM '+esc(ncmRaw)+' não encontrado na tabela oficial. <a href="'+NCM_CONSULTA_MANUAL_URL+'" target="_blank" rel="noopener">Consultar manualmente →</a>';
       return;
     }
-    const desc = alvo.Descricao || alvo.descricao || '(sem descrição)';
     resultEl.style.color = 'var(--green)';
-    resultEl.innerHTML = '✓ <b>'+esc(desc)+'</b> — fonte: Portal Único Siscomex (Receita Federal)';
+    resultEl.innerHTML = '✓ <b>'+esc(d.descricao||'(sem descrição)')+'</b> — fonte: Portal Único Siscomex (Receita Federal)';
   }catch(e){
     console.error(e);
     const local = buscarNCMTabelaLocal(ncmRaw);
     if(local){
       resultEl.style.color = 'var(--amber)';
-      resultEl.innerHTML = '≈ <b>'+esc(local)+'</b> — nível de posição (4 dígitos), Portal Siscomex indisponível agora ('+esc(e.message)+'). '
+      resultEl.innerHTML = '≈ <b>'+esc(local)+'</b> — nível de posição (4 dígitos), busca indisponível agora ('+esc(e.message)+'). '
         + '<a href="'+NCM_CONSULTA_MANUAL_URL+'" target="_blank" rel="noopener">Conferir os 8 dígitos completos →</a>';
     } else {
       resultEl.style.color = 'var(--red)';
