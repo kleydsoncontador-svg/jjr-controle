@@ -6563,8 +6563,24 @@ document.addEventListener('focusout', e=>{
 async function _loadFromSupabase(){
   if(!_supaClient)return;
   try{
-    var r=await _supaClient.from('dados_app').select('key,value,updated_at').order('updated_at', {ascending: false});
-    if(r.error){console.warn('SB load err:',r.error);_supaLastLoadOk=false;return;}
+    // O Supabase limita a 1000 linhas por request (PostgREST) — sem paginação
+    // explícita, um banco com mais registros que isso tinha a leitura
+    // truncada de forma instável (a ordem de desempate entre registros com
+    // updated_at idêntico/muito próximo não é determinística, então uma
+    // chave importante como "emps" podia ora entrar ora ficar de fora dos
+    // 1000 retornados). Descoberto em 18/08/2026 quando a Visão Geral
+    // alternava entre correta e zerada sem nenhuma mudança real no banco —
+    // era a MESMA leitura truncada que já tinha sido corrigida no script de
+    // backup (scripts/backup-diario.js), só que aqui também.
+    const PAGE_SIZE=1000;
+    var allRows=[];
+    for(var from=0;;from+=PAGE_SIZE){
+      var page=await _supaClient.from('dados_app').select('key,value,updated_at').order('updated_at',{ascending:false}).range(from,from+PAGE_SIZE-1);
+      if(page.error){console.warn('SB load err:',page.error);_supaLastLoadOk=false;return;}
+      allRows=allRows.concat(page.data||[]);
+      if(!page.data||page.data.length<PAGE_SIZE)break;
+    }
+    var r={data:allRows};
     _supaLastLoadOk=true;
     var serverTsByKey={};
     if(r.data&&r.data.length){
