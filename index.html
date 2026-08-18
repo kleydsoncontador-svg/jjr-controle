@@ -6585,45 +6585,40 @@ async function _loadFromSupabase(){
       cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
       console.log('✓ Supabase: carregou',r.data.length,'registros. Ganhos encontrados:',r.data.filter(d=>d.key.startsWith('ganhos_')).length);
     }
-    // Reenvia pro servidor qualquer dado local mais recente que ele ainda não tem
-    // confirmado (ex: gravação que não terminou de sincronizar antes da página
-    // recarregar). Só faz isso pra edições RECENTES (últimas 6h) — um cache local
-    // de dias/semanas atrás que por algum motivo tenha um timestamp "mais recente"
-    // que o servidor (relógio do PC errado, aba que ficou aberta há muito tempo,
-    // reinstalação, etc.) NÃO deve ser reenviado automaticamente: já aconteceu de
-    // um PC com cache antigo sobrescrever silenciosamente uma correção feita
-    // direto no banco (18/08/2026), apagando trabalho de outros operadores sem
-    // nenhum aviso. Ver [[project_jjr_incidente_17ago_restauracao]].
-    const RESYNC_JANELA_MS=6*60*60*1000;
-    const agora=Date.now();
-    let resyncBloqueadoCount=0;
+    // NUNCA reenviar automaticamente/silenciosamente pro servidor dado algum
+    // que o cache local ache "mais recente". Isso existia pra recobrir uma
+    // gravação que ficou pendente por falha de rede pontual — mas em
+    // 18/08/2026 um PC com cache de HORAS atrás (não dias — por isso nem uma
+    // janela de tempo generosa protegeu) sobrescreveu silenciosamente uma
+    // correção de dados feita direto no banco, apagando trabalho de outros
+    // operadores sem nenhum aviso. Ver [[project_jjr_incidente_17ago_restauracao]].
+    // O caso real de "gravação que falhou por rede" já tem proteção própria e
+    // VISÍVEL: _tratarFalhaGravacao()/_mostrarErroSincronizacao(), disparados
+    // no momento exato em que uma gravação falha — não precisa (e não deve)
+    // ser reforçado por um reenvio automático no boot.
+    let divergenciaCount=0;
     Object.keys(cccLocalUpdatedAt).forEach(function(key){
       if(key==='ccc_session')return;
       var localTs=cccLocalUpdatedAt[key],serverTs=serverTsByKey[key];
       if((!serverTs||new Date(localTs)>new Date(serverTs))&&(key in cccCache)){
-        if(agora-new Date(localTs).getTime()>RESYNC_JANELA_MS){
-          resyncBloqueadoCount++;
-          console.warn('Resync bloqueado (cache local antigo, fora da janela de confiança):',key,localTs);
-          return;
-        }
-        _supaClient.from('dados_app').upsert({key:key,value:cccCache[key],updated_at:localTs}).then(function(res){if(res.error)console.warn('SB resync err',key,res.error);});
+        divergenciaCount++;
+        console.warn('Cache local diverge do servidor (NÃO reenviado automaticamente):',key,localTs);
       }
     });
-    if(resyncBloqueadoCount>0) _avisarCacheLocalDesatualizado(resyncBloqueadoCount);
+    if(divergenciaCount>0) _avisarCacheLocalDesatualizado(divergenciaCount);
   }catch(e){console.warn('_loadFromSupabase:',e);_supaLastLoadOk=false;}
 }
 
-// Aviso fixo (não fecha sozinho) quando o app detecta cache local antigo que
-// diverge do servidor mas NÃO foi reenviado automaticamente (ver comentário
-// acima). Isso pode ser só uma tela que ficou aberta por muito tempo, mas
+// Aviso fixo (não fecha sozinho) quando o app detecta cache local que diverge
+// do servidor. Isso pode ser só uma aba que ficou aberta por muito tempo, mas
 // também pode ser dado bom que só existe localmente — vale conferir antes de
-// simplesmente ignorar.
+// simplesmente ignorar. Nunca reenviado automaticamente (ver comentário acima).
 function _avisarCacheLocalDesatualizado(qtd){
   if(document.getElementById('cacheAntigoAviso'))return;
   var div=document.createElement('div');
   div.id='cacheAntigoAviso';
   div.style.cssText='position:fixed;bottom:16px;left:16px;z-index:9999;background:#78350F;color:#FEF3C7;padding:12px 16px;border-radius:8px;font-size:12.5px;max-width:340px;box-shadow:0 4px 12px rgba(0,0,0,.3)';
-  div.innerHTML='⚠️ Este navegador tem '+qtd+' item'+(qtd!==1?'s':'')+' salvo'+(qtd!==1?'s':'')+' localmente há mais de 6h que diverge'+(qtd!==1?'m':'')+' do servidor e NÃO foi'+(qtd!==1?'m':'')+' reenviado automaticamente, pra evitar sobrescrever dados de outros operadores. Se você tinha algo importante digitado aqui que não sincronizou, avise o Kleydson antes de continuar. <span style="cursor:pointer;text-decoration:underline" onclick="this.closest(\'div\').remove()">Entendi, fechar</span>';
+  div.innerHTML='⚠️ Este navegador tem '+qtd+' item'+(qtd!==1?'s':'')+' salvo'+(qtd!==1?'s':'')+' localmente que diverge'+(qtd!==1?'m':'')+' do servidor. Se você tinha algo importante digitado que não sincronizou, avise o Kleydson antes de continuar — nada foi reenviado automaticamente. <span style="cursor:pointer;text-decoration:underline" onclick="this.closest(\'div\').remove()">Entendi, fechar</span>';
   document.body.appendChild(div);
 }
 
