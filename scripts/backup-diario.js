@@ -25,10 +25,24 @@ async function main() {
   const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
   console.log('🔄 Buscando todos os registros de dados_app...');
-  const { data, error } = await supabase.from('dados_app').select('*');
-  if (error) {
-    console.error('❌ Erro ao buscar dados:', error);
-    process.exit(1);
+  // O Supabase limita a 1000 linhas por request (PostgREST). Sem paginação
+  // explícita, bancos com mais de 1000 registros tinham o backup silenciosamente
+  // truncado — descoberto em 18/08/2026 quando a restauração pós-incidente
+  // revelou que só 1000 de 1815 registros reais estavam nos backups diários.
+  const PAGE_SIZE = 1000;
+  const data = [];
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data: page, error } = await supabase
+      .from('dados_app')
+      .select('*')
+      .range(from, from + PAGE_SIZE - 1);
+    if (error) {
+      console.error('❌ Erro ao buscar dados:', error);
+      process.exit(1);
+    }
+    data.push(...page);
+    console.log(`  … ${data.length} registros lidos até agora`);
+    if (page.length < PAGE_SIZE) break;
   }
 
   const agora = new Date();
