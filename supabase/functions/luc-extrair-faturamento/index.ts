@@ -14,7 +14,9 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+// llama-3.3-70b-versatile foi descontinuado pelo Groq em 17/06/2026 —
+// migrado para o substituto recomendado pela própria Groq.
+const GROQ_MODEL = 'openai/gpt-oss-120b';
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
