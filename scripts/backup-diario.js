@@ -1,7 +1,7 @@
-// Backup diário automático de dados_app (Supabase) — roda via GitHub Actions,
-// sem depender de nenhum PC ligado. Usa a service_role key (bypassa RLS, lê
-// tudo) e grava em <pastaDestino>/AAAA-MM/backup_AAAA-MM-DD.json — um arquivo
-// por dia, nunca sobrescreve os anteriores.
+// Backup automático de dados_app (Supabase) — roda via GitHub Actions a cada
+// 6h, sem depender de nenhum PC ligado. Usa a service_role key (bypassa RLS,
+// lê tudo) e grava em <pastaDestino>/AAAA-MM/backup_AAAA-MM-DD_HHh.json — um
+// arquivo por execução, nunca sobrescreve os anteriores.
 //
 // Variáveis de ambiente necessárias:
 //   SUPABASE_URL              (opcional — usa o projeto real da JJR por padrão)
@@ -49,10 +49,11 @@ async function main() {
   const ano = agora.getUTCFullYear();
   const mes = String(agora.getUTCMonth() + 1).padStart(2, '0');
   const dia = String(agora.getUTCDate()).padStart(2, '0');
+  const hora = String(agora.getUTCHours()).padStart(2, '0');
 
   const pastaMes = path.join(DEST_DIR, `${ano}-${mes}`);
   fs.mkdirSync(pastaMes, { recursive: true });
-  const arquivo = path.join(pastaMes, `backup_${ano}-${mes}-${dia}.json`);
+  const arquivo = path.join(pastaMes, `backup_${ano}-${mes}-${dia}_${hora}h.json`);
 
   const backup = {
     timestamp: agora.toISOString(),
