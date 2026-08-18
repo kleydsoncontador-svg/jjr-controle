@@ -6583,16 +6583,20 @@ async function _loadFromSupabase(){
     var r={data:allRows};
     _supaLastLoadOk=true;
     var serverTsByKey={};
+    // Janela pequena (2min) só pra cobrir a race condition real: uma edição
+    // feita agora mesmo (ainda subindo pro servidor) sendo apagada por uma
+    // leitura que chegou antes dessa gravação terminar. Cache local mais
+    // velho que isso NUNCA deve vencer o servidor pra exibição — foi
+    // exatamente um cache de horas atrás "parecendo mais recente" que fez a
+    // TELA continuar mostrando dados errados em 18/08/2026 mesmo depois do
+    // servidor já estar correto (o reenvio automático já tinha sido
+    // removido, mas a leitura ainda preferia o local por timestamp). Usada
+    // tanto pra decidir o que exibir quanto pra decidir se um item entra no
+    // aviso de divergência abaixo — sem essa mesma tolerância nos dois
+    // lugares, o aviso "gritava" toda vez que o próprio usuário editava algo
+    // e recarregava a página em seguida (edição normal, não risco nenhum).
+    const RACE_CONDITION_MS=2*60*1000;
     if(r.data&&r.data.length){
-      // Janela pequena (2min) só pra cobrir a race condition real: uma edição
-      // feita agora mesmo (ainda subindo pro servidor) sendo apagada por uma
-      // leitura que chegou antes dessa gravação terminar. Cache local mais
-      // velho que isso NUNCA deve vencer o servidor pra exibição — foi
-      // exatamente um cache de horas atrás "parecendo mais recente" que fez a
-      // TELA continuar mostrando dados errados em 18/08/2026 mesmo depois do
-      // servidor já estar correto (o reenvio automático já tinha sido
-      // removido, mas a leitura ainda preferia o local por timestamp).
-      const RACE_CONDITION_MS=2*60*1000;
       r.data.forEach(function(row){
         if(row.key!==undefined&&row.value!==undefined){
           serverTsByKey[row.key]=row.updated_at;
@@ -6624,7 +6628,11 @@ async function _loadFromSupabase(){
     Object.keys(cccLocalUpdatedAt).forEach(function(key){
       if(key==='ccc_session')return;
       var localTs=cccLocalUpdatedAt[key],serverTs=serverTsByKey[key];
-      if((!serverTs||new Date(localTs)>new Date(serverTs))&&(key in cccCache)){
+      if(!localTs)return;
+      var divergeDeVerdade=serverTs
+        ? new Date(localTs).getTime()-new Date(serverTs).getTime()>RACE_CONDITION_MS
+        : (Date.now()-new Date(localTs).getTime()>RACE_CONDITION_MS); // chave que só existe local (nem no servidor)
+      if(divergeDeVerdade&&(key in cccCache)){
         divergenciaCount++;
         console.warn('Cache local diverge do servidor (NÃO reenviado automaticamente):',key,localTs);
       }
