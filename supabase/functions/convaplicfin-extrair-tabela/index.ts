@@ -76,6 +76,10 @@ async function extrairViaGroq(texto: string): Promise<unknown> {
   return JSON.parse(limparJson(raw));
 }
 
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 async function extrairViaGemini(imagens: string[]): Promise<unknown> {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
@@ -90,25 +94,38 @@ async function extrairViaGemini(imagens: string[]): Promise<unknown> {
     parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
   }
 
-  const resp = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
-      body: JSON.stringify({
-        contents: [{ role: 'user', parts }],
-        generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
-      }),
+  // O tier gratuito do Gemini retorna 503 "model is currently experiencing
+  // high demand" com frequência (sobrecarga temporária do lado do Google,
+  // não um erro real) — descoberto testando com o PDF real do Itaú em
+  // 18/08/2026. Tenta de novo automaticamente em vez de fazer o usuário
+  // clicar "Processar" manualmente várias vezes.
+  const MAX_TENTATIVAS = 3;
+  let ultimoErro = '';
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+        }),
+      }
+    );
+    if (resp.ok) {
+      const data = await resp.json();
+      const raw = data?.candidates?.[0]?.content?.parts?.find((p: any) => typeof p.text === 'string')?.text || '';
+      if (!raw) throw new Error('Gemini não retornou texto — resposta: ' + JSON.stringify(data).slice(0, 300));
+      return JSON.parse(limparJson(raw));
     }
-  );
-  if (!resp.ok) {
     const errText = await resp.text();
-    throw new Error('Erro na API da IA (Gemini, ' + resp.status + '): ' + errText.slice(0, 300));
+    ultimoErro = 'Erro na API da IA (Gemini, ' + resp.status + '): ' + errText.slice(0, 300);
+    const retentavel = resp.status === 503 || resp.status === 429;
+    if (!retentavel || tentativa === MAX_TENTATIVAS) throw new Error(ultimoErro);
+    await sleep(2000 * tentativa); // 2s, depois 4s
   }
-  const data = await resp.json();
-  const raw = data?.candidates?.[0]?.content?.parts?.find((p: any) => typeof p.text === 'string')?.text || '';
-  if (!raw) throw new Error('Gemini não retornou texto — resposta: ' + JSON.stringify(data).slice(0, 300));
-  return JSON.parse(limparJson(raw));
+  throw new Error(ultimoErro);
 }
 
 Deno.serve(async (req: Request) => {
