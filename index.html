@@ -10847,6 +10847,9 @@ let _convAplicFinExpandido={};
 let _convAplicFinFormOpen={};
 let _convAplicFinContasFormOpen={};
 let _convAplicFinResultados={};
+// Extração genérica (via IA) aguardando o usuário mapear as colunas antes de
+// virar lançamentos — ver renderConvAplicFinMapeamentoForm.
+let _convAplicFinExtracaoPendente={};
 // Contas fixas, iguais para todas as empresas e aplicações (confirmado pelo
 // usuário) — só a "conta da aplicação" e a "conta banco" variam por empresa.
 const CONV_APLICFIN_CONTA_IRRF='31';
@@ -10985,6 +10988,7 @@ function editarConvAplicFinContas(itemId){
 }
 function renderConvAplicFinProcessamento(eid,item){
   const resultado=_convAplicFinResultados[item.id];
+  const pendente=_convAplicFinExtracaoPendente[item.id];
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
     <div class="fg"><label class="fl">Extrato (PDF)</label><input type="file" id="convAplicFinArquivo_${item.id}" accept=".pdf" class="fi"></div>
     <div class="fg"><label class="fl">Nos Resgates, usar</label>
@@ -10995,8 +10999,87 @@ function renderConvAplicFinProcessamento(eid,item){
     </div>
     <button class="btn bp bsm" id="convAplicFinBtnProcessar_${item.id}" onclick="processarConvAplicFinItem('${eid}','${item.id}')" style="margin-top:6px">&#9881; Processar Arquivo</button>
     <div id="convAplicFinStatus_${item.id}" style="margin-top:8px;font-size:12px;white-space:pre-line"></div>
+    ${pendente?renderConvAplicFinMapeamentoForm(eid,item.id,pendente):''}
     <div id="convAplicFinResultado_${item.id}">${resultado?renderConvAplicFinResultado(eid,item.id):''}</div>
   </div>`;
+}
+// ── Mapeamento de colunas configurável (modelo genérico, via IA) ────────────
+// Depois que _convAplicFinExtrairGenerico devolve {colunas, linhas}, o
+// usuário decide pra cada coluna (exceto "Data", sempre obrigatória): ignorar,
+// ou informar Débito/Crédito. Salvo em item.mapeamentoColunas — por empresa/
+// aplicação, já que o mesmo banco pode exigir contas diferentes em cada uma.
+function renderConvAplicFinMapeamentoForm(eid,itemId,extraido){
+  const{colunas,linhas,observacoes}=extraido;
+  const colunasMapeaveis=colunas.filter(c=>c!=='Data');
+  const amostra=linhas.slice(0,3);
+  const mapAtual=_convAplicFinMapeamentoRascunho[itemId]||{};
+  let html=`<div style="margin-top:12px;background:white;border-radius:6px;padding:12px;border:1px solid var(--teal-l)">
+    <div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:6px">Modelo não reconhecido automaticamente — mapeie as colunas encontradas</div>`;
+  if(observacoes)html+=`<div style="font-size:11px;color:var(--slate);margin-bottom:8px">${esc(observacoes)}</div>`;
+  html+=`<div style="margin-bottom:10px;max-height:140px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;font-size:10.5px;border-collapse:collapse">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">${colunas.map(c=>`<th style="padding:4px 6px;text-align:left;white-space:nowrap">${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${amostra.map(l=>`<tr style="border-top:1px solid var(--border)">${colunas.map(c=>`<td style="padding:4px 6px;white-space:nowrap">${l[c]!=null?esc(String(l[c])):'—'}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table>
+  </div>
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Data é sempre incluída. Para cada outra coluna, ignore ou informe as contas de débito/crédito.</div>
+  <div style="display:grid;gap:8px">`;
+  colunasMapeaveis.forEach(col=>{
+    const cfg=mapAtual[col]||{};
+    const ignorada=cfg.ignorar!==false;
+    html+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px;background:var(--bg);border-radius:4px">
+      <label style="display:flex;align-items:center;gap:4px;font-size:11.5px;min-width:200px"><input type="checkbox" id="convAplicFinMapIgnorar_${itemId}_${esc(col)}" ${ignorada?'checked':''} onchange="_convAplicFinToggleMapColuna('${itemId}','${esc(col)}',this.checked)"> <b>${esc(col)}</b> — ignorar</label>
+      <div id="convAplicFinMapContas_${itemId}_${esc(col)}" style="display:${ignorada?'none':'flex'};gap:6px">
+        <input class="fi" placeholder="Débito" value="${esc(cfg.debito||'')}" id="convAplicFinMapDebito_${itemId}_${esc(col)}" style="width:90px;font-size:11px">
+        <input class="fi" placeholder="Crédito" value="${esc(cfg.credito||'')}" id="convAplicFinMapCredito_${itemId}_${esc(col)}" style="width:90px;font-size:11px">
+      </div>
+    </div>`;
+  });
+  html+=`</div>
+  <div style="margin-top:10px;display:flex;gap:6px">
+    <button class="btn bp bsm" onclick="salvarConvAplicFinMapeamento('${eid}','${itemId}')">&#10003; Salvar Mapeamento e Gerar Lançamentos</button>
+    <button class="btn bo bsm" onclick="delete _convAplicFinExtracaoPendente['${itemId}'];delete _convAplicFinMapeamentoRascunho['${itemId}'];renderConvAplicFinLista()">Cancelar</button>
+  </div>
+</div>`;
+  return html;
+}
+let _convAplicFinMapeamentoRascunho={};
+function _convAplicFinToggleMapColuna(itemId,coluna,ignorada){
+  if(!_convAplicFinMapeamentoRascunho[itemId])_convAplicFinMapeamentoRascunho[itemId]={};
+  const atual=_convAplicFinMapeamentoRascunho[itemId][coluna]||{};
+  _convAplicFinMapeamentoRascunho[itemId][coluna]={...atual,ignorar:ignorada};
+  const contasEl=document.getElementById('convAplicFinMapContas_'+itemId+'_'+coluna);
+  if(contasEl)contasEl.style.display=ignorada?'none':'flex';
+}
+function salvarConvAplicFinMapeamento(eid,itemId){
+  const extraido=_convAplicFinExtracaoPendente[itemId];
+  if(!extraido){toast('Extração não encontrada — processe o arquivo novamente.','err');return;}
+  const colunasMapeaveis=extraido.colunas.filter(c=>c!=='Data');
+  const mapeamento={};
+  for(const col of colunasMapeaveis){
+    const ignorarEl=document.getElementById('convAplicFinMapIgnorar_'+itemId+'_'+col);
+    const ignorar=!!ignorarEl?.checked;
+    if(ignorar){mapeamento[col]={ignorar:true};continue;}
+    const debito=(document.getElementById('convAplicFinMapDebito_'+itemId+'_'+col)?.value||'').trim();
+    const credito=(document.getElementById('convAplicFinMapCredito_'+itemId+'_'+col)?.value||'').trim();
+    if(!debito||!credito){toast('Informe débito e crédito para "'+col+'", ou marque para ignorar.','err');return;}
+    mapeamento[col]={ignorar:false,debito,credito};
+  }
+  const lista=getConvAplicFinLista(eid);
+  const item=lista.find(i=>i.id===itemId);
+  if(!item){toast('Aplicação não encontrada.','err');return;}
+  item.mapeamentoColunas=mapeamento;
+  setConvAplicFinLista(eid,lista);
+  const linhas=_convAplicFinGerarLinhasGenerico(item.nome,extraido.linhas,mapeamento);
+  if(!linhas.length){
+    toast('Nenhum lançamento gerado — confira se ao menos uma coluna foi mapeada com valores.','err');
+    return;
+  }
+  _convAplicFinResultados[itemId]={linhas,meta:extraido};
+  delete _convAplicFinExtracaoPendente[itemId];
+  delete _convAplicFinMapeamentoRascunho[itemId];
+  renderConvAplicFinLista();
+  toast('Extrato processado com sucesso!','ok');
 }
 function renderConvAplicFinForm(eid){
   const opcoes=_convAplicFinOpcoesListagem();
@@ -11156,6 +11239,71 @@ function _convAplicFinGerarLinhasInvestFacilBradesco(item,dados,usarCredito){
   }
   return linhas;
 }
+// ── Modelo genérico (qualquer banco não reconhecido pelo parser fixo acima) ──
+// Extrai texto via pdfjsLib como de costume; se vier vazio/curto (PDF é
+// imagem escaneada — caso real: "Aplic. Aut Mais Itaú", confirmado sem
+// nenhum texto selecionável), renderiza cada página como imagem e manda pra
+// IA com visão. A IA devolve as colunas exatamente como aparecem no extrato
+// (sem assumir nenhum banco), e o usuário mapeia cada uma pra uma conta
+// contábil (ou ignora) na tela seguinte — ver renderConvAplicFinMapeamentoForm.
+async function _convAplicFinExtrairGenerico(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let textoCompleto='';
+  const imagens=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+    textoCompleto+=' '+texto;
+  }
+  textoCompleto=textoCompleto.trim();
+  if(textoCompleto.length<20){
+    // PDF sem texto selecionável — renderiza cada página como imagem (até 5,
+    // limite do modelo de visão) pra mandar pra IA.
+    for(let p=1;p<=Math.min(pdf.numPages,5);p++){
+      const page=await pdf.getPage(p);
+      const viewport=page.getViewport({scale:2});
+      const canvas=document.createElement('canvas');
+      canvas.width=viewport.width;canvas.height=viewport.height;
+      const ctx=canvas.getContext('2d');
+      await page.render({canvasContext:ctx,viewport}).promise;
+      imagens.push(canvas.toDataURL('image/jpeg',0.85));
+    }
+  }
+  const body=imagens.length?{imagens}:{texto:textoCompleto};
+  const resp=await fetch(SUPABASE_URL+'/functions/v1/convaplicfin-extrair-tabela',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+    body:JSON.stringify(body)
+  });
+  if(!resp.ok)throw new Error('A extração retornou status '+resp.status);
+  const d=await resp.json();
+  if(d.error)throw new Error(d.error);
+  if(!Array.isArray(d.colunas)||!Array.isArray(d.linhas)||!d.linhas.length){
+    throw new Error('Não foi possível identificar uma tabela de movimentação neste extrato.');
+  }
+  return d; // {colunas, linhas, observacoes}
+}
+// Gera os lançamentos a partir do mapeamento configurado pelo usuário
+// (renderConvAplicFinMapeamentoForm) — mesma estrutura de saída que o parser
+// fixo do Bradesco produz, então reaproveita o preview/exportação sem mudança.
+function _convAplicFinGerarLinhasGenerico(nomeAplicacao,linhas,mapeamento){
+  const saida=[];
+  linhas.forEach(linha=>{
+    const data=linha['Data'];
+    if(!data)return;
+    Object.keys(mapeamento).forEach(coluna=>{
+      const cfg=mapeamento[coluna];
+      if(!cfg||cfg.ignorar)return;
+      const valor=linha[coluna];
+      if(valor==null||Math.abs(Number(valor)||0)<0.005)return;
+      saida.push({data,historico:nomeAplicacao+' - '+coluna,valor:Math.abs(Number(valor)),debito:cfg.debito,credito:cfg.credito});
+    });
+  });
+  return saida;
+}
 async function processarConvAplicFinItem(eid,itemId){
   const lista=getConvAplicFinLista(eid);
   const item=lista.find(i=>i.id===itemId);
@@ -11170,21 +11318,45 @@ async function processarConvAplicFinItem(eid,itemId){
   toast('Processando arquivo…','');
   try{
     const dados=await _convAplicFinExtrairInvestFacilBradesco(file);
-    if(!dados){
-      _convAplicFinSetStatus(itemId,'Modelo de extrato não reconhecido para esta aplicação. Avise o desenvolvedor para incluir esse novo modelo.','err');
-      toast('Modelo não reconhecido.','err');
-      _convAplicFinResetBotao(itemId);return;
+    if(dados){
+      if(!dados.aplicacoes.length&&!dados.resgates.length&&!dados.rendimentoBrutoPeriodo){
+        _convAplicFinSetStatus(itemId,'Nenhuma Aplicação, Resgate ou Rendimento encontrado neste extrato.','err');
+        toast('Nada encontrado no extrato.','err');
+        _convAplicFinResetBotao(itemId);return;
+      }
+      const linhas=_convAplicFinGerarLinhasInvestFacilBradesco(item,dados,usarCredito);
+      _convAplicFinResultados[itemId]={linhas,meta:dados};
+      _convAplicFinSetStatus(itemId,'','');
+      renderConvAplicFinLista();
+      toast('Extrato processado com sucesso!','ok');
+      return;
     }
-    if(!dados.aplicacoes.length&&!dados.resgates.length&&!dados.rendimentoBrutoPeriodo){
-      _convAplicFinSetStatus(itemId,'Nenhuma Aplicação, Resgate ou Rendimento encontrado neste extrato.','err');
-      toast('Nada encontrado no extrato.','err');
-      _convAplicFinResetBotao(itemId);return;
+    // Modelo fixo (Bradesco) não reconheceu — tenta o fluxo genérico via IA.
+    _convAplicFinSetStatus(itemId,'Modelo não identificado — lendo com IA (pode levar alguns segundos)…','');
+    const extraido=await _convAplicFinExtrairGenerico(file);
+    // Se já existe um mapeamento salvo pra essa aplicação E ele cobre todas
+    // as colunas encontradas dessa vez, reaproveita direto sem perguntar de
+    // novo — só reabre o formulário se aparecer alguma coluna nova.
+    const colunasMapeaveis=extraido.colunas.filter(c=>c!=='Data');
+    const mapSalvo=item.mapeamentoColunas;
+    const cobreTudo=mapSalvo&&colunasMapeaveis.every(c=>c in mapSalvo);
+    if(cobreTudo){
+      const linhas=_convAplicFinGerarLinhasGenerico(item.nome,extraido.linhas,mapSalvo);
+      if(!linhas.length){
+        _convAplicFinSetStatus(itemId,'Nenhum lançamento gerado com o mapeamento salvo — confira as colunas.','err');
+        toast('Nada encontrado com o mapeamento salvo.','err');
+        _convAplicFinResetBotao(itemId);return;
+      }
+      _convAplicFinResultados[itemId]={linhas,meta:extraido};
+      _convAplicFinSetStatus(itemId,'','');
+      renderConvAplicFinLista();
+      toast('Extrato processado com sucesso!','ok');
+      return;
     }
-    const linhas=_convAplicFinGerarLinhasInvestFacilBradesco(item,dados,usarCredito);
-    _convAplicFinResultados[itemId]={linhas,meta:dados};
+    _convAplicFinMapeamentoRascunho[itemId]=mapSalvo?{...mapSalvo}:{};
+    _convAplicFinExtracaoPendente[itemId]=extraido;
     _convAplicFinSetStatus(itemId,'','');
     renderConvAplicFinLista();
-    toast('Extrato processado com sucesso!','ok');
   }catch(e){
     _convAplicFinSetStatus(itemId,'Erro ao processar o arquivo: '+e.message,'err');
     toast('Erro ao processar.','err');
