@@ -3328,10 +3328,8 @@ async function _convRazaoConcProcessarArquivo(file){
     throw new Error('Não encontrei a linha de cabeçalho da tabela (Data / Número / Histórico...) em "'+file.name+'".');
   }
 
-  const saida=[];
-  saida.push(['Data','Número','Histórico','','','','Cta.C.Part.','Débito','Crédito','','','Saldo-Exercício',
-    'CONTA','Ação necessária','Relação','Cta. Débito','Cta. Crédito','Histórico','Valor','+/-','Critério 1','<SALDO','Critério 2','<SALDO','Ordem','STATUS']);
-
+  // linhas em formato de array (mesma ordem de colunas do arquivo de saída)
+  const linhas=[];
   let contaAtual='';
   let ordem=0;
   for(let r=headerRowIdx+1;r<aoa.length;r++){
@@ -3349,15 +3347,39 @@ async function _convRazaoConcProcessarArquivo(file){
     ordem++;
     let dataSaida=col0;
     if(col0 instanceof Date) dataSaida=_convRazaoConcFmtDataBR(col0);
-    saida.push([
-      dataSaida, row[1]===''?'':row[1], row[2]||'', '', '', '', row[6]===''?'':row[6], row[7]===''?'':row[7], row[8]===''?'':row[8], '', '', row[11]===''?'':row[11],
-      contaAtual, '', '', '', '', '', '', sinal, '', '', criterio2, '', ordem, ''
-    ]);
+    linhas.push({
+      isLinhaConta,
+      valores:[dataSaida, row[1]===''?'':row[1], row[2]||'', '', '', '', row[6]===''?'':row[6], row[7]===''?'':row[7], row[8]===''?'':row[8], '', '', row[11]===''?'':row[11],
+        contaAtual, '', '', '', '', '', '', sinal, '', '', criterio2, '', ordem, '']
+    });
   }
 
-  const wbOut=XLSX.utils.book_new();
-  const wsOut=XLSX.utils.aoa_to_sheet(saida);
-  XLSX.utils.book_append_sheet(wbOut,wsOut,'Razão - Editado');
+  // ── monta o Excel de saída com ExcelJS, no mesmo padrão de cores da base de referência:
+  // cabeçalho das colunas novas (N:Z) em azul FF0070C0 com fonte branca; linhas "Conta:" com
+  // as colunas originais (A:M) em cinza FF595959 com fonte branca.
+  const AZUL_CABECALHO={type:'pattern',pattern:'solid',fgColor:{argb:'FF0070C0'}};
+  const CINZA_CONTA={type:'pattern',pattern:'solid',fgColor:{argb:'FF595959'}};
+  const FONTE_BRANCA_NEGRITO={bold:true,color:{argb:'FFFFFFFF'}};
+  const wbOut=new ExcelJS.Workbook();
+  const wsOut=wbOut.addWorksheet('Razão - Editado');
+  const cabecalho=['Data','Número','Histórico','','','','Cta.C.Part.','Débito','Crédito','','','Saldo-Exercício',
+    'CONTA','Ação necessária','Relação','Cta. Débito','Cta. Crédito','Histórico','Valor','+/-','Critério 1','<SALDO','Critério 2','<SALDO','Ordem','STATUS'];
+  const linhaCabecalho=wsOut.addRow(cabecalho);
+  linhaCabecalho.eachCell({includeEmpty:true},(cell,colNum)=>{
+    cell.font={bold:true};
+    if(colNum>=13){ cell.fill=AZUL_CABECALHO; cell.font=FONTE_BRANCA_NEGRITO; }
+  });
+  linhas.forEach(l=>{
+    const excelRow=wsOut.addRow(l.valores);
+    if(l.isLinhaConta){
+      excelRow.eachCell({includeEmpty:true},(cell,colNum)=>{
+        if(colNum<=13){ cell.fill=CINZA_CONTA; cell.font=FONTE_BRANCA_NEGRITO; }
+      });
+    }
+  });
+  wsOut.columns.forEach(col=>{ col.width=14; });
+  wsOut.getColumn(3).width=45; wsOut.getColumn(13).width=30; wsOut.getColumn(23).width=35;
+
   const nomeArquivo=`${empresa} - Base para Conciliação_${periodoIni} a ${periodoFim}.xlsx`;
   return {nomeArquivo,wbOut};
 }
@@ -3366,6 +3388,7 @@ async function processarConvRazaoConc(){
   const files=inputEl?Array.from(inputEl.files):[];
   if(!files.length){toast('Selecione ao menos um arquivo do Razão','warn');return;}
   if(typeof XLSX==='undefined'){toast('Biblioteca XLSX não carregada','err');return;}
+  if(typeof ExcelJS==='undefined'){toast('Biblioteca ExcelJS não carregada','err');return;}
   const btn=document.getElementById('convRazaoConcBtn');
   if(btn){btn.disabled=true;btn.textContent='Processando...';}
   const gerados=[], erros=[];
@@ -3373,7 +3396,13 @@ async function processarConvRazaoConc(){
     _convRazaoConcSetStatus(`Processando ${i+1} de ${files.length}: ${files[i].name}...`,'info');
     try{
       const {nomeArquivo,wbOut}=await _convRazaoConcProcessarArquivo(files[i]);
-      XLSX.writeFile(wbOut,nomeArquivo);
+      const buf=await wbOut.xlsx.writeBuffer();
+      const blob=new Blob([buf],{type:'application/octet-stream'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url; a.download=nomeArquivo;
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      URL.revokeObjectURL(url);
       gerados.push(nomeArquivo);
     }catch(e){
       console.error(e);
