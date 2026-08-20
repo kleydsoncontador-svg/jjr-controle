@@ -1941,7 +1941,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   <div class="ptitle">Excel para Conciliação</div>
   <p style="color:var(--slate);margin:0 0 20px">Converte um Razão exportado (Excel) numa base pronta pra conciliação, adicionando as colunas CONTA, +/-, Critério 2 e Ordem. Empresa, período e nome do arquivo de saída são lidos automaticamente do próprio Razão.</p>
   <div class="hide-in-print" style="padding:20px 0;border-bottom:1px solid var(--border);margin-bottom:20px">
-    <div class="fg"><label class="fl">Razão (Excel)</label><input type="file" id="convRazaoConcArquivo" accept=".xls,.xlsx" class="fi"></div>
+    <div class="fg"><label class="fl">Razão (Excel) — pode selecionar arquivos de mais de uma empresa, gera um arquivo de saída pra cada</label><input type="file" id="convRazaoConcArquivo" accept=".xls,.xlsx" multiple class="fi"></div>
     <button class="btn bp bsm" id="convRazaoConcBtn" onclick="processarConvRazaoConc()" style="margin-top:10px">⚙ Processar e Baixar</button>
     <div id="convRazaoConcStatus" style="margin-top:8px;font-size:12px"></div>
   </div>
@@ -3288,87 +3288,104 @@ function _convRazaoConcSetStatus(msg,tipo){
   const cor=tipo==='err'?'#dc2626':tipo==='ok'?'#16a34a':'var(--slate)';
   el.innerHTML=`<span style="color:${cor}">${esc(msg)}</span>`;
 }
+function _convRazaoConcValorAoLadoDoRotulo(row){
+  for(let c=1;c<row.length;c++){ if(String(row[c]==null?'':row[c]).trim()){ return String(row[c]).trim(); } }
+  return '';
+}
+async function _convRazaoConcProcessarArquivo(file){
+  const buf=await file.arrayBuffer();
+  const wb=XLSX.read(buf,{type:'array',cellDates:true});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  if(!ws){
+    throw new Error('Não consegui ler o conteúdo de "'+file.name+'" — esse .xls parece estar num formato antigo que o navegador não sabe abrir. Abra o arquivo no Excel, use "Salvar Como" → "Pasta de Trabalho do Excel (.xlsx)", e suba o .xlsx aqui.');
+  }
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+
+  // cabeçalho do relatório: linhas "Empresa:" e "Período:" no topo — o valor pode cair em
+  // colunas diferentes conforme a origem do arquivo (célula mesclada), então pega a primeira
+  // célula não vazia depois do rótulo, em vez de um índice fixo.
+  let empresa='', periodoTxt='';
+  for(let r=0;r<Math.min(aoa.length,6);r++){
+    const row=aoa[r]||[];
+    const rotulo=_convRazaoConcNorm(row[0]);
+    if(rotulo.includes('empresa')) empresa=_convRazaoConcValorAoLadoDoRotulo(row);
+    else if(rotulo.includes('periodo')) periodoTxt=_convRazaoConcValorAoLadoDoRotulo(row);
+  }
+  const mPeriodo=periodoTxt.match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/);
+  if(!empresa||!mPeriodo){
+    throw new Error('Não consegui identificar "Empresa:" e "Período:" no topo de "'+file.name+'". Confira se é um Razão exportado no padrão esperado.');
+  }
+  const periodoIni=mPeriodo[1]+'.'+mPeriodo[2]+'.'+mPeriodo[3];
+  const periodoFim=mPeriodo[4]+'.'+mPeriodo[5]+'.'+mPeriodo[6];
+
+  // linha de cabeçalho da tabela (Data / Número / Histórico / Cta.C.Part. / Débito / Crédito / Saldo-Exercício)
+  let headerRowIdx=-1;
+  for(let r=0;r<Math.min(aoa.length,15);r++){
+    const row=aoa[r]||[];
+    if(_convRazaoConcNorm(row[0])==='data' && _convRazaoConcNorm(row[2]).includes('historico')){ headerRowIdx=r; break; }
+  }
+  if(headerRowIdx<0){
+    throw new Error('Não encontrei a linha de cabeçalho da tabela (Data / Número / Histórico...) em "'+file.name+'".');
+  }
+
+  const saida=[];
+  saida.push(['Data','Número','Histórico','','','','Cta.C.Part.','Débito','Crédito','','','Saldo-Exercício',
+    'CONTA','Ação necessária','Relação','Cta. Débito','Cta. Crédito','Histórico','Valor','+/-','Critério 1','<SALDO','Critério 2','<SALDO','Ordem','STATUS']);
+
+  let contaAtual='';
+  let ordem=0;
+  for(let r=headerRowIdx+1;r<aoa.length;r++){
+    const row=aoa[r]||[];
+    const col0=row[0];
+    const isLinhaConta=_convRazaoConcNorm(col0)==='conta:';
+    if(isLinhaConta){
+      const num=row[1], cod=row[2], nome=row[4];
+      contaAtual=`${num}||${cod}||${nome}||`;
+    }
+    const debito=parseFloat(row[7])||0;
+    const credito=parseFloat(row[8])||0;
+    const sinal=debito-credito;
+    const criterio2=(sinal===0?'':String(Math.abs(sinal)))+contaAtual;
+    ordem++;
+    let dataSaida=col0;
+    if(col0 instanceof Date) dataSaida=_convRazaoConcFmtDataBR(col0);
+    saida.push([
+      dataSaida, row[1]===''?'':row[1], row[2]||'', '', '', '', row[6]===''?'':row[6], row[7]===''?'':row[7], row[8]===''?'':row[8], '', '', row[11]===''?'':row[11],
+      contaAtual, '', '', '', '', '', '', sinal, '', '', criterio2, '', ordem, ''
+    ]);
+  }
+
+  const wbOut=XLSX.utils.book_new();
+  const wsOut=XLSX.utils.aoa_to_sheet(saida);
+  XLSX.utils.book_append_sheet(wbOut,wsOut,'Razão - Editado');
+  const nomeArquivo=`${empresa} - Base para Conciliação_${periodoIni} a ${periodoFim}.xlsx`;
+  return {nomeArquivo,wbOut};
+}
 async function processarConvRazaoConc(){
   const inputEl=document.getElementById('convRazaoConcArquivo');
-  const file=inputEl?.files[0];
-  if(!file){toast('Selecione o arquivo do Razão','warn');return;}
+  const files=inputEl?Array.from(inputEl.files):[];
+  if(!files.length){toast('Selecione ao menos um arquivo do Razão','warn');return;}
   if(typeof XLSX==='undefined'){toast('Biblioteca XLSX não carregada','err');return;}
   const btn=document.getElementById('convRazaoConcBtn');
   if(btn){btn.disabled=true;btn.textContent='Processando...';}
-  _convRazaoConcSetStatus('Lendo arquivo...','info');
-  try{
-    const buf=await file.arrayBuffer();
-    const wb=XLSX.read(buf,{type:'array',cellDates:true});
-    const ws=wb.Sheets[wb.SheetNames[0]];
-    const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
-
-    // cabeçalho do relatório: Empresa (linha 0, col 2) e Período (linha 2, col 2)
-    let empresa='', periodoTxt='';
-    for(let r=0;r<Math.min(aoa.length,5);r++){
-      const row=aoa[r]||[];
-      const rotulo=_convRazaoConcNorm(row[0]);
-      if(rotulo.includes('empresa')) empresa=String(row[2]||'').trim();
-      else if(rotulo.includes('periodo')) periodoTxt=String(row[2]||'').trim();
+  const gerados=[], erros=[];
+  for(let i=0;i<files.length;i++){
+    _convRazaoConcSetStatus(`Processando ${i+1} de ${files.length}: ${files[i].name}...`,'info');
+    try{
+      const {nomeArquivo,wbOut}=await _convRazaoConcProcessarArquivo(files[i]);
+      XLSX.writeFile(wbOut,nomeArquivo);
+      gerados.push(nomeArquivo);
+    }catch(e){
+      console.error(e);
+      erros.push(files[i].name+': '+e.message);
     }
-    const mPeriodo=periodoTxt.match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/);
-    if(!empresa||!mPeriodo){
-      _convRazaoConcSetStatus('Não consegui identificar "Empresa:" e "Período:" no topo do arquivo. Confira se é um Razão exportado no padrão esperado.','err');
-      if(btn){btn.disabled=false;btn.textContent='⚙ Processar e Baixar';}
-      return;
-    }
-    const periodoIni=mPeriodo[1]+'.'+mPeriodo[2]+'.'+mPeriodo[3];
-    const periodoFim=mPeriodo[4]+'.'+mPeriodo[5]+'.'+mPeriodo[6];
-
-    // linha de cabeçalho da tabela (Data / Número / Histórico / Cta.C.Part. / Débito / Crédito / Saldo-Exercício)
-    let headerRowIdx=-1;
-    for(let r=0;r<Math.min(aoa.length,15);r++){
-      const row=aoa[r]||[];
-      if(_convRazaoConcNorm(row[0])==='data' && _convRazaoConcNorm(row[2]).includes('historico')){ headerRowIdx=r; break; }
-    }
-    if(headerRowIdx<0){
-      _convRazaoConcSetStatus('Não encontrei a linha de cabeçalho da tabela (Data / Número / Histórico...).','err');
-      if(btn){btn.disabled=false;btn.textContent='⚙ Processar e Baixar';}
-      return;
-    }
-
-    _convRazaoConcSetStatus('Montando base de conciliação...','info');
-    const saida=[];
-    saida.push(['Data','Número','Histórico','','','','Cta.C.Part.','Débito','Crédito','','','Saldo-Exercício',
-      'CONTA','Ação necessária','Relação','Cta. Débito','Cta. Crédito','Histórico','Valor','+/-','Critério 1','<SALDO','Critério 2','<SALDO','Ordem','STATUS']);
-
-    let contaAtual='';
-    let ordem=0;
-    for(let r=headerRowIdx+1;r<aoa.length;r++){
-      const row=aoa[r]||[];
-      const col0=row[0];
-      const isLinhaConta=_convRazaoConcNorm(col0)==='conta:';
-      if(isLinhaConta){
-        const num=row[1], cod=row[2], nome=row[4];
-        contaAtual=`${num}||${cod}||${nome}||`;
-      }
-      const debito=parseFloat(row[7])||0;
-      const credito=parseFloat(row[8])||0;
-      const sinal=debito-credito;
-      const criterio2=(sinal===0?'':String(Math.abs(sinal)))+contaAtual;
-      ordem++;
-      let dataSaida=col0;
-      if(col0 instanceof Date) dataSaida=_convRazaoConcFmtDataBR(col0);
-      saida.push([
-        dataSaida, row[1]===''?'':row[1], row[2]||'', '', '', '', row[6]===''?'':row[6], row[7]===''?'':row[7], row[8]===''?'':row[8], '', '', row[11]===''?'':row[11],
-        contaAtual, '', '', '', '', '', '', sinal, '', '', criterio2, '', ordem, ''
-      ]);
-    }
-
-    const wbOut=XLSX.utils.book_new();
-    const wsOut=XLSX.utils.aoa_to_sheet(saida);
-    XLSX.utils.book_append_sheet(wbOut,wsOut,'Razão - Editado');
-    const nomeArquivo=`${empresa} - Base para Conciliação_${periodoIni} a ${periodoFim}.xlsx`;
-    XLSX.writeFile(wbOut,nomeArquivo);
-    _convRazaoConcSetStatus('Arquivo gerado: '+nomeArquivo,'ok');
-    toast('Base de conciliação gerada com sucesso!','ok');
-  }catch(e){
-    console.error(e);
-    _convRazaoConcSetStatus('Erro ao processar: '+e.message,'err');
+  }
+  if(erros.length){
+    _convRazaoConcSetStatus((gerados.length?gerados.length+' arquivo(s) gerado(s), ':'')+erros.length+' erro(s): '+erros.join(' | '),'err');
+    toast(erros.length+' arquivo(s) com erro — confira a mensagem abaixo do botão.','err');
+  } else {
+    _convRazaoConcSetStatus(gerados.length+' arquivo(s) gerado(s): '+gerados.join(' • '),'ok');
+    toast(gerados.length+' base(s) de conciliação gerada(s) com sucesso!','ok');
   }
   if(btn){btn.disabled=false;btn.textContent='⚙ Processar e Baixar';}
 }
