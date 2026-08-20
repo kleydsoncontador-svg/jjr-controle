@@ -21655,20 +21655,25 @@ function voltarLalup(){
 
 // ---- cálculo de tributos por NF ----
 function _lalupTrimestre(mesNum){return Math.ceil(mesNum/3);}
-function _lalupCalcularTributosNF(cfg,valorFaturado,acumTrimAntes,acumAnoAntes){
+// valorParaAccum = valor faturado total da NF (conta pra limite trimestral/anual da LC224, mesmo
+// que parte já tenha sido recebida no mês da emissão). baseCalculo = valor sobre o qual o tributo
+// diferido é efetivamente calculado (pode ser menor que valorParaAccum quando parte da NF já foi
+// recebida no próprio mês da emissão e portanto nunca foi diferida).
+function _lalupCalcularTributosNF(cfg,baseCalculo,acumTrimAntes,acumAnoAntes,valorParaAccum){
+  if(valorParaAccum===undefined) valorParaAccum=baseCalculo;
   let percPresuncao=cfg.percPresuncao;
   let lc224Aplicado=false;
   if(cfg.lc224Ativa){
-    const acumTrimDepois=acumTrimAntes+valorFaturado;
-    const acumAnoDepois=acumAnoAntes+valorFaturado;
+    const acumTrimDepois=acumTrimAntes+valorParaAccum;
+    const acumAnoDepois=acumAnoAntes+valorParaAccum;
     if(acumTrimDepois>cfg.lc224LimiteTrimestral || acumAnoDepois>cfg.lc224LimiteAnual){
       percPresuncao=percPresuncao*(1+cfg.lc224MarkupPerc/100);
       lc224Aplicado=true;
     }
   }
-  const base=valorFaturado*percPresuncao/100;
-  const pis=valorFaturado*cfg.aliqPIS/100;
-  const cofins=valorFaturado*cfg.aliqCOFINS/100;
+  const base=baseCalculo*percPresuncao/100;
+  const pis=baseCalculo*cfg.aliqPIS/100;
+  const cofins=baseCalculo*cfg.aliqCOFINS/100;
   const csll=base*cfg.aliqCSLL/100;
   const irpj=base*cfg.aliqIRPJ/100;
   const excedente=base-cfg.adicionalIRPJLimiteMensal;
@@ -21679,6 +21684,12 @@ function _lalupTotalTributos(nf){
   const t=nf.tributos||{};
   return (t.pis||0)+(t.cofins||0)+(t.csll||0)+(t.irpj||0)+(t.irpjAdicional||0);
 }
+// parte da NF que efetivamente foi diferida (exclui o que já foi recebido no mês da própria emissão)
+function _lalupBaseDiferida(nf){
+  return Math.max(0,(nf.valorFaturado||0)-(nf.valorRecebidoMesEmissao||0));
+}
+function getLalupPendMesEmissao(eid){return S.g('lalup_pendmesemissao_'+eid)||{};}
+function setLalupPendMesEmissao(eid,obj){S.s('lalup_pendmesemissao_'+eid,obj);}
 
 // ---- Config por empresa ----
 function renderLalupConfigForm(){
@@ -21722,6 +21733,78 @@ function salvarLalupConfig(){
   document.getElementById('lalupConfigModal').style.display='none';
   toast('Configuração salva','ok');
   renderLalupGerenciador(eid);
+}
+
+// ---- Contas contábeis (diferido/baixa) + exportação TXT ----
+function getLalupContas(eid){return S.g('lalup_contas_'+eid)||null;}
+function setLalupContas(eid,c){S.s('lalup_contas_'+eid,c);}
+function renderLalupContasForm(callback){
+  const eid=window._lalupEidAtual;
+  if(!eid) return;
+  const c=getLalupContas(eid)||{diferidoDebito:'',diferidoCredito:'',baixaDebito:'',baixaCredito:''};
+  const html=`
+    <p style="font-size:.85rem;color:var(--gray);margin:0 0 12px">Contas usadas no TXT desta empresa (fica salvo, não precisa preencher de novo depois).</p>
+    <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px">
+      <label>Diferido - Débito<input id="lalupContaDiferidoDebito" type="text" value="${esc(c.diferidoDebito)}" class="si" placeholder="conta de despesa"></label>
+      <label>Diferido - Crédito<input id="lalupContaDiferidoCredito" type="text" value="${esc(c.diferidoCredito)}" class="si" placeholder="passivo diferido"></label>
+      <label>Baixa - Débito<input id="lalupContaBaixaDebito" type="text" value="${esc(c.baixaDebito)}" class="si" placeholder="baixa do passivo diferido"></label>
+      <label>Baixa - Crédito<input id="lalupContaBaixaCredito" type="text" value="${esc(c.baixaCredito)}" class="si" placeholder="tributos a recolher"></label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn" onclick="salvarLalupContas()" style="background:#166534;color:#fff;padding:8px 16px;border:none;border-radius:6px;cursor:pointer">Salvar e Gerar TXT</button>
+      <button class="btn bo" onclick="document.getElementById('lalupConfigModal').style.display='none'">Cancelar</button>
+    </div>`;
+  document.getElementById('lalupConfigConteudo').innerHTML=html;
+  document.getElementById('lalupConfigModal').style.display='flex';
+  window._lalupContasCallback=callback;
+}
+function salvarLalupContas(){
+  const eid=window._lalupEidAtual;
+  if(!eid) return;
+  const v=id=>(document.getElementById(id).value||'').trim();
+  const diferidoDebito=v('lalupContaDiferidoDebito'), diferidoCredito=v('lalupContaDiferidoCredito');
+  const baixaDebito=v('lalupContaBaixaDebito'), baixaCredito=v('lalupContaBaixaCredito');
+  if(!diferidoDebito||!diferidoCredito||!baixaDebito||!baixaCredito){toast('Preencha as 4 contas.','err');return;}
+  setLalupContas(eid,{diferidoDebito,diferidoCredito,baixaDebito,baixaCredito});
+  document.getElementById('lalupConfigModal').style.display='none';
+  toast('Contas salvas.','ok');
+  const cb=window._lalupContasCallback; window._lalupContasCallback=null;
+  if(cb) cb();
+}
+function gerarLalupTxt(eid,mk){
+  const contas=getLalupContas(eid);
+  if(!contas){ renderLalupContasForm(()=>gerarLalupTxt(eid,mk)); return; }
+  const nfs=getLalupNfs(eid);
+  const linhas=[];
+  nfs.filter(n=>n.mesEmissao===mk && n.status!=='cancelada' && _lalupTotalTributos(n)>0).forEach(n=>{
+    const valorTxt=_lalupTotalTributos(n).toFixed(2).replace('.',',');
+    const dataTxt=n.dataEmissao.split('-').reverse().join('/');
+    const historico=_convMpRemoverAcentos(`Diferimento tributos NF ${n.numeroNF} - ${n.cliente||''}`).replace(/;/g,' ');
+    linhas.push(`${dataTxt};${contas.diferidoDebito};${contas.diferidoCredito};${valorTxt};;${historico};1;${eid};;`);
+  });
+  nfs.forEach(n=>{
+    (n.baixas||[]).forEach(b=>{
+      if(b.mesReferencia!==mk) return;
+      const baseDiferida=_lalupBaseDiferida(n);
+      const fracao=baseDiferida>0?b.valorRecebido/baseDiferida:0;
+      const valor=_lalupTotalTributos(n)*fracao;
+      if(valor<=0) return;
+      const valorTxt=valor.toFixed(2).replace('.',',');
+      const dataTxt=(b.data||mk+'-01').split('-').reverse().join('/');
+      const historico=_convMpRemoverAcentos(`Baixa diferido NF ${n.numeroNF} - ${n.cliente||''}`).replace(/;/g,' ');
+      linhas.push(`${dataTxt};${contas.baixaDebito};${contas.baixaCredito};${valorTxt};;${historico};1;${eid};;`);
+    });
+  });
+  if(linhas.length===0){toast('Nada a gerar nesta competência (sem diferidos novos nem baixas).','info');return;}
+  const conteudo=linhas.join('\r\n');
+  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  const emp=S.emps().find(e=>String(e.eid)===eid);
+  const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
+  a.href=url; a.download='LALUP_'+nomeArq+'_'+mk+'.txt'; a.click();
+  URL.revokeObjectURL(url);
+  toast('TXT gerado com '+linhas.length+' lançamento(s).','ok');
 }
 
 // ---- Importação de NFs emitidas ----
@@ -21861,52 +21944,120 @@ function _lalupProcessarImportacaoEmitidas(eid,linhas){
   const acumTrim={}, acumAno={};
   nfsExistentes.forEach(n=>{
     if(chavesEmProcesso.has(_lalupNFKey(n.numeroNF))) return; // será recalculada abaixo, não conta duas vezes
+    if(n.status==='cancelada') return; // NF cancelada não conta faturamento pra limite da LC224
     const d=new Date(n.dataEmissao);
     const anoKey=String(d.getFullYear());
     const trimKey=anoKey+'-Q'+_lalupTrimestre(d.getMonth()+1);
     acumTrim[trimKey]=(acumTrim[trimKey]||0)+n.valorFaturado;
     acumAno[anoKey]=(acumAno[anoKey]||0)+n.valorFaturado;
   });
+  const pendMesEmissao=getLalupPendMesEmissao(eid);
   const novosRegistros=[];
   let atualizadas=0, criadas=0;
   novasLinhas.forEach((l,i)=>{
     const d=l.dataEmissao;
     const anoKey=String(d.getFullYear());
     const trimKey=anoKey+'-Q'+_lalupTrimestre(d.getMonth()+1);
-    const antesTrim=acumTrim[trimKey]||0, antesAno=acumAno[anoKey]||0;
-    const tributos=_lalupCalcularTributosNF(cfg,l.valorFaturado,antesTrim,antesAno);
-    acumTrim[trimKey]=antesTrim+l.valorFaturado;
-    acumAno[anoKey]=antesAno+l.valorFaturado;
     const mesEmissao=anoKey+'-'+String(d.getMonth()+1).padStart(2,'0');
     const chave=_lalupNFKey(l.numeroNF);
+    const cancelada=!!l.cancelamento;
+    const valorRecebidoMesEmissao=cancelada?0:(pendMesEmissao[chave]||0);
+    let tributos;
+    if(cancelada){
+      tributos={pis:0,cofins:0,csll:0,irpj:0,irpjAdicional:0,percPresuncaoUsado:cfg.percPresuncao,lc224Aplicado:false};
+    } else {
+      const antesTrim=acumTrim[trimKey]||0, antesAno=acumAno[anoKey]||0;
+      const baseCalculo=Math.max(0,l.valorFaturado-valorRecebidoMesEmissao);
+      tributos=_lalupCalcularTributosNF(cfg,baseCalculo,antesTrim,antesAno,l.valorFaturado);
+      acumTrim[trimKey]=antesTrim+l.valorFaturado;
+      acumAno[anoKey]=antesAno+l.valorFaturado;
+      if(valorRecebidoMesEmissao>0) delete pendMesEmissao[chave];
+    }
     const existente=porNumero[chave];
     if(existente){
       existente.numFatura=l.numFatura; existente.cliente=l.cliente;
       existente.dataEmissao=d.toISOString().slice(0,10); existente.mesEmissao=mesEmissao;
       existente.valorFaturado=l.valorFaturado; existente.tributos=tributos; existente.cancelamento=l.cancelamento||null;
-      const totalTributos=_lalupTotalTributos(existente);
-      const fracaoRecebida=existente.valorFaturado>0?(existente.valorRecebidoAcumulado||0)/existente.valorFaturado:0;
-      existente.saldoDiferido=totalTributos*(1-fracaoRecebida);
-      existente.status=fracaoRecebida>=0.999999?'quitado':(fracaoRecebida>0?'parcial':'diferido');
+      existente.valorRecebidoMesEmissao=valorRecebidoMesEmissao;
+      if(cancelada){ existente.saldoDiferido=0; existente.status='cancelada'; }
+      else{
+        const totalTributos=_lalupTotalTributos(existente);
+        const baseDiferida=_lalupBaseDiferida(existente);
+        const fracaoRecebida=baseDiferida>0?Math.min(1,(existente.valorRecebidoAcumulado||0)/baseDiferida):(existente.valorRecebidoAcumulado>0?1:0);
+        existente.saldoDiferido=totalTributos*(1-fracaoRecebida);
+        existente.status=baseDiferida<=0?'quitado':(fracaoRecebida>=0.999999?'quitado':(fracaoRecebida>0?'parcial':'diferido'));
+      }
       atualizadas++;
     } else {
       novosRegistros.push({
         id:'lnf_'+Date.now()+'_'+i,
         numeroNF:l.numeroNF, numFatura:l.numFatura, cliente:l.cliente,
         dataEmissao:d.toISOString().slice(0,10), mesEmissao, valorFaturado:l.valorFaturado, cancelamento:l.cancelamento||null,
-        tributos, baixas:[], valorRecebidoAcumulado:0,
-        saldoDiferido:tributos.pis+tributos.cofins+tributos.csll+tributos.irpj+tributos.irpjAdicional,
-        status:'diferido'
+        valorRecebidoMesEmissao, tributos, baixas:[], valorRecebidoAcumulado:0,
+        saldoDiferido:cancelada?0:_lalupTotalTributos({tributos}),
+        status:cancelada?'cancelada':(Math.max(0,l.valorFaturado-valorRecebidoMesEmissao)<=0?'quitado':'diferido')
       });
       criadas++;
     }
   });
+  setLalupPendMesEmissao(eid,pendMesEmissao);
   setLalupNfs(eid,nfsExistentes.concat(novosRegistros));
   toast(criadas+' NF(s) nova(s) importada(s)'+(atualizadas?', '+atualizadas+' sobrescrita(s)':'')+'.','ok');
   renderLalupGerenciador(eid);
 }
 
 // ---- Importação de recebimentos (baixa) ----
+// Layout: "RELATÓRIO DE RECEBIMENTOS MM.AAAA - <empresa>" (título na célula A1 dá a competência
+// do recebimento), cabeçalho com Nº Nota Fiscal, Data Emi., Parcela, Valor Fat. Hon. (valor
+// recebido nesta parcela), Razão Social (do tomador), Banco Recebimento.
+function _lalupParsearRecebimentosLMA(arrayBuffer){
+  const wb=XLSX.read(arrayBuffer,{type:'array',cellDates:true});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+  let competencia=null;
+  for(let r=0;r<Math.min(aoa.length,3) && !competencia;r++){
+    (aoa[r]||[]).forEach(c=>{
+      const m=String(c||'').match(/(\d{2})[.\/](\d{4})/);
+      if(m && !competencia) competencia=m[2]+'-'+m[1];
+    });
+  }
+  let headerRowIdx=-1, colIdx={};
+  for(let r=0;r<Math.min(aoa.length,10);r++){
+    const row=aoa[r]||[];
+    const norm=row.map(c=>_lalupNorm(c));
+    if(norm.some(c=>c.includes('nota fiscal'))){
+      headerRowIdx=r;
+      row.forEach((c,ci)=>{
+        const n=_lalupNorm(c);
+        if(n.includes('razao social')) colIdx.cliente=ci;
+        else if(n.includes('valor') && n.includes('fat')) colIdx.valorRecebido=ci;
+        else if(n.includes('nota fiscal')) colIdx.numeroNF=ci;
+        else if(n.includes('data emi')) colIdx.dataEmissao=ci;
+        else if(n.includes('parcela')) colIdx.parcela=ci;
+        else if(n.includes('banco recebimento')) colIdx.banco=ci;
+      });
+      break;
+    }
+  }
+  if(headerRowIdx<0 || colIdx.numeroNF===undefined || colIdx.dataEmissao===undefined || colIdx.valorRecebido===undefined) return {competencia,linhas:[]};
+  const linhas=[];
+  for(let r=headerRowIdx+1;r<aoa.length;r++){
+    const row=aoa[r]||[];
+    const numeroNF=String(row[colIdx.numeroNF]||'').trim();
+    if(!numeroNF) continue;
+    let dataEmissao=row[colIdx.dataEmissao];
+    if(!(dataEmissao instanceof Date)){ dataEmissao=_lalupParsearDataBR(dataEmissao); if(!dataEmissao) continue; }
+    const valorRecebido=parseFloat(row[colIdx.valorRecebido])||0;
+    if(!valorRecebido) continue;
+    linhas.push({
+      numeroNF, dataEmissao, valorRecebido,
+      parcela:colIdx.parcela!==undefined?String(row[colIdx.parcela]||'').trim():'',
+      cliente:colIdx.cliente!==undefined?String(row[colIdx.cliente]||'').trim():'',
+      banco:colIdx.banco!==undefined?String(row[colIdx.banco]||'').trim():''
+    });
+  }
+  return {competencia,linhas};
+}
 function lalupImportarRecebidos(inputEl){
   const file=inputEl.files&&inputEl.files[0];
   if(!file) return;
@@ -21916,77 +22067,74 @@ function lalupImportarRecebidos(inputEl){
   const reader=new FileReader();
   reader.onload=function(e){
     try{
-      const wb=XLSX.read(e.target.result,{type:'array',cellDates:true});
-      const linhas=[];
-      wb.SheetNames.forEach(sheetName=>{
-        const ws=wb.Sheets[sheetName];
-        const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
-        let headerRowIdx=-1, colIdx={};
-        for(let r=0;r<Math.min(aoa.length,10);r++){
-          const row=aoa[r]||[];
-          const norm=row.map(c=>_lalupNorm(c));
-          if(norm.some(c=>c.includes('nota fiscal')||c==='nf')){
-            headerRowIdx=r;
-            row.forEach((c,ci)=>{
-              const n=_lalupNorm(c);
-              if(n.includes('nota fiscal')||n==='nf') colIdx.numeroNF=ci;
-              else if(n.includes('data') && (n.includes('receb')||n.includes('pagto')||n.includes('pagamento'))) colIdx.dataRecebimento=ci;
-              else if(n.includes('valor') && (n.includes('receb')||n.includes('pago')||n.includes('pagto'))) colIdx.valorRecebido=ci;
-            });
-            break;
-          }
-        }
-        if(headerRowIdx<0 || colIdx.numeroNF===undefined || colIdx.valorRecebido===undefined) return;
-        for(let r=headerRowIdx+1;r<aoa.length;r++){
-          const row=aoa[r]||[];
-          const numeroNF=String(row[colIdx.numeroNF]||'').trim();
-          if(!numeroNF) continue;
-          const valorRecebido=parseFloat(row[colIdx.valorRecebido])||0;
-          if(!valorRecebido) continue;
-          let dataRecebimento=colIdx.dataRecebimento!==undefined?row[colIdx.dataRecebimento]:null;
-          if(dataRecebimento instanceof Date){}
-          else if(typeof dataRecebimento==='string' && dataRecebimento.includes('/')){
-            const p=dataRecebimento.split('/'); dataRecebimento=new Date(+p[2],+p[1]-1,+p[0]);
-          } else dataRecebimento=new Date();
-          linhas.push({numeroNF,valorRecebido,dataRecebimento});
-        }
-      });
-      if(linhas.length===0){toast('Nenhum recebimento reconhecido na planilha. Confira as colunas (Nº Nota Fiscal, Valor Recebido, Data Recebimento).','err');inputEl.value='';return;}
-      _lalupProcessarBaixas(eid,linhas);
+      const {competencia,linhas}=_lalupParsearRecebimentosLMA(e.target.result);
+      if(!competencia){toast('Não consegui identificar a competência (MM.AAAA) no título da planilha (célula A1).','err');inputEl.value='';return;}
+      if(linhas.length===0){toast('Nenhum recebimento reconhecido na planilha. Confira as colunas (Nº Nota Fiscal, Data Emi., Valor Fat. Hon.).','err');inputEl.value='';return;}
+      _lalupProcessarBaixas(eid,competencia,linhas);
     }catch(err){toast('Erro ao ler planilha: '+err.message,'err');}
     inputEl.value='';
   };
   reader.readAsArrayBuffer(file);
 }
 
-function _lalupProcessarBaixas(eid,linhas){
+function _lalupProcessarBaixas(eid,competencia,linhas){
   const nfs=getLalupNfs(eid);
   const porNumero={};
   nfs.forEach(n=>{porNumero[_lalupNFKey(n.numeroNF)]=n;});
+  const pendMesEmissao=getLalupPendMesEmissao(eid);
   const naoEncontradas=[];
-  let aplicadas=0;
+  let aplicadas=0, mesmoMes=0;
   linhas.forEach(l=>{
-    const nf=porNumero[_lalupNFKey(l.numeroNF)];
+    const chave=_lalupNFKey(l.numeroNF);
+    const mesEmissaoLinha=l.dataEmissao.getFullYear()+'-'+String(l.dataEmissao.getMonth()+1).padStart(2,'0');
+    const nf=porNumero[chave];
+    if(mesEmissaoLinha===competencia){
+      // recebida no mesmo mês da emissão: nunca foi diferida, não é baixa — corrige a base da NF
+      if(nf && nf.status!=='cancelada'){
+        nf.valorRecebidoMesEmissao=(nf.valorRecebidoMesEmissao||0)+l.valorRecebido;
+        const baseDiferida=_lalupBaseDiferida(nf);
+        const cfg=getLalupConfig(eid);
+        const perc=(nf.tributos&&nf.tributos.percPresuncaoUsado)!=null?nf.tributos.percPresuncaoUsado:cfg.percPresuncao;
+        const baseTrib=baseDiferida*perc/100;
+        nf.tributos={
+          pis:baseDiferida*cfg.aliqPIS/100, cofins:baseDiferida*cfg.aliqCOFINS/100,
+          csll:baseTrib*cfg.aliqCSLL/100, irpj:baseTrib*cfg.aliqIRPJ/100,
+          irpjAdicional:Math.max(0,baseTrib-cfg.adicionalIRPJLimiteMensal)*cfg.adicionalIRPJPerc/100,
+          percPresuncaoUsado:perc, lc224Aplicado:nf.tributos?nf.tributos.lc224Aplicado:false
+        };
+        const totalTributos=_lalupTotalTributos(nf);
+        const fracaoRecebidaPosterior=baseDiferida>0?Math.min(1,(nf.valorRecebidoAcumulado||0)/baseDiferida):(nf.valorRecebidoAcumulado>0?1:0);
+        nf.saldoDiferido=totalTributos*(1-fracaoRecebidaPosterior);
+        nf.status=baseDiferida<=0?'quitado':(fracaoRecebidaPosterior>=0.999999?'quitado':(fracaoRecebidaPosterior>0?'parcial':'diferido'));
+      } else if(!nf){
+        // NF ainda não foi importada em "NFs Emitidas" — guarda pendente pra aplicar quando ela chegar
+        pendMesEmissao[chave]=(pendMesEmissao[chave]||0)+l.valorRecebido;
+      }
+      mesmoMes++;
+      return;
+    }
+    // recebida em mês posterior ao da emissão: baixa normal do diferido
     if(!nf){naoEncontradas.push(l.numeroNF);return;}
-    const saldoFaturadoAberto=nf.valorFaturado-(nf.valorRecebidoAcumulado||0);
-    const valorAplicado=Math.min(l.valorRecebido, saldoFaturadoAberto>0?saldoFaturadoAberto:0);
+    if(nf.status==='cancelada') return;
+    const baseDiferida=_lalupBaseDiferida(nf);
+    const saldoAberto=baseDiferida-(nf.valorRecebidoAcumulado||0);
+    const valorAplicado=Math.min(l.valorRecebido, saldoAberto>0?saldoAberto:0);
     if(valorAplicado<=0) return;
-    const d=l.dataRecebimento;
-    const mesReferencia=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0');
     nf.baixas=nf.baixas||[];
-    nf.baixas.push({data:d.toISOString().slice(0,10),valorRecebido:valorAplicado,mesReferencia});
+    nf.baixas.push({data:competencia+'-01',valorRecebido:valorAplicado,mesReferencia:competencia,parcela:l.parcela,banco:l.banco});
     nf.valorRecebidoAcumulado=(nf.valorRecebidoAcumulado||0)+valorAplicado;
     const totalTributos=_lalupTotalTributos(nf);
-    const fracaoRecebida=nf.valorFaturado>0?nf.valorRecebidoAcumulado/nf.valorFaturado:0;
+    const fracaoRecebida=baseDiferida>0?Math.min(1,nf.valorRecebidoAcumulado/baseDiferida):1;
     nf.saldoDiferido=totalTributos*(1-fracaoRecebida);
     nf.status=fracaoRecebida>=0.999999?'quitado':(fracaoRecebida>0?'parcial':'diferido');
     aplicadas++;
   });
+  setLalupPendMesEmissao(eid,pendMesEmissao);
   setLalupNfs(eid,nfs);
   if(naoEncontradas.length>0){
-    alert('As seguintes NFs não foram encontradas como diferidas nesta empresa e não puderam ser baixadas (verifique se já foram importadas na etapa "Importar NFs Emitidas"):\n\n'+naoEncontradas.join(', '));
+    alert('As seguintes NFs não foram encontradas como diferidas nesta empresa (verifique se já foram importadas na etapa "Importar NFs Emitidas"):\n\n'+naoEncontradas.join(', '));
   }
-  toast(aplicadas+' baixa(s) aplicada(s)'+(naoEncontradas.length?', '+naoEncontradas.length+' NF(s) não encontrada(s)':'')+'.', naoEncontradas.length?'warn':'ok');
+  toast(aplicadas+' baixa(s) aplicada(s)'+(mesmoMes?', '+mesmoMes+' recebida(s) no mesmo mês da emissão (não diferida)':'')+(naoEncontradas.length?', '+naoEncontradas.length+' NF(s) não encontrada(s)':'')+'.', naoEncontradas.length?'warn':'ok');
   renderLalupGerenciador(eid);
 }
 
@@ -21999,7 +22147,8 @@ function _lalupCompetencias(eid){
     meses[n.mesEmissao].novoDiferido+=_lalupTotalTributos(n);
     (n.baixas||[]).forEach(b=>{
       const totalTributos=_lalupTotalTributos(n);
-      const fracao=n.valorFaturado>0?b.valorRecebido/n.valorFaturado:0;
+      const baseDiferida=_lalupBaseDiferida(n);
+      const fracao=baseDiferida>0?b.valorRecebido/baseDiferida:0;
       meses[b.mesReferencia]=meses[b.mesReferencia]||{novoDiferido:0,baixadoNoMes:0};
       meses[b.mesReferencia].baixadoNoMes+=totalTributos*fracao;
     });
@@ -22029,7 +22178,7 @@ function renderLalupGerenciador(eid){
       <td style="padding:10px;text-align:right">R$ ${_lalupFmt(c.novoDiferido)}</td>
       <td style="padding:10px;text-align:right">R$ ${_lalupFmt(c.baixadoNoMes)}</td>
       <td style="padding:10px;text-align:right;font-weight:600">R$ ${_lalupFmt(c.saldoAcumulado)}</td>
-      <td style="padding:10px;text-align:right;white-space:nowrap"><button class="btn bo" onclick="abrirLalupEmitidas('${eid}','${c.mk}')" style="padding:6px 10px;margin-right:6px">📄 Tributos Emitidos</button><button class="btn bo" onclick="abrirLalupBaixas('${eid}','${c.mk}')" style="padding:6px 10px">💰 Baixas Recebidas</button></td>
+      <td style="padding:10px;text-align:right;white-space:nowrap"><button class="btn bo" onclick="abrirLalupEmitidas('${eid}','${c.mk}')" style="padding:6px 10px;margin-right:6px">📄 Tributos Emitidos</button><button class="btn bo" onclick="abrirLalupBaixas('${eid}','${c.mk}')" style="padding:6px 10px;margin-right:6px">💰 Baixas Recebidas</button><button class="action-btn action-btn-txt" onclick="gerarLalupTxt('${eid}','${c.mk}')" style="padding:6px 10px">📝 Gerar TXT</button></td>
     </tr>`;
   });
   html+='</tbody></table><div id="lalupCompetenciaDetalhe" style="margin-top:24px"></div>';
@@ -22054,23 +22203,28 @@ function abrirLalupEmitidas(eid,mk){
   html+=`<table id="lalupTabelaCompetencia" style="width:100%;border-collapse:collapse"><thead><tr style="background:#f1f5f9">
     <th style="padding:8px;text-align:left">Data</th><th style="padding:8px;text-align:left">Nº NFS-e</th><th style="padding:8px;text-align:left">Razão Social do Tomador</th>
     <th style="padding:8px;text-align:right">Valor dos Serviços</th><th style="padding:8px;text-align:left">Cancelamento</th>
+    <th style="padding:8px;text-align:right">Saldo Diferido (R$)</th>
     <th style="padding:8px;text-align:right">PIS</th><th style="padding:8px;text-align:right">COFINS</th>
     <th style="padding:8px;text-align:right">CSLL</th><th style="padding:8px;text-align:right">IRPJ</th><th style="padding:8px;text-align:right">Adic. IRPJ</th>
     <th style="padding:8px;text-align:right">Total Diferido</th><th style="padding:8px;text-align:left">Status</th>
   </tr></thead><tbody>`;
   nfs.forEach(n=>{
     const t=n.tributos||{};
-    html+=`<tr style="border-bottom:1px solid var(--border)">
+    const cancelada=n.status==='cancelada';
+    const bg=cancelada?'background:#fee2e2':'';
+    const saldoRs=_lalupBaseDiferida(n)-(n.valorRecebidoAcumulado||0);
+    html+=`<tr style="border-bottom:1px solid var(--border);${bg}">
       <td style="padding:8px">${n.dataEmissao.split('-').reverse().join('/')}</td><td style="padding:8px">${esc(n.numeroNF)}</td><td style="padding:8px">${esc(n.cliente||'')}</td>
       <td style="padding:8px;text-align:right">R$ ${_lalupFmt(n.valorFaturado)}</td>
       <td style="padding:8px">${n.cancelamento?n.cancelamento.split('-').reverse().join('/'):''}</td>
+      <td style="padding:8px;text-align:right">R$ ${_lalupFmt(cancelada?0:saldoRs)}</td>
       <td style="padding:8px;text-align:right">R$ ${_lalupFmt(t.pis)}</td><td style="padding:8px;text-align:right">R$ ${_lalupFmt(t.cofins)}</td>
       <td style="padding:8px;text-align:right">R$ ${_lalupFmt(t.csll)}</td><td style="padding:8px;text-align:right">R$ ${_lalupFmt(t.irpj)}</td><td style="padding:8px;text-align:right">R$ ${_lalupFmt(t.irpjAdicional)}</td>
       <td style="padding:8px;text-align:right;font-weight:600">R$ ${_lalupFmt(_lalupTotalTributos(n))}</td>
-      <td style="padding:8px">${n.status==='quitado'?'✅ Quitado':(n.status==='parcial'?'🟡 Parcial':'🔵 Diferido')}</td>
+      <td style="padding:8px">${cancelada?'❌ Cancelada':(n.status==='quitado'?'✅ Quitado':(n.status==='parcial'?'🟡 Parcial':'🔵 Diferido'))}</td>
     </tr>`;
   });
-  if(nfs.length===0) html+='<tr><td colspan="11" style="padding:16px;text-align:center;color:var(--gray)">Nenhuma NF emitida nesta competência.</td></tr>';
+  if(nfs.length===0) html+='<tr><td colspan="12" style="padding:16px;text-align:center;color:var(--gray)">Nenhuma NF emitida nesta competência.</td></tr>';
   html+='</tbody></table>';
   detalhe.innerHTML=html;
 }
@@ -22083,8 +22237,9 @@ function abrirLalupBaixas(eid,mk){
     (n.baixas||[]).forEach(b=>{
       if(b.mesReferencia!==mk) return;
       const t=n.tributos||{};
-      const fracao=n.valorFaturado>0?b.valorRecebido/n.valorFaturado:0;
-      linhas.push({numeroNF:n.numeroNF,cliente:n.cliente,dataEmissao:n.dataEmissao,dataRecebimento:b.data,valorRecebido:b.valorRecebido,
+      const baseDiferida=_lalupBaseDiferida(n);
+      const fracao=baseDiferida>0?b.valorRecebido/baseDiferida:0;
+      linhas.push({numeroNF:n.numeroNF,cliente:n.cliente,dataEmissao:n.dataEmissao,dataRecebimento:b.data,valorRecebido:b.valorRecebido,banco:b.banco||'',
         pis:(t.pis||0)*fracao,cofins:(t.cofins||0)*fracao,csll:(t.csll||0)*fracao,irpj:(t.irpj||0)*fracao,irpjAdicional:(t.irpjAdicional||0)*fracao,
         total:_lalupTotalTributos(n)*fracao});
     });
@@ -22092,7 +22247,7 @@ function abrirLalupBaixas(eid,mk){
   const detalhe=document.getElementById('lalupCompetenciaDetalhe');
   let html=_lalupDetalheHeader('Baixa sobre NFs Recebidas',eid,mk);
   html+=`<table id="lalupTabelaCompetencia" style="width:100%;border-collapse:collapse"><thead><tr style="background:#f1f5f9">
-    <th style="padding:8px;text-align:left">Nº NF</th><th style="padding:8px;text-align:left">Cliente</th><th style="padding:8px;text-align:left">Emissão</th><th style="padding:8px;text-align:left">Recebimento</th>
+    <th style="padding:8px;text-align:left">Nº NF</th><th style="padding:8px;text-align:left">Cliente</th><th style="padding:8px;text-align:left">Emissão</th><th style="padding:8px;text-align:left">Banco Recebimento</th>
     <th style="padding:8px;text-align:right">Valor Recebido</th><th style="padding:8px;text-align:right">PIS</th><th style="padding:8px;text-align:right">COFINS</th>
     <th style="padding:8px;text-align:right">CSLL</th><th style="padding:8px;text-align:right">IRPJ</th><th style="padding:8px;text-align:right">Adic. IRPJ</th>
     <th style="padding:8px;text-align:right">Total Baixado (p/ a Recolher)</th>
@@ -22100,7 +22255,7 @@ function abrirLalupBaixas(eid,mk){
   linhas.forEach(l=>{
     html+=`<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:8px">${esc(l.numeroNF)}</td><td style="padding:8px">${esc(l.cliente||'')}</td>
-      <td style="padding:8px">${l.dataEmissao.split('-').reverse().join('/')}</td><td style="padding:8px">${l.dataRecebimento.split('-').reverse().join('/')}</td>
+      <td style="padding:8px">${l.dataEmissao.split('-').reverse().join('/')}</td><td style="padding:8px">${esc(l.banco)}</td>
       <td style="padding:8px;text-align:right">R$ ${_lalupFmt(l.valorRecebido)}</td>
       <td style="padding:8px;text-align:right">R$ ${_lalupFmt(l.pis)}</td><td style="padding:8px;text-align:right">R$ ${_lalupFmt(l.cofins)}</td>
       <td style="padding:8px;text-align:right">R$ ${_lalupFmt(l.csll)}</td><td style="padding:8px;text-align:right">R$ ${_lalupFmt(l.irpj)}</td><td style="padding:8px;text-align:right">R$ ${_lalupFmt(l.irpjAdicional)}</td>
