@@ -551,6 +551,31 @@ td{padding:9px 13px;vertical-align:middle}
   </div>
 </div>
 
+<div class="mb" id="mDetalharSaldoAnterior">
+  <div class="modal" style="max-width:560px">
+    <div class="mt" style="display:flex;justify-content:space-between;align-items:center">
+      <span>📤 Detalhar Saldo Anterior — <span id="detSaldoAntConta"></span></span>
+      <button onclick="closeModal('mDetalharSaldoAnterior');resetDetalharSaldoAnterior()" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button>
+    </div>
+    <div class="info" style="margin-bottom:12px">ℹ Envie a planilha "Relação de Lançamentos" com a composição do Saldo Anterior desta conta, lançamento a lançamento (com colunas de Débito/Crédito). Ao confirmar, o Saldo Anterior (valor único) é <b>substituído</b> por esses lançamentos individuais — cada um passa a poder ser conciliado/baixado normalmente junto com os lançamentos do mês.</div>
+    <div id="detSaldoAntP1">
+      <div class="uz" id="uzDetSaldoAnt" onclick="document.getElementById('fileDetSaldoAnt').click()" style="padding:32px 20px">
+        <div style="font-size:36px">📤</div>
+        <div class="ui-txt">Arraste ou clique para selecionar a planilha</div>
+        <div class="ui-sub">Excel com a composição do Saldo Anterior, por lançamento</div>
+        <input type="file" style="display:none" id="fileDetSaldoAnt" accept=".xlsx,.xls,.csv" onchange="handleDetalharSaldoAnterior(event)">
+      </div>
+    </div>
+    <div id="detSaldoAntP2" style="display:none">
+      <div id="detSaldoAntPreview"></div>
+      <div class="ma">
+        <button class="btn bo" onclick="resetDetalharSaldoAnterior()">← Escolher outro arquivo</button>
+        <button class="btn bp" id="detSaldoAntConfirmBtn" onclick="confirmarDetalharSaldoAnterior()">✓ Confirmar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-aging">
   <div class="ptitle">Aging List</div>
   <div class="psub">Saldos em aberto por faixa de vencimento</div>
@@ -5412,6 +5437,187 @@ function confirmarSubstituirRazao(){
 }
 
 
+// ════════════════════════════════════════════════════════════
+// UI: DETALHAR SALDO ANTERIOR (substitui o valor único pela composição por lançamento)
+// ════════════════════════════════════════════════════════════
+var _detSaldoAntLancamentos=null;
+
+function parseSaldoAnteriorFile(data){
+  function parseBRVal(v){
+    if(v===null||v===undefined||v==='')return 0;
+    if(typeof v==='number')return v;
+    var s=String(v).trim().replace(/\s/g,'');
+    if(!s||s==='-')return 0;
+    var neg=s.startsWith('(')&&s.endsWith(')');
+    var clean=s.replace(/[()]/g,'');
+    var n=clean.includes(',')?parseFloat(clean.replace(/\./g,'').replace(',','.')):parseFloat(clean);
+    return isNaN(n)?0:(neg?-n:n);
+  }
+  var COL={};
+  var headerRowIdx=-1;
+  for(var i=0;i<Math.min(data.length,15);i++){
+    var row=data[i]; if(!row)continue;
+    var norm=row.map(function(c){return String(c==null?'':c).trim().normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();});
+    if(norm.indexOf('data')>=0 && norm.some(function(n){return n.indexOf('debito')>=0;}) && norm.some(function(n){return n.indexOf('credito')>=0;})){
+      headerRowIdx=i;
+      row.forEach(function(h,ci){
+        var s=String(h==null?'':h).trim().normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+        if(s==='data') COL.data=ci;
+        else if(COL.numero===undefined&&(s.indexOf('lote')>=0||s==='numero'||s==='num')) COL.numero=ci;
+        else if(COL.debito===undefined&&s.indexOf('debito')>=0) COL.debito=ci;
+        else if(COL.credito===undefined&&s.indexOf('credito')>=0) COL.credito=ci;
+        else if(s==='valor') COL.valor=ci;
+        else if(COL.historico===undefined&&s.indexOf('historico')>=0) COL.historico=ci;
+        else if(COL.documento===undefined&&s.indexOf('documento')>=0) COL.documento=ci;
+      });
+      break;
+    }
+  }
+  if(headerRowIdx<0||COL.data===undefined||COL.debito===undefined||COL.credito===undefined||COL.valor===undefined) return null;
+
+  var codigo='', nome='';
+  for(var r=headerRowIdx;r<data.length;r++){
+    var row=data[r]; if(!row)continue;
+    var col0=String(row[0]||'').trim();
+    if(/^conta:?\s*$/i.test(col0)){
+      // "Conta:" e o código/nome em colunas separadas
+      for(var ci=1;ci<row.length;ci++){
+        var v=String(row[ci]||'').trim();
+        if(/^\d[\d.]{3,}\d$/.test(v)||/^\d{4,}$/.test(v)){codigo=v;break;}
+      }
+      for(var ci=1;ci<row.length;ci++){
+        var v=String(row[ci]||'').trim();
+        if(v&&v!==codigo&&!/^\d+$/.test(v)){nome=v;break;}
+      }
+      break;
+    }
+    var mConta=col0.match(/^conta:?\s*(\d[\d.]*\d|\d{3,})\s*-\s*(.+)$/i);
+    if(mConta){
+      // "Conta: <código> - <nome>" tudo numa célula só
+      codigo=mConta[1].trim();
+      nome=mConta[2].trim();
+      break;
+    }
+  }
+
+  var lancamentos=[];
+  for(var r=headerRowIdx+1;r<data.length;r++){
+    var row=data[r]; if(!row)continue;
+    var dataVal=row[COL.data];
+    if(!dataVal)continue;
+    var valor=parseBRVal(row[COL.valor]);
+    if(!valor)continue;
+    var ehDebito=String(row[COL.debito]||'').trim()!=='';
+    var ehCredito=String(row[COL.credito]||'').trim()!=='';
+    if(!ehDebito&&!ehCredito)continue;
+    lancamentos.push({
+      data:excelDateToStr(dataVal),
+      numero:String((COL.numero!==undefined?row[COL.numero]:'')||'').trim(),
+      historico:String((COL.historico!==undefined?row[COL.historico]:'')||'').trim(),
+      ctapart:'',
+      debito:ehDebito?valor:0,
+      credito:ehCredito?valor:0,
+      saldo:0
+    });
+  }
+  return {codigo:codigo, nome:nome, lancamentos:lancamentos};
+}
+
+function abrirDetalharSaldoAnteriorModal(){
+  var data=getContaDetData();
+  var nome=data.contaObj?data.contaObj.nome:(data.razaoConta?data.razaoConta.nome:contaDetCodigo);
+  document.getElementById('detSaldoAntConta').textContent=contaDetCodigo+' — '+nome;
+  resetDetalharSaldoAnterior();
+  openModal('mDetalharSaldoAnterior');
+}
+
+function resetDetalharSaldoAnterior(){
+  _detSaldoAntLancamentos=null;
+  document.getElementById('detSaldoAntP1').style.display='block';
+  document.getElementById('detSaldoAntP2').style.display='none';
+  var fileInput=document.getElementById('fileDetSaldoAnt');
+  if(fileInput)fileInput.value='';
+}
+
+function handleDetalharSaldoAnterior(event){
+  var file=event.target.files[0]; if(!file)return;
+  var reader=new FileReader();
+  reader.onload=function(e){
+    try{
+      var wb=XLSX.read(e.target.result,{type:'array'});
+      var ws=wb.Sheets[wb.SheetNames[0]];
+      var data=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+      var parsed=parseSaldoAnteriorFile(data);
+      if(!parsed||!parsed.lancamentos.length){
+        toast('Não reconheci o layout da planilha (esperado: colunas Data, Débito, Crédito, Valor)','err');
+        return;
+      }
+      if(parsed.codigo && parsed.codigo!==contaDetCodigo){
+        toast('Essa planilha é da conta '+parsed.codigo+', mas a tela aberta é '+contaDetCodigo+'. Confira o arquivo.','err');
+        return;
+      }
+      _detSaldoAntLancamentos=parsed.lancamentos;
+      renderDetalharSaldoAnteriorPreview();
+    }catch(err){
+      toast('Erro ao ler arquivo: '+err.message,'err');
+    }
+  };
+  reader.readAsArrayBuffer(file);
+}
+
+function renderDetalharSaldoAnteriorPreview(){
+  var data=getContaDetData();
+  var sa=data.contaObj?data.contaObj.saldoAnterior:(data.razaoConta?data.razaoConta.saldoAnterior:0);
+  var lancs=_detSaldoAntLancamentos||[];
+  var totDeb=0, totCre=0;
+  lancs.forEach(function(l){totDeb+=l.debito||0;totCre+=l.credito||0;});
+  var somaLiquida=totCre-totDeb; // convenção do saldo de conta Passivo (crédito positivo)
+  var diff=Math.abs(somaLiquida-sa);
+
+  var html='<div class="cards" style="margin:0 0 12px">'+
+    '<div class="card"><div class="cl">Saldo Anterior atual (valor único)</div><div class="cv">'+fmt(sa)+'</div></div>'+
+    '<div class="card"><div class="cl">Soma dos lançamentos da planilha</div><div class="cv g">'+fmt(somaLiquida)+'</div><div class="cs">'+lancs.length+' lançamento(s)</div></div>'+
+    '</div>';
+  if(diff>0.05){
+    html+='<div class="info" style="background:var(--red-bg);border-color:#F5A3A3">⚠ A soma dos lançamentos ('+fmt(somaLiquida)+') não bate exatamente com o Saldo Anterior atual ('+fmt(sa)+') — diferença de '+fmt(diff)+'. Confira a planilha antes de confirmar.</div>';
+  } else {
+    html+='<div class="info" style="background:var(--teal-bg);border-color:#99E6DD">✓ A soma bate com o Saldo Anterior atual.</div>';
+  }
+  html+='<div class="info">Ao confirmar: o Saldo Anterior vira R$ 0,00 e esses '+lancs.length+' lançamento(s) entram na tabela junto com os do mês, prontos pra conciliar. Baixas manuais, flags e "Baixa em Andamento" já confirmados nos lançamentos do mês são preservados.</div>';
+
+  document.getElementById('detSaldoAntPreview').innerHTML=html;
+  document.getElementById('detSaldoAntP1').style.display='none';
+  document.getElementById('detSaldoAntP2').style.display='block';
+}
+
+function confirmarDetalharSaldoAnterior(){
+  if(!_detSaldoAntLancamentos){toast('Nenhum arquivo processado','err');return}
+
+  var razao=S.razao(curEmpId,contaDetMes);
+  var razaoContaAtual=razao[contaDetCodigo];
+  var lancsAtuais=(razaoContaAtual&&razaoContaAtual.lancamentos)||[];
+  var novosLancamentos=_detSaldoAntLancamentos.concat(lancsAtuais);
+
+  var res=substituirRazaoConta(contaDetCodigo,novosLancamentos);
+  if(!res.ok){toast(res.erro||'Erro ao substituir','err');return}
+
+  // Zera o Saldo Anterior — foi completamente substituído pelos lançamentos detalhados
+  var razao2=S.razao(curEmpId,contaDetMes);
+  if(razao2[contaDetCodigo]) razao2[contaDetCodigo].saldoAnterior=0;
+  S.saveRazao(curEmpId,contaDetMes,razao2);
+  var comp2=S.comp(curEmpId);
+  var d2=comp2[contaDetMes];
+  var contaObj2=d2&&(d2.contas||[]).find(function(c){return c.codigo===contaDetCodigo;});
+  if(contaObj2){contaObj2.saldoAnterior=0; S.saveComp(curEmpId,comp2);}
+
+  closeModal('mDetalharSaldoAnterior');
+  resetDetalharSaldoAnterior();
+  toast('Saldo Anterior detalhado: '+_detSaldoAntLancamentos.length+' lançamento(s) adicionado(s) ✓');
+
+  renderContaDetHeader();
+  renderContaDetTabela();
+}
+
 function abrirAjusteModal(){
   document.getElementById('ajTipo').value='ajuste';
   document.getElementById('ajContraWrap').style.display='none';
@@ -5673,7 +5879,8 @@ function renderContaDetHeader(){
   var cards=document.getElementById('contaDetCards');
   var saBtn='<button class="btn bo bsm" style="margin-top:4px;font-size:10px;padding:2px 6px" '+
     'onclick="toggleSaldoAntConciliado()" title="Marcar saldo anterior como conciliado">'+
-    (saAberto?'Marcar conciliado':'↩ Reabrir')+'</button>';
+    (saAberto?'Marcar conciliado':'↩ Reabrir')+'</button>'+
+    (sa?' <button class="btn bo bsm" style="margin-top:4px;font-size:10px;padding:2px 6px" onclick="abrirDetalharSaldoAnteriorModal()" title="Substituir este valor único pela composição detalhada, lançamento a lançamento">📤 Detalhar</button>':'');
 
   cards.innerHTML=
     '<div class="card"><div class="cl">Saldo Anterior</div><div class="cv sm'+(saAberto?'':' g')+'">'+fmt(sa)+'</div>'+saBtn+'</div>'+
@@ -5865,9 +6072,9 @@ function renderContaDetTabela(){
   // Saldo Anterior
   var sa=contaObj?contaObj.saldoAnterior:(razaoConta?razaoConta.saldoAnterior:0);
   var saConciliado=!!(d&&d.saldoAntConciliado&&d.saldoAntConciliado[contaDetCodigo]);
-  var saIncluded = (fStatus===''||fStatus==='flagged') ||
+  var saIncluded = sa!==0 && ((fStatus===''||fStatus==='flagged') ||
     (fStatus==='aberto'&&!saConciliado) ||
-    ((fStatus==='baixado_exato'||fStatus==='manual')&&saConciliado);
+    ((fStatus==='baixado_exato'||fStatus==='manual')&&saConciliado));
   if(fHist||fVal||fData) saIncluded=false; // SALDO ANTERIOR doesn't match text/value/date filters
 
   var html='<table class="ledger-table"><thead><tr>'+
