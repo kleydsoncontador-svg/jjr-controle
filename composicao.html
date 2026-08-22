@@ -432,6 +432,8 @@ td{padding:9px 13px;vertical-align:middle}
       <button class="btn bo bsm" onclick="limparFiltrosContaDet()">✕ Limpar</button>
       <div style="margin-left:auto;display:flex;gap:6px">
         <button class="btn bo bsm" style="background:#f5c518;color:#1E3558;border:none" onclick="atualizarSaldoCorridoConta()" title="Recalcula a coluna Saldo de todos os lançamentos desta conta, na ordem, a partir do Saldo Anterior">🔄 Atualizar Saldo</button>
+        <button class="btn bo bsm" onclick="abrirParcelasConta()" title="Ver todos os grupos de parcelamento em aberto desta conta">📦 Parcelas</button>
+        <button class="btn bo bsm" onclick="abrirConciliadoConta()" title="Ver todos os grupos de parcelamento já totalmente quitados desta conta">✅ Conciliado</button>
         <button class="btn bo bsm" onclick="exportarLedgerFiltrado()" title="Exportar apenas as linhas filtradas para Excel">📊 Excel (filtrado)</button>
         <button class="btn bo bsm" onclick="abrirSubstituirRazaoModal()" title="Substituir o Razão desta conta por uma versão ajustada, preservando conciliações confirmadas">🔄 Substituir Razão</button>
         <button class="btn bo bsm" onclick="abrirAjusteModal()">＋ Ajuste / Reclassificação</button>
@@ -443,6 +445,7 @@ td{padding:9px 13px;vertical-align:middle}
       <span style="color:var(--slate)">Seleção em massa:</span>
       <button class="btn bo bsm" style="font-size:11px;padding:3px 8px" onclick="bulkConciliar('conciliar')">✓ Conciliar selecionados</button>
       <button class="btn bo bsm" style="font-size:11px;padding:3px 8px" onclick="bulkConciliar('abrir')">↩ Desconciliar selecionados</button>
+      <button class="btn bo bsm" style="font-size:11px;padding:3px 8px;background:#EDE9FE;border-color:#C4B5FD" onclick="marcarComoParcelamento()" title="Agrupa os lançamentos selecionados (ex: aquisição + pagamentos parciais da mesma NF) numa única linha de saldo, movendo o detalhe pra tela Parcelas">📦 Marcar como Parcelamento</button>
       <span style="color:var(--slate);font-size:11px;margin-left:auto">Marque os checkboxes na tabela e use os filtros para refinar a seleção</span>
     </div>
 
@@ -5985,6 +5988,124 @@ function toggleFlagLancamento(lancIdx, natureza){
   renderContaDetTabela();
 }
 
+// ════════════════════════════════════════════════════════════
+// PARCELAMENTOS: agrupa lançamentos de uma mesma NF (aquisição + pagamentos
+// parciais em meses diferentes) numa única linha de saldo na tabela principal.
+// ════════════════════════════════════════════════════════════
+function _extrairNumeroNF(historico){
+  if(!historico)return null;
+  var h=String(historico);
+  var m=h.match(/NOTA FISCAL\s*<(\d{2,})>/i);
+  if(m)return m[1];
+  m=h.match(/NFE?\.?\s*(\d{2,})\s*\//i);
+  if(m)return m[1];
+  m=h.match(/NF[E]?\s*<(\d{2,})>/i);
+  if(m)return m[1];
+  return null;
+}
+function getGruposParcelamento(mes,codigo){
+  var comp=S.comp(curEmpId);
+  var d=comp[mes];
+  return (d&&d.parcelamentos&&d.parcelamentos[codigo])||[];
+}
+// Auto-inclui no grupo qualquer lançamento novo (ex: parcela de um mês seguinte)
+// que cite o mesmo número de NF já usado como chave do grupo.
+function _reconciliarParcelamentos(mes,codigo,lancs){
+  var comp=S.comp(curEmpId);
+  var d=comp[mes]; if(!d||!d.parcelamentos||!d.parcelamentos[codigo])return;
+  var grupos=d.parcelamentos[codigo];
+  var mudou=false;
+  grupos.forEach(function(g){
+    if(!g.nfChave)return;
+    lancs.forEach(function(l){
+      if(!l.numero||g.numeros.indexOf(l.numero)>=0)return;
+      if(_extrairNumeroNF(l.historico)===g.nfChave){g.numeros.push(l.numero);mudou=true;}
+    });
+  });
+  if(mudou)S.saveComp(curEmpId,comp);
+}
+// Resolve os grupos contra os lançamentos atuais: separa quem ainda tem saldo em
+// aberto (aparece consolidado na tabela principal e na tela Parcelas) de quem já
+// zerou (some da tabela principal e da tela Parcelas, só aparece em Conciliado).
+function _resolverGruposParcelamento(mes,codigo,lancs){
+  var grupos=getGruposParcelamento(mes,codigo);
+  var porNumero={};
+  lancs.forEach(function(l){if(l.numero)porNumero[l.numero]=l;});
+  var ativos=[], quitados=[], numerosOcultos=new Set();
+  grupos.forEach(function(g){
+    var itens=g.numeros.map(function(n){return porNumero[n];}).filter(Boolean);
+    if(!itens.length)return;
+    itens.forEach(function(l){numerosOcultos.add(l.numero);});
+    var net=0;
+    itens.forEach(function(l){net+=(l.debito||0)-(l.credito||0);});
+    var ordenados=itens.slice().sort(function(a,b){return (a.data||'').localeCompare(b.data||'');});
+    var info={grupo:g,itens:ordenados,net:net};
+    if(Math.abs(net)<0.01)quitados.push(info);
+    else ativos.push(info);
+  });
+  return {ativos:ativos,quitados:quitados,numerosOcultos:numerosOcultos};
+}
+function marcarComoParcelamento(){
+  var sel=getSelectedLancRows().filter(function(r){return r.kind==='lanc'&&!r.isGrupo;});
+  if(!sel.length){toast('Selecione ao menos um lançamento (a aquisição e o(s) pagamento(s) da mesma NF)','err');return}
+  var numeros=sel.map(function(r){return r.l.numero;}).filter(Boolean);
+  if(!numeros.length){toast('Os lançamentos selecionados não têm número identificável','err');return}
+  var nfChave=null;
+  for(var i=0;i<sel.length;i++){var n=_extrairNumeroNF(sel[i].l.historico);if(n){nfChave=n;break;}}
+  var comp=S.comp(curEmpId);
+  var d=comp[contaDetMes]; if(!d)return;
+  if(!d.parcelamentos)d.parcelamentos={};
+  if(!d.parcelamentos[contaDetCodigo])d.parcelamentos[contaDetCodigo]=[];
+  d.parcelamentos[contaDetCodigo].push({
+    id:'parc_'+Date.now()+'_'+Math.random().toString(36).slice(2,6),
+    nfChave:nfChave, numeros:numeros, criadoEm:new Date().toISOString()
+  });
+  S.saveComp(curEmpId,comp);
+  toast('Grupo de parcelamento criado com '+numeros.length+' lançamento(s)'+(nfChave?' (NF '+nfChave+', parcelas futuras entram sozinhas)':'')+' ✓');
+  renderContaDetHeader();
+  renderContaDetTabela();
+}
+function _renderReplicaGrupos(titulo,grupos,msgVazio){
+  var body=document.getElementById('contaDetBody');
+  var html='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
+    '<h3 style="margin:0;color:var(--ink)">'+titulo+' — '+contaDetCodigo+'</h3>'+
+    '<div style="display:flex;gap:6px">'+
+      '<button class="btn bo bsm" onclick="window.print()">🖨 Imprimir</button>'+
+      '<button class="btn bo bsm" onclick="renderContaDetTabela()">← Voltar</button>'+
+    '</div></div>';
+  if(!grupos.length){
+    body.innerHTML=html+'<div class="empty"><div class="et">'+msgVazio+'</div></div>';
+    return;
+  }
+  html+='<table class="ledger-table"><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th></tr></thead><tbody>';
+  grupos.forEach(function(g){
+    html+='<tr style="background:#F1F5F9"><td colspan="5" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
+    g.itens.forEach(function(l){
+      html+='<tr>'+
+        '<td class="mn">'+(l.data?l.data.split('-').reverse().join('/'):'—')+'</td>'+
+        '<td class="mn">'+(l.numero||'—')+'</td>'+
+        '<td class="ledger-hist">'+(l.historico||'—')+'</td>'+
+        '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
+        '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
+      '</tr>';
+    });
+  });
+  html+='</tbody></table>';
+  body.innerHTML=html;
+}
+function abrirParcelasConta(){
+  var data=getContaDetData();
+  var lancs=(data.razaoConta&&data.razaoConta.lancamentos)||[];
+  var res=_resolverGruposParcelamento(contaDetMes,contaDetCodigo,lancs);
+  _renderReplicaGrupos('📦 Parcelas',res.ativos,'Nenhum grupo de parcelamento em aberto nesta conta. Selecione lançamentos na tabela e clique em "Marcar como Parcelamento".');
+}
+function abrirConciliadoConta(){
+  var data=getContaDetData();
+  var lancs=(data.razaoConta&&data.razaoConta.lancamentos)||[];
+  var res=_resolverGruposParcelamento(contaDetMes,contaDetCodigo,lancs);
+  _renderReplicaGrupos('✅ Conciliado',res.quitados,'Nenhum grupo de parcelamento totalmente quitado nesta conta ainda.');
+}
+
 function renderContaDetTabela(){
   var data=getContaDetData();
   var razaoConta=data.razaoConta;
@@ -6016,12 +6137,21 @@ function renderContaDetTabela(){
   var fVal=(document.getElementById('contaDetFiltroValor')||{}).value||'';
   var fStatus=(document.getElementById('contaDetFiltroStatus')||{}).value||'';
 
-  var rows=lancs.map(function(l,i){
+  // Parcelamentos: reconcilia novas parcelas por nº de NF, e resolve quais
+  // lançamentos ficam ocultos (fazem parte de algum grupo) e quais grupos ainda
+  // têm saldo em aberto (viram uma única linha consolidada na tabela).
+  _reconciliarParcelamentos(contaDetMes,contaDetCodigo,lancs);
+  var resParc=_resolverGruposParcelamento(contaDetMes,contaDetCodigo,lancs);
+  var numerosOcultos=resParc.numerosOcultos;
+
+  var rows=[];
+  lancs.forEach(function(l,i){
+    if(l.numero&&numerosOcultos.has(l.numero))return; // faz parte de um grupo de parcelamento
     var status=statuses?statuses[i].status:'aberto';
     var matchTipo=statuses?statuses[i].matchTipo:'';
     var matchDetalhe=statuses?(statuses[i].matchDetalhe||''):'';
     var flaggedNat=flagsLanc[i]||null; // 'pagamento' | 'recebimento' | null
-    return {kind:'lanc', idx:i, l:l, status:status, matchTipo:matchTipo, matchDetalhe:matchDetalhe, flagged:!!flaggedNat, flaggedNat:flaggedNat};
+    rows.push({kind:'lanc', idx:i, l:l, status:status, matchTipo:matchTipo, matchDetalhe:matchDetalhe, flagged:!!flaggedNat, flaggedNat:flaggedNat});
   });
 
   // Adjustment/reclassification rows
@@ -6031,6 +6161,19 @@ function renderContaDetTabela(){
       status:a.conciliado?'baixado_exato':'aberto',
       matchTipo:a.tipo==='reclass'?'Reclassificação':'Ajuste',
       flagged:false, flaggedNat:null
+    });
+  });
+
+  // Grupos de parcelamento ainda em aberto: uma única linha consolidada, ancorada
+  // na data do primeiro lançamento do grupo, com o saldo líquido do grupo.
+  resParc.ativos.forEach(function(g){
+    var primeiro=g.itens[0];
+    var net=g.net;
+    rows.push({
+      kind:'lanc', idx:-1, isGrupo:true, grupoId:g.grupo.id,
+      l:{data:primeiro.data, numero:'📦 '+(g.grupo.nfChave||''), historico:(primeiro.historico||'')+' — parcelado ('+g.itens.length+' lançamento(s))', ctapart:'',
+        debito:net>0?net:0, credito:net<0?-net:0, saldo:null},
+      status:'parcelado', matchTipo:'Parcelado', matchDetalhe:'', flagged:false, flaggedNat:null
     });
   });
 
@@ -6155,19 +6298,20 @@ function renderContaDetTabela(){
   rowsFiltered.forEach(function(r,ri){
     var l=r.l;
     var rowCls='';
-    if(r.kind==='ajuste')rowCls='ledger-row-ajuste';
+    if(r.isGrupo)rowCls='ledger-row-manual';
+    else if(r.kind==='ajuste')rowCls='ledger-row-ajuste';
     else if(r.flagged)rowCls='ledger-row-flagged';
     else if(r.status==='baixado_exato')rowCls='ledger-row-exato';
     else if(r.status==='baixado_aprox')rowCls='ledger-row-aprox';
     else if(r.status==='manual')rowCls='ledger-row-manual';
 
-    var badgeCls=r.status==='baixado_exato'?'cb-exato':r.status==='baixado_aprox'?'cb-aprox':r.status==='manual'?'cb-fechada':'cb-aberto';
-    var badgeTxt=r.status==='aberto'?'Em aberto':(r.matchTipo||(r.status==='manual'?'Manual':'Conciliado'));
+    var badgeCls=r.isGrupo?'cb-fechada':r.status==='baixado_exato'?'cb-exato':r.status==='baixado_aprox'?'cb-aprox':r.status==='manual'?'cb-fechada':'cb-aberto';
+    var badgeTxt=r.isGrupo?'📦 Parcelado':(r.status==='aberto'?'Em aberto':(r.matchTipo||(r.status==='manual'?'Manual':'Conciliado')));
 
-    var baixaAndCk=(r.kind==='lanc'&&baixaAndamento[r.idx])?' checked':'';
-    var saldoAntSelCk=(r.kind==='lanc'&&saldoAnteriorSel[r.idx])?' checked':'';
+    var baixaAndCk=(r.kind==='lanc'&&!r.isGrupo&&baixaAndamento[r.idx])?' checked':'';
+    var saldoAntSelCk=(r.kind==='lanc'&&!r.isGrupo&&saldoAnteriorSel[r.idx])?' checked':'';
     html+='<tr class="'+rowCls+'" data-row-ri="'+ri+'">'+
-      '<td><input type="checkbox" class="contaDetChk" data-ri="'+ri+'"></td>'+
+      '<td>'+(r.isGrupo?'':'<input type="checkbox" class="contaDetChk" data-ri="'+ri+'">')+'</td>'+
       '<td class="mn" style="white-space:nowrap">'+(l.data?l.data.split('-').reverse().join('/'):'—')+'</td>'+
       '<td class="mn">'+(l.numero||'—')+'</td>'+
       '<td class="ledger-hist" title="'+(l.historico||'').replace(/"/g,'&quot;')+'">'+(l.historico||'—')+(r.kind==='ajuste'&&l.contraConta?' <span style="opacity:.7">→ '+l.contraConta+'</span>':'')+'</td>'+
@@ -6177,8 +6321,8 @@ function renderContaDetTabela(){
       '<td class="mn tr"><b>'+(r.saldoCalc!==undefined&&r.saldoCalc!==null?fmt(r.saldoCalc):'—')+'</b></td>'+
       '<td><span class="concil-badge '+badgeCls+'">'+badgeTxt+'</span></td>'+
       '<td style="font-size:11px;color:var(--slate)">'+(r.matchDetalhe||'—')+'</td>'+
-      '<td style="text-align:center">'+(r.kind==='lanc'?'<input type="checkbox" class="baixaAndChk" data-idx="'+r.idx+'" data-cre="'+(l.credito||0)+'" data-deb="'+(l.debito||0)+'"'+baixaAndCk+'>':'')+'</td>'+
-      '<td style="text-align:center">'+(r.kind==='lanc'?'<input type="checkbox" class="saldoAntSelChk" data-idx="'+r.idx+'" data-cre="'+(l.credito||0)+'" data-deb="'+(l.debito||0)+'"'+saldoAntSelCk+'>':'')+'</td>'+
+      '<td style="text-align:center">'+(r.kind==='lanc'&&!r.isGrupo?'<input type="checkbox" class="baixaAndChk" data-idx="'+r.idx+'" data-cre="'+(l.credito||0)+'" data-deb="'+(l.debito||0)+'"'+baixaAndCk+'>':'')+'</td>'+
+      '<td style="text-align:center">'+(r.kind==='lanc'&&!r.isGrupo?'<input type="checkbox" class="saldoAntSelChk" data-idx="'+r.idx+'" data-cre="'+(l.credito||0)+'" data-deb="'+(l.debito||0)+'"'+saldoAntSelCk+'>':'')+'</td>'+
       '<td></td>'+
     '</tr>';
   });
@@ -6244,6 +6388,17 @@ function renderContaDetTabela(){
     actionTd.style.whiteSpace='nowrap';
     actionTd.style.display='flex';
     actionTd.style.gap='4px';
+
+    if(r.isGrupo){
+      var btnVerParc=document.createElement('button');
+      btnVerParc.className='btn bo bsm';
+      btnVerParc.style.cssText='font-size:10.5px;padding:3px 7px';
+      btnVerParc.textContent='📦 Ver Parcelas';
+      btnVerParc.title='Abrir o detalhe de todos os lançamentos deste grupo';
+      btnVerParc.onclick=function(){abrirParcelasConta();};
+      actionTd.appendChild(btnVerParc);
+      continue;
+    }
 
     if(r.kind==='ajuste'){
       var btnDel=document.createElement('button');
