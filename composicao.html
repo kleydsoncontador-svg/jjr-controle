@@ -6065,14 +6065,26 @@ function marcarComoParcelamento(){
   renderContaDetHeader();
   renderContaDetTabela();
 }
-function _renderReplicaGrupos(titulo,grupos,msgVazio){
-  var body=document.getElementById('contaDetBody');
-  var html='<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
+function _linhaConciliadoHtml(l){
+  return '<tr>'+
+    '<td class="mn">'+(l.data?l.data.split('-').reverse().join('/'):'—')+'</td>'+
+    '<td class="mn">'+(l.numero||l.id||'—')+'</td>'+
+    '<td class="ledger-hist">'+(l.historico||'—')+'</td>'+
+    '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
+    '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
+  '</tr>';
+}
+function _cabecalhoReplica(titulo){
+  return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
     '<h3 style="margin:0;color:var(--ink)">'+titulo+' — '+contaDetCodigo+'</h3>'+
     '<div style="display:flex;gap:6px">'+
       '<button class="btn bo bsm" onclick="window.print()">🖨 Imprimir</button>'+
       '<button class="btn bo bsm" onclick="renderContaDetTabela()">← Voltar</button>'+
     '</div></div>';
+}
+function _renderReplicaGrupos(titulo,grupos,msgVazio){
+  var body=document.getElementById('contaDetBody');
+  var html=_cabecalhoReplica(titulo);
   if(!grupos.length){
     body.innerHTML=html+'<div class="empty"><div class="et">'+msgVazio+'</div></div>';
     return;
@@ -6080,15 +6092,7 @@ function _renderReplicaGrupos(titulo,grupos,msgVazio){
   html+='<table class="ledger-table"><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th></tr></thead><tbody>';
   grupos.forEach(function(g){
     html+='<tr style="background:#F1F5F9"><td colspan="5" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
-    g.itens.forEach(function(l){
-      html+='<tr>'+
-        '<td class="mn">'+(l.data?l.data.split('-').reverse().join('/'):'—')+'</td>'+
-        '<td class="mn">'+(l.numero||'—')+'</td>'+
-        '<td class="ledger-hist">'+(l.historico||'—')+'</td>'+
-        '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
-        '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
-      '</tr>';
-    });
+    g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l);});
   });
   html+='</tbody></table>';
   body.innerHTML=html;
@@ -6099,11 +6103,50 @@ function abrirParcelasConta(){
   var res=_resolverGruposParcelamento(contaDetMes,contaDetCodigo,lancs);
   _renderReplicaGrupos('📦 Parcelas',res.ativos,'Nenhum grupo de parcelamento em aberto nesta conta. Selecione lançamentos na tabela e clique em "Marcar como Parcelamento".');
 }
+// Mostra TUDO que já está "resolvido" nesta conta: lançamentos conciliados
+// (exato/aprox./manual, do jeito que a tabela principal já não mostra mais por
+// padrão) + ajustes conciliados + grupos de parcelamento que zeraram.
 function abrirConciliadoConta(){
   var data=getContaDetData();
   var lancs=(data.razaoConta&&data.razaoConta.lancamentos)||[];
+  var statuses=data.conciliacao?data.conciliacao.lancamentos:null;
+  var ajustes=data.ajustes||[];
   var res=_resolverGruposParcelamento(contaDetMes,contaDetCodigo,lancs);
-  _renderReplicaGrupos('✅ Conciliado',res.quitados,'Nenhum grupo de parcelamento totalmente quitado nesta conta ainda.');
+
+  var numerosEmGrupo=new Set();
+  res.ativos.concat(res.quitados).forEach(function(info){
+    info.itens.forEach(function(l){if(l.numero)numerosEmGrupo.add(l.numero);});
+  });
+
+  var lancsConciliados=[];
+  lancs.forEach(function(l,i){
+    if(l.numero&&numerosEmGrupo.has(l.numero))return; // já representado no grupo de parcelamento
+    var st=statuses?statuses[i].status:'aberto';
+    if(st==='baixado_exato'||st==='baixado_aprox'||st==='manual')lancsConciliados.push(l);
+  });
+  ajustes.forEach(function(a){if(a.conciliado)lancsConciliados.push(a);});
+  lancsConciliados.sort(function(a,b){return (a.data||'').localeCompare(b.data||'');});
+
+  var body=document.getElementById('contaDetBody');
+  var html=_cabecalhoReplica('✅ Conciliado');
+  if(!res.quitados.length&&!lancsConciliados.length){
+    body.innerHTML=html+'<div class="empty"><div class="et">Nenhum lançamento conciliado nesta conta ainda.</div></div>';
+    return;
+  }
+  html+='<table class="ledger-table"><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th></tr></thead><tbody>';
+  if(res.quitados.length){
+    html+='<tr style="background:#DCFCE7"><td colspan="5" style="font-weight:700;padding:8px;color:#166534">📦 Grupos de parcelamento quitados</td></tr>';
+    res.quitados.forEach(function(g){
+      html+='<tr style="background:#F1F5F9"><td colspan="5" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
+      g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l);});
+    });
+  }
+  if(lancsConciliados.length){
+    html+='<tr style="background:#DCFCE7"><td colspan="5" style="font-weight:700;padding:8px;color:#166534">✓ Lançamentos conciliados</td></tr>';
+    lancsConciliados.forEach(function(l){html+=_linhaConciliadoHtml(l);});
+  }
+  html+='</tbody></table>';
+  body.innerHTML=html;
 }
 
 function renderContaDetTabela(){
@@ -6210,6 +6253,10 @@ function renderContaDetTabela(){
     }
     if(fStatus==='flagged'&&!r.flagged)return false;
     if(fStatus&&fStatus!=='flagged'&&r.status!==fStatus)return false;
+    // Sem filtro de status escolhido: lançamentos já conciliados (exato/aprox./manual)
+    // saem da tabela principal por padrão e vão pra tela "✅ Conciliado" — só aparecem
+    // aqui se o usuário explicitamente escolher esse status no filtro.
+    if(!fStatus&&(r.status==='baixado_exato'||r.status==='baixado_aprox'||r.status==='manual'))return false;
     return true;
   });
 
