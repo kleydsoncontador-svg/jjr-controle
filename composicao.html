@@ -436,6 +436,7 @@ td{padding:9px 13px;vertical-align:middle}
         <button class="btn bo bsm" style="background:#f5c518;color:#1E3558;border:none" onclick="atualizarSaldoCorridoConta()" title="Recalcula a coluna Saldo de todos os lançamentos desta conta, na ordem, a partir do Saldo Anterior">🔄 Atualizar Saldo</button>
         <button class="btn bo bsm" onclick="abrirParcelasConta()" title="Ver todos os grupos de parcelamento em aberto desta conta">📦 Parcelas</button>
         <button class="btn bo bsm" onclick="abrirConciliadoConta()" title="Ver todos os grupos de parcelamento já totalmente quitados desta conta">✅ Conciliado</button>
+        <button class="btn bo bsm" onclick="abrirAjustesConta()" title="Ver todos os ajustes/reclassificações criados nesta conta e gerar o TXT">📄 Ajustes</button>
         <button class="btn bo bsm" onclick="exportarLedgerFiltrado()" title="Exportar apenas as linhas filtradas para Excel">📊 Excel (filtrado)</button>
         <button class="btn bo bsm" onclick="abrirSubstituirRazaoModal()" title="Substituir o Razão desta conta por uma versão ajustada, preservando conciliações confirmadas">🔄 Substituir Razão</button>
         <button class="btn bo bsm" onclick="abrirAjusteModal()">＋ Ajuste / Reclassificação</button>
@@ -6122,10 +6123,11 @@ function _renderCardsReplica(itens){
     '<div class="card"><div class="cl">Total Crédito</div><div class="cv sm">'+fmt(totCre)+'</div></div>'+
     '<div class="card"><div class="cl">Saldo Líquido</div><div class="cv sm g">'+fmt(totDeb-totCre)+'</div></div>';
 }
-function _cabecalhoReplica(titulo){
+function _cabecalhoReplica(titulo,extraBtnHtml){
   return '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">'+
     '<h3 style="margin:0;color:var(--ink)">'+titulo+' — '+contaDetCodigo+'</h3>'+
     '<div style="display:flex;gap:6px">'+
+      (extraBtnHtml||'')+
       '<button class="btn bo bsm" onclick="window.print()">🖨 Imprimir</button>'+
       '<button class="btn bo bsm" onclick="renderContaDetTabela()">← Voltar ao Em Aberto/Aprox.</button>'+
     '</div></div>';
@@ -6202,6 +6204,61 @@ function abrirConciliadoConta(){
   }
   html+='</tbody></table>';
   body.innerHTML=html;
+}
+
+// Tela replica listando todo ajuste/reclassificação já criado nesta conta,
+// com botão para gerar o TXT (mesmo layout usado no LALUP: data;conta
+// débito;conta crédito;valor;;histórico;1;empresa;;). Só entram no TXT os
+// que têm conta de contrapartida definida (tipo reclass) — um ajuste sem
+// contrapartida não forma um lançamento contábil completo.
+function abrirAjustesConta(){
+  var data=getContaDetData();
+  var ajustes=(data.ajustes||[]).slice().sort(function(a,b){return (a.data||'').localeCompare(b.data||'');});
+  var body=document.getElementById('contaDetBody');
+  var btnTxt='<button class="btn bo bsm" style="background:var(--teal);color:#fff;border:none" onclick="gerarTxtAjustesConta()">⬇ Gerar TXT</button>';
+  var html=_cabecalhoReplica('📄 Ajustes',btnTxt);
+  _renderCardsReplica(ajustes);
+  if(!ajustes.length){
+    body.innerHTML=html+'<div class="empty"><div class="et">Nenhum ajuste/reclassificação criado nesta conta ainda.</div></div>';
+    return;
+  }
+  html+='<table class="ledger-table" style="table-layout:fixed"><colgroup><col style="width:85px"><col style="width:85px"><col><col style="width:105px"><col style="width:105px"><col style="width:115px"></colgroup><thead><tr><th>Data</th><th>Tipo</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th><th>Contrapartida</th></tr></thead><tbody>';
+  ajustes.forEach(function(a){
+    html+='<tr>'+
+      '<td class="mn">'+(a.data?a.data.split('-').reverse().join('/'):'—')+'</td>'+
+      '<td class="mn">'+(a.tipo==='reclass'?'Reclass.':'Ajuste')+'</td>'+
+      '<td class="ledger-hist">'+(a.historico||'—')+'</td>'+
+      '<td class="mn tr">'+(a.debito?fmt(a.debito):'—')+'</td>'+
+      '<td class="mn tr">'+(a.credito?fmt(a.credito):'—')+'</td>'+
+      '<td class="mn">'+(a.contraConta||'—')+'</td>'+
+    '</tr>';
+  });
+  html+='</tbody></table>';
+  body.innerHTML=html;
+}
+
+function gerarTxtAjustesConta(){
+  var data=getContaDetData();
+  var ajustes=(data.ajustes||[]).filter(function(a){return a.tipo==='reclass'&&a.contraConta;});
+  if(!ajustes.length){toast('Nenhum ajuste com contrapartida definida nesta conta para exportar.','err');return}
+  var semAcento=function(s){return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'');};
+  var limparHistorico=function(s){return semAcento(s).replace(/;/g,' ').trim();};
+  var linhas=ajustes.map(function(a){
+    var dataTxt=(a.data||'').split('-').reverse().join('/');
+    var contaDeb,contaCred,valor;
+    if(a.debito>0){contaDeb=contaDetCodigo;contaCred=a.contraConta;valor=a.debito;}
+    else{contaDeb=a.contraConta;contaCred=contaDetCodigo;valor=a.credito;}
+    var valorTxt=valor.toFixed(2).replace('.',',');
+    var historico=limparHistorico(a.historico);
+    return dataTxt+';'+contaDeb+';'+contaCred+';'+valorTxt+';;'+historico+';1;'+curEmpId+';;';
+  });
+  var conteudo=linhas.join('\r\n');
+  var blob=new Blob([semAcento(conteudo)],{type:'text/plain;charset=utf-8'});
+  var url=URL.createObjectURL(blob);
+  var a2=document.createElement('a');
+  a2.href=url; a2.download='Ajustes_'+contaDetCodigo+'_'+contaDetMes+'.txt'; a2.click();
+  URL.revokeObjectURL(url);
+  toast('TXT gerado com '+linhas.length+' lançamento(s) ✓');
 }
 
 function renderContaDetTabela(){
