@@ -441,6 +441,7 @@ td{padding:9px 13px;vertical-align:middle}
         <button class="btn bo bsm" onclick="abrirAjustesConta()" title="Ver todos os ajustes/reclassificações criados nesta conta e gerar o TXT">📄 Ajustes</button>
         <button class="btn bo bsm" onclick="exportarLedgerFiltrado()" title="Exportar apenas as linhas filtradas para Excel">📊 Excel (filtrado)</button>
         <button class="btn bo bsm" onclick="abrirSubstituirRazaoModal()" title="Substituir o Razão desta conta por uma versão ajustada, preservando conciliações confirmadas">🔄 Substituir Razão</button>
+        <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirDadosConta()" title="Apaga TODOS os dados desta conta (lançamentos, conciliação, ajustes, parcelamentos) para subir uma versão do zero. A conta continua na lista, só fica vazia.">🗑️ Excluir Conta</button>
         <button class="btn bo bsm" onclick="abrirAjusteModal()">＋ Ajuste / Reclassificação</button>
         <button class="btn bo bsm" style="background:var(--teal);color:#fff;border:none" onclick="conciliarContaDetalhe()">▶ Conciliar automaticamente</button>
       </div>
@@ -4584,6 +4585,42 @@ function substituirRazaoConta(codigo, novosLancamentos){
   };
 }
 
+// Apaga TODOS os dados desta conta (lançamentos, conciliação, ajustes,
+// parcelamentos, flags, baixa em andamento, saldo anterior selecionado/
+// conciliado, números de NF manuais) para o usuário poder subir uma versão
+// do zero quantas vezes precisar — ao contrário de "Substituir Razão", que
+// tenta PRESERVAR conciliações confirmadas, aqui é reset completo mesmo.
+// A conta em si continua cadastrada em d.contas (só o conteúdo é zerado).
+function excluirDadosConta(){
+  if(!confirm('Apagar TODOS os dados da conta '+contaDetCodigo+'? Isso remove lançamentos, conciliação, ajustes, parcelamentos e flags dessa conta (só dela, as outras contas não são afetadas). Essa ação não pode ser desfeita — só use se for subir o Razão dela de novo do zero.'))return;
+
+  var razao=S.razao(curEmpId,contaDetMes);
+  var comp=S.comp(curEmpId);
+  var d=comp[contaDetMes];
+  if(!d)return;
+  var codigo=contaDetCodigo;
+
+  var nomeAtual=(razao[codigo]&&razao[codigo].nome)||codigo;
+  razao[codigo]={classificacao:codigo,nome:nomeAtual,saldoAnterior:0,lancamentos:[]};
+  S.saveRazao(curEmpId,contaDetMes,razao);
+
+  if(d.conciliacao)delete d.conciliacao[codigo];
+  if(d.ajustes)delete d.ajustes[codigo];
+  if(d.parcelamentos)delete d.parcelamentos[codigo];
+  if(d.flagsLancamentos)delete d.flagsLancamentos[codigo];
+  if(d.baixaAndamento)delete d.baixaAndamento[codigo];
+  if(d.saldoAnteriorSel)delete d.saldoAnteriorSel[codigo];
+  if(d.saldoAntConciliado)delete d.saldoAntConciliado[codigo];
+  if(d.docsNf)delete d.docsNf[codigo];
+
+  var contaObj=(d.contas||[]).find(function(c){return c.codigo===codigo;});
+  if(contaObj)contaObj.saldoAnterior=0;
+
+  S.saveComp(curEmpId,comp);
+  toast('Dados da conta '+codigo+' apagados — pode subir o Razão dela de novo.','ok');
+  renderContaDetHeader();
+  renderContaDetTabela();
+}
 function processRazao(data, filename){
   var parsed = parseRazaoFile(data);
   var contas = parsed.contas, totalContas = parsed.totalContas, totalLanc = parsed.totalLanc;
@@ -6083,6 +6120,23 @@ function conciliarContaDetalhe(){
 }
 
 // natureza: 'pagamento' or 'recebimento'
+// Coluna "Nº NF": vem preenchida sozinha (extraída do histórico via
+// _extrairNumeroNF), mas o operador pode corrigir/completar na mão quando o
+// texto não tem um número reconhecível ou vem errado — a edição manual fica
+// guardada por lançamento (d.docsNf), sobrepondo o valor automático.
+function salvarNfDocManual(inputEl){
+  var idx=parseInt(inputEl.dataset.idx,10);
+  var valor=inputEl.value.trim();
+  var comp=S.comp(curEmpId);
+  var d=comp[contaDetMes];
+  if(!d)return;
+  if(!d.docsNf)d.docsNf={};
+  if(!d.docsNf[contaDetCodigo])d.docsNf[contaDetCodigo]={};
+  if(valor)d.docsNf[contaDetCodigo][idx]=valor;
+  else delete d.docsNf[contaDetCodigo][idx];
+  S.saveComp(curEmpId,comp);
+  toast('Nº NF salvo ✓');
+}
 function toggleFlagLancamento(lancIdx, natureza){
   var comp=S.comp(curEmpId);
   var d=comp[contaDetMes];
@@ -6400,6 +6454,7 @@ function renderContaDetTabela(){
   var flagsLanc=(d&&d.flagsLancamentos&&d.flagsLancamentos[contaDetCodigo])||{};
   var baixaAndamento=(d&&d.baixaAndamento&&d.baixaAndamento[contaDetCodigo])||{};
   var saldoAnteriorSel=(d&&d.saldoAnteriorSel&&d.saldoAnteriorSel[contaDetCodigo])||{};
+  var docsNf=(d&&d.docsNf&&d.docsNf[contaDetCodigo])||{};
   var ajustes=data.ajustes;
   var tipo=contaObj?contaObj.tipo:tipoFromCodigo(contaDetCodigo);
 
@@ -6541,7 +6596,7 @@ function renderContaDetTabela(){
 
   var html='<table class="ledger-table"><thead><tr>'+
     '<th><input type="checkbox" id="contaDetSelAll" onchange="toggleSelAllLanc(this)"></th>'+
-    '<th>Data</th><th>Número</th><th>Histórico</th><th>Cta.C.Part.</th>'+
+    '<th>Data</th><th>Número</th><th>Histórico</th><th>Nº NF</th><th>Cta.C.Part.</th>'+
     '<th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th>'+
     '<th>Conciliação</th><th>Critério do Match</th>'+
     '<th style="text-align:center">Baixa em<br>Andamento <input type="checkbox" id="baixaAndamentoSelAll" onchange="toggleSelAllBaixaAndamento(this)" title="Marcar/desmarcar todos os itens filtrados" style="vertical-align:middle;margin-left:4px"></th>'+
@@ -6555,7 +6610,7 @@ function renderContaDetTabela(){
     var saSaldoAntSelCk=saldoAnteriorSel['SA']?' checked':'';
     html+='<tr class="'+saCls+'" data-saldo-ant="1" style="font-weight:600">'+
       '<td></td>'+
-      '<td colspan="6">SALDO ANTERIOR</td>'+
+      '<td colspan="7">SALDO ANTERIOR</td>'+
       '<td class="tr">'+fmt(sa)+'</td>'+
       '<td><span class="concil-badge '+(saConciliado?'cb-exato':'cb-aberto')+'">'+(saConciliado?'Conciliado':'Em aberto')+'</span></td>'+
       '<td></td>'+
@@ -6566,7 +6621,7 @@ function renderContaDetTabela(){
 
   // Lançamentos de meses anteriores em aberto
   if(prevRows.length){
-    html+='<tr style="background:#DBEAFE"><td colspan="13" style="padding:5px 13px;font-size:11px;font-weight:600;color:#1D4ED8;border-top:2px solid #BFDBFE;border-bottom:1px solid #BFDBFE">'+
+    html+='<tr style="background:#DBEAFE"><td colspan="14" style="padding:5px 13px;font-size:11px;font-weight:600;color:#1D4ED8;border-top:2px solid #BFDBFE;border-bottom:1px solid #BFDBFE">'+
       '↩ Lançamentos de meses anteriores em aberto ('+prevRows.length+' item'+( prevRows.length>1?'s':'')+' — constituem o Saldo Anterior)</td></tr>';
     prevRows.forEach(function(r){
       var l=r.l;
@@ -6576,6 +6631,7 @@ function renderContaDetTabela(){
         '<td class="mn" style="white-space:nowrap">'+dataFmt+'<br><span style="font-size:9px;color:#3B82F6;font-weight:600">'+mesLabel(r.mes)+'</span></td>'+
         '<td class="mn">'+(l.numero||'—')+'</td>'+
         '<td class="ledger-hist" title="'+(l.historico||'').replace(/"/g,'&quot;')+'">'+(l.historico||'—')+'</td>'+
+        '<td class="mn">'+(_extrairNumeroNF(l.historico)||'—')+'</td>'+
         '<td class="mn">'+(l.ctapart||'—')+'</td>'+
         '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
         '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
@@ -6606,6 +6662,7 @@ function renderContaDetTabela(){
       '<td class="mn" style="white-space:nowrap">'+(l.data?l.data.split('-').reverse().join('/'):'—')+'</td>'+
       '<td class="mn">'+(l.numero||'—')+'</td>'+
       '<td class="ledger-hist" title="'+(l.historico||'').replace(/"/g,'&quot;')+'">'+(l.historico||'—')+(r.kind==='ajuste'&&l.contraConta?' <span style="opacity:.7">→ '+l.contraConta+'</span>':'')+'</td>'+
+      '<td>'+(r.kind==='lanc'&&!r.isGrupo?'<input type="text" class="nfDocInput" data-idx="'+r.idx+'" value="'+((docsNf[r.idx]!==undefined?docsNf[r.idx]:(_extrairNumeroNF(l.historico)||'')).replace(/"/g,'&quot;'))+'" placeholder="—" style="width:72px;font-family:var(--mono);font-size:11px;padding:3px 5px;border:1px solid var(--border);border-radius:4px" onchange="salvarNfDocManual(this)">':'')+'</td>'+
       '<td class="mn">'+(l.ctapart||'—')+'</td>'+
       '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
       '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
