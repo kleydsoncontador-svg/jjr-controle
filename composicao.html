@@ -4,6 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>JJR Conciliador</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+<script src="supabase-config.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <style>
 
@@ -1073,6 +1075,67 @@ const CA2_DB_STORE = 'kv';
 const ca2Cache = {};
 let ca2Db = null;
 
+// ═══════════════════════════════════════════════════════
+// PERSISTÊNCIA NA NUVEM — Supabase, tabela dados_app
+// (mesmo padrão do index.html e do valor-residual.html)
+// ═══════════════════════════════════════════════════════
+// Até aqui este módulo só gravava em IndexedDB local (ver comentário acima)
+// — nunca sincronizava com o Supabase, então dados de Composição de Saldos
+// feitos numa máquina não apareciam em nenhuma outra. Isso foi corrigido
+// mantendo o cache local (rápido, síncrono, funciona offline) mas agora
+// espelhando toda gravação pra nuvem também, e puxando o que já está salvo
+// lá no boot, ANTES do primeiro bootstrap() — igual o resto do site já faz.
+let _ca2SupaClient = null;
+let _ca2SessaoPronta = Promise.resolve(false);
+try{
+  if(typeof supabase!=='undefined' && typeof SUPABASE_URL!=='undefined' && SUPABASE_URL && SUPABASE_URL.indexOf('YOUR')<0){
+    _ca2SupaClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    // Este módulo roda embutido (iframe) na mesma origem do index.html — se o
+    // usuário já logou lá, a sessão do Supabase Auth fica no localStorage
+    // compartilhado da origem. Sem esperar essa sessão resolver antes da
+    // primeira chamada, ela sai anônima e a RLS de dados_app pode bloquear.
+    _ca2SessaoPronta = _ca2SupaClient.auth.getSession().then(function(r){ return !!(r.data && r.data.session); });
+  }
+}catch(e){ console.error('ca2: Supabase init falhou', e); }
+
+// Chaves que NUNCA sobem pra nuvem (equivalente ao CA2_LOCAL_KEYS do OneDrive
+// e ao 'ccc_session' do index.html) — são estado de sessão desta máquina.
+const CA2_NUVEM_IGNORAR = ['session'];
+
+async function ca2SupabaseUpsert(key, value){
+  if(!_ca2SupaClient || CA2_NUVEM_IGNORAR.includes(key)) return;
+  await _ca2SessaoPronta;
+  try{
+    const { error } = await _ca2SupaClient.from('dados_app').upsert({ key, value, updated_at: new Date().toISOString() });
+    if(error){
+      console.error('ca2SupabaseUpsert', key, error);
+      toast('⚠ Não salvou na nuvem ('+key+') — só ficou salvo neste computador por enquanto','err');
+    }
+  }catch(e){ console.error('ca2SupabaseUpsert', key, e); }
+}
+
+// Busca no Supabase tudo que este módulo usa: as chaves fixas (emps/grupos/
+// users) e as por-empresa (comp_*, razao_*). Devolve {chave:valor} ou null
+// se não deu pra falar com o servidor (aí o boot segue só com o cache local).
+async function ca2CarregarDoSupabase(){
+  if(!_ca2SupaClient) return null;
+  await _ca2SessaoPronta;
+  try{
+    const [fixas, comps, razoes] = await Promise.all([
+      _ca2SupaClient.from('dados_app').select('key,value').in('key', ['emps','grupos','users']),
+      _ca2SupaClient.from('dados_app').select('key,value').like('key', 'comp_%'),
+      _ca2SupaClient.from('dados_app').select('key,value').like('key', 'razao_%'),
+    ]);
+    if(fixas.error || comps.error || razoes.error){
+      console.error('ca2CarregarDoSupabase', fixas.error||comps.error||razoes.error);
+      return null;
+    }
+    const out = {};
+    [].concat(fixas.data||[], comps.data||[], razoes.data||[]).forEach(function(row){ out[row.key] = row.value; });
+    return out;
+  }catch(e){ console.error('ca2CarregarDoSupabase', e); return null; }
+}
+
 function ca2IdbOpen(){
   return new Promise(function(resolve){
     if(!window.indexedDB){ resolve(null); return; }
@@ -1123,28 +1186,49 @@ async function ca2InitStorage(){
 
   if(Object.keys(idbData).length > 0){
     Object.assign(ca2Cache, idbData);
-    return;
+  } else {
+    // Empty IndexedDB: migrate any existing ca2_* localStorage data (one-time).
+    try{
+      var keys = Object.keys(localStorage);
+      keys.forEach(function(k){
+        if(k.indexOf('ca2_') !== 0) return;
+        var shortKey = k.slice(4);
+        if(['lastUser','seeded_v3','seeded_v4','seeded_v5','lma_cleared_v1','idb_migrated_v1'].indexOf(shortKey) !== -1) return;
+        try{
+          var parsed = JSON.parse(localStorage.getItem(k));
+          ca2Cache[shortKey] = parsed;
+          ca2IdbSet(shortKey, parsed);
+        }catch(e){ /* skip malformed entries */ }
+      });
+    }catch(e){ /* localStorage unavailable */ }
   }
 
-  // Empty IndexedDB: migrate any existing ca2_* localStorage data (one-time).
-  try{
-    var keys = Object.keys(localStorage);
-    keys.forEach(function(k){
-      if(k.indexOf('ca2_') !== 0) return;
-      var shortKey = k.slice(4);
-      if(['lastUser','seeded_v3','seeded_v4','seeded_v5','lma_cleared_v1','idb_migrated_v1'].indexOf(shortKey) !== -1) return;
-      try{
-        var parsed = JSON.parse(localStorage.getItem(k));
-        ca2Cache[shortKey] = parsed;
-        ca2IdbSet(shortKey, parsed);
-      }catch(e){ /* skip malformed entries */ }
+  // A partir daqui, cache local (IndexedDB/localStorage) já está pronto —
+  // funciona offline mesmo se o passo abaixo falhar. Agora busca o que já
+  // está salvo na nuvem: o servidor é a fonte compartilhada entre máquinas,
+  // então ele tem prioridade sobre o que está só aqui.
+  var chavesSoLocais = Object.keys(ca2Cache);
+  var dadosNuvem = await ca2CarregarDoSupabase();
+  if(dadosNuvem){
+    Object.keys(dadosNuvem).forEach(function(k){
+      ca2Cache[k] = dadosNuvem[k];
+      ca2IdbSet(k, dadosNuvem[k]);
     });
-  }catch(e){ /* localStorage unavailable */ }
+    // Migração única: chaves que existem só nesta máquina (nunca foram
+    // sincronizadas antes desta correção) sobem pra nuvem agora — mas só as
+    // que o servidor ainda não tem, pra nunca sobrescrever dado de outra
+    // máquina com um dado local antigo.
+    chavesSoLocais.forEach(function(k){
+      if(!(k in dadosNuvem) && !CA2_NUVEM_IGNORAR.includes(k) && ca2Cache[k]!==undefined){
+        ca2SupabaseUpsert(k, ca2Cache[k]);
+      }
+    });
+  }
 }
 
 const S = {
   g:(k)=>(k in ca2Cache)?ca2Cache[k]:null,
-  s:(k,v)=>{ ca2Cache[k]=v; ca2IdbSet(k,v); ca2OneDriveSave(k,v); },
+  s:(k,v)=>{ ca2Cache[k]=v; ca2IdbSet(k,v); ca2OneDriveSave(k,v); ca2SupabaseUpsert(k,v); },
   emps:()=>S.g('emps')||[],
   saveEmps:(a)=>S.s('emps',a),
   comp:(eId)=>S.g('comp_'+eId)||{},
