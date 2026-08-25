@@ -1098,12 +1098,21 @@ try{
   }
 }catch(e){ console.error('ca2: Supabase init falhou', e); }
 
-// Chaves que NUNCA sobem pra nuvem (equivalente ao CA2_LOCAL_KEYS do OneDrive
-// e ao 'ccc_session' do index.html) — são estado de sessão desta máquina.
-const CA2_NUVEM_IGNORAR = ['session'];
+// LISTA DE PERMISSÃO (não de bloqueio): só sobem/descem pra nuvem as chaves
+// que este módulo é DONO de verdade — a composição/razão por empresa.
+// 'emps'/'grupos'/'users'/'session' NUNCA entram aqui: são geridas pelo
+// index.html (Cadastro de Empresas etc.) e chegam aqui só de leitura, via o
+// bridge de localStorage ('jjr_bridge_emps') — nunca escritas de volta pra
+// nuvem por este arquivo. Isso já causou perda de dados uma vez: o bridge
+// reconstrói uma versão ENXUTA da empresa (só nome/cnpj/responsável) e, se
+// isso fosse sincronizado pra nuvem, apaga campos que só existem no
+// index.html (fechamento FOPAG/FISCAL/FINANCEIRO/BALANCETE, status, etc.).
+function _ca2ChaveSincronizavel(key){
+  return key.indexOf('comp_')===0 || key.indexOf('razao_')===0;
+}
 
 async function ca2SupabaseUpsert(key, value){
-  if(!_ca2SupaClient || CA2_NUVEM_IGNORAR.includes(key)) return;
+  if(!_ca2SupaClient || !_ca2ChaveSincronizavel(key)) return;
   await _ca2SessaoPronta;
   try{
     const { error } = await _ca2SupaClient.from('dados_app').upsert({ key, value, updated_at: new Date().toISOString() });
@@ -1114,24 +1123,22 @@ async function ca2SupabaseUpsert(key, value){
   }catch(e){ console.error('ca2SupabaseUpsert', key, e); }
 }
 
-// Busca no Supabase tudo que este módulo usa: as chaves fixas (emps/grupos/
-// users) e as por-empresa (comp_*, razao_*). Devolve {chave:valor} ou null
-// se não deu pra falar com o servidor (aí o boot segue só com o cache local).
+// Busca no Supabase só o que este módulo é dono (comp_*, razao_*). NUNCA
+// busca/sobrescreve emps/grupos/users — ver nota acima.
 async function ca2CarregarDoSupabase(){
   if(!_ca2SupaClient) return null;
   await _ca2SessaoPronta;
   try{
-    const [fixas, comps, razoes] = await Promise.all([
-      _ca2SupaClient.from('dados_app').select('key,value').in('key', ['emps','grupos','users']),
+    const [comps, razoes] = await Promise.all([
       _ca2SupaClient.from('dados_app').select('key,value').like('key', 'comp_%'),
       _ca2SupaClient.from('dados_app').select('key,value').like('key', 'razao_%'),
     ]);
-    if(fixas.error || comps.error || razoes.error){
-      console.error('ca2CarregarDoSupabase', fixas.error||comps.error||razoes.error);
+    if(comps.error || razoes.error){
+      console.error('ca2CarregarDoSupabase', comps.error||razoes.error);
       return null;
     }
     const out = {};
-    [].concat(fixas.data||[], comps.data||[], razoes.data||[]).forEach(function(row){ out[row.key] = row.value; });
+    [].concat(comps.data||[], razoes.data||[]).forEach(function(row){ out[row.key] = row.value; });
     return out;
   }catch(e){ console.error('ca2CarregarDoSupabase', e); return null; }
 }
@@ -1219,7 +1226,7 @@ async function ca2InitStorage(){
     // que o servidor ainda não tem, pra nunca sobrescrever dado de outra
     // máquina com um dado local antigo.
     chavesSoLocais.forEach(function(k){
-      if(!(k in dadosNuvem) && !CA2_NUVEM_IGNORAR.includes(k) && ca2Cache[k]!==undefined){
+      if(!(k in dadosNuvem) && _ca2ChaveSincronizavel(k) && ca2Cache[k]!==undefined){
         ca2SupabaseUpsert(k, ca2Cache[k]);
       }
     });
