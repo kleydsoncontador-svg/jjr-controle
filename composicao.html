@@ -6192,32 +6192,20 @@ function marcarComoParcelamento(){
   renderContaDetHeader();
   renderContaDetTabela();
 }
-// Calcula o saldo corrido dia a dia de TODOS os lançamentos da conta (mesma
-// lógica da tabela principal: confia no saldo já trazido do Razão quando
-// existe, senão acumula débito-crédito a partir do Saldo Anterior), e devolve
-// um Map lançamento→saldo. Como os itens usados nas telas de réplica (grupos
-// de parcelamento, conciliados) são as MESMAS referências de objeto do Razão
-// (nunca cópias), dá pra usar o próprio objeto como chave do Map.
-function _saldoPorLancamento(mes,codigo){
-  var razao=S.razao(curEmpId,mes);
-  var razaoConta=razao[codigo];
-  var lancs=(razaoConta&&razaoConta.lancamentos)||[];
-  var comp=S.comp(curEmpId);
-  var d=comp[mes];
-  var contaObj=d&&(d.contas||[]).find(function(c){return c.codigo===codigo;});
-  var saldoBase=contaObj?contaObj.saldoAnterior:(razaoConta?razaoConta.saldoAnterior:0);
-  var ultimoSaldo=saldoBase;
+// Saldo corrido LOCAL: ao contrário de uma versão inicial que refletia a
+// conta inteira, incluindo itens ainda em aberto que nada têm a ver com o
+// que está sendo mostrado), este soma só os itens passados, na ordem
+// cronológica entre eles, a partir de 'base'. É o que faz sentido nas telas
+// Parcelas/Conciliado: confirma que aquele grupo específico realmente
+// zerou, sem o saldo ficar "contaminado" por outro lançamento qualquer que
+// segue em aberto na conta mas caiu na mesma data.
+function _saldoLocal(itens,base){
+  var ordenados=itens.slice().sort(function(a,b){return (a.data||'').localeCompare(b.data||'');});
   var mapa=new Map();
-  // Precisa seguir a MESMA ordem cronológica usada pela tabela principal
-  // (renderContaDetTabela ordena por data antes de calcular o saldo corrido).
-  // O array bruto do Razão pode não estar nessa ordem — ex.: depois de um
-  // "Detalhar Saldo Anterior", os lançamentos detalhados são concatenados na
-  // frente do array sem reordenar por data.
-  var ordenados=lancs.slice().sort(function(a,b){return (a.data||'').localeCompare(b.data||'');});
-  ordenados.forEach(function(l){
-    var base=(l.saldo!==undefined&&l.saldo!==null)?l.saldo:(ultimoSaldo+(l.debito||0)-(l.credito||0));
-    ultimoSaldo=base;
-    mapa.set(l,base);
+  var running=base||0;
+  ordenados.forEach(function(it){
+    running += (it.debito||0)-(it.credito||0);
+    mapa.set(it,running);
   });
   return mapa;
 }
@@ -6264,11 +6252,11 @@ function _renderReplicaGrupos(titulo,grupos,msgVazio){
     body.innerHTML=html+'<div class="empty"><div class="et">'+msgVazio+'</div></div>';
     return;
   }
-  var mapaSaldo=_saldoPorLancamento(contaDetMes,contaDetCodigo);
   html+='<table class="ledger-table" style="table-layout:fixed;width:auto;min-width:900px"><colgroup><col style="width:85px"><col style="width:85px"><col style="width:420px"><col style="width:105px"><col style="width:105px"><col style="width:115px"></colgroup><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th></tr></thead><tbody>';
   grupos.forEach(function(g){
     html+='<tr style="background:#F1F5F9"><td colspan="6" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
-    g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaSaldo);});
+    var mapaGrupo=_saldoLocal(g.itens,0);
+    g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaGrupo);});
   });
   html+='</tbody></table>';
   body.innerHTML=html;
@@ -6320,7 +6308,6 @@ function abrirConciliadoConta(){
     body.innerHTML=html+'<div class="empty"><div class="et">Nenhum lançamento conciliado nesta conta ainda.</div></div>';
     return;
   }
-  var mapaSaldo=_saldoPorLancamento(contaDetMes,contaDetCodigo);
   html+='<table class="ledger-table" style="table-layout:fixed;width:auto;min-width:900px"><colgroup><col style="width:85px"><col style="width:85px"><col style="width:420px"><col style="width:105px"><col style="width:105px"><col style="width:115px"></colgroup><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th></tr></thead><tbody>';
   if(saItem){
     html+='<tr style="background:#DCFCE7"><td colspan="6" style="font-weight:700;padding:8px;color:#166534">💰 Saldo Anterior</td></tr>';
@@ -6330,12 +6317,19 @@ function abrirConciliadoConta(){
     html+='<tr style="background:#DCFCE7"><td colspan="6" style="font-weight:700;padding:8px;color:#166534">📦 Grupos de parcelamento quitados</td></tr>';
     res.quitados.forEach(function(g){
       html+='<tr style="background:#F1F5F9"><td colspan="6" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
-      g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaSaldo);});
+      var mapaGrupo=_saldoLocal(g.itens,0);
+      g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaGrupo);});
     });
   }
   if(lancsConciliados.length){
     html+='<tr style="background:#DCFCE7"><td colspan="6" style="font-weight:700;padding:8px;color:#166534">✓ Lançamentos conciliados</td></tr>';
-    lancsConciliados.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaSaldo);});
+    // Encadeia a partir do Saldo Anterior (quando ele também estiver aqui) —
+    // assim, quando o operador conciliar exatamente o par que quita a
+    // abertura, o saldo local realmente chega a zero, em vez de ficar
+    // "contaminado" pelo saldo de outro lançamento qualquer que segue em
+    // aberto na conta mas caiu na mesma data.
+    var mapaConciliados=_saldoLocal(lancsConciliados,saItem?sa:0);
+    lancsConciliados.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaConciliados);});
   }
   html+='</tbody></table>';
   body.innerHTML=html;
