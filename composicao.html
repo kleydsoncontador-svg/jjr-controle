@@ -453,6 +453,7 @@ td{padding:9px 13px;vertical-align:middle}
       <button class="btn bo bsm" style="font-size:11px;padding:3px 8px" onclick="bulkConciliar('conciliar')">✓ Conciliar selecionados</button>
       <button class="btn bo bsm" style="font-size:11px;padding:3px 8px" onclick="bulkConciliar('abrir')">↩ Desconciliar selecionados</button>
       <button class="btn bo bsm" style="font-size:11px;padding:3px 8px;background:#EDE9FE;border-color:#C4B5FD" onclick="marcarComoParcelamento()" title="Agrupa os lançamentos selecionados (ex: aquisição + pagamentos parciais da mesma NF) numa única linha de saldo, movendo o detalhe pra tela Parcelas">📦 Marcar como Parcelamento</button>
+      <button class="btn bo bsm" style="font-size:11px;padding:3px 8px;background:#DCFCE7;border-color:#86EFAC" onclick="conciliarFlegados()" title="Marca como conciliado tudo que estiver flegado em Baixa em Andamento ou Saldo Anterior (inclusive o próprio Saldo Anterior), e limpa os flegs em seguida">✓ Conciliar Flegados</button>
       <span style="color:var(--slate);font-size:11px;margin-left:auto">Marque os checkboxes na tabela e use os filtros para refinar a seleção</span>
     </div>
 
@@ -6161,7 +6162,8 @@ function salvarNfDocManual(inputEl){
   if(valor)d.docsNf[contaDetCodigo][idx]=valor;
   else delete d.docsNf[contaDetCodigo][idx];
   S.saveComp(curEmpId,comp);
-  toast('Nº NF salvo ✓');
+  toast('Doc. salvo ✓');
+  renderContaDetTabela(); // recalcula o Saldo DOC. dos lançamentos com o mesmo doc
 }
 function toggleFlagLancamento(lancIdx, natureza){
   var comp=S.comp(curEmpId);
@@ -6207,6 +6209,10 @@ function _extrairNumeroNF(historico){
   m=h.match(/NFE?\.?\s*(\d{2,})\s*\//i);
   if(m)return m[1];
   m=h.match(/NF[E]?\s*<(\d{2,})>/i);
+  if(m)return m[1];
+  // Fallback genérico: qualquer número entre <> no histórico é considerado
+  // número de documento, mesmo sem "NF"/"NOTA FISCAL" antes.
+  m=h.match(/<(\d{2,})>/);
   if(m)return m[1];
   return null;
 }
@@ -6289,7 +6295,7 @@ function _saldoLocal(itens,base){
   });
   return mapa;
 }
-function _linhaConciliadoHtml(l,mapaSaldo){
+function _linhaConciliadoHtml(l,mapaSaldo,onclickAcao){
   var saldoVal=mapaSaldo?mapaSaldo.get(l):undefined;
   if(saldoVal===undefined)saldoVal=l.saldo;
   return '<tr>'+
@@ -6299,6 +6305,7 @@ function _linhaConciliadoHtml(l,mapaSaldo){
     '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
     '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
     '<td class="mn tr"><b>'+(saldoVal!==undefined&&saldoVal!==null?fmt(saldoVal):'—')+'</b></td>'+
+    '<td>'+(onclickAcao?'<button class="btn bo bsm" style="font-size:10.5px;padding:3px 7px" onclick="'+onclickAcao+'">↩ Desconciliar</button>':'')+'</td>'+
   '</tr>';
 }
 // A barra "Seleção em massa" e os cards de Baixa em Andamento/Saldo Anterior só
@@ -6341,9 +6348,9 @@ function _renderReplicaGrupos(titulo,grupos,msgVazio){
     body.innerHTML=html+'<div class="empty"><div class="et">'+msgVazio+'</div></div>';
     return;
   }
-  html+='<table class="ledger-table" style="table-layout:fixed;width:auto;min-width:900px"><colgroup><col style="width:85px"><col style="width:85px"><col style="width:420px"><col style="width:105px"><col style="width:105px"><col style="width:115px"></colgroup><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th></tr></thead><tbody>';
+  html+='<table class="ledger-table" style="table-layout:fixed;width:auto;min-width:960px"><colgroup><col style="width:85px"><col style="width:85px"><col style="width:420px"><col style="width:105px"><col style="width:105px"><col style="width:115px"><col style="width:110px"></colgroup><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th><th></th></tr></thead><tbody>';
   grupos.forEach(function(g){
-    html+='<tr style="background:#F1F5F9"><td colspan="6" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
+    html+='<tr style="background:#F1F5F9"><td colspan="7" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
     var mapaGrupo=_saldoLocal(g.itens,0);
     g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaGrupo);});
   });
@@ -6372,13 +6379,24 @@ function abrirConciliadoConta(){
     info.itens.forEach(function(l){if(l.numero)numerosEmGrupo.add(l.numero);});
   });
 
+  // Guarda, pra cada item, como desconciliá-lo (índice no Razão ou id do
+  // ajuste) — a tela precisa disso pra oferecer o botão "↩ Desconciliar".
   var lancsConciliados=[];
+  var acaoDoItem=new Map();
   lancs.forEach(function(l,i){
     if(l.numero&&numerosEmGrupo.has(l.numero))return; // já representado no grupo de parcelamento
     var st=statuses?statuses[i].status:'aberto';
-    if(st==='baixado_exato'||st==='manual')lancsConciliados.push(l);
+    if(st==='baixado_exato'||st==='manual'){
+      lancsConciliados.push(l);
+      acaoDoItem.set(l,'desconciliarLancDaTelaConciliado('+i+')');
+    }
   });
-  ajustes.forEach(function(a){if(a.conciliado)lancsConciliados.push(a);});
+  ajustes.forEach(function(a){
+    if(a.conciliado){
+      lancsConciliados.push(a);
+      acaoDoItem.set(a,'desconciliarAjusteDaTelaConciliado(\''+a.id+'\')');
+    }
+  });
   lancsConciliados.sort(function(a,b){return (a.data||'').localeCompare(b.data||'');});
 
   // SALDO ANTERIOR: é uma linha à parte (não vem do Razão), então precisa
@@ -6398,31 +6416,62 @@ function abrirConciliadoConta(){
     body.innerHTML=html+'<div class="empty"><div class="et">Nenhum lançamento conciliado nesta conta ainda.</div></div>';
     return;
   }
-  html+='<table class="ledger-table" style="table-layout:fixed;width:auto;min-width:900px"><colgroup><col style="width:85px"><col style="width:85px"><col style="width:420px"><col style="width:105px"><col style="width:105px"><col style="width:115px"></colgroup><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th></tr></thead><tbody>';
+  html+='<table class="ledger-table" style="table-layout:fixed;width:auto;min-width:960px"><colgroup><col style="width:85px"><col style="width:85px"><col style="width:420px"><col style="width:105px"><col style="width:105px"><col style="width:115px"><col style="width:110px"></colgroup><thead><tr><th>Data</th><th>Número</th><th>Histórico</th><th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th><th></th></tr></thead><tbody>';
   if(saItem){
-    html+='<tr style="background:#DCFCE7"><td colspan="6" style="font-weight:700;padding:8px;color:#166534">💰 Saldo Anterior</td></tr>';
-    html+=_linhaConciliadoHtml(saItem);
+    html+='<tr style="background:#DCFCE7"><td colspan="7" style="font-weight:700;padding:8px;color:#166534">💰 Saldo Anterior</td></tr>';
+    html+=_linhaConciliadoHtml(saItem,null,'desconciliarSaldoAnteriorDaTelaConciliado()');
   }
   if(res.quitados.length){
-    html+='<tr style="background:#DCFCE7"><td colspan="6" style="font-weight:700;padding:8px;color:#166534">📦 Grupos de parcelamento quitados</td></tr>';
+    html+='<tr style="background:#DCFCE7"><td colspan="7" style="font-weight:700;padding:8px;color:#166534">📦 Grupos de parcelamento quitados</td></tr>';
     res.quitados.forEach(function(g){
-      html+='<tr style="background:#F1F5F9"><td colspan="6" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
+      html+='<tr style="background:#F1F5F9"><td colspan="7" style="font-weight:700;padding:8px">NF '+(g.grupo.nfChave||'—')+' — saldo do grupo: '+fmt(g.net)+'</td></tr>';
       var mapaGrupo=_saldoLocal(g.itens,0);
       g.itens.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaGrupo);});
     });
   }
   if(lancsConciliados.length){
-    html+='<tr style="background:#DCFCE7"><td colspan="6" style="font-weight:700;padding:8px;color:#166534">✓ Lançamentos conciliados</td></tr>';
+    html+='<tr style="background:#DCFCE7"><td colspan="7" style="font-weight:700;padding:8px;color:#166534">✓ Lançamentos conciliados</td></tr>';
     // Encadeia a partir do Saldo Anterior (quando ele também estiver aqui) —
     // assim, quando o operador conciliar exatamente o par que quita a
     // abertura, o saldo local realmente chega a zero, em vez de ficar
     // "contaminado" pelo saldo de outro lançamento qualquer que segue em
     // aberto na conta mas caiu na mesma data.
     var mapaConciliados=_saldoLocal(lancsConciliados,saItem?sa:0);
-    lancsConciliados.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaConciliados);});
+    lancsConciliados.forEach(function(l){html+=_linhaConciliadoHtml(l,mapaConciliados,acaoDoItem.get(l));});
   }
   html+='</tbody></table>';
   body.innerHTML=html;
+}
+
+// Desconciliar a partir da tela "Conciliado": em qualquer um dos três casos,
+// depois de reabrir volta pra tabela principal (renderContaDetTabela) — é lá
+// que o item reaberto passa a aparecer de novo, então faz sentido já mostrar
+// direto em vez de deixar o operador na tela Conciliado (que não mostra mais
+// abertos).
+function desconciliarSaldoAnteriorDaTelaConciliado(){
+  var comp=S.comp(curEmpId);
+  var d=comp[contaDetMes]; if(!d)return;
+  if(d.saldoAntConciliado)d.saldoAntConciliado[contaDetCodigo]=false;
+  S.saveComp(curEmpId,comp);
+  toast('Saldo Anterior reaberto ✓');
+  renderContaDetHeader();
+  renderContaDetTabela();
+}
+function desconciliarLancDaTelaConciliado(idx){
+  reabrirLancamento(contaDetMes,contaDetCodigo,idx);
+  toast('Lançamento reaberto ✓');
+  renderContaDetHeader();
+  renderContaDetTabela();
+}
+function desconciliarAjusteDaTelaConciliado(ajusteId){
+  var comp=S.comp(curEmpId);
+  var d=comp[contaDetMes]; if(!d||!d.ajustes||!d.ajustes[contaDetCodigo])return;
+  var a=d.ajustes[contaDetCodigo].find(function(x){return x.id===ajusteId;});
+  if(a)a.conciliado=false;
+  S.saveComp(curEmpId,comp);
+  toast('Ajuste reaberto ✓');
+  renderContaDetHeader();
+  renderContaDetTabela();
 }
 
 // Tela replica listando todo ajuste/reclassificação já criado nesta conta,
@@ -6507,6 +6556,16 @@ function renderContaDetTabela(){
 
   var lancs=(razaoConta&&razaoConta.lancamentos)||[];
   var statuses=conciliacao?conciliacao.lancamentos:null;
+
+  // Saldo DOC.: soma crédito-débito de TODOS os lançamentos da conta que
+  // compartilham o mesmo número de documento (manual, quando informado, senão
+  // extraído do histórico) — não só os visíveis com o filtro atual.
+  var docTotals={};
+  lancs.forEach(function(l,i){
+    var doc=docsNf[i]!==undefined?docsNf[i]:_extrairNumeroNF(l.historico);
+    if(!doc)return;
+    docTotals[doc]=(docTotals[doc]||0)+(l.credito||0)-(l.debito||0);
+  });
 
   // Filters
   var fData=(document.getElementById('contaDetFiltroData')||{}).value||'';
@@ -6634,7 +6693,7 @@ function renderContaDetTabela(){
 
   var html='<table class="ledger-table"><thead><tr>'+
     '<th><input type="checkbox" id="contaDetSelAll" onchange="toggleSelAllLanc(this)"></th>'+
-    '<th>Data</th><th>Número</th><th>Histórico</th><th>Nº NF</th><th>Cta.C.Part.</th>'+
+    '<th>Data</th><th>Número</th><th>Histórico</th><th>Doc.</th><th class="tr">Saldo DOC.</th><th>Cta.C.Part.</th>'+
     '<th class="tr">Débito</th><th class="tr">Crédito</th><th class="tr">Saldo</th>'+
     '<th>Conciliação</th><th>Critério do Match</th>'+
     '<th style="text-align:center">Baixa em<br>Andamento <input type="checkbox" id="baixaAndamentoSelAll" onchange="toggleSelAllBaixaAndamento(this)" title="Marcar/desmarcar todos os itens filtrados" style="vertical-align:middle;margin-left:4px"></th>'+
@@ -6648,7 +6707,7 @@ function renderContaDetTabela(){
     var saSaldoAntSelCk=saldoAnteriorSel['SA']?' checked':'';
     html+='<tr class="'+saCls+'" data-saldo-ant="1" style="font-weight:600">'+
       '<td></td>'+
-      '<td colspan="7">SALDO ANTERIOR</td>'+
+      '<td colspan="8">SALDO ANTERIOR</td>'+
       '<td class="tr">'+fmt(sa)+'</td>'+
       '<td><span class="concil-badge '+(saConciliado?'cb-exato':'cb-aberto')+'">'+(saConciliado?'Conciliado':'Em aberto')+'</span></td>'+
       '<td></td>'+
@@ -6659,7 +6718,7 @@ function renderContaDetTabela(){
 
   // Lançamentos de meses anteriores em aberto
   if(prevRows.length){
-    html+='<tr style="background:#DBEAFE"><td colspan="14" style="padding:5px 13px;font-size:11px;font-weight:600;color:#1D4ED8;border-top:2px solid #BFDBFE;border-bottom:1px solid #BFDBFE">'+
+    html+='<tr style="background:#DBEAFE"><td colspan="15" style="padding:5px 13px;font-size:11px;font-weight:600;color:#1D4ED8;border-top:2px solid #BFDBFE;border-bottom:1px solid #BFDBFE">'+
       '↩ Lançamentos de meses anteriores em aberto ('+prevRows.length+' item'+( prevRows.length>1?'s':'')+' — constituem o Saldo Anterior)</td></tr>';
     prevRows.forEach(function(r){
       var l=r.l;
@@ -6670,6 +6729,7 @@ function renderContaDetTabela(){
         '<td class="mn">'+(l.numero||'—')+'</td>'+
         '<td class="ledger-hist" title="'+(l.historico||'').replace(/"/g,'&quot;')+'">'+(l.historico||'—')+'</td>'+
         '<td class="mn">'+(_extrairNumeroNF(l.historico)||'—')+'</td>'+
+        '<td></td>'+
         '<td class="mn">'+(l.ctapart||'—')+'</td>'+
         '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
         '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
@@ -6701,6 +6761,12 @@ function renderContaDetTabela(){
       '<td class="mn">'+(l.numero||'—')+'</td>'+
       '<td class="ledger-hist" title="'+(l.historico||'').replace(/"/g,'&quot;')+'">'+(l.historico||'—')+(r.kind==='ajuste'&&l.contraConta?' <span style="opacity:.7">→ '+l.contraConta+'</span>':'')+'</td>'+
       '<td>'+(r.kind==='lanc'&&!r.isGrupo?'<input type="text" class="nfDocInput" data-idx="'+r.idx+'" value="'+((docsNf[r.idx]!==undefined?docsNf[r.idx]:(_extrairNumeroNF(l.historico)||'')).replace(/"/g,'&quot;'))+'" placeholder="—" style="width:72px;font-family:var(--mono);font-size:11px;padding:3px 5px;border:1px solid var(--border);border-radius:4px" onchange="salvarNfDocManual(this)">':'')+'</td>'+
+      (function(){
+        if(r.kind!=='lanc'||r.isGrupo)return '<td></td>';
+        var doc=docsNf[r.idx]!==undefined?docsNf[r.idx]:_extrairNumeroNF(l.historico);
+        var saldoDoc=doc?docTotals[doc]:undefined;
+        return '<td class="mn tr">'+(saldoDoc!==undefined?fmt(saldoDoc):'—')+'</td>';
+      })()+
       '<td class="mn">'+(l.ctapart||'—')+'</td>'+
       '<td class="mn tr">'+(l.debito?fmt(l.debito):'—')+'</td>'+
       '<td class="mn tr">'+(l.credito?fmt(l.credito):'—')+'</td>'+
@@ -7090,12 +7156,59 @@ function bulkConciliar(novoStatus){
     var lancs=d.conciliacao[contaDetCodigo].lancamentos;
     var lc=lancs[r.idx];
     if(!lc)return;
-    if(novoStatus==='conciliar'&&lc.status==='aberto'){lc.status='manual';lc.matchTipo='Manual';lc.matchDetalhe='Marcado manualmente';changed++;}
+    if(novoStatus==='conciliar'&&lc.status==='aberto'){
+      lc.status='manual';lc.matchTipo='Manual';lc.matchDetalhe='Marcado manualmente';changed++;
+      // Uma vez conciliado, não faz sentido continuar flegado em Baixa em
+      // Andamento/Saldo Anterior — senão o item continua contando nos cards
+      // e nunca some de lá, mesmo já resolvido.
+      if(d.baixaAndamento&&d.baixaAndamento[contaDetCodigo])delete d.baixaAndamento[contaDetCodigo][r.idx];
+      if(d.saldoAnteriorSel&&d.saldoAnteriorSel[contaDetCodigo])delete d.saldoAnteriorSel[contaDetCodigo][r.idx];
+    }
     else if(novoStatus==='abrir'&&lc.status!=='aberto'){changed+=_reabrirLancPar(lancs,r.idx);}
   });
   if(d.conciliacao&&d.conciliacao[contaDetCodigo])recalcConciliacaoConta(comp,contaDetMes,contaDetCodigo);
   S.saveComp(curEmpId,comp);
   toast(changed+' lançamento(s) atualizado(s) ✓');
+  renderContaDetHeader();
+  renderContaDetTabela();
+}
+
+// Marca como conciliado tudo que estiver flegado em "Baixa em Andamento" ou
+// "Saldo Anterior" (inclusive a própria linha de Saldo Anterior, tecla 'SA')
+// — pensado pro fluxo de conferir visualmente que os dois saldos batem e só
+// então confirmar de uma vez. Limpa os flegs em seguida, senão o item
+// continuaria contando nos cards mesmo já conciliado.
+function conciliarFlegados(){
+  var comp=S.comp(curEmpId);
+  var d=comp[contaDetMes]; if(!d)return;
+  var baixaAnd=(d.baixaAndamento&&d.baixaAndamento[contaDetCodigo])||{};
+  var saldoAntSel=(d.saldoAnteriorSel&&d.saldoAnteriorSel[contaDetCodigo])||{};
+  var chaves=new Set(Object.keys(baixaAnd).concat(Object.keys(saldoAntSel)).filter(function(k){return baixaAnd[k]||saldoAntSel[k];}));
+  if(!chaves.size){toast('Nenhum item flegado em Baixa em Andamento ou Saldo Anterior','err');return}
+
+  if(!confirm('Marcar '+chaves.size+' item(ns) flegado(s) como conciliado(s)? Os flegs de Baixa em Andamento/Saldo Anterior serão removidos em seguida.'))return;
+
+  var lancs=(d.conciliacao&&d.conciliacao[contaDetCodigo]&&d.conciliacao[contaDetCodigo].lancamentos)||null;
+  var changed=0;
+  chaves.forEach(function(k){
+    if(k==='SA'){
+      if(!d.saldoAntConciliado)d.saldoAntConciliado={};
+      d.saldoAntConciliado[contaDetCodigo]=true;
+      changed++;
+      return;
+    }
+    var idx=parseInt(k,10);
+    var lc=lancs&&lancs[idx];
+    if(!lc||lc.status!=='aberto')return;
+    lc.status='manual';lc.matchTipo='Manual';lc.matchDetalhe='Marcado manualmente (Conciliar Flegados)';
+    changed++;
+  });
+  if(lancs)recalcConciliacaoConta(comp,contaDetMes,contaDetCodigo);
+
+  if(d.baixaAndamento)delete d.baixaAndamento[contaDetCodigo];
+  if(d.saldoAnteriorSel)delete d.saldoAnteriorSel[contaDetCodigo];
+  S.saveComp(curEmpId,comp);
+  toast(changed+' item(ns) conciliado(s) ✓');
   renderContaDetHeader();
   renderContaDetTabela();
 }
