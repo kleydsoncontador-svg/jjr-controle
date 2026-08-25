@@ -72,7 +72,7 @@ Extraia os dados e responda SOMENTE com um JSON válido, exatamente neste format
   "cartorioRegistro": "nome/número do cartório de registro de imóveis" ou null,
   "iptuInscricao": "número de inscrição imobiliária/IPTU/ITR/CCIR, se houver" ou null,
   "vendedores": [{"nome": "nome completo", "cpfCnpj": "CPF ou CNPJ formatado", "participacao": "% de participação na venda, se houver mais de um vendedor, ex: 50%"}] (lista de todos os vendedores/outorgantes identificados no documento; array vazio [] se não encontrar nenhum),
-  "observacoes": "1-3 frases em português sobre ambiguidades, campos não encontrados, ou divergências entre os documentos anexados (ex: valor da escritura diferente do valor do contrato)"
+  "observacoes": "um parágrafo corrido (4-8 frases) resumindo a aquisição, como uma nota de arquivo pra consulta futura: o que é o imóvel e onde fica, área, matrícula e cartório de registro, forma de pagamento (à vista/parcelado, valor, banco/meio), dados da escritura (cartório, livro, folhas, protocolo, escrevente, se houver), vendedores/outorgantes e regime de bens quando mencionado, e ao final quaisquer pendências (ex: falta registrar a transferência no cartório de imóveis) ou divergências entre os documentos anexados (ex: valor da escritura diferente do valor do contrato). Sempre preencher, mesmo que o documento esteja completo — nesse caso, é só o resumo, sem pendências."
 }
 
 Valores monetários sempre em número puro (sem "R$", sem separador de milhar, com ponto decimal — ex: 350000.00).`;
