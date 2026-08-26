@@ -3392,11 +3392,11 @@ function _rufatoReescreverHistorico(historicoOriginal){
   var mE=hist.match(/^E,\s*(.*)$/i);
   if(mE){
     var restoE=mE[1].replace(/\s+(NFS|NFD|NF)\s*(\d+)/i,' - $1 $2');
-    return {contaContabil:'E,', historico:'Recebimento de '+restoE};
+    return {contaContabil:'E,', historico:'Recebimento de '+restoE, tipo:'recebimento'};
   }
 
   var mSlash=hist.match(/^(.*?)\s*\/\s*(.*)$/);
-  if(!mSlash) return {contaContabil:'', historico:hist};
+  if(!mSlash) return {contaContabil:'', historico:hist, tipo:'pagamento'};
 
   var prefixo=mSlash[1].trim();
   var resto=mSlash[2].trim();
@@ -3404,7 +3404,7 @@ function _rufatoReescreverHistorico(historicoOriginal){
   // "HOMOLOGACAO A PAGAR RECISAO / PGTO FUNCIONARIOS - RESCISAO NOME"
   if(/HOMOLOGACAO A PAGAR RECISAO/i.test(prefixo)){
     var mResc=resto.match(/RESCISAO\s+(.+)$/i);
-    if(mResc) return {contaContabil:prefixo, historico:'Pagamento ref. rescisão a '+mResc[1].trim()};
+    if(mResc) return {contaContabil:prefixo, historico:'Pagamento ref. rescisão a '+mResc[1].trim(), tipo:'pagamento'};
   }
 
   // "{fornecedor} > NF/NFS/NFD {numero}"
@@ -3414,24 +3414,32 @@ function _rufatoReescreverHistorico(historicoOriginal){
     var label=mDoc[2].toUpperCase();
     var numero=mDoc[3];
     if(label==='NFS')label='NF'; // NFS normaliza pra NF; NF e NFD mantêm o próprio rótulo
-    return {contaContabil:prefixo, historico:'Pagamento ref. '+label+' '+numero+' de '+fornecedor};
+    return {contaContabil:prefixo, historico:'Pagamento ref. '+label+' '+numero+' de '+fornecedor, tipo:'pagamento'};
   }
 
-  // Sem padrão reconhecido: só separa a conta contábil, mantém o resto como veio
-  return {contaContabil:prefixo, historico:resto};
+  // Sem padrão reconhecido: só separa a conta contábil, mantém o resto como veio.
+  // Tudo que não começa com "E," é tratado como pagamento (saída) por padrão.
+  return {contaContabil:prefixo, historico:resto, tipo:'pagamento'};
 }
 
-// true = linha deve ser descartada (vazia, ou resumo "CRÉDITO"/"DÉBITO" que
-// o cliente usa só pra somar na conciliação dele).
-function _rufatoDescartarLinha(row,idxDescr){
+// true = linha deve ser descartada (vazia, ou resumo "CRÉDITO"/"DÉBITO"/"SALDO"
+// que o cliente usa só pra somar na conciliação dele — essas etiquetas podem
+// cair em qualquer coluna da linha, não só no histórico).
+function _rufatoDescartarLinha(row){
   if(!row.some(function(c){return String(c==null?'':c).trim();}))return true;
-  var descrNorm=_rufatoNorm(row[idxDescr]);
-  return descrNorm==='credito'||descrNorm==='debito';
+  return row.some(function(c){
+    var n=_rufatoNorm(c);
+    return n==='credito'||n==='debito'||n==='saldo';
+  });
 }
 
+function _rufatoFmtDataBR(v){
+  if(v instanceof Date) return String(v.getDate()).padStart(2,'0')+'/'+String(v.getMonth()+1).padStart(2,'0')+'/'+v.getFullYear();
+  return v;
+}
 async function _rufatoParsearFluxo(file){
   var buf=await file.arrayBuffer();
-  var wb=XLSX.read(buf,{type:'array',raw:true});
+  var wb=XLSX.read(buf,{type:'array',cellDates:true});
   var ws=wb.Sheets[wb.SheetNames[0]];
   if(!ws)throw new Error('Não consegui ler "'+file.name+'".');
   var aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
@@ -3454,24 +3462,43 @@ async function _rufatoProcessar(bancoId){
   _rufatoSetStatus('Lendo '+arquivos.length+' arquivo(s)...','info');
   try{
     var headerFinal=null;
-    var idxDescr=-1;
+    var idxDescr=-1, idxData=-1, idxValor=-1;
     var todasLinhas=[];
     for(var i=0;i<arquivos.length;i++){
       var parsed=await _rufatoParsearFluxo(arquivos[i]);
       if(!headerFinal){
         headerFinal=parsed.header;
         idxDescr=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='descr';});
+        idxData=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='dtpgto';});
+        idxValor=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='vlliq';});
         if(idxDescr<0)throw new Error('Não encontrei a coluna "descr" (histórico) no cabeçalho de "'+arquivos[i].name+'".');
+        if(idxValor<0)throw new Error('Não encontrei a coluna "vlliq" (valor) no cabeçalho de "'+arquivos[i].name+'".');
       }
       todasLinhas=todasLinhas.concat(parsed.linhas);
     }
 
-    var linhasLimpas=todasLinhas.filter(function(row){return !_rufatoDescartarLinha(row,idxDescr);});
+    // Cada arquivo pode ter uma largura de planilha diferente (colunas finais
+    // vazias variam de arquivo pra arquivo) — normaliza toda linha pra
+    // exatamente a largura do cabeçalho antes de qualquer coisa, senão a
+    // coluna nova (Conta Contábil) acaba entrando em posições diferentes
+    // dependendo de qual arquivo a linha veio.
+    var largura=headerFinal.length;
+    var linhasLimpas=todasLinhas
+      .map(function(row){
+        var r=row.slice(0,largura);
+        while(r.length<largura)r.push('');
+        return r;
+      })
+      .filter(function(row){return !_rufatoDescartarLinha(row);});
+
     var linhasFinal=linhasLimpas.map(function(row){
-      var r=_rufatoReescreverHistorico(row[idxDescr]);
+      var info=_rufatoReescreverHistorico(row[idxDescr]);
       var novaLinha=row.slice();
-      novaLinha[idxDescr]=r.historico;
-      novaLinha.push(r.contaContabil);
+      novaLinha[idxDescr]=info.historico;
+      if(idxData>=0)novaLinha[idxData]=_rufatoFmtDataBR(novaLinha[idxData]);
+      var valorAbs=Math.abs(parseFloat(String(novaLinha[idxValor]).replace(',','.'))||0);
+      novaLinha[idxValor]=info.tipo==='pagamento'?-valorAbs:valorAbs;
+      novaLinha[largura]=info.contaContabil;
       return novaLinha;
     });
 
@@ -3481,7 +3508,12 @@ async function _rufatoProcessar(bancoId){
     cabecalho.push('Conta Contábil');
     var linhaCab=wsOut.addRow(cabecalho);
     linhaCab.eachCell(function(cell){cell.font={bold:true};});
-    linhasFinal.forEach(function(l){wsOut.addRow(l);});
+    linhasFinal.forEach(function(l){
+      var linhaExcel=wsOut.addRow(l);
+      var celulaValor=linhaExcel.getCell(idxValor+1);
+      celulaValor.numFmt='#,##0.00';
+      if(typeof l[idxValor]==='number'&&l[idxValor]<0)celulaValor.font={color:{argb:'FFFF0000'}};
+    });
     wsOut.columns.forEach(function(col){col.width=16;});
     wsOut.getColumn(idxDescr+1).width=55;
 
