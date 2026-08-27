@@ -3451,6 +3451,26 @@ function _rufatoAcharPrefixoContaContabil(historico){
 function _rufatoTirarZerosNF(texto){
   return String(texto||'').replace(/\bNF\s*0*(\d+)/i,function(m,n){return 'NF '+n;});
 }
+// "JUN/26" → "06/2026", "6/2026" → "06/2026" — normaliza competência pro
+// padrão MM/AAAA usado no resto do sistema. Devolve o texto original se não
+// reconhecer nem mês-abreviado nem NN/AAAA (não inventa nada nesse caso).
+var RUFATO_MESES_ABREV={JAN:'01',FEV:'02',MAR:'03',ABR:'04',MAI:'05',JUN:'06',JUL:'07',AGO:'08',SET:'09',OUT:'10',NOV:'11',DEZ:'12'};
+function _rufatoNormalizarCompetencia(s){
+  var v=String(s||'').trim();
+  var m=v.match(/^([A-Za-zç]{3})\/(\d{2,4})$/);
+  if(m){
+    var mes=RUFATO_MESES_ABREV[m[1].toUpperCase()];
+    if(mes)return mes+'/'+(m[2].length===2?'20'+m[2]:m[2]);
+  }
+  var m2=v.match(/^(\d{1,2})\/(\d{2,4})$/);
+  if(m2)return m2[1].padStart(2,'0')+'/'+(m2[2].length===2?'20'+m2[2]:m2[2]);
+  return v;
+}
+// Deixa minúsculo preservando siglas curtas em maiúsculo (ex: "IP DEDICADO"
+// → "IP dedicado", não "Ip dedicado").
+function _rufatoMinusculoComSiglas(s){
+  return String(s||'').split(' ').map(function(w){return /^[A-Z]{2,3}$/.test(w)?w:w.toLowerCase();}).join(' ');
+}
 
 // Reescreve o histórico (coluna "descr") separando a conta contábil (um dos
 // rótulos de RUFATO_PREFIXOS_CONTA_CONTABIL, ou "E," pros recebimentos) numa
@@ -3531,6 +3551,47 @@ function _rufatoReescreverHistorico(historicoOriginal,tipoPelaConta){
     if(mLucro) return {contaContabil:prefixo, historico:'Pagamento a '+mLucro[1].trim(), tipo:'pagamento'};
   }
 
+  // PENSAO ALIMENTICIA A PAGAR / NOME (sem mais nenhuma estrutura — o resto
+  // inteiro já é o nome de quem recebe a pensão)
+  if(prefixoU==='PENSAO ALIMENTICIA A PAGAR'){
+    return {contaContabil:prefixo, historico:'Pagamento ref. pensao alimenticia a '+resto, tipo:'pagamento'};
+  }
+
+  // CLIENTES VM / NOME - REEMB DEP|PGTO MAIOR NF n — sempre reembolso de
+  // depósito a maior, com o nome do cliente indo pro final da frase.
+  if(prefixoU==='CLIENTES VM'){
+    var mVM=resto.match(/^(.+?)\s*-\s*REEMB.*?NF\s*0*(\d+(?:-\d+)?)/i);
+    if(mVM) return {contaContabil:prefixo, historico:'Pagamento a '+mVM[1].trim()+' ref. reembolso de deposito a maior NF '+mVM[2], tipo:'pagamento'};
+  }
+
+  // CLIENTE DI / NOME - REEMB [NF n] [DENEGADA|DEVOL TOTAL|...] — reembolso
+  // de depósito indevido de cliente.
+  if(prefixoU==='CLIENTE DI'){
+    var mReemb=resto.match(/^(.+?)\s*-\s*REEMB\.?\s*(.*)$/i);
+    if(mReemb){
+      var nomeReemb=mReemb[1].trim();
+      var detalheReemb=mReemb[2].trim();
+      var numeroReemb=null;
+      var mNFReemb=detalheReemb.match(/\bNF\s*0*(\d+)\b/i);
+      if(mNFReemb)numeroReemb=mNFReemb[1];
+      var qualificador=detalheReemb.replace(/\bNF\s*0*\d+\b/i,'').replace(/\bDEP\.?\s*INDEVIDO\b/i,'').trim();
+      var out='Pagamento a '+nomeReemb+' ref. reembolso deposito indevido';
+      if(numeroReemb)out+=' NF '+numeroReemb;
+      if(qualificador)out+=' ('+qualificador.toLowerCase().replace(/\bdevol\b/,'devolucao')+')';
+      return {contaContabil:prefixo, historico:out, tipo:'pagamento'};
+    }
+  }
+
+  // TELEFONIA A PAGAR — dois formatos vistos: "{empresa} - REF. {mês/ano}"
+  // (competência de fatura) e "{empresa} - {descrição} - REF {número}"
+  // (referência de contrato/linha, não é competência).
+  if(prefixoU==='TELEFONIA A PAGAR'){
+    var mTelComp=resto.match(/^(.+?)\s*-\s*REF\.?\s*([A-Za-zç]{3}\/\d{2,4}|\d{1,2}\/\d{2,4})\s*$/i);
+    if(mTelComp) return {contaContabil:prefixo, historico:'Pagamento ref. '+mTelComp[1].trim()+' - ref. '+_rufatoNormalizarCompetencia(mTelComp[2]), tipo:'pagamento'};
+    var mTelRef=resto.match(/^(.+?)\s*-\s*(.+?)\s*-\s*REF\.?\s*(\d+)\s*$/i);
+    if(mTelRef) return {contaContabil:prefixo, historico:'Pagamento a '+mTelRef[1].trim()+' ref. '+_rufatoMinusculoComSiglas(mTelRef[2].trim())+' ('+mTelRef[3]+')', tipo:'pagamento'};
+  }
+
   // "{fornecedor} > NF/NFS/NFD {numero}" — vale pra qualquer rótulo que caia
   // nesse formato (FORNECEDORES, SERVICOS PRESTADOS POR TERCEI, etc.)
   var mDoc=resto.match(/^(.*?)\s*>\s*(NFS|NFD|NF)\s*0*(\d+)/i);
@@ -3542,9 +3603,18 @@ function _rufatoReescreverHistorico(historicoOriginal,tipoPelaConta){
     return {contaContabil:prefixo, historico:'Pagamento ref. '+label+' '+numero+' de '+fornecedor, tipo:'pagamento'};
   }
 
-  // Rótulo reconhecido mas sem regra específica de reescrita: só separa a
-  // conta contábil e mantém o resto como veio (nunca inventa texto).
-  return {contaContabil:prefixo, historico:_rufatoTirarZerosNF(resto), tipo:'pagamento'};
+  // "{fornecedor} > FATURA/CTE {número(s)}" — formato de transportadora,
+  // fica com o fornecedor DEPOIS do número (padrão diferente do NF acima,
+  // seguindo exatamente o que foi confirmado pro caso da Rufato).
+  var mDoc2=resto.match(/^(.*?)\s*>\s*(FATURA|CTE)\s+(.+)$/i);
+  if(mDoc2){
+    return {contaContabil:prefixo, historico:'Pagamento ref. '+mDoc2[2].toUpperCase()+' '+mDoc2[3].trim()+' - '+mDoc2[1].trim(), tipo:'pagamento'};
+  }
+
+  // Rótulo reconhecido mas sem regra específica de reescrita: nunca deixa o
+  // histórico "solto" — sempre entra como "Pagamento a {resto}" (nunca
+  // inventa detalhe além disso).
+  return {contaContabil:prefixo, historico:'Pagamento a '+_rufatoTirarZerosNF(resto), tipo:'pagamento'};
 }
 
 // true = linha deve ser descartada (vazia, resumo "CRÉDITO"/"DÉBITO"/"SALDO"/
