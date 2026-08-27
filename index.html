@@ -3357,7 +3357,10 @@ function _rufatoRenderBanco(el,banco){
     <h3 style="margin:0 0 4px;color:#1E3558">${esc(banco.nome)}</h3>
     <div style="font-size:.8rem;color:var(--slate);margin-bottom:18px">Conta contábil padrão: ${esc(banco.contaContabil||'—')}</div>
 
-    <div class="fg"><label class="fl">Fluxo(s) de Caixa (Excel) — pode selecionar mais de um, de meses/períodos diferentes</label>
+    <div class="fg"><label class="fl">Competência que você está processando (mês/ano) — obrigatório; qualquer lançamento do extrato fora desse mês é ignorado</label>
+      <input type="month" id="rufatoCompetencia" class="fi" style="max-width:200px"></div>
+
+    <div class="fg" style="margin-top:12px"><label class="fl">Fluxo(s) de Caixa (Excel) — pode selecionar mais de um, de meses/períodos diferentes</label>
       <input type="file" id="rufatoArqFluxo" accept=".xls,.xlsx" multiple class="fi"></div>
 
     <div class="fg" style="margin-top:12px"><label class="fl">Extrato de Conta Corrente (PDF) — opcional; pode selecionar mais de um</label>
@@ -3366,11 +3369,26 @@ function _rufatoRenderBanco(el,banco){
     <div class="fg" style="margin-top:12px"><label class="fl">Extrato de Aplicação Financeira / Invest Fácil (PDF) — opcional, nem toda empresa tem</label>
       <input type="file" id="rufatoArqAplicacao" accept=".pdf" multiple class="fi"></div>
 
-    <button class="btn bp" style="margin-top:16px" onclick="_rufatoProcessar('${banco.id}')">⚙ Processar Fluxo de Caixa e Baixar</button>
+    <div style="display:flex;gap:10px;margin-top:16px">
+      <button class="btn bp" onclick="_rufatoProcessar('${banco.id}')">⚙ Processar Fluxo de Caixa e Baixar</button>
+      <button class="btn bd bsm" onclick="_rufatoLimparResultado()">🗑 Limpar resultado</button>
+    </div>
     <div id="rufatoStatus" style="margin-top:10px;font-size:12.5px"></div>
     <div id="rufatoRelatorioDiario"></div>
     <div class="info" style="margin-top:14px;font-size:12px">Se anexar o Extrato de Conta Corrente, o sistema confere o saldo diário do Fluxo contra o extrato e já inclui no Excel as linhas que faltarem (com o histórico do próprio extrato). Se anexar o Extrato de Aplicação/Invest Fácil, também inclui as aplicações e os resgates líquidos que não estiverem no Fluxo. Ao final aparece aqui embaixo um relatório dia a dia mostrando onde havia diferença.</div>
   `;
+}
+function _rufatoLimparResultado(){
+  var elStatus=document.getElementById('rufatoStatus');
+  var elRel=document.getElementById('rufatoRelatorioDiario');
+  var elFluxo=document.getElementById('rufatoArqFluxo');
+  var elExtrato=document.getElementById('rufatoArqExtrato');
+  var elAplic=document.getElementById('rufatoArqAplicacao');
+  if(elStatus)elStatus.innerHTML='';
+  if(elRel)elRel.innerHTML='';
+  if(elFluxo)elFluxo.value='';
+  if(elExtrato)elExtrato.value='';
+  if(elAplic)elAplic.value='';
 }
 function _rufatoSetStatus(msg,tipo){
   const elS=document.getElementById('rufatoStatus');
@@ -3706,10 +3724,27 @@ function _rufatoEncontrarFaltantes(poolFluxo,transacoes,toleranciaDias){
   return faltantes;
 }
 
+// Padrões do histórico do extrato que representam valores agregados/de
+// terceiros e NUNCA devem ser inseridos como linha nova no Excel (mesmo que
+// não achem par no Fluxo) — inserir duplicaria dinheiro já lançado em várias
+// linhas separadas (cobrança) ou que não é do fluxo de caixa da empresa
+// (rentabilidade automática do Invest Fácil).
+var RUFATO_EXTRATO_NUNCA_INSERIR=[/LIQUIDA[ÇC][ÃA]O\s+DE\s+COBRAN[ÇC]A/i,/RENTAB\.?\s*INVEST\s*F[ÁA]CIL/i];
+function _rufatoDataEhDaCompetencia(dataBR,ano,mes){
+  var m=String(dataBR||'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  if(!m)return false;
+  return parseInt(m[2],10)===mes&&parseInt(m[3],10)===ano;
+}
+
 async function _rufatoProcessar(bancoId){
   var banco=getRufatoBancos().find(function(b){return b.id===bancoId;});
   var inputFluxo=document.getElementById('rufatoArqFluxo');
   var arquivos=inputFluxo?Array.from(inputFluxo.files):[];
+  var elCompetencia=document.getElementById('rufatoCompetencia');
+  var competenciaVal=elCompetencia?elCompetencia.value:'';
+  if(!competenciaVal){toast('Informe a competência (mês/ano) que você está processando','warn');return;}
+  var competenciaAno=parseInt(competenciaVal.split('-')[0],10);
+  var competenciaMes=parseInt(competenciaVal.split('-')[1],10);
   if(!arquivos.length){toast('Selecione ao menos um arquivo de Fluxo de Caixa','warn');return;}
   if(typeof XLSX==='undefined'){toast('Biblioteca XLSX não carregada','err');return;}
   if(typeof ExcelJS==='undefined'){toast('Biblioteca ExcelJS não carregada','err');return;}
@@ -3762,11 +3797,14 @@ async function _rufatoProcessar(bancoId){
     // ── Conferência com o extrato de conta corrente (se anexado) ──
     var relatorioHtml='';
     var qtdInseridas=0;
+    var qtdForaCompetencia=0;
     var inputExtrato=document.getElementById('rufatoArqExtrato');
     var arqsExtrato=inputExtrato?Array.from(inputExtrato.files):[];
     if(arqsExtrato.length&&idxData>=0){
       _rufatoSetStatus('Lendo extrato de conta corrente ('+arqsExtrato.length+' PDF)...','info');
-      var transacoesExtrato=await _rufatoParsearExtratoPDF(arqsExtrato);
+      var transacoesExtratoTodas=await _rufatoParsearExtratoPDF(arqsExtrato);
+      var transacoesExtrato=transacoesExtratoTodas.filter(function(t){return _rufatoDataEhDaCompetencia(t.data,competenciaAno,competenciaMes);});
+      var foraCompetenciaExtrato=transacoesExtratoTodas.length-transacoesExtrato.length;
 
       var fluxoPorDia=_rufatoAgruparPorDia(linhasFinal,function(l){return l[idxData];},function(l){return l[idxValor];});
       var extratoPorDia=_rufatoAgruparPorDia(transacoesExtrato,function(t){return t.data;},function(t){return t.valor;});
@@ -3774,7 +3812,10 @@ async function _rufatoProcessar(bancoId){
       relatorioHtml+=_rufatoRenderRelatorioDiario(comparacao);
 
       var poolFluxo=linhasFinal.map(function(l){return {valor:l[idxValor],dataObj:_rufatoDataParaDate(l[idxData]),usado:false};});
-      var faltantesExtrato=_rufatoEncontrarFaltantes(poolFluxo,transacoesExtrato,3);
+      var transacoesParaInserir=transacoesExtrato.filter(function(t){
+        return !RUFATO_EXTRATO_NUNCA_INSERIR.some(function(re){return re.test(t.historico||'');});
+      });
+      var faltantesExtrato=_rufatoEncontrarFaltantes(poolFluxo,transacoesParaInserir,3);
       faltantesExtrato.forEach(function(t){
         var novaLinha=new Array(largura+1).fill('');
         novaLinha[idxData]=t.data;
@@ -3783,6 +3824,7 @@ async function _rufatoProcessar(bancoId){
         linhasFinal.push(novaLinha);
       });
       qtdInseridas+=faltantesExtrato.length;
+      qtdForaCompetencia+=foraCompetenciaExtrato;
     }
 
     // ── Conferência com o extrato de Aplicação/Invest Fácil (se anexado) ──
@@ -3792,8 +3834,11 @@ async function _rufatoProcessar(bancoId){
       _rufatoSetStatus('Lendo extrato de aplicação financeira ('+arqsAplicacao.length+' PDF)...','info');
       var dadosAplic=await _rufatoParsearAplicacaoPDF(arqsAplicacao);
       var poolFluxo2=linhasFinal.map(function(l){return {valor:l[idxValor],dataObj:_rufatoDataParaDate(l[idxData]),usado:false};});
+      var aplicacoesDaCompetencia=dadosAplic.aplicacoes.filter(function(a){return _rufatoDataEhDaCompetencia(a.data,competenciaAno,competenciaMes);});
+      var resgatesDaCompetencia=dadosAplic.resgates.filter(function(r){return _rufatoDataEhDaCompetencia(r.data,competenciaAno,competenciaMes);});
+      var foraCompetenciaAplic=(dadosAplic.aplicacoes.length-aplicacoesDaCompetencia.length)+(dadosAplic.resgates.length-resgatesDaCompetencia.length);
 
-      var transacoesAplic=dadosAplic.aplicacoes.map(function(a){return {data:a.data,valor:-Math.abs(a.valor)};});
+      var transacoesAplic=aplicacoesDaCompetencia.map(function(a){return {data:a.data,valor:-Math.abs(a.valor)};});
       var faltamAplic=_rufatoEncontrarFaltantes(poolFluxo2,transacoesAplic,5);
       faltamAplic.forEach(function(t){
         var novaLinha=new Array(largura+1).fill('');
@@ -3803,7 +3848,7 @@ async function _rufatoProcessar(bancoId){
         linhasFinal.push(novaLinha);
       });
 
-      var transacoesResg=dadosAplic.resgates.map(function(r){return {data:r.data,valor:Math.abs(r.valor)};});
+      var transacoesResg=resgatesDaCompetencia.map(function(r){return {data:r.data,valor:Math.abs(r.valor)};});
       var faltamResg=_rufatoEncontrarFaltantes(poolFluxo2,transacoesResg,5);
       faltamResg.forEach(function(t){
         var novaLinha=new Array(largura+1).fill('');
@@ -3813,6 +3858,7 @@ async function _rufatoProcessar(bancoId){
         linhasFinal.push(novaLinha);
       });
       qtdInseridas+=faltamAplic.length+faltamResg.length;
+      qtdForaCompetencia+=foraCompetenciaAplic;
     }
 
     if(qtdInseridas>0){
@@ -3845,8 +3891,9 @@ async function _rufatoProcessar(bancoId){
     a.href=url; a.download='Rufato - '+(banco?banco.nome:'Banco')+' - Fluxo de Caixa corrigido.xlsx'; a.click();
     URL.revokeObjectURL(url);
 
-    var msgFinal=linhasFinal.length+' lançamento(s) no arquivo final (de '+todasLinhas.length+' lidos, '+(todasLinhas.length-linhasLimpas.length)+' linha(s) de resumo/vazias removida(s))';
+    var msgFinal='Competência '+String(competenciaMes).padStart(2,'0')+'/'+competenciaAno+': '+linhasFinal.length+' lançamento(s) no arquivo final (de '+todasLinhas.length+' lidos, '+(todasLinhas.length-linhasLimpas.length)+' linha(s) de resumo/vazias removida(s))';
     if(qtdInseridas>0)msgFinal+=' — '+qtdInseridas+' linha(s) incluída(s) automaticamente por conferência com o(s) PDF(s)';
+    if(qtdForaCompetencia>0)msgFinal+=' — '+qtdForaCompetencia+' lançamento(s) do(s) PDF(s) fora da competência '+String(competenciaMes).padStart(2,'0')+'/'+competenciaAno+' foram ignorado(s)';
     msgFinal+='.';
     _rufatoSetStatus(msgFinal,'ok');
     if(elRelatorio)elRelatorio.innerHTML=relatorioHtml;
