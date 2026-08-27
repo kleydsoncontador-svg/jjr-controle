@@ -3406,37 +3406,127 @@ function _rufatoSetStatus(msg,tipo){
   elS.innerHTML=`<span style="color:${cor}">${esc(msg)}</span>`;
 }
 
-// Reescreve o histórico (coluna "descr") separando a conta contábil (o que
-// vem antes da "/", ou "E," pros recebimentos) numa coluna própria, e
-// reformulando o texto num padrão fixo ("Pagamento ref. NF X de Y",
-// "Recebimento de ...", "Pagamento ref. rescisão a ..."). Quando não bate
-// com nenhum padrão conhecido, só tira o prefixo antes da "/" e deixa o
-// resto como histórico (fallback conservador — nunca inventa texto).
-function _rufatoReescreverHistorico(historicoOriginal){
-  var hist=String(historicoOriginal||'').trim();
-  if(!hist)return{contaContabil:'',historico:''};
+// Lista FECHADA de rótulos de conta contábil que aparecem antes da "/" (ou
+// "E," pros recebimentos) no histórico do Fluxo da Rufato. É uma lista
+// fechada, não um "pega tudo antes da primeira /" — porque um recebimento
+// direto sem NF vinculada vem como "CLIENTE / CNPJ NF 123" (sem nenhum
+// rótulo de conta na frente), e um "pega tudo antes da /" genérico ia
+// confundir o NOME DO CLIENTE com um rótulo de conta contábil, arrancando o
+// nome do histórico à toa. Só entra na coluna Conta Contábil o que bate
+// EXATAMENTE com um desses rótulos confirmados pelo usuário.
+var RUFATO_PREFIXOS_CONTA_CONTABIL=[
+  'E,','FORNECEDORES /','SERVICOS PRESTADOS POR TERCEI /','HOMOLOGACAO A PAGAR RECISAO /',
+  'CLIENTES VM /','FRETES E CARRETOS /','CLIENTES /','PENSAO ALIMENTICIA A PAGAR /',
+  'MANUTENCAO DE VEICULOS /','ADIANTAMENTO DE FERIAS /','COMPUTADORES E PERIFERICOS /',
+  'DESPESAS INDEDUTIVEIS /','CLIENTE DI /','MAQUINAS E EQUIPAMENTOS /','MATERIAL DE ESCRITORIO /',
+  'UNIFORMES E EQUIPAMENTOS /','RECEBIMENTO A REGULARIZAR /','LUCROS A PAGAR-SERGIO RUF.MILA /',
+  'HONORARIOS CONTABEIS A PAGAR /','ALUGUEIS DE EQUIPAMENTOS /','TRANSF. ENTRE C/C RUFATO /',
+  'DESPESAS POSTAIS E TELEGRAFICA /','COPA E COZINHA CONSUMO /','EMBALAGENS /',
+  'CONTRIBUI SINDICAIS PATRONAIS /','TELEFONIA A PAGAR /','VALE TRANSPORTE / COMBUSTIVEL /',
+  'DARF UNIFICADO 1410 - DCTFWEB /','OUTROS BENEFI CONCEDI EMPREGA /','FEIRAS E CONVENCOES /',
+  'IPI A RECOLHER /','DESPESAS C/ ALIMENTACAO/REFEI /','RECEBIMENTOS A REGUL./INDEV. /',
+  'DONATIVOS E CONTRIBUICOES /','SALARIOS E ORDENADOS A PAGAR /','MANUTENCAO DE EQUIPAMENTOS /',
+  'ICMS ST E ANTECIP. TRIBUTARIA /','PRO-LABORE A PAGAR /'
+].sort(function(a,b){return b.length-a.length;});
+function _rufatoEscapeRegex(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
+var RUFATO_PREFIXOS_REGEX=RUFATO_PREFIXOS_CONTA_CONTABIL.map(function(p){
+  return {label:p.replace(/\s*\/\s*$/,'').trim(), re:new RegExp('^'+p.split(/\s+/).map(_rufatoEscapeRegex).join('\\s+'),'i')};
+});
+// Acha, no INÍCIO do histórico, um dos rótulos da lista fechada acima —
+// tolera espaçamento diferente do cadastrado (o "\s+" no lugar de cada
+// espaço), mas exige bater exatamente o texto (sem tentar adivinhar rótulo
+// novo). Devolve null quando não bate com nenhum (histórico "solto", sem
+// rótulo de conta na frente).
+function _rufatoAcharPrefixoContaContabil(historico){
+  var h=String(historico||'');
+  for(var i=0;i<RUFATO_PREFIXOS_REGEX.length;i++){
+    var item=RUFATO_PREFIXOS_REGEX[i];
+    var m=h.match(item.re);
+    if(m)return {prefixo:item.label, resto:h.slice(m[0].length).trim()};
+  }
+  return null;
+}
+// "Sempre tire os zeros no início da NF" — 00275805 → 275805. Só mexe no
+// número que vem logo depois de "NF" (não em CNPJ nem em outro número solto).
+function _rufatoTirarZerosNF(texto){
+  return String(texto||'').replace(/\bNF\s*0*(\d+)/i,function(m,n){return 'NF '+n;});
+}
 
-  // "E, ..." → recebimento
-  var mE=hist.match(/^E,\s*(.*)$/i);
-  if(mE){
-    var restoE=mE[1].replace(/\s+(NFS|NFD|NF)\s*(\d+)/i,' - $1 $2');
-    return {contaContabil:'E,', historico:'Recebimento de '+restoE, tipo:'recebimento'};
+// Reescreve o histórico (coluna "descr") separando a conta contábil (um dos
+// rótulos de RUFATO_PREFIXOS_CONTA_CONTABIL, ou "E," pros recebimentos) numa
+// coluna própria, e reformulando o texto num padrão fixo. `tipoPelaConta` é
+// o tipo (recebimento/pagamento) já decidido pela conta contábil do banco
+// (débito/crédito do lançamento) — usado como critério de reserva quando o
+// histórico não bate com nenhum rótulo conhecido. Quando não bate com
+// nenhum padrão de reescrita específico, só separa a conta contábil (se
+// achar) e deixa o resto como histórico (fallback conservador — nunca
+// inventa texto).
+function _rufatoReescreverHistorico(historicoOriginal,tipoPelaConta){
+  var hist=String(historicoOriginal||'').trim();
+  if(!hist)return{contaContabil:'',historico:'',tipo:tipoPelaConta||'pagamento'};
+
+  var achado=_rufatoAcharPrefixoContaContabil(hist);
+
+  if(!achado){
+    // Sem rótulo de conta reconhecido: se a conta do banco já identificou
+    // isso como recebimento, é o padrão "CLIENTE / CNPJ NF n" direto (sem
+    // rótulo de conta na frente, por isso não precisa informar Conta
+    // Contábil — a conta crédito do lançamento já diz que é recebimento).
+    if(tipoPelaConta==='recebimento'){
+      return {contaContabil:'', historico:'Recebimento de '+_rufatoTirarZerosNF(hist), tipo:'recebimento'};
+    }
+    return {contaContabil:'', historico:hist, tipo:tipoPelaConta||'pagamento'};
   }
 
-  var mSlash=hist.match(/^(.*?)\s*\/\s*(.*)$/);
-  if(!mSlash) return {contaContabil:'', historico:hist, tipo:'pagamento'};
+  var prefixo=achado.prefixo;
+  var resto=achado.resto;
+  var prefixoU=prefixo.toUpperCase();
 
-  var prefixo=mSlash[1].trim();
-  var resto=mSlash[2].trim();
+  // "E," → mesmo tratamento do recebimento "solto" acima, só que aqui o
+  // histórico original já trazia a marca "E," explicitamente.
+  if(prefixoU==='E,'){
+    return {contaContabil:'E,', historico:'Recebimento de '+_rufatoTirarZerosNF(resto), tipo:'recebimento'};
+  }
 
-  // "HOMOLOGACAO A PAGAR RECISAO / PGTO FUNCIONARIOS - RESCISAO NOME"
-  if(/HOMOLOGACAO A PAGAR RECISAO/i.test(prefixo)){
+  // HOMOLOGACAO A PAGAR RECISAO / PGTO FUNCIONARIOS - RESCISAO NOME
+  if(prefixoU==='HOMOLOGACAO A PAGAR RECISAO'){
     var mResc=resto.match(/RESCISAO\s+(.+)$/i);
     if(mResc) return {contaContabil:prefixo, historico:'Pagamento ref. rescisão a '+mResc[1].trim(), tipo:'pagamento'};
   }
 
-  // "{fornecedor} > NF/NFS/NFD {numero}"
-  var mDoc=resto.match(/^(.*?)\s*>\s*(NFS|NFD|NF)\s*(\d+)/i);
+  // ADIANTAMENTO DE FERIAS / PGTO FUNCIONARIOS - FERIAS NOME
+  if(prefixoU==='ADIANTAMENTO DE FERIAS'){
+    var mFer=resto.match(/FERIAS\s+(.+)$/i);
+    if(mFer) return {contaContabil:prefixo, historico:'Pagamento ref. ferias a '+mFer[1].trim(), tipo:'pagamento'};
+  }
+
+  // SALARIOS E ORDENADOS A PAGAR / SALARIO 06/2026
+  if(prefixoU==='SALARIOS E ORDENADOS A PAGAR'){
+    var mSal=resto.match(/^SALARIO\s+(.+)$/i);
+    if(mSal) return {contaContabil:prefixo, historico:'Pagamento ref. salario '+mSal[1].trim(), tipo:'pagamento'};
+  }
+
+  // ICMS ST E ANTECIP. TRIBUTARIA / GNRE MT SEFAZ - COMP. 06/2026 - COD. n
+  if(prefixoU==='ICMS ST E ANTECIP. TRIBUTARIA'){
+    var semComp=resto.replace(/\bCOMP\.?\s+/i,'').trim();
+    return {contaContabil:prefixo, historico:'Pagamento ref. '+_rufatoTirarZerosNF(semComp), tipo:'pagamento'};
+  }
+
+  // PRO-LABORE A PAGAR / NOME - PRO LABORE 06/2026
+  if(prefixoU==='PRO-LABORE A PAGAR'){
+    var mProlab=resto.match(/^(.+?)\s*-\s*PRO\s*LABORE\s+(.+)$/i);
+    if(mProlab) return {contaContabil:prefixo, historico:'Pagamento ref. pro-labore '+mProlab[2].trim()+' a '+mProlab[1].trim(), tipo:'pagamento'};
+  }
+
+  // LUCROS A PAGAR-SERGIO RUF.MILA / NOME - TRANSF. LUCROS
+  if(prefixoU==='LUCROS A PAGAR-SERGIO RUF.MILA'){
+    var mLucro=resto.match(/^(.+?)\s*-\s*TRANSF\.?\s*LUCROS/i);
+    if(mLucro) return {contaContabil:prefixo, historico:'Pagamento a '+mLucro[1].trim(), tipo:'pagamento'};
+  }
+
+  // "{fornecedor} > NF/NFS/NFD {numero}" — vale pra qualquer rótulo que caia
+  // nesse formato (FORNECEDORES, SERVICOS PRESTADOS POR TERCEI, etc.)
+  var mDoc=resto.match(/^(.*?)\s*>\s*(NFS|NFD|NF)\s*0*(\d+)/i);
   if(mDoc){
     var fornecedor=mDoc[1].trim();
     var label=mDoc[2].toUpperCase();
@@ -3445,9 +3535,9 @@ function _rufatoReescreverHistorico(historicoOriginal){
     return {contaContabil:prefixo, historico:'Pagamento ref. '+label+' '+numero+' de '+fornecedor, tipo:'pagamento'};
   }
 
-  // Sem padrão reconhecido: só separa a conta contábil, mantém o resto como veio.
-  // Tudo que não começa com "E," é tratado como pagamento (saída) por padrão.
-  return {contaContabil:prefixo, historico:resto, tipo:'pagamento'};
+  // Rótulo reconhecido mas sem regra específica de reescrita: só separa a
+  // conta contábil e mantém o resto como veio (nunca inventa texto).
+  return {contaContabil:prefixo, historico:_rufatoTirarZerosNF(resto), tipo:'pagamento'};
 }
 
 // true = linha deve ser descartada (vazia, ou resumo "CRÉDITO"/"DÉBITO"/"SALDO"
@@ -3812,7 +3902,7 @@ async function _rufatoProcessar(bancoId){
   if(elRelatorio)elRelatorio.innerHTML='';
   try{
     var headerFinal=null;
-    var idxDescr=-1, idxData=-1, idxValor=-1, idxPladeb=-1, idxPlacre=-1, idxCcuscre=-1;
+    var idxDescr=-1, idxData=-1, idxValor=-1, idxPladeb=-1, idxPlacre=-1;
     var todasLinhas=[];
     for(var i=0;i<arquivos.length;i++){
       var parsed=await _rufatoParsearFluxo(arquivos[i]);
@@ -3823,7 +3913,6 @@ async function _rufatoProcessar(bancoId){
         idxValor=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='vlliq';});
         idxPladeb=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='pladeb';});
         idxPlacre=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='placre';});
-        idxCcuscre=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='ccuscre';});
         if(idxDescr<0)throw new Error('Não encontrei a coluna "descr" (histórico) no cabeçalho de "'+arquivos[i].name+'".');
         if(idxValor<0)throw new Error('Não encontrei a coluna "vlliq" (valor) no cabeçalho de "'+arquivos[i].name+'".');
       }
@@ -3832,8 +3921,8 @@ async function _rufatoProcessar(bancoId){
 
     // Cada arquivo pode ter uma largura de planilha diferente (colunas finais
     // vazias variam de arquivo pra arquivo) — normaliza toda linha pra
-    // exatamente a largura do cabeçalho antes de qualquer coisa, senão a
-    // coluna nova (Conta Contábil) acaba entrando em posições diferentes
+    // exatamente a largura do cabeçalho antes de qualquer coisa, senão o
+    // acesso por índice de coluna (pladeb/placre/vlliq/descr) sai errado
     // dependendo de qual arquivo a linha veio.
     var largura=headerFinal.length;
     var linhasLimpas=todasLinhas
@@ -3844,41 +3933,40 @@ async function _rufatoProcessar(bancoId){
       })
       .filter(function(row){return !_rufatoDescartarLinha(row);});
 
-    // A coluna "Conta Contábil" nova vai na coluna J (ccuscre) por pedido do
-    // usuário, em vez de lá no fim da planilha (que tem ~250 colunas técnicas
-    // vazias e ficava fora de vista) — mas só reaproveita a coluna J se ela
-    // estiver REALMENTE vazia em todas as linhas lidas; se algum arquivo
-    // tiver usado ccuscre pra algo, não arrisca sobrescrever e cai no
-    // comportamento antigo (acrescenta uma coluna nova no final).
-    var usarColunaJ=idxCcuscre>=0&&!linhasLimpas.some(function(row){return String(row[idxCcuscre]==null?'':row[idxCcuscre]).trim()!=='';});
-    var idxContaContabilSaida=usarColunaJ?idxCcuscre:largura;
-    var larguraSaida=usarColunaJ?largura:largura+1;
-
+    // O Excel novo só traz 5 colunas do original (dtpgto/pladeb/placre/vlliq/
+    // descr) + Saldo (calculado linha a linha) + Conta Contábil — por pedido
+    // do usuário, não leva mais o resto das ~250 colunas técnicas do arquivo
+    // original. Por isso cada lançamento vira um objeto próprio em vez de
+    // manter a linha inteira do Excel de origem.
+    //
     // O sinal (entrada/saída) é decidido pela conta contábil do banco nas
     // colunas de débito/crédito do lançamento (partida dobrada: se a conta do
     // banco está no débito, o saldo dela aumenta = entrada; no crédito,
     // diminui = saída) — mais confiável que adivinhar pelo texto do
-    // histórico, que só reconhece o padrão "E, ..." e classificaria qualquer
-    // recebimento sem esse prefixo como saída por engano. O histórico
-    // continua sendo o critério de reserva, só usado quando a conta do banco
-    // não aparece em nenhum dos dois lados do lançamento.
+    // histórico. Esse mesmo sinal também decide, dentro de
+    // _rufatoReescreverHistorico, se um histórico SEM rótulo de conta
+    // reconhecido é um recebimento direto (vira "Recebimento de ...") ou
+    // fica como está (pagamento não identificado, nunca inventa texto).
     var contaBanco=String((banco&&banco.contaContabil)||'').trim();
     var linhasFinal=linhasLimpas.map(function(row){
-      var info=_rufatoReescreverHistorico(row[idxDescr]);
-      var novaLinha=row.slice();
-      novaLinha[idxDescr]=info.historico;
-      if(idxData>=0)novaLinha[idxData]=_rufatoFmtDataBR(novaLinha[idxData]);
-      var tipoReal=info.tipo;
+      var tipoPelaConta=null;
       if(contaBanco&&idxPladeb>=0&&idxPlacre>=0){
         var pladebVal=String(row[idxPladeb]==null?'':row[idxPladeb]).trim();
         var placreVal=String(row[idxPlacre]==null?'':row[idxPlacre]).trim();
-        if(pladebVal===contaBanco)tipoReal='recebimento';
-        else if(placreVal===contaBanco)tipoReal='pagamento';
+        if(pladebVal===contaBanco)tipoPelaConta='recebimento';
+        else if(placreVal===contaBanco)tipoPelaConta='pagamento';
       }
-      var valorAbs=Math.abs(parseFloat(String(novaLinha[idxValor]).replace(',','.'))||0);
-      novaLinha[idxValor]=tipoReal==='pagamento'?-valorAbs:valorAbs;
-      novaLinha[idxContaContabilSaida]=info.contaContabil;
-      return novaLinha;
+      var info=_rufatoReescreverHistorico(row[idxDescr],tipoPelaConta);
+      var tipoReal=tipoPelaConta||info.tipo;
+      var valorAbs=Math.abs(parseFloat(String(row[idxValor]).replace(',','.'))||0);
+      return {
+        data:_rufatoFmtDataBR(row[idxData]),
+        pladeb:idxPladeb>=0?row[idxPladeb]:'',
+        placre:idxPlacre>=0?row[idxPlacre]:'',
+        valor:tipoReal==='pagamento'?-valorAbs:valorAbs,
+        descr:info.historico,
+        contaContabil:info.contaContabil
+      };
     });
 
     // ── Conferência com o extrato de conta corrente (se anexado) ──
@@ -3887,7 +3975,7 @@ async function _rufatoProcessar(bancoId){
     var qtdForaCompetencia=0;
     var inputExtrato=document.getElementById('rufatoArqExtrato');
     var arqsExtrato=inputExtrato?Array.from(inputExtrato.files):[];
-    if(arqsExtrato.length&&idxData>=0){
+    if(arqsExtrato.length){
       _rufatoSetStatus('Lendo extrato de conta corrente ('+arqsExtrato.length+' PDF)...','info');
       var transacoesExtratoTodas=await _rufatoParsearExtratoPDF(arqsExtrato);
       var transacoesExtrato=transacoesExtratoTodas.filter(function(t){return _rufatoDataEhDaCompetencia(t.data,competenciaAno,competenciaMes);});
@@ -3898,7 +3986,7 @@ async function _rufatoProcessar(bancoId){
       // nova no Excel (fica só pro relatório mostrar a diferença); quem entra
       // automaticamente no Excel são só as aplicações e os resgates líquidos
       // do Invest Fácil, no bloco de baixo.
-      var fluxoPorDia=_rufatoAgruparPorDia(linhasFinal,function(l){return l[idxData];},function(l){return l[idxValor];});
+      var fluxoPorDia=_rufatoAgruparPorDia(linhasFinal,function(l){return l.data;},function(l){return l.valor;});
       var extratoPorDia=_rufatoAgruparPorDia(transacoesExtrato,function(t){return t.data;},function(t){return t.valor;});
       var comparacao=_rufatoCompararDiario(fluxoPorDia,extratoPorDia);
       relatorioHtml+=_rufatoRenderRelatorioDiario(comparacao);
@@ -3908,10 +3996,10 @@ async function _rufatoProcessar(bancoId){
     // ── Conferência com o extrato de Aplicação/Invest Fácil (se anexado) ──
     var inputAplicacao=document.getElementById('rufatoArqAplicacao');
     var arqsAplicacao=inputAplicacao?Array.from(inputAplicacao.files):[];
-    if(arqsAplicacao.length&&idxData>=0){
+    if(arqsAplicacao.length){
       _rufatoSetStatus('Lendo extrato de aplicação financeira ('+arqsAplicacao.length+' PDF)...','info');
       var dadosAplic=await _rufatoParsearAplicacaoPDF(arqsAplicacao);
-      var poolFluxo2=linhasFinal.map(function(l){return {valor:l[idxValor],dataObj:_rufatoDataParaDate(l[idxData]),usado:false};});
+      var poolFluxo2=linhasFinal.map(function(l){return {valor:l.valor,dataObj:_rufatoDataParaDate(l.data),usado:false};});
       var aplicacoesDaCompetencia=dadosAplic.aplicacoes.filter(function(a){return _rufatoDataEhDaCompetencia(a.data,competenciaAno,competenciaMes);});
       var resgatesDaCompetencia=dadosAplic.resgates.filter(function(r){return _rufatoDataEhDaCompetencia(r.data,competenciaAno,competenciaMes);});
       var foraCompetenciaAplic=(dadosAplic.aplicacoes.length-aplicacoesDaCompetencia.length)+(dadosAplic.resgates.length-resgatesDaCompetencia.length);
@@ -3919,28 +4007,20 @@ async function _rufatoProcessar(bancoId){
       var transacoesAplic=aplicacoesDaCompetencia.map(function(a){return {data:a.data,valor:-Math.abs(a.valor)};});
       var faltamAplic=_rufatoEncontrarFaltantes(poolFluxo2,transacoesAplic,5);
       faltamAplic.forEach(function(t){
-        var novaLinha=new Array(larguraSaida).fill('');
-        novaLinha[idxData]=t.data;
-        novaLinha[idxDescr]='Aplicação Invest Fácil '+(banco?banco.nome:'');
-        novaLinha[idxValor]=t.valor;
-        linhasFinal.push(novaLinha);
+        linhasFinal.push({data:t.data,pladeb:'',placre:'',valor:t.valor,descr:'Aplicação Invest Fácil '+(banco?banco.nome:''),contaContabil:''});
       });
 
       var transacoesResg=resgatesDaCompetencia.map(function(r){return {data:r.data,valor:Math.abs(r.valor)};});
       var faltamResg=_rufatoEncontrarFaltantes(poolFluxo2,transacoesResg,5);
       faltamResg.forEach(function(t){
-        var novaLinha=new Array(larguraSaida).fill('');
-        novaLinha[idxData]=t.data;
-        novaLinha[idxDescr]='Resgate líquido Invest Fácil '+(banco?banco.nome:'');
-        novaLinha[idxValor]=t.valor;
-        linhasFinal.push(novaLinha);
+        linhasFinal.push({data:t.data,pladeb:'',placre:'',valor:t.valor,descr:'Resgate líquido Invest Fácil '+(banco?banco.nome:''),contaContabil:''});
       });
       qtdInseridas+=faltamAplic.length+faltamResg.length;
       qtdForaCompetencia+=foraCompetenciaAplic;
     }
 
     linhasFinal.sort(function(a,b){
-      var da=_rufatoDataParaDate(a[idxData]),db=_rufatoDataParaDate(b[idxData]);
+      var da=_rufatoDataParaDate(a.data),db=_rufatoDataParaDate(b.data);
       if(!da&&!db)return 0; if(!da)return 1; if(!db)return -1;
       return da-db;
     });
@@ -3948,11 +4028,7 @@ async function _rufatoProcessar(bancoId){
     // Não gera/baixa o Excel aqui — só deixa tudo pronto em memória. O
     // usuário revisa o relatório, pode incluir linhas manuais (data/valor/
     // pagamento ou recebimento) e só então clica em "Baixar Excel".
-    _rufatoEstado={
-      banco:banco, headerFinal:headerFinal, idxDescr:idxDescr, idxData:idxData, idxValor:idxValor,
-      idxContaContabilSaida:idxContaContabilSaida, usarColunaJ:usarColunaJ, larguraSaida:larguraSaida,
-      linhasFinal:linhasFinal, linhasManuais:[]
-    };
+    _rufatoEstado={banco:banco, linhasFinal:linhasFinal, linhasManuais:[]};
 
     var msgFinal='Competência '+String(competenciaMes).padStart(2,'0')+'/'+competenciaAno+': '+linhasFinal.length+' lançamento(s) prontos (de '+todasLinhas.length+' lidos, '+(todasLinhas.length-linhasLimpas.length)+' linha(s) de resumo/vazias removida(s))';
     if(qtdInseridas>0)msgFinal+=' — '+qtdInseridas+' linha(s) incluída(s) automaticamente por conferência com o(s) PDF(s)';
@@ -3975,7 +4051,7 @@ function _rufatoRenderAreaBaixar(){
   var est=_rufatoEstado;
   var listaHtml=est.linhasManuais.length?est.linhasManuais.map(function(m,i){
     return '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;border-top:1px solid var(--border);font-size:12px">'+
-      '<span>'+esc(m.dataBR)+' — '+esc(m.historico)+' — <b style="color:'+(m.tipo==='pagamento'?'#dc2626':'#16a34a')+'">'+(m.tipo==='pagamento'?'-':'+')+_rufatoFmtMoeda(Math.abs(m.valor))+'</b></span>'+
+      '<span>'+esc(m.data)+' — '+esc(m.historico)+' — <b style="color:'+(m.tipo==='pagamento'?'#dc2626':'#16a34a')+'">'+(m.tipo==='pagamento'?'-':'+')+_rufatoFmtMoeda(Math.abs(m.valor))+'</b></span>'+
       '<button class="btn bd bsm" onclick="_rufatoRemoverLinhaManual('+i+')">✕</button>'+
     '</div>';
   }).join(''):'<div style="padding:8px 0;color:var(--slate);font-size:12px">Nenhuma linha manual adicionada ainda.</div>';
@@ -4007,7 +4083,7 @@ function _rufatoAdicionarLinhaManual(){
   if(!historicoVal){toast('Informe o histórico do lançamento','warn');return;}
   var partes=dataVal.split('-'); // input type=date -> AAAA-MM-DD
   var dataBR=partes[2]+'/'+partes[1]+'/'+partes[0];
-  _rufatoEstado.linhasManuais.push({dataBR:dataBR,valor:valorVal,tipo:tipoVal,historico:historicoVal});
+  _rufatoEstado.linhasManuais.push({data:dataBR,valor:valorVal,tipo:tipoVal,historico:historicoVal});
   document.getElementById('rufatoManualValor').value='';
   document.getElementById('rufatoManualHistorico').value='';
   _rufatoRenderAreaBaixar();
@@ -4023,36 +4099,37 @@ async function _rufatoGerarEBaixarExcel(){
   if(!_rufatoEstado){toast('Processe o Fluxo de Caixa antes de baixar','warn');return;}
   if(typeof ExcelJS==='undefined'){toast('Biblioteca ExcelJS não carregada','err');return;}
   var est=_rufatoEstado;
-  var idxData=est.idxData, idxDescr=est.idxDescr, idxValor=est.idxValor;
   var linhasCompletas=est.linhasFinal.slice();
   est.linhasManuais.forEach(function(m){
-    var novaLinha=new Array(est.larguraSaida).fill('');
-    novaLinha[idxData]=m.dataBR;
-    novaLinha[idxDescr]=m.historico;
-    novaLinha[idxValor]=m.tipo==='pagamento'?-Math.abs(m.valor):Math.abs(m.valor);
-    linhasCompletas.push(novaLinha);
+    linhasCompletas.push({data:m.data,pladeb:'',placre:'',valor:m.tipo==='pagamento'?-Math.abs(m.valor):Math.abs(m.valor),descr:m.historico,contaContabil:''});
   });
   linhasCompletas.sort(function(a,b){
-    var da=_rufatoDataParaDate(a[idxData]),db=_rufatoDataParaDate(b[idxData]);
+    var da=_rufatoDataParaDate(a.data),db=_rufatoDataParaDate(b.data);
     if(!da&&!db)return 0; if(!da)return 1; if(!db)return -1;
     return da-db;
   });
 
+  // Excel novo só com dtpgto/pladeb/placre/vlliq/descr (por pedido do
+  // usuário — nada das outras ~250 colunas técnicas do arquivo original),
+  // mais Saldo (acumulado linha a linha, começando em zero — não é o saldo
+  // real do banco, é só o total líquido acumulado dos lançamentos deste
+  // arquivo) e Conta Contábil.
   var wbOut=new ExcelJS.Workbook();
   var wsOut=wbOut.addWorksheet('Fluxo de Caixa');
-  var cabecalho=est.headerFinal.slice();
-  if(est.usarColunaJ)cabecalho[est.idxContaContabilSaida]='Conta Contábil';
-  else cabecalho.push('Conta Contábil');
-  var linhaCab=wsOut.addRow(cabecalho);
+  var linhaCab=wsOut.addRow(['dtpgto','pladeb','placre','vlliq','descr','Saldo','Conta Contábil']);
   linhaCab.eachCell(function(cell){cell.font={bold:true};});
+  var saldoAcumulado=0;
   linhasCompletas.forEach(function(l){
-    var linhaExcel=wsOut.addRow(l);
-    var celulaValor=linhaExcel.getCell(idxValor+1);
-    celulaValor.numFmt='#,##0.00';
-    if(typeof l[idxValor]==='number'&&l[idxValor]<0)celulaValor.font={color:{argb:'FFFF0000'}};
+    saldoAcumulado+=l.valor;
+    var linhaExcel=wsOut.addRow([l.data,l.pladeb,l.placre,l.valor,l.descr,saldoAcumulado,l.contaContabil]);
+    [4,6].forEach(function(colNum){
+      var cel=linhaExcel.getCell(colNum);
+      cel.numFmt='#,##0.00';
+      if(colNum===4&&l.valor<0)cel.font={color:{argb:'FFFF0000'}};
+    });
   });
   wsOut.columns.forEach(function(col){col.width=16;});
-  wsOut.getColumn(idxDescr+1).width=55;
+  wsOut.getColumn(5).width=55;
 
   var buf=await wbOut.xlsx.writeBuffer();
   var blob=new Blob([buf],{type:'application/octet-stream'});
