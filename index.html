@@ -3428,7 +3428,7 @@ var RUFATO_PREFIXOS_CONTA_CONTABIL=[
   'DONATIVOS E CONTRIBUICOES /','SALARIOS E ORDENADOS A PAGAR /','MANUTENCAO DE EQUIPAMENTOS /',
   'ICMS ST E ANTECIP. TRIBUTARIA /','PRO-LABORE A PAGAR /','IPTU A RECOLHER /',
   'COMBUSTIVEIS E DERIVADOS /','MANUTENCAO E REPARO /','ENERGIA ELETRICA A PAGAR /',
-  'ENERGIA ELETRICA /'
+  'ENERGIA ELETRICA /','SEGUROS /'
 ].sort(function(a,b){return b.length-a.length;});
 function _rufatoEscapeRegex(s){return s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');}
 var RUFATO_PREFIXOS_REGEX=RUFATO_PREFIXOS_CONTA_CONTABIL.map(function(p){
@@ -3579,6 +3579,28 @@ function _rufatoReescreverHistorico(historicoOriginal,tipoPelaConta){
     if(mIptu) return {contaContabil:prefixo, historico:'Pagamento ref. IPTU parcela '+mIptu[2]+' ('+mIptu[1].trim()+')', tipo:'pagamento'};
   }
 
+  // FRETES E CARRETOS / NOME - REEMB {motivo} NF n — reembolso de algo
+  // (peça extraviada etc.) que a transportadora devolve; respeita o tipo
+  // decidido pela conta do banco (pode ser recebimento, não só pagamento).
+  if(prefixoU==='FRETES E CARRETOS'){
+    var mReembFrete=resto.match(/^(.+?)\s*-\s*REEMB\.?\s*(.+?)\s*NF\s*0*(\d+)\s*$/i);
+    if(mReembFrete){
+      var motivoFrete=mReembFrete[2].trim().toLowerCase().replace(/\bpeca\b/,'peça');
+      var tipoFrete=tipoPelaConta||'pagamento';
+      var acaoFrete=tipoFrete==='recebimento'?'Recebimento de ':'Pagamento a ';
+      return {contaContabil:prefixo, historico:acaoFrete+mReembFrete[1].trim()+' - reembolso de '+motivoFrete+' NF '+mReembFrete[3], tipo:tipoFrete};
+    }
+  }
+
+  // SEGUROS / SEGURADORA - SEGURO {tipo}  OU  SEGURADORA - {pessoa} (seguro
+  // de vida em nome de alguém, quando não vem a palavra "SEGURO" no meio).
+  if(prefixoU==='SEGUROS'){
+    var mSeguroTipo=resto.match(/^(.+?)\s*-\s*SEGURO\s+(.+)$/i);
+    if(mSeguroTipo) return {contaContabil:prefixo, historico:'Pagamento ref. seguro '+mSeguroTipo[2].trim().toLowerCase()+' - '+mSeguroTipo[1].trim(), tipo:'pagamento'};
+    var mSeguroVida=resto.match(/^(.+?)\s*-\s*(.+)$/);
+    if(mSeguroVida) return {contaContabil:prefixo, historico:'Pagamento ref. seguro de vida a '+mSeguroVida[2].trim()+' - '+mSeguroVida[1].trim(), tipo:'pagamento'};
+  }
+
   // COMBUSTIVEIS E DERIVADOS / FORNECEDOR - n NF(S) k QUINZENA MES/AA — o
   // arquivo do cliente vem com caracteres corrompidos nessa (ex: "NFÏS",
   // "1¦" no lugar de "1ª"), por isso o regex é tolerante a qualquer coisa
@@ -3665,18 +3687,34 @@ function _rufatoReescreverHistorico(historicoOriginal,tipoPelaConta){
     return {contaContabil:prefixo, historico:'Pagamento ref. '+label+' '+numero+' de '+fornecedor, tipo:'pagamento'};
   }
 
-  // "{fornecedor} > FATURA/CTE {número(s)}" — formato de transportadora,
+  // "{fornecedor}[ - algo no meio] - NF(S) {numero}" (com TRAÇO, não seta) —
+  // só o PRIMEIRO pedaço antes do 1º traço é o fornecedor de verdade;
+  // qualquer coisa no meio (ex: "EBAZAR.COM - CORDAO - NFS 2514729") é
+  // descartada.
+  var partesDashNF=resto.split(/\s*-\s*/);
+  if(partesDashNF.length>=2){
+    var mNFDash=partesDashNF[partesDashNF.length-1].match(/^NFS?\s*0*(\d+)$/i);
+    if(mNFDash) return {contaContabil:prefixo, historico:'Pagamento ref. NF '+mNFDash[1]+' - '+partesDashNF[0].trim(), tipo:'pagamento'};
+  }
+
+  // "{fornecedor} > FATURA/FAT/CTE {número(s)}" — formato de transportadora,
   // fica com o fornecedor DEPOIS do número (padrão diferente do NF acima,
-  // seguindo exatamente o que foi confirmado pro caso da Rufato).
-  var mDoc2=resto.match(/^(.*?)\s*>\s*(FATURA|CTE)\s+(.+)$/i);
+  // seguindo exatamente o que foi confirmado pro caso da Rufato). "FAT" é
+  // abreviação de "FATURA" e sempre vira o rótulo por extenso no texto novo.
+  var mDoc2=resto.match(/^(.*?)\s*>\s*(FATURA|FAT|CTE)\s+(.+)$/i);
   if(mDoc2){
-    return {contaContabil:prefixo, historico:'Pagamento ref. '+mDoc2[2].toUpperCase()+' '+mDoc2[3].trim()+' - '+mDoc2[1].trim(), tipo:'pagamento'};
+    var labelDoc2=mDoc2[2].toUpperCase();
+    if(labelDoc2==='FAT')labelDoc2='FATURA';
+    return {contaContabil:prefixo, historico:'Pagamento ref. '+labelDoc2+' '+mDoc2[3].trim()+' - '+mDoc2[1].trim(), tipo:'pagamento'};
   }
 
   // Rótulo reconhecido mas sem regra específica de reescrita: nunca deixa o
-  // histórico "solto" — sempre entra como "Pagamento a {resto}" (nunca
-  // inventa detalhe além disso).
-  return {contaContabil:prefixo, historico:'Pagamento a '+_rufatoTirarZerosNF(resto), tipo:'pagamento'};
+  // histórico "solto" — respeita o tipo já decidido pela conta do banco
+  // (pode ser recebimento, ex: "CLIENTES / ... ACORDO JUDIC ..." quando o
+  // lançamento é uma entrada, não só pagamento).
+  var tipoFallback=tipoPelaConta||'pagamento';
+  var acaoFallback=tipoFallback==='recebimento'?'Recebimento de ':'Pagamento a ';
+  return {contaContabil:prefixo, historico:acaoFallback+_rufatoTirarZerosNF(resto), tipo:tipoFallback};
 }
 
 // true = linha deve ser descartada (vazia, resumo "CRÉDITO"/"DÉBITO"/"SALDO"/
