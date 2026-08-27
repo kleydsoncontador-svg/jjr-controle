@@ -3451,6 +3451,14 @@ function _rufatoAcharPrefixoContaContabil(historico){
 function _rufatoTirarZerosNF(texto){
   return String(texto||'').replace(/\bNF\s*0*(\d+)/i,function(m,n){return 'NF '+n;});
 }
+// "... 174593-01" (no final do texto, sem rótulo nenhum) → "... - NF 174593
+// (PARCELA 01)". Só mexe se o número-parcela for o ÚLTIMO token do texto.
+function _rufatoFormatarParcelaFinal(texto){
+  var t=String(texto||'');
+  var m=t.match(/^(.*?)\s+0*(\d{4,})-(\d{2})\s*$/);
+  if(m)return m[1].trim()+' - NF '+m[2]+' (PARCELA '+m[3]+')';
+  return t;
+}
 // "JUN/26" → "06/2026", "6/2026" → "06/2026" — normaliza competência pro
 // padrão MM/AAAA usado no resto do sistema. Devolve o texto original se não
 // reconhecer nem mês-abreviado nem NN/AAAA (não inventa nada nesse caso).
@@ -3500,7 +3508,7 @@ function _rufatoReescreverHistorico(historicoOriginal,tipoPelaConta){
     // rótulo de conta na frente, por isso não precisa informar Conta
     // Contábil — a conta crédito do lançamento já diz que é recebimento).
     if(tipoPelaConta==='recebimento'){
-      return {contaContabil:'', historico:'Recebimento de '+_rufatoTirarZerosNF(hist), tipo:'recebimento'};
+      return {contaContabil:'', historico:'Recebimento de '+_rufatoTirarZerosNF(_rufatoFormatarParcelaFinal(hist)), tipo:'recebimento'};
     }
     return {contaContabil:'', historico:hist, tipo:tipoPelaConta||'pagamento'};
   }
@@ -3512,7 +3520,7 @@ function _rufatoReescreverHistorico(historicoOriginal,tipoPelaConta){
   // "E," → mesmo tratamento do recebimento "solto" acima, só que aqui o
   // histórico original já trazia a marca "E," explicitamente.
   if(prefixoU==='E,'){
-    return {contaContabil:'E,', historico:'Recebimento de '+_rufatoTirarZerosNF(resto), tipo:'recebimento'};
+    return {contaContabil:'E,', historico:'Recebimento de '+_rufatoTirarZerosNF(_rufatoFormatarParcelaFinal(resto)), tipo:'recebimento'};
   }
 
   // HOMOLOGACAO A PAGAR RECISAO / PGTO FUNCIONARIOS - RESCISAO NOME
@@ -4046,6 +4054,21 @@ async function _rufatoProcessar(bancoId){
       var info=_rufatoReescreverHistorico(row[idxDescr],tipoPelaConta);
       var tipoReal=tipoPelaConta||info.tipo;
       var valorAbs=Math.abs(parseFloat(String(row[idxValor]).replace(',','.'))||0);
+      // VALE TRANSPORTE / COMBUSTIVEL pago ANTES da competência que consta no
+      // histórico (ex: pago em 07/2026 pra usar em 08/2026) é adiantamento,
+      // não despesa do mês — marca "(ATIVO)" na Conta Contábil pro contador
+      // saber que precisa ir pro ativo, não direto pra despesa.
+      if(info.contaContabil==='VALE TRANSPORTE / COMBUSTIVEL'){
+        var mCompVT=String(row[idxDescr]||'').match(/(\d{2})\/(\d{4})\s*$/);
+        var dataRow=row[idxData];
+        if(mCompVT&&dataRow instanceof Date&&!isNaN(dataRow.getTime())){
+          var mesComp=parseInt(mCompVT[1],10), anoComp=parseInt(mCompVT[2],10);
+          var mesLanc=dataRow.getMonth()+1, anoLanc=dataRow.getFullYear();
+          if(anoComp>anoLanc||(anoComp===anoLanc&&mesComp>mesLanc)){
+            info.contaContabil+=' (ATIVO)';
+          }
+        }
+      }
       return {
         data:_rufatoFmtDataBR(row[idxData]),
         pladeb:idxPladeb>=0?row[idxPladeb]:'',
