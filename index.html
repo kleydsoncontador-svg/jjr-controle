@@ -3708,16 +3708,65 @@ function _rufatoRenderRelatorioDiario(linhas){
 // usuário avisou que o Fluxo às vezes registra o lançamento 1-2 dias antes/
 // depois do que aparece no extrato). Marca o item do pool como usado quando
 // acha, pra não casar o mesmo lançamento do Fluxo com duas transações.
-function _rufatoEncontrarFaltantes(poolFluxo,transacoes,toleranciaDias){
+// Extrai o nome do remetente/favorecido do histórico do extrato ("REM: 64.874.892
+// DAVID OLIV 01/07 PIX QR CODE DINAMIC" → "DAVID OLIV") e do histórico já
+// reescrito do Fluxo ("Recebimento de DAVID OLIVEIRA RAMOS 64874892 / ..." →
+// "DAVID OLIVEIRA RAMOS 64874892"). O banco costuma truncar o nome no extrato,
+// por isso a comparação em _rufatoNomesCompativeis é por prefixo, não igualdade.
+function _rufatoExtrairNomeExtrato(historico){
+  var h=String(historico||'');
+  var m=h.match(/^REM:\s*(?:[\d.\/-]+\s+)?(.+?)\s+\d{2}\/\d{2}\s*(?:PIX|$)/i);
+  return m?m[1].trim():'';
+}
+function _rufatoExtrairNomeFluxo(historico){
+  var h=String(historico||'');
+  var m=h.match(/^Recebimento de\s+(.+?)\s*\//i);
+  if(m)return m[1].trim();
+  m=h.match(/rescis[ãa]o a\s+(.+)$/i);
+  if(m)return m[1].trim();
+  m=h.match(/\bde\s+([^\/]+)$/i);
+  return m?m[1].trim():'';
+}
+function _rufatoNomesCompativeis(a,b){
+  var na=_rufatoNorm(a), nb=_rufatoNorm(b);
+  if(!na||!nb)return false;
+  return na.indexOf(nb)===0||nb.indexOf(na)===0;
+}
+
+// `getNomePool`/`getNomeTransacao` são opcionais: quando o mesmo dia tem mais
+// de uma transação com o MESMO valor (ex: dois PIX de R$233,73 recebidos no
+// mesmo dia, de clientes diferentes), casar só por valor+data pode "roubar" a
+// linha certa do Fluxo pra transação errada do extrato — daí sobra uma
+// transação real sem par (marcada como faltante) e o cliente certo aparece
+// duplicado no Excel (a linha original + a inserida por engano). Com os
+// extratores de nome, entre os candidatos empatados em valor+data prefere-se
+// o que tem o nome compatível; sem eles (ou sem nome extraível), mantém o
+// comportamento antigo de pegar o primeiro candidato disponível.
+function _rufatoEncontrarFaltantes(poolFluxo,transacoes,toleranciaDias,getNomePool,getNomeTransacao){
   var faltantes=[];
   transacoes.forEach(function(t){
     var dt=_rufatoDataParaDate(t.data);
-    var achou=poolFluxo.find(function(p){
+    var candidatos=poolFluxo.filter(function(p){
       if(p.usado)return false;
       if(Math.abs(p.valor-t.valor)>0.015)return false;
       if(!dt||!p.dataObj)return true;
       return Math.abs((dt-p.dataObj)/86400000)<=toleranciaDias;
     });
+    var achou=null;
+    var nomeT=getNomeTransacao?getNomeTransacao(t):'';
+    if(candidatos.length&&getNomePool&&getNomeTransacao&&nomeT){
+      // Só casa com candidato cujo nome seja compatível (ou sem nome
+      // extraível, tratado como coringa) — mesmo com 1 único candidato,
+      // senão a 1ª transação do extrato a chegar "rouba" a vaga de quem
+      // realmente bate, mesmo com nomes diferentes (ex: dois PIX de
+      // R$233,73 no mesmo dia, de clientes diferentes, 1 só vaga no Fluxo).
+      achou=candidatos.find(function(p){
+        var nomeP=getNomePool(p);
+        return !nomeP||_rufatoNomesCompativeis(nomeP,nomeT);
+      })||null;
+    } else {
+      achou=candidatos[0]||null;
+    }
     if(achou)achou.usado=true;
     else faltantes.push(t);
   });
@@ -3811,11 +3860,13 @@ async function _rufatoProcessar(bancoId){
       var comparacao=_rufatoCompararDiario(fluxoPorDia,extratoPorDia);
       relatorioHtml+=_rufatoRenderRelatorioDiario(comparacao);
 
-      var poolFluxo=linhasFinal.map(function(l){return {valor:l[idxValor],dataObj:_rufatoDataParaDate(l[idxData]),usado:false};});
+      var poolFluxo=linhasFinal.map(function(l){return {valor:l[idxValor],dataObj:_rufatoDataParaDate(l[idxData]),historico:l[idxDescr],usado:false};});
       var transacoesParaInserir=transacoesExtrato.filter(function(t){
         return !RUFATO_EXTRATO_NUNCA_INSERIR.some(function(re){return re.test(t.historico||'');});
       });
-      var faltantesExtrato=_rufatoEncontrarFaltantes(poolFluxo,transacoesParaInserir,3);
+      var faltantesExtrato=_rufatoEncontrarFaltantes(poolFluxo,transacoesParaInserir,3,
+        function(p){return _rufatoExtrairNomeFluxo(p.historico);},
+        function(t){return _rufatoExtrairNomeExtrato(t.historico);});
       faltantesExtrato.forEach(function(t){
         var novaLinha=new Array(largura+1).fill('');
         novaLinha[idxData]=t.data;
