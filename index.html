@@ -3803,7 +3803,7 @@ async function _rufatoProcessar(bancoId){
   if(elRelatorio)elRelatorio.innerHTML='';
   try{
     var headerFinal=null;
-    var idxDescr=-1, idxData=-1, idxValor=-1, idxPladeb=-1, idxPlacre=-1;
+    var idxDescr=-1, idxData=-1, idxValor=-1, idxPladeb=-1, idxPlacre=-1, idxCcuscre=-1;
     var todasLinhas=[];
     for(var i=0;i<arquivos.length;i++){
       var parsed=await _rufatoParsearFluxo(arquivos[i]);
@@ -3814,6 +3814,7 @@ async function _rufatoProcessar(bancoId){
         idxValor=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='vlliq';});
         idxPladeb=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='pladeb';});
         idxPlacre=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='placre';});
+        idxCcuscre=parsed.header.findIndex(function(h){return _rufatoNorm(h)==='ccuscre';});
         if(idxDescr<0)throw new Error('Não encontrei a coluna "descr" (histórico) no cabeçalho de "'+arquivos[i].name+'".');
         if(idxValor<0)throw new Error('Não encontrei a coluna "vlliq" (valor) no cabeçalho de "'+arquivos[i].name+'".');
       }
@@ -3833,6 +3834,16 @@ async function _rufatoProcessar(bancoId){
         return r;
       })
       .filter(function(row){return !_rufatoDescartarLinha(row);});
+
+    // A coluna "Conta Contábil" nova vai na coluna J (ccuscre) por pedido do
+    // usuário, em vez de lá no fim da planilha (que tem ~250 colunas técnicas
+    // vazias e ficava fora de vista) — mas só reaproveita a coluna J se ela
+    // estiver REALMENTE vazia em todas as linhas lidas; se algum arquivo
+    // tiver usado ccuscre pra algo, não arrisca sobrescrever e cai no
+    // comportamento antigo (acrescenta uma coluna nova no final).
+    var usarColunaJ=idxCcuscre>=0&&!linhasLimpas.some(function(row){return String(row[idxCcuscre]==null?'':row[idxCcuscre]).trim()!=='';});
+    var idxContaContabilSaida=usarColunaJ?idxCcuscre:largura;
+    var larguraSaida=usarColunaJ?largura:largura+1;
 
     // O sinal (entrada/saída) é decidido pela conta contábil do banco nas
     // colunas de débito/crédito do lançamento (partida dobrada: se a conta do
@@ -3857,7 +3868,7 @@ async function _rufatoProcessar(bancoId){
       }
       var valorAbs=Math.abs(parseFloat(String(novaLinha[idxValor]).replace(',','.'))||0);
       novaLinha[idxValor]=tipoReal==='pagamento'?-valorAbs:valorAbs;
-      novaLinha[largura]=info.contaContabil;
+      novaLinha[idxContaContabilSaida]=info.contaContabil;
       return novaLinha;
     });
 
@@ -3886,7 +3897,7 @@ async function _rufatoProcessar(bancoId){
         function(p){return _rufatoExtrairNomeFluxo(p.historico);},
         function(t){return _rufatoExtrairNomeExtrato(t.historico);});
       faltantesExtrato.forEach(function(t){
-        var novaLinha=new Array(largura+1).fill('');
+        var novaLinha=new Array(larguraSaida).fill('');
         novaLinha[idxData]=t.data;
         novaLinha[idxDescr]=t.historico||'(sem histórico no extrato)';
         novaLinha[idxValor]=t.valor;
@@ -3910,7 +3921,7 @@ async function _rufatoProcessar(bancoId){
       var transacoesAplic=aplicacoesDaCompetencia.map(function(a){return {data:a.data,valor:-Math.abs(a.valor)};});
       var faltamAplic=_rufatoEncontrarFaltantes(poolFluxo2,transacoesAplic,5);
       faltamAplic.forEach(function(t){
-        var novaLinha=new Array(largura+1).fill('');
+        var novaLinha=new Array(larguraSaida).fill('');
         novaLinha[idxData]=t.data;
         novaLinha[idxDescr]='Aplicação Invest Fácil '+(banco?banco.nome:'');
         novaLinha[idxValor]=t.valor;
@@ -3920,7 +3931,7 @@ async function _rufatoProcessar(bancoId){
       var transacoesResg=resgatesDaCompetencia.map(function(r){return {data:r.data,valor:Math.abs(r.valor)};});
       var faltamResg=_rufatoEncontrarFaltantes(poolFluxo2,transacoesResg,5);
       faltamResg.forEach(function(t){
-        var novaLinha=new Array(largura+1).fill('');
+        var novaLinha=new Array(larguraSaida).fill('');
         novaLinha[idxData]=t.data;
         novaLinha[idxDescr]='Resgate líquido Invest Fácil '+(banco?banco.nome:'');
         novaLinha[idxValor]=t.valor;
@@ -3941,7 +3952,8 @@ async function _rufatoProcessar(bancoId){
     var wbOut=new ExcelJS.Workbook();
     var wsOut=wbOut.addWorksheet('Fluxo de Caixa');
     var cabecalho=headerFinal.slice();
-    cabecalho.push('Conta Contábil');
+    if(usarColunaJ)cabecalho[idxContaContabilSaida]='Conta Contábil';
+    else cabecalho.push('Conta Contábil');
     var linhaCab=wsOut.addRow(cabecalho);
     linhaCab.eachCell(function(cell){cell.font={bold:true};});
     linhasFinal.forEach(function(l){
