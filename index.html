@@ -3301,6 +3301,11 @@ const CONVERSOR_HUB_ICONES={
 // e do extrato Invest Fácil (Aplicações + Resgates/Vencimentos) — tudo
 // validado contra arquivos reais da Rufato antes de subir pra produção.
 let _rufatoBancoAtual=null;
+// Estado do último "Processar" (fica em memória até "Baixar Excel" ou "Limpar
+// resultado") — guarda tudo que _rufatoGerarEBaixarExcel precisa pra montar o
+// arquivo, incluindo as linhas manuais que o usuário for adicionando na tela
+// antes de decidir baixar.
+let _rufatoEstado=null;
 function getRufatoBancos(){return S.g('convRufato_bancos')||[];}
 function setRufatoBancos(arr){S.s('convRufato_bancos',arr);}
 function _rufatoNorm(s){return String(s==null?'':s).trim().normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();}
@@ -3370,25 +3375,29 @@ function _rufatoRenderBanco(el,banco){
       <input type="file" id="rufatoArqAplicacao" accept=".pdf" multiple class="fi"></div>
 
     <div style="display:flex;gap:10px;margin-top:16px">
-      <button class="btn bp" onclick="_rufatoProcessar('${banco.id}')">⚙ Processar Fluxo de Caixa e Baixar</button>
+      <button class="btn bp" onclick="_rufatoProcessar('${banco.id}')">⚙ Processar Fluxo de Caixa</button>
       <button class="btn bd bsm" onclick="_rufatoLimparResultado()">🗑 Limpar resultado</button>
     </div>
     <div id="rufatoStatus" style="margin-top:10px;font-size:12.5px"></div>
     <div id="rufatoRelatorioDiario"></div>
-    <div class="info" style="margin-top:14px;font-size:12px">Se anexar o Extrato de Conta Corrente, o sistema confere o saldo diário do Fluxo contra o extrato e já inclui no Excel as linhas que faltarem (com o histórico do próprio extrato). Se anexar o Extrato de Aplicação/Invest Fácil, também inclui as aplicações e os resgates líquidos que não estiverem no Fluxo. Ao final aparece aqui embaixo um relatório dia a dia mostrando onde havia diferença.</div>
+    <div id="rufatoAreaBaixar"></div>
+    <div class="info" style="margin-top:14px;font-size:12px">Se anexar o Extrato de Conta Corrente, o sistema confere o saldo diário do Fluxo contra o extrato e mostra um relatório dia a dia com a diferença (não inclui essas linhas automaticamente — use o formulário de linha manual pra isso). Se anexar o Extrato de Aplicação/Invest Fácil, inclui automaticamente as aplicações e os resgates líquidos que não estiverem no Fluxo. Depois de processar, revise e clique em "Baixar Excel" — o arquivo só é gerado nesse momento.</div>
   `;
 }
 function _rufatoLimparResultado(){
   var elStatus=document.getElementById('rufatoStatus');
   var elRel=document.getElementById('rufatoRelatorioDiario');
+  var elBaixar=document.getElementById('rufatoAreaBaixar');
   var elFluxo=document.getElementById('rufatoArqFluxo');
   var elExtrato=document.getElementById('rufatoArqExtrato');
   var elAplic=document.getElementById('rufatoArqAplicacao');
   if(elStatus)elStatus.innerHTML='';
   if(elRel)elRel.innerHTML='';
+  if(elBaixar)elBaixar.innerHTML='';
   if(elFluxo)elFluxo.value='';
   if(elExtrato)elExtrato.value='';
   if(elAplic)elAplic.value='';
+  _rufatoEstado=null;
 }
 function _rufatoSetStatus(msg,tipo){
   const elS=document.getElementById('rufatoStatus');
@@ -3884,26 +3893,15 @@ async function _rufatoProcessar(bancoId){
       var transacoesExtrato=transacoesExtratoTodas.filter(function(t){return _rufatoDataEhDaCompetencia(t.data,competenciaAno,competenciaMes);});
       var foraCompetenciaExtrato=transacoesExtratoTodas.length-transacoesExtrato.length;
 
+      // Só o relatório diário usa o extrato de conta corrente — por pedido do
+      // usuário, os lançamentos do extrato NÃO são mais inseridos como linha
+      // nova no Excel (fica só pro relatório mostrar a diferença); quem entra
+      // automaticamente no Excel são só as aplicações e os resgates líquidos
+      // do Invest Fácil, no bloco de baixo.
       var fluxoPorDia=_rufatoAgruparPorDia(linhasFinal,function(l){return l[idxData];},function(l){return l[idxValor];});
       var extratoPorDia=_rufatoAgruparPorDia(transacoesExtrato,function(t){return t.data;},function(t){return t.valor;});
       var comparacao=_rufatoCompararDiario(fluxoPorDia,extratoPorDia);
       relatorioHtml+=_rufatoRenderRelatorioDiario(comparacao);
-
-      var poolFluxo=linhasFinal.map(function(l){return {valor:l[idxValor],dataObj:_rufatoDataParaDate(l[idxData]),historico:l[idxDescr],usado:false};});
-      var transacoesParaInserir=transacoesExtrato.filter(function(t){
-        return !RUFATO_EXTRATO_NUNCA_INSERIR.some(function(re){return re.test(t.historico||'');});
-      });
-      var faltantesExtrato=_rufatoEncontrarFaltantes(poolFluxo,transacoesParaInserir,3,
-        function(p){return _rufatoExtrairNomeFluxo(p.historico);},
-        function(t){return _rufatoExtrairNomeExtrato(t.historico);});
-      faltantesExtrato.forEach(function(t){
-        var novaLinha=new Array(larguraSaida).fill('');
-        novaLinha[idxData]=t.data;
-        novaLinha[idxDescr]=t.historico||'(sem histórico no extrato)';
-        novaLinha[idxValor]=t.valor;
-        linhasFinal.push(novaLinha);
-      });
-      qtdInseridas+=faltantesExtrato.length;
       qtdForaCompetencia+=foraCompetenciaExtrato;
     }
 
@@ -3941,49 +3939,128 @@ async function _rufatoProcessar(bancoId){
       qtdForaCompetencia+=foraCompetenciaAplic;
     }
 
-    if(qtdInseridas>0){
-      linhasFinal.sort(function(a,b){
-        var da=_rufatoDataParaDate(a[idxData]),db=_rufatoDataParaDate(b[idxData]);
-        if(!da&&!db)return 0; if(!da)return 1; if(!db)return -1;
-        return da-db;
-      });
-    }
-
-    var wbOut=new ExcelJS.Workbook();
-    var wsOut=wbOut.addWorksheet('Fluxo de Caixa');
-    var cabecalho=headerFinal.slice();
-    if(usarColunaJ)cabecalho[idxContaContabilSaida]='Conta Contábil';
-    else cabecalho.push('Conta Contábil');
-    var linhaCab=wsOut.addRow(cabecalho);
-    linhaCab.eachCell(function(cell){cell.font={bold:true};});
-    linhasFinal.forEach(function(l){
-      var linhaExcel=wsOut.addRow(l);
-      var celulaValor=linhaExcel.getCell(idxValor+1);
-      celulaValor.numFmt='#,##0.00';
-      if(typeof l[idxValor]==='number'&&l[idxValor]<0)celulaValor.font={color:{argb:'FFFF0000'}};
+    linhasFinal.sort(function(a,b){
+      var da=_rufatoDataParaDate(a[idxData]),db=_rufatoDataParaDate(b[idxData]);
+      if(!da&&!db)return 0; if(!da)return 1; if(!db)return -1;
+      return da-db;
     });
-    wsOut.columns.forEach(function(col){col.width=16;});
-    wsOut.getColumn(idxDescr+1).width=55;
 
-    var buf=await wbOut.xlsx.writeBuffer();
-    var blob=new Blob([buf],{type:'application/octet-stream'});
-    var url=URL.createObjectURL(blob);
-    var a=document.createElement('a');
-    a.href=url; a.download='Rufato - '+(banco?banco.nome:'Banco')+' - Fluxo de Caixa corrigido.xlsx'; a.click();
-    URL.revokeObjectURL(url);
+    // Não gera/baixa o Excel aqui — só deixa tudo pronto em memória. O
+    // usuário revisa o relatório, pode incluir linhas manuais (data/valor/
+    // pagamento ou recebimento) e só então clica em "Baixar Excel".
+    _rufatoEstado={
+      banco:banco, headerFinal:headerFinal, idxDescr:idxDescr, idxData:idxData, idxValor:idxValor,
+      idxContaContabilSaida:idxContaContabilSaida, usarColunaJ:usarColunaJ, larguraSaida:larguraSaida,
+      linhasFinal:linhasFinal, linhasManuais:[]
+    };
 
-    var msgFinal='Competência '+String(competenciaMes).padStart(2,'0')+'/'+competenciaAno+': '+linhasFinal.length+' lançamento(s) no arquivo final (de '+todasLinhas.length+' lidos, '+(todasLinhas.length-linhasLimpas.length)+' linha(s) de resumo/vazias removida(s))';
+    var msgFinal='Competência '+String(competenciaMes).padStart(2,'0')+'/'+competenciaAno+': '+linhasFinal.length+' lançamento(s) prontos (de '+todasLinhas.length+' lidos, '+(todasLinhas.length-linhasLimpas.length)+' linha(s) de resumo/vazias removida(s))';
     if(qtdInseridas>0)msgFinal+=' — '+qtdInseridas+' linha(s) incluída(s) automaticamente por conferência com o(s) PDF(s)';
     if(qtdForaCompetencia>0)msgFinal+=' — '+qtdForaCompetencia+' lançamento(s) do(s) PDF(s) fora da competência '+String(competenciaMes).padStart(2,'0')+'/'+competenciaAno+' foram ignorado(s)';
-    msgFinal+='.';
+    msgFinal+='. Revise e clique em "Baixar Excel" quando estiver pronto.';
     _rufatoSetStatus(msgFinal,'ok');
     if(elRelatorio)elRelatorio.innerHTML=relatorioHtml;
-    toast('Fluxo de Caixa gerado ✓','ok');
+    _rufatoRenderAreaBaixar();
+    toast('Fluxo de Caixa processado ✓','ok');
   }catch(e){
     console.error(e);
     _rufatoSetStatus('Erro: '+e.message,'err');
     toast('Erro ao processar: '+e.message,'err');
   }
+}
+
+function _rufatoRenderAreaBaixar(){
+  var el=document.getElementById('rufatoAreaBaixar');
+  if(!el||!_rufatoEstado)return;
+  var est=_rufatoEstado;
+  var listaHtml=est.linhasManuais.length?est.linhasManuais.map(function(m,i){
+    return '<div style="display:flex;justify-content:space-between;align-items:center;padding:5px 8px;border-top:1px solid var(--border);font-size:12px">'+
+      '<span>'+esc(m.dataBR)+' — '+esc(m.historico)+' — <b style="color:'+(m.tipo==='pagamento'?'#dc2626':'#16a34a')+'">'+(m.tipo==='pagamento'?'-':'+')+_rufatoFmtMoeda(Math.abs(m.valor))+'</b></span>'+
+      '<button class="btn bd bsm" onclick="_rufatoRemoverLinhaManual('+i+')">✕</button>'+
+    '</div>';
+  }).join(''):'<div style="padding:8px 0;color:var(--slate);font-size:12px">Nenhuma linha manual adicionada ainda.</div>';
+
+  el.innerHTML=`
+    <div style="margin-top:18px;border:1px solid var(--border);border-radius:8px;padding:14px">
+      <h4 style="margin:0 0 10px;color:#1E3558">➕ Incluir lançamento manual no Excel</h4>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:flex-end">
+        <div class="fg" style="margin:0"><label class="fl">Data</label><input type="date" id="rufatoManualData" class="fi" style="width:150px"></div>
+        <div class="fg" style="margin:0"><label class="fl">Valor</label><input type="number" id="rufatoManualValor" class="fi" style="width:130px" step="0.01" min="0"></div>
+        <div class="fg" style="margin:0"><label class="fl">Tipo</label><select id="rufatoManualTipo" class="fi" style="width:150px"><option value="recebimento">Recebimento (+)</option><option value="pagamento">Pagamento (-)</option></select></div>
+        <div class="fg" style="margin:0;flex:1;min-width:220px"><label class="fl">Histórico</label><input type="text" id="rufatoManualHistorico" class="fi" style="width:100%"></div>
+        <button class="btn bp bsm" onclick="_rufatoAdicionarLinhaManual()">+ Adicionar</button>
+      </div>
+      <div style="margin-top:10px;max-height:200px;overflow:auto">${listaHtml}</div>
+    </div>
+    <button class="btn bp" style="margin-top:14px" onclick="_rufatoGerarEBaixarExcel()">📥 Baixar Excel (${est.linhasFinal.length+est.linhasManuais.length} lançamento(s))</button>
+  `;
+}
+
+function _rufatoAdicionarLinhaManual(){
+  if(!_rufatoEstado){toast('Processe o Fluxo de Caixa antes de adicionar linhas manuais','warn');return;}
+  var dataVal=(document.getElementById('rufatoManualData')||{}).value;
+  var valorVal=parseFloat((document.getElementById('rufatoManualValor')||{}).value);
+  var tipoVal=(document.getElementById('rufatoManualTipo')||{}).value;
+  var historicoVal=((document.getElementById('rufatoManualHistorico')||{}).value||'').trim();
+  if(!dataVal){toast('Informe a data','warn');return;}
+  if(!(valorVal>0)){toast('Informe um valor maior que zero','warn');return;}
+  if(!historicoVal){toast('Informe o histórico do lançamento','warn');return;}
+  var partes=dataVal.split('-'); // input type=date -> AAAA-MM-DD
+  var dataBR=partes[2]+'/'+partes[1]+'/'+partes[0];
+  _rufatoEstado.linhasManuais.push({dataBR:dataBR,valor:valorVal,tipo:tipoVal,historico:historicoVal});
+  document.getElementById('rufatoManualValor').value='';
+  document.getElementById('rufatoManualHistorico').value='';
+  _rufatoRenderAreaBaixar();
+  toast('Linha adicionada — clique em "Baixar Excel" quando terminar','ok');
+}
+function _rufatoRemoverLinhaManual(idx){
+  if(!_rufatoEstado)return;
+  _rufatoEstado.linhasManuais.splice(idx,1);
+  _rufatoRenderAreaBaixar();
+}
+
+async function _rufatoGerarEBaixarExcel(){
+  if(!_rufatoEstado){toast('Processe o Fluxo de Caixa antes de baixar','warn');return;}
+  if(typeof ExcelJS==='undefined'){toast('Biblioteca ExcelJS não carregada','err');return;}
+  var est=_rufatoEstado;
+  var idxData=est.idxData, idxDescr=est.idxDescr, idxValor=est.idxValor;
+  var linhasCompletas=est.linhasFinal.slice();
+  est.linhasManuais.forEach(function(m){
+    var novaLinha=new Array(est.larguraSaida).fill('');
+    novaLinha[idxData]=m.dataBR;
+    novaLinha[idxDescr]=m.historico;
+    novaLinha[idxValor]=m.tipo==='pagamento'?-Math.abs(m.valor):Math.abs(m.valor);
+    linhasCompletas.push(novaLinha);
+  });
+  linhasCompletas.sort(function(a,b){
+    var da=_rufatoDataParaDate(a[idxData]),db=_rufatoDataParaDate(b[idxData]);
+    if(!da&&!db)return 0; if(!da)return 1; if(!db)return -1;
+    return da-db;
+  });
+
+  var wbOut=new ExcelJS.Workbook();
+  var wsOut=wbOut.addWorksheet('Fluxo de Caixa');
+  var cabecalho=est.headerFinal.slice();
+  if(est.usarColunaJ)cabecalho[est.idxContaContabilSaida]='Conta Contábil';
+  else cabecalho.push('Conta Contábil');
+  var linhaCab=wsOut.addRow(cabecalho);
+  linhaCab.eachCell(function(cell){cell.font={bold:true};});
+  linhasCompletas.forEach(function(l){
+    var linhaExcel=wsOut.addRow(l);
+    var celulaValor=linhaExcel.getCell(idxValor+1);
+    celulaValor.numFmt='#,##0.00';
+    if(typeof l[idxValor]==='number'&&l[idxValor]<0)celulaValor.font={color:{argb:'FFFF0000'}};
+  });
+  wsOut.columns.forEach(function(col){col.width=16;});
+  wsOut.getColumn(idxDescr+1).width=55;
+
+  var buf=await wbOut.xlsx.writeBuffer();
+  var blob=new Blob([buf],{type:'application/octet-stream'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url; a.download='Rufato - '+(est.banco?est.banco.nome:'Banco')+' - Fluxo de Caixa corrigido.xlsx'; a.click();
+  URL.revokeObjectURL(url);
+  toast('Excel gerado ✓','ok');
 }
 
 // ─── EXCEL PARA CONCILIAÇÃO (Razão → Base para Conciliação) ───
