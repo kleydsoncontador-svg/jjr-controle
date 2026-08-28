@@ -1429,9 +1429,23 @@ async function extrairDadosPDF(file){
     m = texto.match(/DATA\s+DA\s+EMISS[ÃA]O\D{0,15}?(\d{4}\.\d{2}\.\d{2})/i) || texto.match(/(\d{4}\.\d{2}\.\d{2})/);
     if(m) dados.dataAquisicao = m[1].replace(/\./g,'-');
   }
+  // CNPJ do adquirente: ancorado no rótulo "CNPJ/CPF" (usado especificamente
+  // dentro do quadro DESTINATÁRIO/REMETENTE) — mais confiável que assumir
+  // "o 2º CNPJ do texto", que quebra quando o canhoto/recibo (que já tem o
+  // CNPJ do destinatário) aparece ANTES do quadro do emitente na ordem de
+  // leitura do PDF (alguns emissores fazem isso).
+  // O quadro padrão SEFAZ do emitente tem 3 campos numa linha: "INSCRIÇÃO
+  // ESTADUAL | INSCRIÇÃO ESTADUAL SUB. TRIBUTARIA | CNPJ" — o CNPJ do
+  // emitente é o único rotulado só "CNPJ" (sem "/CPF"); destinatário e
+  // transportador sempre usam o rótulo composto "CNPJ/CPF". Mais confiável
+  // que contar "1º CNPJ do texto" (a ordem de leitura do PDF pode não
+  // seguir a ordem visual — o canhoto/recibo, que já repete o CNPJ do
+  // destinatário, às vezes vem antes do quadro do emitente no texto extraído).
   const cnpjs = Array.from(texto.matchAll(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/g)).map(x=>x[1]);
-  if(cnpjs[0]) dados.cnpjFornecedor = cnpjs[0];
-  if(cnpjs[1]) dados.cnpjAdquirente = cnpjs[1];
+  const mCnpjForn = texto.match(/\bCNPJ\b(?!\s*\/\s*CPF)\D{0,15}?(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/i);
+  const mCnpjAdq = texto.match(/CNPJ\s*\/\s*CPF\D{0,15}?(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/i);
+  dados.cnpjFornecedor = mCnpjForn ? mCnpjForn[1] : cnpjs[0];
+  dados.cnpjAdquirente = (mCnpjAdq ? mCnpjAdq[1] : cnpjs[1]) || cnpjs.find(c => c !== dados.cnpjFornecedor);
   // "V. TOTAL PRODUTOS" / "VALOR TOTAL DOS PRODUTOS" — emissores abreviam de formas diferentes.
   m = texto.match(/V(?:ALOR)?\.?\s*TOTAL\s+(?:DOS?\s+)?PRODUTOS?\s*[:.]?\s*([\d.,]+)/i);
   let valorProdutosNF = m ? parseNum(m[1]) : undefined;
@@ -1468,6 +1482,23 @@ async function extrairDadosPDF(file){
   };
   const fornecedorLinha = acharProximaLinha(/IDENTIFICA[ÇC][ÃA]O\s+DO\s+EMITENTE/i);
   if(fornecedorLinha) dados.fornecedor = fornecedorLinha;
+  if(!dados.fornecedor){
+    // Alguns emissores não têm o rótulo "IDENTIFICAÇÃO DO EMITENTE" — o nome
+    // do emitente aparece "solto" perto da palavra "DANFE" (que por exigência
+    // da SEFAZ está em toda DANFE, sempre ao lado do quadro de identificação
+    // de quem emitiu). Procura pra trás a partir de "DANFE" pela linha mais
+    // próxima que pareça razão social (termina em LTDA/S.A./ME/EIRELI/EPP).
+    const danfeIdx = linhas.findIndex(l => /^DANFE$/i.test(l) || /DOCUMENTO\s+AUXILIAR/i.test(l));
+    if(danfeIdx >= 0){
+      const nomeEmpresaRegex = /\b(LTDA\.?|S\/A|S\.A\.?|EIRELI|E\.?P\.?P\.?)\b/i;
+      for(let i = danfeIdx - 1; i >= Math.max(0, danfeIdx - 10); i--){
+        if(nomeEmpresaRegex.test(linhas[i]) && linhas[i].length < 80 && !/^\d/.test(linhas[i])){
+          dados.fornecedor = linhas[i];
+          break;
+        }
+      }
+    }
+  }
   let adquirenteLinha = acharProximaLinha(/NOME\s*\/\s*RAZ[ÃA]O\s+SOCIAL/i);
   if(!adquirenteLinha){
     // Alguns emissores usam só "RAZÃO SOCIAL" (sem o prefixo "NOME/") dentro da
