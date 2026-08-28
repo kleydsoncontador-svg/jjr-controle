@@ -225,6 +225,7 @@ td{padding:9px 12px;vertical-align:middle}
         </div>
         <div class="grid2">
           <div class="fg"><label class="fl">Valor do Frete na Nota (R$)</label><input class="fi" id="vrValorFrete" placeholder="Só se aparecer na NF" value="0" oninput="recalcular()"></div>
+          <div class="fg"><label class="fl">Valor Unitário (R$)</label><input class="fi" id="vrValorUnitario" readonly style="background:var(--bg)" title="Calculado sozinho: Valor Total dos Produtos + Frete, dividido pela Quantidade"></div>
         </div>
         <div style="font-size:11.5px;color:var(--slate);background:var(--bg);border-radius:var(--r);padding:8px 12px">
           ⚠ Use somente o Valor do Frete impresso na própria NF-e. Se o campo não aparecer ou for R$ 0,00, deixe zerado — nunca estime um valor de frete.
@@ -567,6 +568,8 @@ function recalcular(){
   const f = coletarFormulario();
   const custo = valorDeCusto(f.valorProdutos, f.valorFrete, f.quantidade);
   const custoBase = f.quantidade > 1 ? custo.custoTotal : custo.custoUnitario;
+  const vuEl = document.getElementById('vrValorUnitario');
+  if(vuEl) vuEl.value = formatBRL(custo.custoUnitario).replace('R$','').trim();
   const taxaEl = document.getElementById('rTaxaAnual');
   if(taxaEl) taxaEl.textContent = f.vidaUtilAnos > 0 ? taxaAnualDeprec(f.vidaUtilAnos).toFixed(2).replace('.',',')+'% a.a.' : '—';
   if(!f.dataAquisicao){
@@ -590,7 +593,7 @@ function recalcular(){
 function limparFormulario(silencioso){
   if(!silencioso && !confirm('Limpar todos os campos do formulário?')) return;
   ['vrDescricao','vrNfNumero','vrNfSerie','vrNcm','vrFornecedor','vrCnpjFornecedor','vrAdquirente','vrCnpjAdquirente','vrValorTotalNF',
-   'vrValorProdutos','vrMercNovo','vrMercRecente','vrMercMedio','vrMercAntigo','vrMercDemanda','vrMercVelocidade','vrObsolConclusao','vrJustificativa']
+   'vrValorProdutos','vrValorUnitario','vrMercNovo','vrMercRecente','vrMercMedio','vrMercAntigo','vrMercDemanda','vrMercVelocidade','vrObsolConclusao','vrJustificativa']
    .forEach(id=>{ const el=document.getElementById(id); if(el) el.value=''; });
   document.getElementById('vrValorFrete').value='0';
   document.getElementById('vrQuantidade').value='1';
@@ -1574,23 +1577,33 @@ async function extrairDadosPDF(file){
   // que sobrou por não estar na lista de limpeza acima) e aí engolia tudo
   // até o item de verdade como se fosse a descrição — por isso agora exige
   // pelo menos 1 dígito dentro do código (nenhum rótulo de cabeçalho tem).
-  const itemRegex = /((?=[A-Z0-9]*\d)[A-Z0-9]{6,}(?:-\d+)?|\d{1,4}\.\d{3})\s+(.+?)\s*-?\s*-?\s*(\d{4}\.?\d{2}\.?\d{2})\s+\d{1,3}(?:\s+\d{1,3})?\s+(?:\d\.?\d{3}|\d{3,4})(?:\/[A-Z0-9]{1,3})?\s+[A-Za-z]{2,3}\s+[\d.,]+\s+[\d.,]+\s+([\d.,]+)/gs;
+  // QUANT. e VALOR UNITARIO (colunas antes de VALOR TOTAL no DANFe) agora
+  // também são capturados — sem eles a Quantidade sempre ficava travada em
+  // "1" nesta tela, mesmo numa NF com 36 unidades do mesmo item.
+  const itemRegex = /((?=[A-Z0-9]*\d)[A-Z0-9]{6,}(?:-\d+)?|\d{1,4}\.\d{3})\s+(.+?)\s*-?\s*-?\s*(\d{4}\.?\d{2}\.?\d{2})\s+\d{1,3}(?:\s+\d{1,3})?\s+(?:\d\.?\d{3}|\d{3,4})(?:\/[A-Z0-9]{1,3})?\s+[A-Za-z]{2,3}\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/gs;
   const itens = [];
   let mm;
   while((mm = itemRegex.exec(textoItens))){
     // Remove o CEST (ex: "CEST:2109800"), que às vezes vem grudado no fim da
     // descrição por causa de como o texto do PDF é lido em sequência única.
     const descricaoLimpa = mm[2].trim().replace(/\s*CEST\s*:?\s*[\d.]+\s*$/i,'').trim().replace(/\s+/g,' ');
-    itens.push({ descricao: descricaoLimpa, ncm: mm[3], valorTotal: parseNum(mm[4]) });
+    const qtdItem = Math.round(parseNum(mm[4])) || 1;
+    itens.push({ descricao: descricaoLimpa, ncm: mm[3], quantidade: qtdItem, valorUnitario: parseNum(mm[5]), valorTotal: parseNum(mm[6]) });
   }
 
+  // O rateio de frete/desconto (_vrReconciliarItensComNF) ajusta valorTotal
+  // de cada item — recalcula o valor unitário depois disso pra continuar
+  // batendo (valorTotal ÷ quantidade), em vez de manter o unitário "de
+  // fábrica" da NF que ficaria desatualizado.
   _vrReconciliarItensComNF(itens, dados.valorTotalNF-(dados.valorFrete||0));
+  itens.forEach(it=>{ it.valorUnitario = it.quantidade ? Math.round((it.valorTotal/it.quantidade)*100)/100 : it.valorTotal; });
   if(itens.length > 1){
     dados.itens = itens;
     dados._aviso += ' — '+itens.length+' itens nesta NF, escolha qual você está analisando na lista abaixo';
   } else if(itens.length === 1){
     dados.descricao = itens[0].descricao;
     dados.ncm = itens[0].ncm;
+    dados.quantidade = itens[0].quantidade;
     dados.valorProdutos = itens[0].valorTotal;
   } else if(valorProdutosNF !== undefined){
     dados.valorProdutos = valorProdutosNF;
@@ -1667,7 +1680,7 @@ function renderItensNFPicker(itens){
         <div class="item-nf-desc">${it.salvo?'✓ ':''}<b>${esc(it.descricao)}</b>${it.ncm?(' <span style="color:var(--slate);font-size:11px">NCM '+esc(it.ncm)+'</span>'):''}</div>
         <div style="margin-top:4px"><a href="#" onclick="marcarItemNFDespesa(${i},event);return false;" style="font-size:10px;color:var(--red)">🚫 Marcar como despesa</a></div>
       </div>
-      <div class="item-nf-valor">${formatBRL(it.valorTotal)}</div>
+      <div class="item-nf-valor">${formatBRL(it.valorTotal)}${it.quantidade>1?(' <span style="color:var(--slate);font-size:11px">('+it.quantidade+' un. × '+formatBRL(it.valorUnitario)+')</span>'):''}</div>
     </div>`
   ).join('') : '<div style="padding:10px;color:var(--slate);font-size:12px">Todos os itens desta NF foram marcados como despesa.</div>';
   wrap.style.display = 'block';
