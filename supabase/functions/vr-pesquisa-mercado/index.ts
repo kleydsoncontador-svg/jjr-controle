@@ -12,7 +12,12 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
+// Tenta em ordem — a Groq muda/aposenta modelos com alguma frequência, então
+// em vez de travar tudo quando UM nome de modelo para de existir, tenta o
+// próximo da lista automaticamente (só pula pro próximo se o erro for
+// especificamente "modelo não existe"; outros erros, ex: chave inválida ou
+// limite de uso, propagam na hora, sem ficar tentando à toa).
+const GROQ_MODELS = ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'llama-3.1-8b-instant'];
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -74,24 +79,33 @@ Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usa
 
 Use valores realistas para o mercado brasileiro — não invente números absurdos, e mantenha conservador_pct < realista_pct < otimista_pct.`;
 
-    const aiResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + apiKey,
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-        temperature: 0.4,
-      }),
-    });
-
-    if (!aiResp.ok) {
-      const errText = await aiResp.text();
-      throw new Error('Erro na API da IA (' + aiResp.status + '): ' + errText.slice(0, 300));
+    let aiResp: Response | null = null;
+    let ultimoErro = '';
+    for (const model of GROQ_MODELS) {
+      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + apiKey,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{ role: 'user', content: prompt }],
+          response_format: { type: 'json_object' },
+          temperature: 0.4,
+        }),
+      });
+      if (resp.ok) { aiResp = resp; break; }
+      const errText = await resp.text();
+      ultimoErro = 'Erro na API da IA (modelo ' + model + ', status ' + resp.status + '): ' + errText.slice(0, 300);
+      // Só tenta o próximo modelo se o erro for especificamente "modelo não
+      // existe/sem acesso" — qualquer outro erro (chave inválida, limite de
+      // uso, etc.) afeta todos os modelos igualmente, então propaga direto.
+      if (!/model_not_found|does not exist/i.test(errText)) {
+        throw new Error(ultimoErro);
+      }
     }
+    if (!aiResp) throw new Error(ultimoErro || 'Nenhum modelo da Groq respondeu.');
     const aiData = await aiResp.json();
     let raw: string = aiData?.choices?.[0]?.message?.content || '';
     raw = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
