@@ -1665,6 +1665,9 @@ function baixarArquivoRenomeadoAtual(){
 // repetir os dados dela.
 let _vrItensNF = [];
 let _vrItemNFSelecionado = -1;
+// Índice do item cujo mini-seletor "🔗 Agregar a outro item" está aberto no
+// momento (só um por vez) — não persiste, é só estado de UI da tela atual.
+let _vrAgregarAbertoPara = -1;
 function renderItensNFPicker(itens){
   _vrItensNF = itens || _vrItensNF;
   const wrap = document.getElementById('vrItensNFWrap');
@@ -1672,23 +1675,72 @@ function renderItensNFPicker(itens){
   if(!_vrItensNF || _vrItensNF.length < 2){ wrap.style.display = 'none'; return; }
   // Itens marcados como despesa (não são ativo imobilizado) somem da lista de
   // seleção — continuam guardados em _vrItensNF (pelo índice original, usado
-  // no onclick), só não aparecem mais como opção pra analisar.
-  const visiveis = _vrItensNF.map((it,i)=>({it,i})).filter(x=>!x.it.despesa);
-  lista.innerHTML = visiveis.length ? visiveis.map(({it,i})=>
-    `<div class="item-nf-card${i===_vrItemNFSelecionado?' on':''}${it.salvo?' item-nf-done':''}" onclick="escolherItemNF(${i})">
+  // no onclick), só não aparecem mais como opção pra analisar. Itens
+  // agregados a outro item (ex: um acessório que faz parte do item principal,
+  // tipo "Pistol Grip" agregado ao "Coletor de Dados") também somem da lista
+  // principal — aparecem só como sub-linha dentro do card do item pai, e
+  // herdam NCM/categoria/vida útil/condições do pai (não têm análise própria).
+  const visiveis = _vrItensNF.map((it,i)=>({it,i})).filter(x=>!x.it.despesa && x.it.agregadoA==null);
+  lista.innerHTML = visiveis.length ? visiveis.map(({it,i})=>{
+    const agregados = _vrItensNF.map((x,j)=>({x,j})).filter(({x})=>x.agregadoA===i);
+    const valorComAgregados = it.valorTotal + agregados.reduce((s,{x})=>s+(x.valorTotal||0),0);
+    // Candidatos a virar "pai" deste item: qualquer outro item que não seja
+    // despesa, que não esteja ele mesmo agregado a outro, e que ainda não
+    // tenha itens agregados a ele (evita empilhar agregação em 2 níveis).
+    const candidatos = _vrItensNF.map((x,j)=>({x,j})).filter(({x,j})=>
+      j!==i && !x.despesa && x.agregadoA==null && !_vrItensNF.some(y=>y.agregadoA===j)
+    );
+    return `<div class="item-nf-card${i===_vrItemNFSelecionado?' on':''}${it.salvo?' item-nf-done':''}" onclick="escolherItemNF(${i})">
       <div style="flex:1;min-width:0">
         <div class="item-nf-desc">${it.salvo?'✓ ':''}<b>${esc(it.descricao)}</b>${it.ncm?(' <span style="color:var(--slate);font-size:11px">NCM '+esc(it.ncm)+'</span>'):''}</div>
-        <div style="margin-top:4px"><a href="#" onclick="marcarItemNFDespesa(${i},event);return false;" style="font-size:10px;color:var(--red)">🚫 Marcar como despesa</a></div>
+        ${agregados.map(({x})=>`<div style="margin:4px 0 0 14px;font-size:11px;color:var(--slate)">↳ agregado: <b>${esc(x.descricao)}</b> (${formatBRL(x.valorTotal)}) <a href="#" onclick="desfazerAgregacaoItemNF(${agregados.find(a=>a.x===x).j},event);return false;" style="color:var(--red)">desfazer</a></div>`).join('')}
+        <div style="margin-top:4px">
+          <a href="#" onclick="marcarItemNFDespesa(${i},event);return false;" style="font-size:10px;color:var(--red)">🚫 Marcar como despesa</a>
+          ${candidatos.length ? `<a href="#" onclick="toggleAgregarItemNF(${i},event);return false;" style="font-size:10px;color:var(--blue);margin-left:10px">🔗 Agregar a outro item</a>` : ''}
+        </div>
+        ${_vrAgregarAbertoPara===i ? `<div onclick="event.stopPropagation()" style="margin-top:6px;padding:8px;background:var(--bg);border-radius:6px">
+          <div style="font-size:11px;color:var(--slate);margin-bottom:6px">Este item é parte de qual item? Vai usar os mesmos parâmetros dele (categoria, vida útil, condições) e não vira um ativo separado:</div>
+          ${candidatos.map(({x,j})=>`<button type="button" class="btn bo bsm" style="margin:0 4px 4px 0" onclick="agregarItemNF(${i},${j},event)">${esc(x.descricao)}</button>`).join('')}
+        </div>` : ''}
       </div>
-      <div class="item-nf-valor">${formatBRL(it.valorTotal)}${it.quantidade>1?(' <span style="color:var(--slate);font-size:11px">('+it.quantidade+' un. × '+formatBRL(it.valorUnitario)+')</span>'):''}</div>
-    </div>`
-  ).join('') : '<div style="padding:10px;color:var(--slate);font-size:12px">Todos os itens desta NF foram marcados como despesa.</div>';
+      <div class="item-nf-valor">${formatBRL(valorComAgregados)}${it.quantidade>1?(' <span style="color:var(--slate);font-size:11px">('+it.quantidade+' un. × '+formatBRL(valorComAgregados/it.quantidade)+')</span>'):''}${agregados.length?' <span style="color:var(--slate);font-size:11px">(inclui agregado'+(agregados.length>1?'s':'')+')</span>':''}</div>
+    </div>`;
+  }).join('') : '<div style="padding:10px;color:var(--slate);font-size:12px">Todos os itens desta NF foram marcados como despesa.</div>';
   wrap.style.display = 'block';
+}
+function toggleAgregarItemNF(i, ev){
+  if(ev) ev.stopPropagation();
+  _vrAgregarAbertoPara = (_vrAgregarAbertoPara===i) ? -1 : i;
+  renderItensNFPicker(_vrItensNF);
+}
+function agregarItemNF(filhoIdx, paiIdx, ev){
+  if(ev) ev.stopPropagation();
+  const filho = _vrItensNF[filhoIdx], pai = _vrItensNF[paiIdx];
+  if(!filho || !pai) return;
+  filho.agregadoA = paiIdx;
+  _vrAgregarAbertoPara = -1;
+  if(_vrItemNFSelecionado===filhoIdx) _vrItemNFSelecionado = -1;
+  renderItensNFPicker(_vrItensNF);
+  showToast('"'+filho.descricao+'" agregado a "'+pai.descricao+'".','ok');
+  // Se o pai já estava selecionado no formulário, atualiza o valor pra
+  // incluir o item recém-agregado sem precisar reselecionar.
+  if(_vrItemNFSelecionado===paiIdx) escolherItemNF(paiIdx);
+}
+function desfazerAgregacaoItemNF(filhoIdx, ev){
+  if(ev) ev.stopPropagation();
+  const filho = _vrItensNF[filhoIdx];
+  if(!filho) return;
+  const paiIdx = filho.agregadoA;
+  filho.agregadoA = null;
+  renderItensNFPicker(_vrItensNF);
+  showToast('Agregação desfeita — "'+filho.descricao+'" volta a ser um item separado.','ok');
+  if(_vrItemNFSelecionado===paiIdx) escolherItemNF(paiIdx);
 }
 function marcarItemNFDespesa(i, ev){
   if(ev) ev.stopPropagation();
   const it = _vrItensNF[i];
   if(!it) return;
+  if(_vrItensNF.some(x=>x.agregadoA===i)){ showToast('Este item tem outro(s) agregado(s) a ele — desfaça a agregação antes de marcar como despesa.','err'); return; }
   if(!confirm('Marcar "'+it.descricao+'" como despesa?\n\nEsse item some da lista de seleção — use quando o item não deve virar bem do ativo imobilizado.')) return;
   it.despesa = true;
   if(_vrItemNFSelecionado===i) _vrItemNFSelecionado = -1;
@@ -1697,16 +1749,22 @@ function marcarItemNFDespesa(i, ev){
 }
 function escolherItemNF(i){
   const it = _vrItensNF[i];
-  if(!it) return;
+  if(!it || it.despesa) return;
+  if(it.agregadoA!=null){ showToast('Este item está agregado a outro — abra o item ao qual ele foi agregado, ou desfaça a agregação.','err'); return; }
   _vrItemNFSelecionado = i;
   resetCamposItemEAnalise();
   document.getElementById('vrDescricao').value = it.descricao;
   if(it.ncm) document.getElementById('vrNcm').value = it.ncm;
   if(it.quantidade) document.getElementById('vrQuantidade').value = it.quantidade;
-  document.getElementById('vrValorProdutos').value = String(it.valorTotal).replace('.',',');
+  // Itens agregados a este (ver "🔗 Agregar a outro item") somam o valor
+  // deles aqui — o item agregado não vira ativo próprio, seu custo entra
+  // dentro do item pai, que usa os mesmos parâmetros pra todos.
+  const agregados = _vrItensNF.filter(x=>x.agregadoA===i);
+  const valorComAgregados = it.valorTotal + agregados.reduce((s,x)=>s+(x.valorTotal||0),0);
+  document.getElementById('vrValorProdutos').value = String(valorComAgregados).replace('.',',');
   recalcular();
   renderItensNFPicker(_vrItensNF);
-  showToast('Item selecionado: '+it.descricao);
+  showToast(agregados.length ? ('Item selecionado: '+it.descricao+' (+ '+agregados.length+' agregado'+(agregados.length>1?'s':'')+')') : ('Item selecionado: '+it.descricao));
 }
 
 async function processarArquivoNF(ev){
@@ -1723,6 +1781,7 @@ async function processarArquivoNF(ev){
     else throw new Error('Formato não suportado — use .xml ou .pdf');
     preencherFormularioComDados(dados);
     _vrItemNFSelecionado = -1;
+    _vrAgregarAbertoPara = -1;
     renderItensNFPicker(dados.itens || []);
     recalcular();
 
@@ -1856,12 +1915,17 @@ async function salvarAnalise(){
     _vrIndexCache.unshift({ id, empresaEid: empresaAtualEid, empresaNome: empresaAtualNome, descricao: f.descricao, nfNumero: f.nfNumero, fornecedor: f.fornecedor, dataAquisicao: f.dataAquisicao, valorCusto: calc.custoBase, salvoEm: registro.salvoEm });
     await VRSet('vr_index', _vrIndexCache);
     analiseAtual = registro;
-    if(_vrItemNFSelecionado >= 0 && _vrItensNF[_vrItemNFSelecionado]) _vrItensNF[_vrItemNFSelecionado].salvo = true;
+    if(_vrItemNFSelecionado >= 0 && _vrItensNF[_vrItemNFSelecionado]){
+      _vrItensNF[_vrItemNFSelecionado].salvo = true;
+      // Itens agregados a este (ver "🔗 Agregar a outro item") não têm
+      // análise própria — ficam "concluídos" junto com o item pai.
+      _vrItensNF.forEach(function(x){ if(x.agregadoA===_vrItemNFSelecionado) x.salvo = true; });
+    }
     showToast('Análise salva com sucesso!','ok');
     renderRelatorio(registro);
     irPara('relatorio');
     const proximoBtn = document.getElementById('btnProximoItemNF');
-    const temPendente = _vrItensNF.some(function(it){ return !it.salvo; });
+    const temPendente = _vrItensNF.some(function(it){ return !it.despesa && it.agregadoA==null && !it.salvo; });
     proximoBtn.style.display = (_vrItensNF.length>1 && temPendente) ? 'inline-flex' : 'none';
   }catch(e){
     console.error(e);
@@ -2010,7 +2074,7 @@ REFERÊNCIA: CPC 27 (art. 16, 50-55), Lei 6.404/76 (art. 183), IN RFB nº 1.700/
 // repetir NF/série/data/fornecedor/adquirente — só limpa os campos do
 // ativo/análise em si (ver resetCamposItemEAnalise).
 function irParaProximoItemNF(){
-  const idx = _vrItensNF.findIndex(function(it){ return !it.salvo; });
+  const idx = _vrItensNF.findIndex(function(it){ return !it.despesa && it.agregadoA==null && !it.salvo; });
   if(idx < 0){ showToast('Todos os itens desta NF já foram analisados!','ok'); irPara('lista'); return; }
   irPara('nova');
   escolherItemNF(idx);
