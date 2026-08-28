@@ -3189,6 +3189,60 @@ const S = {
   saveSession:(u)=>S.s('ccc_session',u),
 };
 
+// Grava uma chave só se ninguém escreveu por cima dela entre a leitura e a
+// escrita (concorrência otimista via updated_at) — ao contrário de S.s (que
+// escreve direto por cima, sem checar), isso evita perder dados quando dois
+// lugares geram a mesma lista quase ao mesmo tempo. Caso real que motivou
+// isso: "Análise de Imobilizado" (iframe, lê/escreve o Supabase direto sem
+// cache) e "NF Ativo Fixo" (aqui, escreve via S.s que atualiza o cache local
+// na hora mas manda pro Supabase em segundo plano) geram bens pra empresas
+// diferentes na MESMA chave `convAtivo_bens_<eid>` — se o usuário manda dois
+// itens quase juntos, o segundo pode ler a lista de antes do primeiro salvar
+// e, ao escrever de volta, apagar o que o primeiro tinha acabado de gravar.
+// `montarNovoValor(valorAtual)` precisa ser pura: recebe o valor mais atual
+// já lido do banco e devolve o valor COMPLETO a salvar — é chamada de novo
+// a cada tentativa, sempre em cima do dado mais fresco.
+async function ccGravarAtomico(key, montarNovoValor, maxTentativas){
+  if(!_supaClient) throw new Error('Sem conexão com o Supabase — não deu pra gravar "'+key+'".');
+  maxTentativas = maxTentativas || 6;
+  for(let tentativa=0; tentativa<maxTentativas; tentativa++){
+    const { data, error } = await _supaClient.from('dados_app').select('value,updated_at').eq('key',key).maybeSingle();
+    if(error) throw error;
+    const valorAtual = data ? data.value : null;
+    const updatedAtLido = data ? data.updated_at : null;
+    const novoValor = montarNovoValor(valorAtual);
+    const ts = new Date().toISOString();
+    let q = _supaClient.from('dados_app').update({ value: novoValor, updated_at: ts }).eq('key', key);
+    q = updatedAtLido ? q.eq('updated_at', updatedAtLido) : q.is('updated_at', null);
+    const { data: upd, error: errUpd } = await q.select('key');
+    if(errUpd) throw errUpd;
+    if(upd && upd.length){
+      cccCache[key]=novoValor; cccIdbSet(key,novoValor);
+      cccLocalUpdatedAt[key]=ts; cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt);
+      return novoValor;
+    }
+    if(!data){
+      // Chave ainda não existia — usa insert() (não upsert!) de propósito:
+      // se outra chamada concorrente também viu "não existe" e criou a linha
+      // primeiro, o insert() falha por violar a chave única (em vez de
+      // sobrescrever silenciosamente como o upsert faria) e cai no retry
+      // abaixo, que na próxima volta já vai ler a linha existente e seguir
+      // pelo caminho normal de update com concorrência otimista.
+      const { error: errIns } = await _supaClient.from('dados_app').insert({ key, value: novoValor, updated_at: ts });
+      if(!errIns){
+        cccCache[key]=novoValor; cccIdbSet(key,novoValor);
+        cccLocalUpdatedAt[key]=ts; cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt);
+        return novoValor;
+      }
+    }
+    // Conflito: alguém escreveu no meio — espera um pouco (com jitter, pra
+    // não bater os dois lados de novo no mesmo instante) e tenta de novo
+    // com o dado mais fresco.
+    await new Promise(r=>setTimeout(r, 150+Math.random()*250));
+  }
+  throw new Error('Não consegui gravar "'+key+'" — outra tela estava gravando ao mesmo tempo. Tente de novo em alguns segundos.');
+}
+
 // ═══════════════════════════════════════════════
 // LOGIN + CONTROLE DE ACESSO
 // ═══════════════════════════════════════════════
@@ -11989,6 +12043,11 @@ function _abrirNFAtivoFixoDeOutraTela(eid){
   }
   goPage('conv-ativo');
   _convAtivoExpandido[eid]=true;
+  // Filtra a lista pra mostrar só esta empresa (reaproveita o seletor global
+  // de empresa, que renderConvAtivoLista já respeita) — sem isso, qualquer
+  // outra empresa já adicionada ao NF Ativo Fixo antes continuava aparecendo
+  // na lista junto, mesmo vindo direto do botão de uma empresa específica.
+  if(typeof selecionarEmpresaGlobal==='function') selecionarEmpresaGlobal(eid);
   renderConvAtivoLista();
 }
 function renderConvAtivoCardExpandido(eid,cfg){
@@ -13034,45 +13093,67 @@ function _convAtivoIgnoradosIniciais(r){
 // processar outra NF) — a numeração do próximo código sempre continua do
 // maior código já usado nessa lista; o "próximo código" configurado só vale
 // como ponto de partida enquanto a lista ainda está vazia.
-function _convAtivoGerarResultado(eid,nfsInfo,regras){
-  const bensAtuais=getConvAtivoBens(eid);
-  const cfg=getConvAtivoConfig(eid);
-  const maiorCodigoUsado=bensAtuais.reduce((max,b)=>Math.max(max,b.codigoBem),0);
-  let proximoCodigo=maiorCodigoUsado>0?maiorCodigoUsado+1:cfg.proximoCodigo;
-  const novosBens=[];
-  nfsInfo.forEach(nfInfo=>{
-    nfInfo.itens.forEach(item=>{
-      const r=_convAtivoClassificar(item.ncm,regras);
-      // Valor Residual só repete quando Valor do Produto + Conta + Centro +
-      // Taxa baterem todos com uma combinação já informada antes — não é uma
-      // propriedade do NCM, já que o mesmo NCM pode cobrir itens de valores
-      // bem diferentes.
-      const valorResidual=r?_convAtivoBuscarResidual(eid,item.valorUnitario,r.contaPatrimonial,r.centroCusto,r.taxaDepreciacao):'';
-      const qtdTotal=Math.max(1,Math.round(item.qtd));
-      const valoresDistribuidos=_convAtivoDistribuirValores(item.valorTotal??item.valorUnitario*item.qtd,qtdTotal);
-      for(let i=1;i<=qtdTotal;i++){
-        const qtdLabel=qtdTotal>1?(i+'/'+qtdTotal):'1';
-        const codigoBem=proximoCodigo++;
-        const historico=`<NF ${nfInfo.nfNumero}> ${nfInfo.fornecedor} |  QTD. ${qtdLabel}_${item.descricao}`;
-        novosBens.push({
-          codigoBem,nfNumero:nfInfo.nfNumero,fornecedor:nfInfo.fornecedor,semClassificacao:!r,
-          ignorados:_convAtivoIgnoradosIniciais(r),
-          valores:_convAtivoValoresIniciais({
-            eid,codigoBem,descricao:item.descricao,dataAquisicao:nfInfo.dataEmissao,
-            contaPatrimonial:r?r.contaPatrimonial:'',centroCusto:r?r.centroCusto:'',
-            historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:r?r.taxaDepreciacao:'',ncm:item.ncm,
-            valorResidual
-          })
+// ASSÍNCRONA e usa ccGravarAtomico pra escrever os bens (ver comentário lá) —
+// motivo: "Análise de Imobilizado" (iframe separado, lê/escreve o Supabase
+// direto) e "NF Ativo Fixo" (aqui) geram bens na MESMA chave
+// `convAtivo_bens_<eid>`, e mandar dois itens quase juntos (um por cada tela)
+// já causou perda real de 36 bens de uma NF — o segundo lia a lista de antes
+// do primeiro salvar e escrevia por cima. Por isso o cálculo do código do bem
+// e a montagem da lista final vivem dentro da função passada a
+// ccGravarAtomico: ela roda de novo, com o dado mais fresco, se detectar que
+// alguém escreveu no meio.
+async function _convAtivoGerarResultado(eid,nfsInfo,regras){
+  let novosBensGerados=[];
+  let proximoCodigoFinal=0;
+  try{
+    await ccGravarAtomico('convAtivo_bens_'+eid, function(bensAtuaisFrescos){
+      bensAtuaisFrescos=bensAtuaisFrescos||[];
+      const cfg=getConvAtivoConfig(eid)||{};
+      const maiorCodigoUsado=bensAtuaisFrescos.reduce((max,b)=>Math.max(max,b.codigoBem),0);
+      let proximoCodigo=maiorCodigoUsado>0?maiorCodigoUsado+1:(cfg.proximoCodigo||1);
+      const novosBens=[];
+      nfsInfo.forEach(nfInfo=>{
+        nfInfo.itens.forEach(item=>{
+          const r=_convAtivoClassificar(item.ncm,regras);
+          // Valor Residual só repete quando Valor do Produto + Conta + Centro +
+          // Taxa baterem todos com uma combinação já informada antes — não é uma
+          // propriedade do NCM, já que o mesmo NCM pode cobrir itens de valores
+          // bem diferentes.
+          const valorResidual=r?_convAtivoBuscarResidual(eid,item.valorUnitario,r.contaPatrimonial,r.centroCusto,r.taxaDepreciacao):'';
+          const qtdTotal=Math.max(1,Math.round(item.qtd));
+          const valoresDistribuidos=_convAtivoDistribuirValores(item.valorTotal??item.valorUnitario*item.qtd,qtdTotal);
+          for(let i=1;i<=qtdTotal;i++){
+            const qtdLabel=qtdTotal>1?(i+'/'+qtdTotal):'1';
+            const codigoBem=proximoCodigo++;
+            const historico=`<NF ${nfInfo.nfNumero}> ${nfInfo.fornecedor} |  QTD. ${qtdLabel}_${item.descricao}`;
+            novosBens.push({
+              codigoBem,nfNumero:nfInfo.nfNumero,fornecedor:nfInfo.fornecedor,semClassificacao:!r,
+              ignorados:_convAtivoIgnoradosIniciais(r),
+              valores:_convAtivoValoresIniciais({
+                eid,codigoBem,descricao:item.descricao,dataAquisicao:nfInfo.dataEmissao,
+                contaPatrimonial:r?r.contaPatrimonial:'',centroCusto:r?r.centroCusto:'',
+                historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:r?r.taxaDepreciacao:'',ncm:item.ncm,
+                valorResidual
+              })
+            });
+          }
         });
-      }
+      });
+      novosBensGerados=novosBens;
+      proximoCodigoFinal=proximoCodigo;
+      return [...bensAtuaisFrescos,...novosBens];
     });
-  });
-  setConvAtivoBens(eid,[...bensAtuais,...novosBens]);
-  setConvAtivoConfig(eid,{...cfg,proximoCodigo});
-  setConvAtivoUltimoLote(eid,novosBens.map(b=>b.codigoBem));
-  delete _convAtivoPendentes[eid];
-  renderConvAtivoLista();
-  toast(nfsInfo.length>1?nfsInfo.length+' notas fiscais processadas com sucesso!':'Nota fiscal processada com sucesso!','ok');
+    await ccGravarAtomico('convAtivo_config_'+eid, function(cfgFresco){
+      return {...(cfgFresco||{}),proximoCodigo:proximoCodigoFinal};
+    });
+    setConvAtivoUltimoLote(eid,novosBensGerados.map(b=>b.codigoBem));
+    delete _convAtivoPendentes[eid];
+    renderConvAtivoLista();
+    toast(nfsInfo.length>1?nfsInfo.length+' notas fiscais processadas com sucesso!':'Nota fiscal processada com sucesso!','ok');
+  }catch(e){
+    console.error('_convAtivoGerarResultado',e);
+    toast('Erro ao gravar os bens: '+(e.message||e)+' — nada foi perdido, tente novamente.','err');
+  }
 }
 function renderConvAtivoResultado(eid){
   const bens=getConvAtivoBens(eid);

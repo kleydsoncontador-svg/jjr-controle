@@ -365,6 +365,49 @@ async function VRSet(key, value){
   const { error } = await _supaClient.from('dados_app').upsert({ key, value, updated_at: new Date().toISOString() });
   if(error) console.error('VRSet', key, error);
 }
+// Grava uma chave só se ninguém escreveu por cima dela entre a leitura e a
+// escrita (concorrência otimista via updated_at) — VRSet acima escreve direto
+// por cima, sem checar, o que já causou perda real de dados: esta tela e a
+// "NF Ativo Fixo" (index.html, fora deste iframe) geram bens na MESMA chave
+// `convAtivo_bens_<eid>`, e mandar dois itens quase ao mesmo tempo (um daqui,
+// outro de lá) fazia o segundo ler a lista de antes do primeiro salvar e
+// escrever por cima, apagando o que tinha acabado de ser gravado.
+// `montarNovoValor(valorAtual)` precisa ser pura: recebe o valor mais atual
+// já lido do banco e devolve o valor COMPLETO a salvar — é chamada de novo a
+// cada tentativa, sempre em cima do dado mais fresco.
+async function VRGravarAtomico(key, montarNovoValor, maxTentativas){
+  if(!_supaClient) throw new Error('Sem conexão com o Supabase — não deu pra gravar "'+key+'".');
+  await _vrSessaoPronta;
+  maxTentativas = maxTentativas || 6;
+  for(let tentativa=0; tentativa<maxTentativas; tentativa++){
+    const { data, error } = await _supaClient.from('dados_app').select('value,updated_at').eq('key',key).maybeSingle();
+    if(error) throw error;
+    const valorAtual = data ? data.value : null;
+    const updatedAtLido = data ? data.updated_at : null;
+    const novoValor = montarNovoValor(valorAtual);
+    const ts = new Date().toISOString();
+    let q = _supaClient.from('dados_app').update({ value: novoValor, updated_at: ts }).eq('key', key);
+    q = updatedAtLido ? q.eq('updated_at', updatedAtLido) : q.is('updated_at', null);
+    const { data: upd, error: errUpd } = await q.select('key');
+    if(errUpd) throw errUpd;
+    if(upd && upd.length) return novoValor;
+    if(!data){
+      // Chave ainda não existia — usa insert() (não upsert!) de propósito:
+      // se outra chamada concorrente (ex: NF Ativo Fixo, fora deste iframe)
+      // também viu "não existe" e criou a linha primeiro, o insert() falha
+      // por violar a chave única (em vez de sobrescrever silenciosamente
+      // como o upsert faria) e cai no retry abaixo, que já vai ler a linha
+      // existente e seguir pelo caminho normal de update com concorrência
+      // otimista.
+      const { error: errIns } = await _supaClient.from('dados_app').insert({ key, value: novoValor, updated_at: ts });
+      if(!errIns) return novoValor;
+    }
+    // Conflito: alguém escreveu no meio — espera um pouco (com jitter) e
+    // tenta de novo com o dado mais fresco.
+    await new Promise(r=>setTimeout(r, 150+Math.random()*250));
+  }
+  throw new Error('Não consegui gravar "'+key+'" — outra tela estava gravando ao mesmo tempo. Tente de novo em alguns segundos.');
+}
 
 // ═══════════════════════════════════════════════════════════════════════
 // CÁLCULO (seção 4 da especificação)
@@ -866,31 +909,43 @@ function _vrConvAtivoValoresIniciais(ctx){
 // código que ele usaria) — só é chamado quando o NCM já tem regra cadastrada
 // lá (Conta/Centro/Taxa), senão o item cai na fila pra classificação manual.
 async function _vrGerarBensNFAtivoFixo(eid,item,nfInfo,regra,qtd,valorTotalItem,valorResidualUnitario){
-  const bensAtuais=(await VRGet('convAtivo_bens_'+eid))||[];
-  const cfg=(await VRGet('convAtivo_config_'+eid))||{proximoCodigo:1};
-  const maiorCodigoUsado=bensAtuais.reduce((max,b)=>Math.max(max,b.codigoBem),0);
-  let proximoCodigo=maiorCodigoUsado>0?maiorCodigoUsado+1:(cfg.proximoCodigo||1);
   const valoresDistribuidos=_vrConvAtivoDistribuirValores(valorTotalItem,qtd);
   const dataAquisicaoYYYYMMDD=(nfInfo.dataEmissao||'').replace(/-/g,'');
   const valorResidualFmt=_vrConvAtivoFmtValorTxt(valorResidualUnitario);
-  const novosBens=[];
-  for(let i=1;i<=qtd;i++){
-    const qtdLabel=qtd>1?(i+'/'+qtd):'1';
-    const codigoBem=proximoCodigo++;
-    const historico=`<NF ${nfInfo.nfNumero}> ${nfInfo.fornecedor} |  QTD. ${qtdLabel}_${item.descricao} [via Análise de Imobilizado]`;
-    novosBens.push({
-      codigoBem,nfNumero:nfInfo.nfNumero,fornecedor:nfInfo.fornecedor,semClassificacao:false,
-      ignorados:_vrConvAtivoIgnoradosIniciais(regra),
-      valores:_vrConvAtivoValoresIniciais({
-        eid,codigoBem,descricao:item.descricao,dataAquisicao:dataAquisicaoYYYYMMDD,
-        contaPatrimonial:regra.contaPatrimonial,centroCusto:regra.centroCusto,
-        historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:regra.taxaDepreciacao,
-        ncm:item.ncm,valorResidual:valorResidualFmt
-      })
-    });
-  }
-  await VRSet('convAtivo_bens_'+eid,[...bensAtuais,...novosBens]);
-  await VRSet('convAtivo_config_'+eid,{...cfg,proximoCodigo});
+  // Ver comentário de VRGravarAtomico: monta a lista de bens de novo a cada
+  // tentativa, sempre em cima da lista mais fresca lida do banco — assim, se
+  // o NF Ativo Fixo (index.html, fora deste iframe) gravou um lote por baixo
+  // do nosso pé entre a leitura e a escrita, a gente relê e recalcula o
+  // próximo código certo em vez de apagar o que ele acabou de gravar.
+  let novosBens=[];
+  let proximoCodigoFinal=0;
+  await VRGravarAtomico('convAtivo_bens_'+eid, function(bensAtuaisFrescos){
+    bensAtuaisFrescos=bensAtuaisFrescos||[];
+    const maiorCodigoUsado=bensAtuaisFrescos.reduce((max,b)=>Math.max(max,b.codigoBem),0);
+    let proximoCodigo=maiorCodigoUsado>0?maiorCodigoUsado+1:1;
+    const lote=[];
+    for(let i=1;i<=qtd;i++){
+      const qtdLabel=qtd>1?(i+'/'+qtd):'1';
+      const codigoBem=proximoCodigo++;
+      const historico=`<NF ${nfInfo.nfNumero}> ${nfInfo.fornecedor} |  QTD. ${qtdLabel}_${item.descricao} [via Análise de Imobilizado]`;
+      lote.push({
+        codigoBem,nfNumero:nfInfo.nfNumero,fornecedor:nfInfo.fornecedor,semClassificacao:false,
+        ignorados:_vrConvAtivoIgnoradosIniciais(regra),
+        valores:_vrConvAtivoValoresIniciais({
+          eid,codigoBem,descricao:item.descricao,dataAquisicao:dataAquisicaoYYYYMMDD,
+          contaPatrimonial:regra.contaPatrimonial,centroCusto:regra.centroCusto,
+          historico,valor:valoresDistribuidos[i-1],taxaDepreciacao:regra.taxaDepreciacao,
+          ncm:item.ncm,valorResidual:valorResidualFmt
+        })
+      });
+    }
+    novosBens=lote;
+    proximoCodigoFinal=proximoCodigo;
+    return [...bensAtuaisFrescos,...lote];
+  });
+  await VRGravarAtomico('convAtivo_config_'+eid, function(cfgFresco){
+    return {...(cfgFresco||{}),proximoCodigo:proximoCodigoFinal};
+  });
   await VRSet('convAtivo_ultimoLote_'+eid,novosBens.map(b=>b.codigoBem));
   // registra o residual no cache por (valorProduto+conta+centro+taxa), igual ao fluxo manual do NF Ativo Fixo
   const residuais=(await VRGet('convAtivo_residuais_'+eid))||[];
