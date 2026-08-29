@@ -9539,25 +9539,14 @@ function gerarTXTControleTributo(){
     const dataStr = formatDataDDMMYYYY(m.data);
     const ctadebito = m.tipo==='multa' ? '526' : '372';
     const descTipo = m.tipo==='multa' ? 'Multa de Mora' : 'Juros SELIC';
-    const historico = `${trib.nome} ${competencia} - ${descTipo}`;
-    const valorFormatado = m.valor.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).replace(/\./g,'');
-    return `${dataStr};${ctadebito};${contaCredito};${valorFormatado};;${historico};1;${eid};;`;
+    return {data:dataStr,debito:ctadebito,credito:contaCredito,valor:m.valor,historico:`${trib.nome} ${competencia} - ${descTipo}`};
   });
 
   const emps = S.emps();
   const emp = emps.find(e=>String(e.eid)===String(eid));
   const nomeEmp = emp ? emp.nome : eid;
-
-  const conteudo = linhas.join('\n');
-  const blob = new Blob([_convMpRemoverAcentos(conteudo)], {type:'text/plain;charset=utf-8'});
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = `${trib.nome}_${nomeEmp}_multa_juros.txt`.replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  const nomeArquivo = `${trib.nome}_${nomeEmp}_multa_juros.txt`.replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhas,nomeArquivo);
   closeModal('mPeriodoTxt');
   toast('TXT gerado com sucesso','ok');
 }
@@ -10399,6 +10388,48 @@ function renomearConvMp(){
 // caracteres próprios) — nenhum TXT gerado pelo site pode ter acentuação
 // de nenhum desses três jeitos.
 function _convMpRemoverAcentos(s){return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[~´`^¨ºª°]/g,'');}
+
+// ═══════════════════════════════════════════════════════════════════════
+// FORMATO TXT DE IMPORTAÇÃO DO MISTER CONTADOR (layout com barras verticais)
+// ═══════════════════════════════════════════════════════════════════════
+// Layout que TODOS os conversores do site que geram TXT de lançamento
+// contábil usam pra baixar o arquivo final — substitui o formato antigo
+// (ponto-e-vírgula, sem acentuação, começava pelo código interno da
+// empresa no site). Este aceita acentuação normalmente e sempre começa
+// pelo CNPJ real da empresa:
+//   |0000|<CNPJ sem pontuação>|
+//   |6000|X||||
+//   |6100|<DD/MM/AAAA>|<contaDebito>|<contaCredito>|<valor>||<histórico>||||
+// O par "|6000|X||||" + "|6100|...|" se repete uma vez pra cada lançamento
+// (cada linha da conciliação vira um lançamento simples — débito de um
+// lado, crédito do outro, na mesma linha).
+function gerarTxtMisterContador(cnpj,linhas){
+  const cnpjLimpo=String(cnpj||'').replace(/\D/g,'');
+  const partes=['|0000|'+cnpjLimpo+'|'];
+  linhas.forEach(function(l){
+    partes.push('|6000|X||||');
+    const valorFmt=Math.abs(parseFloat(l.valor)||0).toFixed(2).replace('.',',');
+    // "|" e quebras de linha quebrariam a separação de campos — nunca
+    // podem aparecer dentro do histórico.
+    const historico=String(l.historico||'').replace(/\|/g,' ').replace(/[\r\n]+/g,' ').trim();
+    partes.push('|6100|'+(l.data||'')+'|'+(l.debito||'')+'|'+(l.credito||'')+'|'+valorFmt+'||'+historico+'||||');
+  });
+  return partes.join('\r\n');
+}
+// CNPJ de uma empresa a partir do eid (usado como cabeçalho |0000|...| de
+// todo TXT gerado pelo site) — nunca o código interno do site.
+function _cnpjPorEid(eid){
+  const emp=S.emps().find(e=>String(e.eid)===String(eid));
+  return emp?emp.cnpj:'';
+}
+function baixarTxtMisterContador(cnpj,linhas,nomeArquivo){
+  const conteudo=gerarTxtMisterContador(cnpj,linhas);
+  const blob=new Blob([conteudo],{type:'text/plain;charset=utf-8'});
+  const url=URL.createObjectURL(blob);
+  const a=document.createElement('a');
+  a.href=url;a.download=nomeArquivo;a.click();
+  URL.revokeObjectURL(url);
+}
 function _convMpFormatarCpfCnpj(v){
   const d=String(v||'').replace(/\D/g,'');
   if(d.length===11)return d.slice(0,3)+'.'+d.slice(3,6)+'.'+d.slice(6,9)+'-'+d.slice(9,11);
@@ -10773,23 +10804,23 @@ function baixarConvMpExcel(alvo){
   const nome='Vendas_BR_Vertical_'+_convMpNomeArquivoBase(alvo)+'.xlsx';
   XLSX.writeFile(wb,nome);
 }
+// CNPJ de um "alvo" do módulo Vendas BR (que pode ser a matriz ou uma
+// filial, ver _convMpResolveAlvo) — filial usa o próprio CNPJ dela.
+function _convMpCnpj(alvo){
+  const r=_convMpResolveAlvo(alvo);
+  if(r.isFilial)return r.filial?r.filial.cnpj:'';
+  const emp=S.emps().find(e=>String(e.eid)===r.eidMatriz);
+  return emp?emp.cnpj:'';
+}
 function baixarConvMpTxt(alvo){
   const resultado=_convMpResultados[alvo];
   if(!resultado){toast('Processe o arquivo primeiro.','err');return;}
   const {linhas,cfg}=resultado;
-  const codigoEmpresa=_convMpCodigoEmpresa(alvo);
-  const txtLinhas=linhas.map(l=>{
+  const linhasTxt=linhas.map(l=>{
     const c=(cfg.contas||{})[l.operacao]||{};
-    const valorAbs=Math.abs(l.valor).toFixed(2).replace('.',',');
-    const histLimpo=_convMpRemoverAcentos(l.historico).replace(/;/g,' ');
-    return `${l.dataEditada};${c.debito||''};${c.credito||''};${valorAbs};;${histLimpo};1;${codigoEmpresa};;`;
+    return {data:l.dataEditada,debito:c.debito||'',credito:c.credito||'',valor:l.valor,historico:l.historico};
   });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
-  a.href=url;a.download='Vendas_BR_'+_convMpNomeArquivoBase(alvo)+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  baixarTxtMisterContador(_convMpCnpj(alvo),linhasTxt,'Vendas_BR_'+_convMpNomeArquivoBase(alvo)+'.txt');
 }
 
 // ─── CONVERSOR DE ARQUIVOS: FATURA CARTÃO ITAÚ (PDF) ─────────────────────────
@@ -11346,20 +11377,10 @@ function excluirConvItauResultado(eid){
 function baixarConvItauTxt(eid){
   const resultado=_convItauResultados[eid];
   if(!resultado){toast('Processe o arquivo primeiro.','err');return;}
-  const codigoEmpresa=eid;
-  const txtLinhas=resultado.linhas.map(l=>{
-    const valorAbs=Math.abs(l.valor).toFixed(2).replace('.',',');
-    const histLimpo=_convMpRemoverAcentos(l.historico).replace(/;/g,' ');
-    return `${l.dataEditada};${l.debito||''};${l.credito||''};${valorAbs};;${histLimpo};1;${codigoEmpresa};;`;
-  });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url;a.download='Fatura_Itau_'+nomeArq+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  const linhasTxt=resultado.linhas.map(l=>({data:l.dataEditada,debito:l.debito,credito:l.credito,valor:l.valor,historico:l.historico}));
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhasTxt,'Fatura_Itau_'+nomeArq+'.txt');
 }
 
 // ─── CONVERSOR DE ARQUIVOS: FATURA CARTÃO NUBANK (PDF) ───────────────────────
@@ -11832,20 +11853,10 @@ function excluirConvNubankResultado(eid){
 function baixarConvNubankTxt(eid){
   const resultado=_convNubankResultados[eid];
   if(!resultado){toast('Processe o arquivo primeiro.','err');return;}
-  const codigoEmpresa=eid;
-  const txtLinhas=resultado.linhas.map(l=>{
-    const valorAbs=Math.abs(l.valor).toFixed(2).replace('.',',');
-    const histLimpo=_convMpRemoverAcentos(l.historico).replace(/;/g,' ');
-    return `${l.dataEditada};${l.debito||''};${l.credito||''};${valorAbs};;${histLimpo};1;${codigoEmpresa};;`;
-  });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url;a.download='Fatura_Nubank_'+nomeArq+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  const linhasTxt=resultado.linhas.map(l=>({data:l.dataEditada,debito:l.debito,credito:l.credito,valor:l.valor,historico:l.historico}));
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhasTxt,'Fatura_Nubank_'+nomeArq+'.txt');
 }
 
 // ─── CONVERSOR DE ARQUIVOS: NF ATIVO FIXO ───────────────────────────────────
@@ -12765,20 +12776,10 @@ function baixarConvAplicFinTxt(eid,itemId){
   if(!resultado){toast('Processe o arquivo primeiro.','err');return;}
   const lista=getConvAplicFinLista(eid);
   const item=lista.find(i=>i.id===itemId);
-  const txtLinhas=resultado.linhas.map(l=>{
-    const valorAbs=l.valor.toFixed(2).replace('.',',');
-    const histLimpo=_convMpRemoverAcentos(l.historico).replace(/;/g,' ');
-    return `${l.data};${l.debito};${l.credito};${valorAbs};;${histLimpo};1;${eid};;`;
-  });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
   const nomeAplic=(item?item.nome:'Aplicacao').replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url;a.download='Aplic_Financeira_'+nomeArq+'_'+nomeAplic+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  baixarTxtMisterContador(_cnpjPorEid(eid),resultado.linhas,'Aplic_Financeira_'+nomeArq+'_'+nomeAplic+'.txt');
 }
 
 // ─ parsing do arquivo da NF (XML padrão NF-e ou PDF/DANFE) ─
@@ -13919,23 +13920,13 @@ function excluirConvCobrResultado(eid){
 function baixarConvCobrTxt(eid){
   const resultado=_convCobrResultados[eid];
   if(!resultado){toast('Processe os arquivos primeiro.','err');return;}
-  const codigoEmpresa=eid;
-  const txtLinhas=resultado.linhas.map(l=>{
-    const valorAbs=l.valor.toFixed(2).replace('.',',');
-    const histLimpo=_convMpRemoverAcentos(l.historico).replace(/;/g,' ');
-    return `${l.dataEditada};${l.debito};${l.credito};${valorAbs};;${histLimpo};1;${codigoEmpresa};;`;
-  });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
   const fmtData=d=>(d||'').replace(/\//g,'-');
   const {periodoInicio,periodoFim}=resultado.validacoes||{};
   const periodoArq=periodoInicio?(periodoInicio===periodoFim?'_'+fmtData(periodoInicio):'_'+fmtData(periodoInicio)+'_a_'+fmtData(periodoFim)):'';
-  a.href=url;a.download='Extrato_Cobranca_Itau_'+nomeArq+periodoArq+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  const linhasTxt=resultado.linhas.map(l=>({data:l.dataEditada,debito:l.debito,credito:l.credito,valor:l.valor,historico:l.historico}));
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhasTxt,'Extrato_Cobranca_Itau_'+nomeArq+periodoArq+'.txt');
 }
 
 // ─── CONVERSOR DE ARQUIVOS: SIGNUS - CLASSIFICAÇÃO ──────────────────────────
@@ -14438,21 +14429,11 @@ function excluirConvSignusResultado(eid){
 function baixarConvSignusTxt(eid){
   const resultado=_convSignusResultados[eid];
   if(!resultado){toast('Processe o arquivo primeiro.','err');return;}
-  const codigoEmpresa=eid;
-  const txtLinhas=resultado.linhas.map(l=>{
-    const valorAbs=l.valor.toFixed(2).replace('.',',');
-    const histLimpo=_convMpRemoverAcentos(l.historico).replace(/;/g,' ');
-    return `${l.dataEditada};${l.debito};${l.credito};${valorAbs};;${histLimpo};1;${codigoEmpresa};;`;
-  });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
   const tipoLabel=_convMpRemoverAcentos(CONV_SIGNUS_TIPOS.find(t=>t.id===resultado.tipoId)?.label||'').replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url;a.download='Signus_'+tipoLabel+'_'+nomeArq+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  const linhasTxt=resultado.linhas.map(l=>({data:l.dataEditada,debito:l.debito,credito:l.credito,valor:l.valor,historico:l.historico}));
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhasTxt,'Signus_'+tipoLabel+'_'+nomeArq+'.txt');
 }
 
 // ─── CONVERSOR DE ARQUIVOS: EXTRATO MOVIMENTAÇÃO COBRANÇA BANCO DO BRASIL ───
@@ -14732,20 +14713,10 @@ function excluirConvBBResultado(eid){
 function baixarConvBBTxt(eid){
   const resultado=_convBBResultados[eid];
   if(!resultado){toast('Processe o arquivo primeiro.','err');return;}
-  const codigoEmpresa=eid;
-  const txtLinhas=resultado.linhas.map(l=>{
-    const valorAbs=l.valor.toFixed(2).replace('.',',');
-    const histLimpo=_convMpRemoverAcentos(l.historico).replace(/;/g,' ');
-    return `${l.dataEditada};${l.debito};${l.credito};${valorAbs};;${histLimpo};1;${codigoEmpresa};;`;
-  });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url;a.download='Extrato_Cobranca_BB_'+nomeArq+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  const linhasTxt=resultado.linhas.map(l=>({data:l.dataEditada,debito:l.debito,credito:l.credito,valor:l.valor,historico:l.historico}));
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhasTxt,'Extrato_Cobranca_BB_'+nomeArq+'.txt');
 }
 
 // ─── SHOPEE - CONCILIAÇÃO ───
@@ -15268,12 +15239,18 @@ function excluirConvShopeeResultado(alvo){
   renderConvShopeeLista();
   toast('Resultado excluído','ok');
 }
+// CNPJ de um "alvo" do módulo Shopee (matriz ou filial, ver _convShopeeResolveAlvo).
+function _convShopeeCnpj(alvo){
+  const r=_convShopeeResolveAlvo(alvo);
+  if(r.isFilial)return r.filial?r.filial.cnpj:'';
+  const emp=S.emps().find(e=>String(e.eid)===r.eidMatriz);
+  return emp?emp.cnpj:'';
+}
 function baixarConvShopeeTxt(alvo){
   const resultado=_convShopeeResultados[alvo];
   if(!resultado){toast('Processe os arquivos primeiro.','err');return;}
   const cfg=getConvShopeeConfig(alvo);
   if(!cfg){toast('Configure as contas primeiro','warn');return;}
-  const codigoEmpresa=_convShopeeCodigoEmpresa(alvo);
   const contaPreco=cfg.contas['Preço do produto']||{};
   const contaFrete=cfg.contas['Subtotal do Frete']||{};
   const contaTaxas=cfg.contas['Taxas']||{};
@@ -15282,39 +15259,28 @@ function baixarConvShopeeTxt(alvo){
   resultado.conciliado.forEach(c=>{
     const dataBr=_convMpFmtDataBr(c.data);
     const dataNotaBr=_convMpFmtDataBr(c.dataNota);
-    const historico=_convMpRemoverAcentos(`NF ${c.nota} - ${c.cliente} (${dataNotaBr})`).replace(/;/g,' ');
-    const valorTxt=c.valor.toFixed(2).replace('.',',');
-    linhas.push(`${dataBr};${contaPreco.debito};${contaPreco.credito};${valorTxt};;${historico};1;${codigoEmpresa};;`);
+    linhas.push({data:dataBr,debito:contaPreco.debito,credito:contaPreco.credito,valor:c.valor,historico:`NF ${c.nota} - ${c.cliente} (${dataNotaBr})`});
   });
   resultado.naoConciliado.forEach(nc=>{
     const dataBr=_convMpFmtDataBr(nc.data);
-    const historico='NF <?> CLIENTE NAO ENCONTRADO';
-    const valorTxt=nc.valor.toFixed(2).replace('.',',');
-    linhas.push(`${dataBr};${contaPreco.debito};${contaPreco.credito};${valorTxt};;${historico};1;${codigoEmpresa};;`);
+    linhas.push({data:dataBr,debito:contaPreco.debito,credito:contaPreco.credito,valor:nc.valor,historico:'NF <?> CLIENTE NAO ENCONTRADO'});
   });
 
   const dataRef=resultado.ultimaData?_convMpFmtDataBr(resultado.ultimaData):'';
   if(resultado.subtotalFreteTotal){
-    const valorTxt=Math.abs(resultado.subtotalFreteTotal).toFixed(2).replace('.',',');
-    linhas.push(`${dataRef};${contaFrete.debito};${contaFrete.credito};${valorTxt};;Subtotal do Frete Shopee;1;${codigoEmpresa};;`);
+    linhas.push({data:dataRef,debito:contaFrete.debito,credito:contaFrete.credito,valor:Math.abs(resultado.subtotalFreteTotal),historico:'Subtotal do Frete Shopee'});
   }
   if(resultado.taxasTotal){
-    const valorTxt=Math.abs(resultado.taxasTotal).toFixed(2).replace('.',',');
-    linhas.push(`${dataRef};${contaTaxas.debito};${contaTaxas.credito};${valorTxt};;Taxas Shopee;1;${codigoEmpresa};;`);
+    linhas.push({data:dataRef,debito:contaTaxas.debito,credito:contaTaxas.credito,valor:Math.abs(resultado.taxasTotal),historico:'Taxas Shopee'});
   }
 
-  const conteudo=linhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const r=_convShopeeResolveAlvo(alvo);
   const emp=S.emps().find(e=>String(e.eid)===r.eidMatriz);
   const nomeArq=(emp?emp.nome:alvo).replace(/[^a-zA-Z0-9]/g,'_');
   const fmtArq=iso=>{const p=String(iso).split('-');return p.length===3?p[2]+'-'+p[1]+'-'+p[0]:String(iso);};
   const datasIso=[...resultado.conciliado,...resultado.naoConciliado].map(c=>c.data).filter(Boolean).sort();
   const periodoArq=datasIso.length?'_'+fmtArq(datasIso[0])+'_a_'+fmtArq(datasIso[datasIso.length-1]):'';
-  a.href=url;a.download='Shopee_Conciliacao_'+nomeArq+periodoArq+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  baixarTxtMisterContador(_convShopeeCnpj(alvo),linhas,'Shopee_Conciliacao_'+nomeArq+periodoArq+'.txt');
 }
 
 // ─── EXTRATOS C/C ───
@@ -15843,18 +15809,12 @@ function baixarExtratoCCTxt(alvo){
 
   const eid=alvo.split('|')[0];
   const banco=alvo.split('|')[1]||'';
-  const txtLinhas=movData.movimentos.map(m=>{
+  const linhasTxt=movData.movimentos.map(m=>{
     const r=_extratoCCClassificar(m,regras);
-    const historico=_convMpRemoverAcentos(_extratoCCMontarHistorico(m,r)).replace(/;/g,' ');
-    const valorTxt=Math.abs(m.valor).toFixed(2).replace('.',',');
     const debito=m.entrada?cfg.contaBanco:r.conta;
     const credito=m.entrada?r.conta:cfg.contaBanco;
-    return `${m.data};${debito};${credito};${valorTxt};;${historico};1;${eid};;`;
+    return {data:m.data,debito,credito,valor:m.valor,historico:_extratoCCMontarHistorico(m,r)};
   });
-  const conteudo=txtLinhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
   const bancoArq=_convMpRemoverAcentos(banco).replace(/[^a-zA-Z0-9]/g,'_');
@@ -15864,8 +15824,7 @@ function baixarExtratoCCTxt(alvo){
   const periodoArq=datas.length?'_'+fmtArq(new Date(Math.min(...datas)))+'_a_'+fmtArq(new Date(Math.max(...datas))):'';
   const contaArq=cfg.contaCorrente?'_CC'+cfg.contaCorrente.replace(/[^a-zA-Z0-9-]/g,''):'';
 
-  a.href=url;a.download='ExtratoCC_'+bancoArq+'_'+nomeArq+contaArq+periodoArq+'.txt';a.click();
-  URL.revokeObjectURL(url);
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhasTxt,'ExtratoCC_'+bancoArq+'_'+nomeArq+contaArq+periodoArq+'.txt');
 }
 
 // ─── GANHOS / RENDIMENTOS ───
@@ -17925,7 +17884,6 @@ function gerarTXTParcelamentos(){
 
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   const nomeEmp=emp?emp.nome:eid;
-  const fmtValor=v=>v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).replace(/\./g,'');
 
   const linhas=[];
   for(let tm=totalIni;tm<=totalFim;tm++){
@@ -17940,23 +17898,15 @@ function gerarTXTParcelamentos(){
 
       if(r.avpVal){
         const historico=`${nomeParc} - Parcela ${r.n} - ${mesAnoStr} - Apropriação Juros`;
-        linhas.push(`${r.dataBalPad};369;${p.contaPassivo||''};${fmtValor(r.avpVal)};;${historico};1;${eid};;`);
+        linhas.push({data:r.dataBalPad,debito:'369',credito:p.contaPassivo||'',valor:r.avpVal,historico});
       }
     });
   }
 
   if(!linhas.length){ toast('Nenhum lançamento de Apropriação de Juros a Transcorrer encontrado para o período selecionado.','warn'); return; }
 
-  const conteudo=linhas.join('\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const link=document.createElement('a');
-  link.href=url;
-  link.download=`Parcelamentos_${nomeEmp}_${iniStr}_a_${fimStr}.txt`.replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  const nomeArquivo=`Parcelamentos_${nomeEmp}_${iniStr}_a_${fimStr}.txt`.replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhas,nomeArquivo);
   closeModal('mPeriodoTxtParc');
   toast('TXT gerado com sucesso','ok');
 }
@@ -19950,7 +19900,6 @@ function gerarTXTEmprestimos(){
 
   const empresa=S.emps().find(e=>String(e.eid)===String(eid));
   const nomeEmp=empresa?empresa.nome:eid;
-  const fmtValor=v=>v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).replace(/\./g,'');
 
   const linhas=[];
   for(let tm=totalIni;tm<=totalFim;tm++){
@@ -19965,35 +19914,27 @@ function gerarTXTEmprestimos(){
       const jurosRes=r.jurosResultado!=null?r.jurosResultado:r.juros;
       if(jurosRes){
         const historico=`${nomeEmprestimo} - Parcela ${r.n} - ${mesAnoStr} - Apropriação Juros (Resultado)`;
-        linhas.push(`${r.dataBalanco||''};${p.contaJurosDespesa||''};${p.contaPassivo||''};${fmtValor(jurosRes)};;${historico};1;${eid};;`);
+        linhas.push({data:r.dataBalanco||'',debito:p.contaJurosDespesa||'',credito:p.contaPassivo||'',valor:jurosRes,historico});
       }
       if(r.correcaoVP){
         const historico=`${nomeEmprestimo} - Parcela ${r.n} - ${mesAnoStr} - Correção Monetária (Selic) - Redutor VP`;
-        linhas.push(`${r.dataBalanco||''};${p.contaJurosDespesa||''};${p.contaPassivo||''};${fmtValor(r.correcaoVP)};;${historico};1;${eid};;`);
+        linhas.push({data:r.dataBalanco||'',debito:p.contaJurosDespesa||'',credito:p.contaPassivo||'',valor:r.correcaoVP,historico});
       }
       if(r.custosTransacaoAmortizado){
         const historico=`${nomeEmprestimo} - Parcela ${r.n} - ${mesAnoStr} - Amortização de Custos de Transação (Redutora)`;
-        linhas.push(`${r.dataBalanco||''};${p.contaJurosDespesa||''};${p.contaRedutora||''};${fmtValor(r.custosTransacaoAmortizado)};;${historico};1;${eid};;`);
+        linhas.push({data:r.dataBalanco||'',debito:p.contaJurosDespesa||'',credito:p.contaRedutora||'',valor:r.custosTransacaoAmortizado,historico});
       }
       if(r.seguroAmortizado){
         const historico=`${nomeEmprestimo} - Parcela ${r.n} - ${mesAnoStr} - Apropriação de Seguro a Apropriar`;
-        linhas.push(`${r.dataBalanco||''};${p.contaSeguroDespesa||''};${p.contaSeguroAtivo||''};${fmtValor(r.seguroAmortizado)};;${historico};1;${eid};;`);
+        linhas.push({data:r.dataBalanco||'',debito:p.contaSeguroDespesa||'',credito:p.contaSeguroAtivo||'',valor:r.seguroAmortizado,historico});
       }
     });
   }
 
   if(!linhas.length){ toast('Nenhum lançamento de juros encontrado para o período selecionado.','warn'); return; }
 
-  const conteudo=linhas.join('\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const link=document.createElement('a');
-  link.href=url;
-  link.download=`Emprestimos_${nomeEmp}_${iniStr}_a_${fimStr}.txt`.replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  const nomeArquivo=`Emprestimos_${nomeEmp}_${iniStr}_a_${fimStr}.txt`.replace(/[\\/:*?"<>|]/g,'').replace(/\s+/g,'_');
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhas,nomeArquivo);
   closeModal('mPeriodoTxtEmp');
   toast('TXT gerado com sucesso','ok');
 }
@@ -23208,9 +23149,7 @@ function gerarLalupTxt(eid,mk){
       const valor=t[tr.k]||0;
       if(valor<=0) return;
       const conta=contas.diferido[tr.k];
-      const valorTxt=valor.toFixed(2).replace('.',',');
-      const historico=_convMpRemoverAcentos(`Diferimento ${tr.label} NF ${n.numeroNF} - ${n.cliente||''}`).replace(/;/g,' ');
-      linhas.push(`${dataTxt};${conta.debito};${conta.credito};${valorTxt};;${historico};1;${eid};;`);
+      linhas.push({data:dataTxt,debito:conta.debito,credito:conta.credito,valor,historico:`Diferimento ${tr.label} NF ${n.numeroNF} - ${n.cliente||''}`});
     });
   });
   nfs.forEach(n=>{
@@ -23225,21 +23164,14 @@ function gerarLalupTxt(eid,mk){
         const valor=(t[tr.k]||0)*fracao;
         if(valor<=0) return;
         const conta=contas.baixa[tr.k];
-        const valorTxt=valor.toFixed(2).replace('.',',');
-        const historico=_convMpRemoverAcentos(`Baixa ${tr.label} NF ${n.numeroNF} - ${n.cliente||''}`).replace(/;/g,' ');
-        linhas.push(`${dataTxt};${conta.debito};${conta.credito};${valorTxt};;${historico};1;${eid};;`);
+        linhas.push({data:dataTxt,debito:conta.debito,credito:conta.credito,valor,historico:`Baixa ${tr.label} NF ${n.numeroNF} - ${n.cliente||''}`});
       });
     });
   });
   if(linhas.length===0){toast('Nada a gerar nesta competência (sem diferidos novos nem baixas).','info');return;}
-  const conteudo=linhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url; a.download='LALUP_'+nomeArq+'_'+mk+'.txt'; a.click();
-  URL.revokeObjectURL(url);
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhas,'LALUP_'+nomeArq+'_'+mk+'.txt');
   toast('TXT gerado com '+linhas.length+' lançamento(s).','ok');
 }
 
@@ -23779,20 +23711,13 @@ function _lalupExAGerarTxt(eid,mk){
       const valor=t[tr.k]||0;
       if(valor<=0) return;
       const conta=contas.baixa[tr.k];
-      const valorTxt=valor.toFixed(2).replace('.',',');
-      const historico=_convMpRemoverAcentos(`Reversão ${tr.label} exercícios anteriores NF ${l.numeroNF} - ${l.cliente||''}`).replace(/;/g,' ');
-      linhas.push(`${dataTxt};${conta.debito};${conta.credito};${valorTxt};;${historico};1;${eid};;`);
+      linhas.push({data:dataTxt,debito:conta.debito,credito:conta.credito,valor,historico:`Reversão ${tr.label} exercícios anteriores NF ${l.numeroNF} - ${l.cliente||''}`});
     });
   });
   if(linhas.length===0){toast('Nenhuma NF com valor recebido preenchido.','warn');return;}
-  const conteudo=linhas.join('\r\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const nomeArq=(emp?emp.nome:eid).replace(/[^a-zA-Z0-9]/g,'_');
-  a.href=url; a.download='LALUP_ExAnteriores_'+nomeArq+'_'+mk+'.txt'; a.click();
-  URL.revokeObjectURL(url);
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhas,'LALUP_ExAnteriores_'+nomeArq+'_'+mk+'.txt');
   toast('TXT gerado com '+linhas.length+' lançamento(s).','ok');
 }
 
@@ -27003,9 +26928,6 @@ function gerarTXTLancamentos(){
   const item=importacoes[eid]?.dados[window._formImportacaoIndex];
   if(!item){toast('Nenhuma importação para gerar','warn');return;}
 
-  const empresa=S.emps().find(e=>String(e.eid)===String(eid));
-  const empresaId=empresa?.id||eid;
-
   const linhas=[];
   let algumaContabilizada=false;
   let faltandoConta=false;
@@ -27023,16 +26945,14 @@ function gerarTXTLancamentos(){
       const ctadebito=row.querySelector('[data-ctadebito]')?.value||'';
       const ctacredito=row.querySelector('[data-ctacredito]')?.value||'';
       const valor=desformatarNumero(row.querySelector('[data-valor]')?.value||'0');
-      const historico=_convMpRemoverAcentos(row.querySelector('[data-historico]')?.value||'');
+      const historico=row.querySelector('[data-historico]')?.value||'';
 
       if(!ctadebito||!ctacredito){
         faltandoConta=true;
         return;
       }
 
-      const valorFormatado=valor.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}).replace(/\./g,'');
-      const linha=`${data};${ctadebito};${ctacredito};${valorFormatado};;${historico};1;${empresaId};;`;
-      linhas.push(linha);
+      linhas.push({data,debito:ctadebito,credito:ctacredito,valor,historico});
     });
   });
 
@@ -27049,16 +26969,7 @@ function gerarTXTLancamentos(){
     return;
   }
 
-  const conteudo=linhas.join('\n');
-  const blob=new Blob([_convMpRemoverAcentos(conteudo)],{type:'text/plain;charset=utf-8'});
-  const url=URL.createObjectURL(blob);
-  const link=document.createElement('a');
-  link.href=url;
-  link.download=`${item.pi}_lancamentos_contabeis.txt`;
-  document.body.appendChild(link);
-  link.click();
-  document.body.removeChild(link);
-  URL.revokeObjectURL(url);
+  baixarTxtMisterContador(_cnpjPorEid(eid),linhas,`${item.pi}_lancamentos_contabeis.txt`);
   toast('TXT gerado com sucesso','ok');
 }
 
