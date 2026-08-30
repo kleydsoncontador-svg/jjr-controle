@@ -443,6 +443,7 @@ td{padding:9px 13px;vertical-align:middle}
         <button class="btn bo bsm" onclick="abrirSubstituirRazaoModal()" title="Substituir o Razão desta conta por uma versão ajustada, preservando conciliações confirmadas">🔄 Substituir Razão</button>
         <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirDadosConta()" title="Apaga TODOS os dados desta conta (lançamentos, conciliação, ajustes, parcelamentos) para subir uma versão do zero. A conta continua na lista, só fica vazia.">🗑️ Excluir Conta</button>
         <button class="btn bo bsm" onclick="abrirAjusteModal()">＋ Ajuste / Reclassificação</button>
+        <button class="btn bo bsm" style="background:#EDE9FE;border-color:#C4B5FD" onclick="abrirBuscaSemNF()" title="Procura, em outra conta, lançamentos que batem em valor com o que está aberto aqui — útil quando um pagamento sem NF foi jogado numa conta genérica">🔗 Sem NF</button>
         <button class="btn bo bsm" style="background:var(--teal);color:#fff;border:none" onclick="conciliarContaDetalhe()">▶ Conciliar automaticamente</button>
       </div>
     </div>
@@ -534,6 +535,28 @@ td{padding:9px 13px;vertical-align:middle}
     <div class="ma">
       <button class="btn bo" onclick="closeModal('mAjuste')">Cancelar</button>
       <button class="btn bp" onclick="salvarAjuste()">Salvar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Buscar lançamentos "sem NF" de outra conta pra tentar zerar contra
+     esta — nada aqui grava sozinho: "Confirmar" só abre o Ajuste/
+     Reclassificação já preenchido, pro usuário revisar e decidir salvar. -->
+<div class="mb" id="mSemNF">
+  <div class="modal" style="max-width:760px">
+    <div class="mt" style="display:flex;justify-content:space-between;align-items:center">
+      <span>🔗 Puxar lançamentos "sem NF" de outra conta</span>
+      <button onclick="closeModal('mSemNF')" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button>
+    </div>
+    <div class="info" style="margin-bottom:12px">ℹ Escolha a conta onde ficaram pagamentos sem NF encontrada (ex: uma conta genérica). O sistema procura, entre os itens em aberto das duas contas, os que batem no valor — é só sugestão: nada é gravado até você clicar em "Confirmar" num par específico, que abre a Reclassificação já preenchida pra você revisar antes de salvar.</div>
+    <div class="fg"><label class="fl">Conta de origem (onde está o "sem NF")</label>
+      <select class="fi" id="semNfContaOrigem" onchange="renderSemNFMatches()">
+        <option value="">— Escolha a conta —</option>
+      </select>
+    </div>
+    <div id="semNfResultado"></div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mSemNF')">Fechar</button>
     </div>
   </div>
 </div>
@@ -5849,6 +5872,120 @@ function abrirAjusteRapido(idx){
   setTimeout(function(){var f=document.getElementById('ajContraConta');if(f)f.focus();},150);
 }
 
+// ════════════════════════════════════════════════════════════
+// "SEM NF": puxa lançamentos em aberto de OUTRA conta (onde um pagamento
+// sem NF foi parar) e sugere pares por valor idêntico com o que está aberto
+// nesta conta — puramente visual/sugestão. Confirmar um par só ABRE o
+// Ajuste/Reclassificação já preenchido (mesmo modal e mesma salvarAjuste()
+// de sempre, que já espelha a reclassificação nas duas contas e atualiza o
+// saldo de ambas) — nada é gravado sem o usuário revisar e clicar Salvar lá.
+// ════════════════════════════════════════════════════════════
+function abrirBuscaSemNF(){
+  var razao=S.razao(curEmpId,contaDetMes);
+  var sel=document.getElementById('semNfContaOrigem');
+  var opts='<option value="">— Escolha a conta —</option>';
+  Object.keys(razao).sort().forEach(function(cod){
+    if(cod===contaDetCodigo)return;
+    var nome=(razao[cod].nome||cod).replace(/</g,'&lt;');
+    opts+='<option value="'+cod+'">'+cod+' — '+nome+'</option>';
+  });
+  sel.innerHTML=opts;
+  document.getElementById('semNfResultado').innerHTML='';
+  openModal('mSemNF');
+}
+// Versão parametrizada de getContaDetData() — busca lançamentos + status de
+// conciliação de uma conta QUALQUER (não a que está aberta na tela), só pra
+// achar candidatos de outra conta.
+function _getContaQualquerData(codigo){
+  var comp=S.comp(curEmpId);
+  var d=comp[contaDetMes];
+  var razao=S.razao(curEmpId,contaDetMes);
+  var razaoConta=razao[codigo];
+  var conciliacao=(d&&d.conciliacao&&d.conciliacao[codigo])||null;
+  return {razaoConta:razaoConta,conciliacao:conciliacao};
+}
+function _itensAbertos(codigo){
+  var data=_getContaQualquerData(codigo);
+  var lancs=(data.razaoConta&&data.razaoConta.lancamentos)||[];
+  var statuses=data.conciliacao?data.conciliacao.lancamentos:null;
+  var abertos=[];
+  lancs.forEach(function(l,idx){
+    var st=statuses?statuses[idx]:null;
+    var status=st?st.status:'aberto'; // conta que nunca rodou conciliação = tudo em aberto
+    if(status==='aberto')abertos.push({idx:idx,lanc:l});
+  });
+  return abertos;
+}
+function renderSemNFMatches(){
+  var origemCodigo=document.getElementById('semNfContaOrigem').value;
+  var box=document.getElementById('semNfResultado');
+  if(!origemCodigo){box.innerHTML='';return}
+
+  var abertosAtual=_itensAbertos(contaDetCodigo);
+  var abertosOrigem=_itensAbertos(origemCodigo);
+
+  // Casa por valor absoluto idêntico (débito+crédito somados, já que só um
+  // dos dois costuma vir preenchido por linha) — cada item só entra num par.
+  var usadosOrigem={};
+  var pares=[];
+  abertosAtual.forEach(function(a){
+    var valA=Math.round(((a.lanc.debito||0)+(a.lanc.credito||0))*100);
+    if(!valA)return;
+    var achou=abertosOrigem.find(function(o){
+      if(usadosOrigem[o.idx])return false;
+      var valO=Math.round(((o.lanc.debito||0)+(o.lanc.credito||0))*100);
+      return valO===valA;
+    });
+    if(achou){
+      usadosOrigem[achou.idx]=true;
+      pares.push({atual:a,origem:achou});
+    }
+  });
+
+  if(!pares.length){
+    box.innerHTML='<div class="empty" style="margin-top:12px"><div class="et">Nenhum par com o mesmo valor entre os itens em aberto das duas contas.</div></div>';
+    return;
+  }
+
+  var html='<div style="font-size:12px;color:var(--slate);margin:10px 0">'+pares.length+' par(es) encontrado(s) por valor idêntico — revise cada um antes de confirmar:</div>';
+  html+='<table class="ledger-table" style="table-layout:fixed"><colgroup><col><col style="width:90px"><col><col style="width:100px"></colgroup>';
+  html+='<thead><tr><th>Nesta conta ('+contaDetCodigo+')</th><th class="tr">Valor</th><th>Na conta '+origemCodigo+'</th><th></th></tr></thead><tbody>';
+  pares.forEach(function(p){
+    var valorFmt=fmt((p.atual.lanc.debito||0)+(p.atual.lanc.credito||0));
+    html+='<tr style="background:#EDE9FE">'+
+      '<td class="ledger-hist">'+(p.atual.lanc.data?p.atual.lanc.data.split('-').reverse().join('/')+' — ':'')+(p.atual.lanc.historico||'—')+'</td>'+
+      '<td class="mn tr">'+valorFmt+'</td>'+
+      '<td class="ledger-hist">'+(p.origem.lanc.data?p.origem.lanc.data.split('-').reverse().join('/')+' — ':'')+(p.origem.lanc.historico||'—')+'</td>'+
+      '<td><button class="btn bp bsm" onclick="confirmarTransferenciaSemNF('+p.atual.idx+','+p.origem.idx+',\''+origemCodigo+'\')">Confirmar</button></td>'+
+    '</tr>';
+  });
+  html+='</tbody></table>';
+  box.innerHTML=html;
+}
+// Pré-preenche o Ajuste/Reclassificação (mesmo modal e mesma salvarAjuste()
+// de qualquer reclassificação manual) a partir de um par sugerido — nada é
+// gravado até o usuário clicar em "Salvar" lá. O lado débito/crédito é
+// sempre o OPOSTO do lançamento em aberto desta conta, pra zerá-lo (mesma
+// lógica de abrirAjusteRapido, só que a contrapartida vem de outra conta).
+function confirmarTransferenciaSemNF(idxAtual,idxOrigem,origemCodigo){
+  var abertosAtual=_itensAbertos(contaDetCodigo);
+  var item=abertosAtual.find(function(a){return a.idx===idxAtual;});
+  if(!item){toast('Lançamento não encontrado','err');return}
+  var l=item.lanc;
+  var origemData=_getContaQualquerData(origemCodigo);
+  var lOrigem=((origemData.razaoConta&&origemData.razaoConta.lancamentos)||[])[idxOrigem];
+
+  document.getElementById('ajTipo').value='reclass';
+  onAjusteTipoChange();
+  document.getElementById('ajContraConta').value=origemCodigo;
+  document.getElementById('ajData').value=l.data||(contaDetMes+'-01');
+  document.getElementById('ajHistorico').value='Transferência entre contas — '+(l.historico||'')+(lOrigem&&lOrigem.historico?' (ref. em '+origemCodigo+': '+lOrigem.historico+')':' (ref. em '+origemCodigo+')');
+  document.getElementById('ajDebito').value=(l.credito||0)?Number(l.credito).toFixed(2).replace('.',','):'';
+  document.getElementById('ajCredito').value=(l.debito||0)?Number(l.debito).toFixed(2).replace('.',','):'';
+  closeModal('mSemNF');
+  openModal('mAjuste');
+  setTimeout(function(){var f=document.getElementById('ajHistorico');if(f)f.focus();},150);
+}
 function onAjusteTipoChange(){
   var tipo=document.getElementById('ajTipo').value;
   document.getElementById('ajContraWrap').style.display=tipo==='reclass'?'block':'none';
