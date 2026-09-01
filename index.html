@@ -19069,12 +19069,19 @@ function obterTaxaTR(mes,ano){
   const r=d.find(x=>x.mes===chave);
   return r&&r.taxa!==null&&r.taxa!==''?parseFloat(r.taxa)||0:0;
 }
-function trSalvarTaxa(mes,val){
-  let d=_trData();
-  let r=d.find(x=>x.mes===mes);
-  if(!r){ r={mes,taxa:null}; d.push(r); d.sort((a,b)=>{const[am,ay]=a.mes.split('/');const[bm,by]=b.mes.split('/');return ay!==by?ay-by:am-bm;}); }
-  r.taxa=val===''?null:parseFloat(val);
-  _trSave(d);
+// Mesma proteção de selicSalvarTaxa (ver comentário lá) — ccGravarAtomico
+// em vez de S.s puro.
+async function trSalvarTaxa(mes,val){
+  try{
+    await ccGravarAtomico('taxaTR', function(dAtual){
+      const d=(dAtual||[]).map(r=>({...r}));
+      let r=d.find(x=>x.mes===mes);
+      if(!r){ r={mes,taxa:null}; d.push(r); d.sort((a,b)=>{const[am,ay]=a.mes.split('/');const[bm,by]=b.mes.split('/');return ay!==by?ay-by:am-bm;}); }
+      r.taxa=val===''?null:parseFloat(val);
+      return d;
+    });
+  }catch(e){ console.error('trSalvarTaxa',e); toast('Erro ao salvar a taxa TR: '+e.message,'err'); }
+  renderTaxaSelic();
 }
 function initTaxaSelic(){
   let d=_selicData();
@@ -19138,20 +19145,37 @@ function renderTaxaSelic(){
     </tr>`;
   }).join('');
 }
-function selicSalvarTaxa(mes,val){
-  const d=_selicData();
-  const r=d.find(x=>x.mes===mes);
-  if(r)r.taxa=val===''?null:parseFloat(val);
-  _selicSave(d);
+// Grava usando ccGravarAtomico (lê o valor mais fresco e só escreve se
+// ninguém mexeu desde a leitura) em vez de S.s puro — evita que um valor
+// digitado aqui (ex: Selic de um mês) seja apagado por outra gravação quase
+// simultânea na mesma chave (mesma causa da perda de bens do NF Ativo Fixo,
+// corrigida hoje mais cedo — ver ccGravarAtomico).
+async function selicSalvarTaxa(mes,val){
+  try{
+    await ccGravarAtomico('taxaSelic', function(dAtual){
+      const d=(dAtual||[]).map(r=>({...r}));
+      let r=d.find(x=>x.mes===mes);
+      if(!r){ r={mes,taxa:null}; d.push(r); }
+      r.taxa=val===''?null:parseFloat(val);
+      return d;
+    });
+  }catch(e){ console.error('selicSalvarTaxa',e); toast('Erro ao salvar a taxa Selic: '+e.message,'err'); }
+  renderTaxaSelic();
 }
-function selicCriarProximoAno(){
-  const d=_selicData();
+async function selicCriarProximoAno(){
+  const dAtual=_selicData();
   let lastYear=0;
-  d.forEach(r=>{const y=parseInt(r.mes.split('/')[1]);if(y>lastYear)lastYear=y;});
+  dAtual.forEach(r=>{const y=parseInt(r.mes.split('/')[1]);if(y>lastYear)lastYear=y;});
   const next=(lastYear||new Date().getFullYear())+1;
-  if(d.some(r=>r.mes.split('/')[1]===String(next))){toast('Ano '+next+' já existe!','err');return;}
-  for(let m=1;m<=12;m++)d.push({mes:String(m).padStart(2,'0')+'/'+next,taxa:null});
-  _selicSave(d);
+  if(dAtual.some(r=>r.mes.split('/')[1]===String(next))){toast('Ano '+next+' já existe!','err');return;}
+  try{
+    await ccGravarAtomico('taxaSelic', function(dFresco){
+      const d=(dFresco||[]).map(r=>({...r}));
+      if(d.some(r=>r.mes.split('/')[1]===String(next))) return d; // já criado por outra aba entre a checagem e agora
+      for(let m=1;m<=12;m++)d.push({mes:String(m).padStart(2,'0')+'/'+next,taxa:null});
+      return d;
+    });
+  }catch(e){ console.error('selicCriarProximoAno',e); toast('Erro ao criar o ano: '+e.message,'err'); return; }
   const sel=document.getElementById('selicFiltroAno');
   if(sel){const o=document.createElement('option');o.value=next;o.textContent=next;sel.appendChild(o);sel.value=String(next);}
   renderTaxaSelic();
