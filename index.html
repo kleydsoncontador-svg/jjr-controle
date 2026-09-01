@@ -2259,7 +2259,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
 <div class="page" id="page-taxaselic" style="display:none;padding:0;height:calc(100vh - 52px);overflow:hidden">
   <div style="height:100%;display:flex;flex-direction:column">
     <div style="padding:14px 20px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:12px;flex-wrap:wrap;background:var(--white);flex-shrink:0">
-      <div style="font-size:1.1rem;font-weight:700;color:#1E3558;flex:1">Taxa SELIC Mensal</div>
+      <div style="font-size:1.1rem;font-weight:700;color:#1E3558;flex:1">Taxa SELIC Mensal <span style="font-weight:400;font-size:.85rem;color:var(--slate)">(e TR, usada no FGTS em atraso)</span></div>
       <label style="font-size:.8rem;font-weight:600;color:var(--slate)">Ano:</label>
       <select id="selicFiltroAno" class="fi" style="width:100px;padding:4px 8px;font-size:.88rem" onchange="renderTaxaSelic()"></select>
       <button class="btn bp bsm" onclick="selicCriarProximoAno()">+ Criar 12 meses do próximo ano</button>
@@ -2268,8 +2268,9 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <table style="width:100%;border-collapse:collapse">
         <thead style="position:sticky;top:0;z-index:5">
           <tr>
-            <th style="background:#1E3558;color:#fff;padding:10px 20px;text-align:left;font-size:.8rem;font-weight:700;width:60%">Mês</th>
-            <th style="background:#1E3558;color:#fff;padding:10px 20px;text-align:right;font-size:.8rem;font-weight:700;width:40%">Taxa (%)</th>
+            <th style="background:#1E3558;color:#fff;padding:10px 20px;text-align:left;font-size:.8rem;font-weight:700;width:40%">Mês</th>
+            <th style="background:#1E3558;color:#fff;padding:10px 20px;text-align:right;font-size:.8rem;font-weight:700;width:30%">Selic (%)</th>
+            <th style="background:#1E3558;color:#fff;padding:10px 20px;text-align:right;font-size:.8rem;font-weight:700;width:30%">TR (%)</th>
           </tr>
         </thead>
         <tbody id="selicTbody"></tbody>
@@ -8934,7 +8935,7 @@ const TRIBUTOS_LISTA = [
   'INSS',
   'INSS Patronal (CPP)',
   'INSS Retido na Fonte',
-  'FGTS — Fundo de Garantia do Tempo de Serviço',
+  'FGTS',
   'DAS — Simples Nacional',
   'DAS-MEI',
   'DARF Unificado',
@@ -9438,10 +9439,85 @@ function formatDataDDMMYYYY(d){
   return dia + '/' + mes + '/' + ano;
 }
 
+// Conta meses OU FRAÇÃO inteiros entre duas datas, arredondando pra cima
+// qualquer fração — usado nos juros de mora do FGTS (0,5% ao mês OU FRAÇÃO,
+// art. 22 §1º da Lei 8.036/1990, diferente da Selic diária dos outros
+// tributos). Ex: vencimento 20/01, pago 31/07 → 6 meses cheios (20/01 a
+// 20/07) + 1 fração (20/07 a 31/07) = 7 incidências.
+function _mesesOuFracaoFGTS(dataIni,dataFim){
+  if(dataFim<=dataIni)return 0;
+  let meses=0;
+  let cursor=new Date(dataIni);
+  while(true){
+    const prox=new Date(cursor.getFullYear(),cursor.getMonth()+1,cursor.getDate());
+    if(prox<=dataFim){ meses++; cursor=prox; } else break;
+  }
+  if(dataFim>cursor)meses++;
+  return meses;
+}
+// FGTS em atraso segue regra PRÓPRIA (art. 22 da Lei 8.036/1990), diferente
+// da multa de mora + Selic usada nos demais tributos federais:
+//  1) Correção monetária pela TR, mês a mês, pro-rata pelos dias em atraso
+//     dentro de cada mês (usa a tabela TR da tela "Taxa Selic").
+//  2) Multa de 10% sobre o valor JÁ corrigido pela TR, a partir do 1º dia
+//     de atraso (não escalona por dia como a multa dos tributos federais).
+//  3) Juros de mora de 0,5% ao mês OU FRAÇÃO, também sobre o valor corrigido
+//     pela TR, contando qualquer mês iniciado como incidência inteira.
+// É uma APROXIMAÇÃO pra acompanhamento (a Caixa corrige a TR numa janela
+// própria, dia 10 a dia 9, e arredonda por trabalhador/débito) — o valor
+// exigível de verdade é sempre o gerado pelo FGTS Digital na data escolhida.
+function gerarMovimentosFGTS(trib,dataVenc,dataLimite){
+  const valorOriginal=trib.valor||0;
+  const movimentos=[{data:new Date(dataVenc),descricao:'Vencimento - '+trib.nome,tipo:'vencimento',valor:valorOriginal}];
+
+  if(dataLimite>=dataVenc){
+    // 1) Correção TR, mês a mês, pro-rata pelos dias em atraso dentro do mês
+    let correcaoAcum=0;
+    let cursor=new Date(dataVenc.getFullYear(),dataVenc.getMonth(),1);
+    while(cursor<=dataLimite){
+      const fimMes=new Date(cursor.getFullYear(),cursor.getMonth()+1,0);
+      const diasNoMes=fimMes.getDate();
+      const iniPeriodo=cursor>dataVenc?cursor:dataVenc;
+      const fimPeriodo=fimMes<dataLimite?fimMes:dataLimite;
+      const diasNoPeriodo=Math.max(0,Math.round((fimPeriodo-iniPeriodo)/86400000)+1);
+      const taxaMes=obterTaxaTR(cursor.getMonth()+1,cursor.getFullYear());
+      if(taxaMes>0&&diasNoPeriodo>0){
+        const fracao=diasNoPeriodo/diasNoMes;
+        const valorTR=valorOriginal*(taxaMes/100)*fracao;
+        correcaoAcum+=valorTR;
+        movimentos.push({data:new Date(fimPeriodo),descricao:'Correção TR ('+taxaMes.toFixed(4)+'% a.m., '+diasNoPeriodo+' dia(s))',tipo:'tr',valor:valorTR});
+      }
+      cursor=new Date(cursor.getFullYear(),cursor.getMonth()+1,1);
+    }
+    const baseCorrigida=valorOriginal+correcaoAcum;
+
+    // 2) Multa de 10% sobre o valor já corrigido, a partir do 1º dia de atraso
+    const diaMulta=new Date(dataVenc);
+    diaMulta.setDate(diaMulta.getDate()+1);
+    if(diaMulta<=dataLimite){
+      movimentos.push({data:diaMulta,descricao:'Multa de 10% (FGTS)',tipo:'multa',valor:baseCorrigida*0.10});
+    }
+
+    // 3) Juros de mora 0,5% ao mês ou fração, sobre o valor já corrigido
+    const numIncidencias=_mesesOuFracaoFGTS(dataVenc,dataLimite);
+    if(numIncidencias>0){
+      movimentos.push({data:new Date(dataLimite),descricao:'Juros de mora 0,5% a.m. ou fração ('+numIncidencias+'x)',tipo:'juros',valor:baseCorrigida*0.005*numIncidencias});
+    }
+  }
+
+  movimentos.sort((a,b)=>a.data-b.data);
+  let saldoAtual=0;
+  movimentos.forEach(m=>{ saldoAtual+=m.valor; m.saldo=saldoAtual; });
+  return movimentos;
+}
 // Gera as linhas de movimento (vencimento + multa + juros) de um tributo até uma data-limite
 function gerarMovimentosTributo(trib, dataLimite){
   const dataVenc = parseDataDD(trib.dataVencimento);
   if(!dataVenc) return null;
+  // FGTS usa fórmula própria (TR + multa 10% + juros 0,5% a.m.) — ver
+  // gerarMovimentosFGTS. Comparação por nome porque não há um "código de
+  // tributo" estruturado nesta lista, só o texto escolhido no dropdown.
+  if((trib.nome||'').trim()==='FGTS') return gerarMovimentosFGTS(trib,dataVenc,dataLimite);
 
   const valorOriginal = trib.valor || 0;
   const movimentos = [];
@@ -9587,7 +9663,7 @@ function formatDataYYYYMMDD(d){
 
 // Preenche os campos de data inicial/final do TXT com o intervalo de multa/juros disponível
 function prepararDatasTXTControle(movimentos){
-  const lancaveis = movimentos.filter(m=>m.tipo==='multa'||m.tipo==='juros');
+  const lancaveis = movimentos.filter(m=>m.tipo==='multa'||m.tipo==='juros'||m.tipo==='tr');
   const ini = document.getElementById('ctrlTxtInicio');
   const fim = document.getElementById('ctrlTxtFim');
   if(!ini || !fim) return;
@@ -9626,7 +9702,7 @@ function gerarTXTControleTributo(){
   const competencia = fmtMes(trib.comp);
 
   const selecionados = movimentos.filter(m=>
-    (m.tipo==='multa' || m.tipo==='juros') && m.data >= dataIni && m.data <= dataFim
+    (m.tipo==='multa' || m.tipo==='juros' || m.tipo==='tr') && m.data >= dataIni && m.data <= dataFim
   );
 
   if(!selecionados.length){
@@ -9637,7 +9713,7 @@ function gerarTXTControleTributo(){
   const linhas = selecionados.map(m=>{
     const dataStr = formatDataDDMMYYYY(m.data);
     const ctadebito = m.tipo==='multa' ? '526' : '372';
-    const descTipo = m.tipo==='multa' ? 'Multa de Mora' : 'Juros SELIC';
+    const descTipo = m.tipo==='multa' ? 'Multa de Mora' : (m.tipo==='tr' ? 'Correção Monetária TR' : 'Juros');
     return {data:dataStr,debito:ctadebito,credito:contaCredito,valor:m.valor,historico:`${trib.nome} ${competencia} - ${descTipo}`};
   });
 
@@ -9657,7 +9733,7 @@ function renderModalControleMovimentos(movimentos){
   tbody.innerHTML = movimentos.map(m=>{
     const dataStr = formatDataDDMMYYYY(m.data);
     const saldoStr = m.saldo.toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2});
-    const valorStr = (m.tipo==='multa'||m.tipo==='juros')
+    const valorStr = (m.tipo==='multa'||m.tipo==='juros'||m.tipo==='tr')
       ? 'R$ ' + m.valor.toLocaleString('pt-BR', {minimumFractionDigits:2, maximumFractionDigits:2})
       : '—';
     const infoRow = m.tipo==='info';
@@ -18979,6 +19055,27 @@ const SELIC_INICIAL=[
 ];
 function _selicData(){return S.g('taxaSelic')||[];}
 function _selicSave(d){S.s('taxaSelic',d);}
+// TR (Taxa Referencial) — usada só na correção monetária do FGTS em atraso
+// (art. 22 da Lei 8.036/1990). Sem tabela seed: ao contrário da Selic (valor
+// sempre positivo e de conhecimento geral), a TR passa a maior parte do
+// tempo em 0% e não tem uma fonte confiável pra "chutar" aqui — o usuário
+// preenche mês a mês igual já faz com a Selic (valor oficial: Banco
+// Central, série 226). Mesma estrutura {mes,taxa} da Selic, chave própria.
+function _trData(){return S.g('taxaTR')||[];}
+function _trSave(d){S.s('taxaTR',d);}
+function obterTaxaTR(mes,ano){
+  const chave=String(mes).padStart(2,'0')+'/'+ano;
+  const d=_trData();
+  const r=d.find(x=>x.mes===chave);
+  return r&&r.taxa!==null&&r.taxa!==''?parseFloat(r.taxa)||0:0;
+}
+function trSalvarTaxa(mes,val){
+  let d=_trData();
+  let r=d.find(x=>x.mes===mes);
+  if(!r){ r={mes,taxa:null}; d.push(r); d.sort((a,b)=>{const[am,ay]=a.mes.split('/');const[bm,by]=b.mes.split('/');return ay!==by?ay-by:am-bm;}); }
+  r.taxa=val===''?null:parseFloat(val);
+  _trSave(d);
+}
 function initTaxaSelic(){
   let d=_selicData();
   if(!d.length){
@@ -19003,18 +19100,23 @@ function initTaxaSelic(){
 }
 function renderTaxaSelic(){
   const d=_selicData();
+  const trD=_trData();
   const ano=document.getElementById('selicFiltroAno')?.value||'';
   const tbody=document.getElementById('selicTbody');if(!tbody)return;
   const rows=ano?d.filter(r=>r.mes.split('/')[1]===ano):d;
-  if(!rows.length){tbody.innerHTML='<tr><td colspan="2" style="padding:40px;text-align:center;color:var(--slate)">Nenhum dado encontrado. Use "+ Criar 12 meses" para adicionar.</td></tr>';return;}
+  if(!rows.length){tbody.innerHTML='<tr><td colspan="3" style="padding:40px;text-align:center;color:var(--slate)">Nenhum dado encontrado. Use "+ Criar 12 meses" para adicionar.</td></tr>';return;}
   const MESES=['','Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
   tbody.innerHTML=rows.map((r,i)=>{
     const [mm,aaaa]=r.mes.split('/');
     const label=MESES[parseInt(mm)]+' / '+aaaa;
     const val=r.taxa!==null&&r.taxa!==''?parseFloat(r.taxa):'';
     const hasVal=val!=='';
+    const trRow=trD.find(x=>x.mes===r.mes);
+    const trVal=trRow&&trRow.taxa!==null&&trRow.taxa!==''?parseFloat(trRow.taxa):'';
+    const trHasVal=trVal!=='';
     const bg=i%2===0?'var(--white)':'#f8fafc';
     const inputBg=hasVal?'transparent':'#fef9c3';
+    const trInputBg=trHasVal?'transparent':'#f0f4f8';
     return `<tr style="background:${bg}">
       <td style="padding:9px 20px;font-size:.88rem;border-bottom:1px solid #f0f0f0;font-weight:${hasVal?'400':'500'};color:${hasVal?'var(--ink)':'var(--slate)'}">${label}</td>
       <td style="padding:6px 20px;border-bottom:1px solid #f0f0f0;text-align:right">
@@ -19022,6 +19124,14 @@ function renderTaxaSelic(){
           <input type="number" step="0.0001" min="0" value="${hasVal?val:''}" placeholder="—"
             style="width:100px;border:1px solid #e2e8f0;border-radius:4px;padding:4px 8px;text-align:right;font-size:.88rem;background:${inputBg};font-family:var(--mono,monospace)"
             onchange="selicSalvarTaxa('${r.mes}',this.value)">
+          <span style="font-size:.82rem;color:var(--slate);width:12px">%</span>
+        </div>
+      </td>
+      <td style="padding:6px 20px;border-bottom:1px solid #f0f0f0;text-align:right">
+        <div style="display:flex;align-items:center;justify-content:flex-end;gap:4px">
+          <input type="number" step="0.0001" min="0" value="${trHasVal?trVal:''}" placeholder="—" title="TR do mês (Banco Central, série 226) — deixe em branco se ainda não sabe (assume 0%)"
+            style="width:100px;border:1px solid #e2e8f0;border-radius:4px;padding:4px 8px;text-align:right;font-size:.88rem;background:${trInputBg};font-family:var(--mono,monospace)"
+            onchange="trSalvarTaxa('${r.mes}',this.value)">
           <span style="font-size:.82rem;color:var(--slate);width:12px">%</span>
         </div>
       </td>
