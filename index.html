@@ -12114,7 +12114,7 @@ const CONV_LMA_MESES_NOME={janeiro:1,fevereiro:2,'março':3,marco:3,abril:4,maio
 const CONV_LMA_TIPOS_BASE=[
   'ACOMPANHAMENTO DE PUBLICAÇÕES','DESPESAS COM OCUPAÇÃO','SERVIÇOS DE TERCEIROS',
   'BRINDES COLABORADORES','SERVIÇOS PRESTADOS','PASSAGEM AÉREA','ALIMENTAÇÃO',
-  'HOSPEDAGEM','TÁXI/UBER','DILIGÊNCIA','CUSTAS','OUTROS'
+  'HOSPEDAGEM','TÁXI/UBER','DILIGÊNCIA','CUSTAS','OUTROS','TRANSPORTE','PEDÁGIO'
 ];
 // Tipo cujo nome quebra em duas linhas no PDF (a 1ª parte fica colada no fim
 // da linha da data+valor, a 2ª parte vem sozinha na linha seguinte, antes da
@@ -12138,9 +12138,12 @@ function _convLmaLimparDescricao(desc){
 // Separador " - " (não "|") de propósito: "|" é o delimitador de CAMPO do
 // próprio layout de TXT (gerarTxtMisterContador) — se sobrevivesse dentro do
 // histórico, quebraria a linha inteira, por isso esse formatador já remove
-// qualquer "|" que apareça no histórico antes de gravar.
-function _convLmaMontarHistorico(numero,item,descricaoLimpa){
-  const base=`Fat. ${numero} - ${item.projetoCodigo} - ${item.projetoNome} - ${item.data} - ${item.tipo} - ${descricaoLimpa}`;
+// qualquer "|" que apareça no histórico antes de gravar. Formato pedido:
+// "<Tomador> - FAT. <número> - (<Tipo>) - <código projeto> - <nome projeto>
+// - <descrição completa concatenada>" — a data de cada item NÃO entra aqui
+// (só a data de emissão da fatura, usada como data fixa do lançamento).
+function _convLmaMontarHistorico(numero,item,descricaoLimpa,tomadorNome){
+  const base=`${tomadorNome||''} - FAT. ${numero} - (${item.tipo}) - ${item.projetoCodigo} - ${item.projetoNome} - ${descricaoLimpa}`;
   return _convMpRemoverAcentos(base);
 }
 function _convLmaChaveClassificacao(item,descricaoLimpa){
@@ -12156,8 +12159,20 @@ function _convLmaParsearFatura(linhasTexto){
   const textoCompleto=linhasTexto.join('\n');
   const mNum=textoCompleto.match(/FATURA DE DESPESAS\s*N[º°o]\s*([\d.]+)/i);
   const numero=mNum?mNum[1].replace(/\./g,''):'';
+  // Tomador (quem está sendo cobrado) é sempre a primeira linha não-vazia
+  // depois de "FATURA DE DESPESAS Nº..." — pode ser empresa (CNPJ) ou
+  // pessoa física/espólio (CPF), por isso captura os dois documentos.
+  let tomadorNome='';
+  const idxFatura=linhasTexto.findIndex(l=>/^FATURA DE DESPESAS/i.test((l||'').trim()));
+  if(idxFatura>=0){
+    for(let i=idxFatura+1;i<linhasTexto.length;i++){
+      const cand=(linhasTexto[i]||'').trim();
+      if(cand){ tomadorNome=cand; break; }
+    }
+  }
   const mCnpj=textoCompleto.match(/CNPJ:\s*([\d.\/-]{14,20})/);
-  const cnpj=mCnpj?mCnpj[1]:'';
+  const mCpf=textoCompleto.match(/\bCPF:\s*([\d.-]{11,14})/);
+  const cnpj=mCnpj?mCnpj[1]:(mCpf?mCpf[1]:'');
   const mData=textoCompleto.match(/DATA:\s*[^,]+,\s*(\d{1,2})\s*de\s*([A-Za-zçÇãÃéÉ]+)\s*de\s*(\d{4})/i);
   let dataEmissaoBr='';
   if(mData){
@@ -12240,7 +12255,7 @@ function _convLmaParsearFatura(linhasTexto){
   }
   fecharItemAtual();
 
-  return {numero,cnpj,dataEmissaoBr,itens};
+  return {numero,cnpj,tomadorNome,dataEmissaoBr,itens};
 }
 async function processarConvLma(eid){
   const btn=document.getElementById('convLmaBtnProcessar_'+eid);
@@ -12271,7 +12286,7 @@ async function processarConvLma(eid){
 
     const itensProcessados=dados.itens.map(item=>{
       const descricaoLimpa=_convLmaLimparDescricao(item.descricaoLinhas.join(' '));
-      const historico=item.semTipo?'':_convLmaMontarHistorico(dados.numero,item,descricaoLimpa);
+      const historico=item.semTipo?'':_convLmaMontarHistorico(dados.numero,item,descricaoLimpa,dados.tomadorNome);
       const chave=item.semTipo?'':_convLmaChaveClassificacao(item,descricaoLimpa);
       return {...item,descricaoLimpa,historico,chave};
     });
@@ -12355,7 +12370,7 @@ function salvarTipoLinhaConvLma(eid,i){
     alvo.tipo=tipoNovo;
     alvo.semTipo=false;
     alvo.descricaoLimpa=_convLmaLimparDescricao(alvo.descricaoLinhas.join(' '));
-    alvo.historico=_convLmaMontarHistorico(pendentes.fatura.numero,alvo,alvo.descricaoLimpa);
+    alvo.historico=_convLmaMontarHistorico(pendentes.fatura.numero,alvo,alvo.descricaoLimpa,pendentes.fatura.tomadorNome);
     alvo.chave=_convLmaChaveClassificacao(alvo,alvo.descricaoLimpa);
   }
   if(lembrar){
