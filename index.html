@@ -16502,7 +16502,7 @@ function abrirLancctbUploadExtratoModal(){
   document.getElementById('lancctbUploadTitulo').textContent='Upload de Extrato Bancário';
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-      Aceita Excel/CSV (lido direto, mais rápido) ou PDF (extraído via IA — qualquer banco, sem precisar reconhecer o layout).
+      Aceita Excel/CSV (lido direto) ou PDF — se o layout do PDF for reconhecido (ex: extrato mensal Itaú), lê direto pela posição das colunas, sem IA. Se não reconhecer, tenta com IA como alternativa.
     </div>
     <input class="fi" id="lancctbExtratoArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
     <div id="lancctbExtratoStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
@@ -16512,6 +16512,131 @@ function abrirLancctbUploadExtratoModal(){
       <button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato()">▶ Extrair</button>
     </div>`;
   openModal('mLancctbUpload');
+}
+// ─── Parser determinístico do extrato mensal Itaú (por posição de coluna) ─
+// Estratégia pedida pelo usuário: IA só entra quando o site NÃO reconhece o
+// layout do PDF. Aqui usamos a posição real (x,y) de cada item de texto
+// devolvida pelo pdfjsLib — o PDF tem colunas de verdade (confirmado com o
+// usuário olhando o PDF renderizado), só que iam pro saco quando a gente
+// concatenava tudo num texto corrido só. Reconstruindo a tabela pela
+// posição, o sinal entrada/saída fica exato (não é heurística de regex) e
+// não depende de nenhuma API externa nem tem risco de estourar cota/tempo.
+//
+// Regras confirmadas com o usuário direto no PDF real (Fast Lube, Itaú
+// Ag 0454 Cc 22895-8, jun/2026):
+// - A data aparece 1x só e vale pra todos os lançamentos seguintes até
+//   aparecer uma nova data.
+// - Nesse banco, "-" no valor = saída; sem "-" = entrada (a própria coluna
+//   em que o valor cai já confirma isso, mas mantemos a checagem dupla).
+// - A tabela "Conta Corrente | Movimentação" termina em "Saldo em C/C" /
+//   "Saldo final" — tudo depois disso é outro tipo de informação
+//   (aplicações automáticas, CDB, indicadores de mercado, notas
+//   explicativas), não lançamento de conta corrente.
+// - As linhas "Apl Aplic Aut Mais"/"Res Aplic Aut Mais"/"Rend Pago Aplic
+//   Aut Mais"/"SALDO APLIC AUT MAIS" são aplicação automática (sweep pro
+//   CDB, sem terceiro envolvido) — o próprio extrato registra em nota que
+//   "os valores referentes ao totalizador de aplicações automáticas não
+//   estão somados no resumo de movimentação de conta corrente", então são
+//   excluídas daqui (não fazem sentido pra conciliar com NF/comprovante).
+
+async function _lancctbExtrairItensPagina(page){
+  const content=await page.getTextContent();
+  return content.items.map(it=>({str:it.str,x:it.transform[4],y:it.transform[5]})).filter(it=>it.str.trim()!=='');
+}
+function _lancctbAgruparLinhasPorY(itens,tolerancia){
+  if(tolerancia===undefined) tolerancia=3;
+  const ordenado=[...itens].sort((a,b)=>b.y-a.y||a.x-b.x);
+  const linhas=[];
+  ordenado.forEach(it=>{
+    let linha=linhas.find(l=>Math.abs(l.y-it.y)<=tolerancia);
+    if(!linha){ linha={y:it.y,itens:[]}; linhas.push(linha); }
+    linha.itens.push(it);
+  });
+  linhas.forEach(l=>l.itens.sort((a,b)=>a.x-b.x));
+  return linhas;
+}
+const LANCCTB_MESES_PT={jan:1,fev:2,mar:3,abr:4,mai:5,jun:6,jul:7,ago:8,set:9,out:10,nov:11,dez:12};
+function _lancctbParseValorBR(s){
+  return parseFloat(String(s).trim().replace(/\./g,'').replace(',','.').replace(/-$/,''))||0;
+}
+// Retorna {lancamentos, totalEntradasDoc, totalSaidasDoc} se reconhecer o
+// layout, ou null se não reconhecer (aí quem chama cai pro caminho via IA).
+async function _lancctbParsearExtratoItauMensal(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  const mMes=textoPagina1.match(/\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\s+(\d{4})\b/i);
+  if(!mMes) return null;
+  const mesRef=LANCCTB_MESES_PT[mMes[1].toLowerCase()], anoRef=parseInt(mMes[2],10);
+
+  // Total oficial do próprio extrato ("total entradas total saídas
+  // (créditos) (débitos) R$ X R$ Y") — usado como conferência depois.
+  let totalEntradasDoc=null,totalSaidasDoc=null;
+  const mTotais=textoPagina1.match(/total\s+entradas\s+total\s+sa[ií]das[\s\S]{0,80}?r\$\s*([\d.,]+)\s*r\$\s*([\d.,]+)/i);
+  if(mTotais){ totalEntradasDoc=_lancctbParseValorBR(mTotais[1]); totalSaidasDoc=_lancctbParseValorBR(mTotais[2]); }
+
+  const lancamentos=[];
+  let colunas=null, dataAtual=null, encerrado=false;
+
+  for(let p=1;p<=pdf.numPages&&!encerrado;p++){
+    const page=p===1?pagina1:await pdf.getPage(p);
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(page);
+    const linhas=_lancctbAgruparLinhasPorY(itens);
+
+    for(const linha of linhas){
+      const textoLinha=linha.itens.map(i=>i.str).join(' ').trim();
+      const textoBaixo=textoLinha.toLowerCase();
+
+      if(/\bdata\b/.test(textoBaixo)&&/descri[cç][aã]o/.test(textoBaixo)&&/entradas/.test(textoBaixo)&&/sa[ií]das/.test(textoBaixo)){
+        const achar=(re)=>linha.itens.find(i=>re.test(i.str.toLowerCase()));
+        const itData=achar(/^data$/),itDesc=achar(/descri/),itEnt=achar(/entradas/),itSai=achar(/sa[ií]das/),itSal=achar(/saldo/);
+        if(itData&&itDesc&&itEnt&&itSai&&itSal) colunas={data:itData.x,descricao:itDesc.x,entradas:itEnt.x,saidas:itSai.x,saldo:itSal.x};
+        continue;
+      }
+      if(!colunas) continue;
+      if(/^\(cr[eé]ditos\)/.test(textoBaixo)||/^\(d[eé]bitos\)/.test(textoBaixo)) continue;
+
+      const limites=[
+        {nome:'data',fim:(colunas.data+colunas.descricao)/2},
+        {nome:'descricao',fim:(colunas.descricao+colunas.entradas)/2},
+        {nome:'entradas',fim:(colunas.entradas+colunas.saidas)/2},
+        {nome:'saidas',fim:(colunas.saidas+colunas.saldo)/2},
+        {nome:'saldo',fim:Infinity},
+      ];
+      const celulas={data:'',descricao:'',entradas:'',saidas:'',saldo:''};
+      linha.itens.forEach(it=>{
+        const col=limites.find(l=>it.x<l.fim)||limites[limites.length-1];
+        celulas[col.nome]+=(celulas[col.nome]?' ':'')+it.str;
+      });
+      Object.keys(celulas).forEach(k=>celulas[k]=celulas[k].trim());
+
+      if(/^saldo em c\/c/i.test(celulas.descricao)||/^saldo final/i.test(celulas.descricao)){ encerrado=true; break; }
+      if(/^saldo anterior/i.test(celulas.descricao)){ if(celulas.data) dataAtual=celulas.data; continue; }
+      if(/aplic aut mais/i.test(celulas.descricao)) continue; // aplicação automática — não é lançamento pra conciliar
+
+      if(celulas.data) dataAtual=celulas.data;
+      if(!dataAtual) continue;
+      const temEntrada=!!celulas.entradas, temSaida=!!celulas.saidas;
+      if(!temEntrada&&!temSaida) continue; // linha sem valor de movimentação (ex: só saldo)
+
+      const mData=dataAtual.match(/^(\d{2})\/(\d{2})$/);
+      if(!mData) continue; // data não reconhecida — não arrisca gravar sem data
+      const dia=parseInt(mData[1],10),mes=parseInt(mData[2],10);
+      let ano=anoRef;
+      if(mes>mesRef+6) ano=anoRef-1; else if(mes<mesRef-6) ano=anoRef+1;
+      const dataIso=`${ano}-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`;
+
+      lancamentos.push({
+        data:dataIso,
+        historico:celulas.descricao,
+        valor_entrada:temEntrada?_lancctbParseValorBR(celulas.entradas):0,
+        valor_saida:temSaida?_lancctbParseValorBR(celulas.saidas):0,
+        documento:null,
+      });
+    }
+  }
+  if(!lancamentos.length) return null;
+  return {lancamentos,totalEntradasDoc,totalSaidasDoc};
 }
 async function processarLancctbUploadExtrato(){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
@@ -16525,10 +16650,34 @@ async function processarLancctbUploadExtrato(){
     let lancamentos=[];
     let origem='excel';
     if(ehPdf){
-      origem='pdf_texto';
       _convItauGarantirWorker();
       const buf=await file.arrayBuffer();
       const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+
+      status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
+      const reconhecido=await _lancctbParsearExtratoItauMensal(pdf);
+      if(reconhecido){
+        origem='pdf_estruturado';
+        lancamentos=reconhecido.lancamentos;
+        const somaEntrada=lancamentos.reduce((s,l)=>s+(l.valor_entrada||0),0);
+        const somaSaida=lancamentos.reduce((s,l)=>s+(l.valor_saida||0),0);
+        let confere='';
+        if(reconhecido.totalEntradasDoc!=null&&reconhecido.totalSaidasDoc!=null){
+          const bateEntrada=Math.abs(somaEntrada-reconhecido.totalEntradasDoc)<0.05;
+          const bateSaida=Math.abs(somaSaida-reconhecido.totalSaidasDoc)<0.05;
+          confere=(bateEntrada&&bateSaida)
+            ? ' ✓ bate com o total informado no extrato.'
+            : ` ⚠ o total do extrato diz R$ ${_fmt(reconhecido.totalEntradasDoc)} entrada / R$ ${_fmt(reconhecido.totalSaidasDoc)} saída — confira antes de salvar.`;
+        }
+        status.textContent=`Layout reconhecido (leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}`;
+        _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
+        renderLancctbExtratoPreview();
+        btn.disabled=false; btn.textContent='▶ Extrair';
+        return;
+      }
+      status.textContent='Layout não reconhecido — tentando extrair via IA…';
+
+      origem='pdf_texto';
       const paginasTexto=[];
       for(let p=1;p<=pdf.numPages;p++){
         const page=await pdf.getPage(p);
