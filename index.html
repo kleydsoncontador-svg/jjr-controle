@@ -15569,12 +15569,25 @@ const LANCCTB_ABAS=[
 let _lancctbEidAtual=null;
 let _lancctbAbaAtiva='nfe-entrada';
 const LANCCTB_PAGE_SIZE=50;
-// PostgREST corta em 1000 linhas por padrão quando a query não tem
-// .range()/.limit() — qualquer busca "todas as contas/lançamentos da
-// empresa" (dropdowns, ignorar em lote, filtro por conta) precisa desse
-// range explícito, senão trunca sem erro nenhum em empresas grandes (Fast
-// Lube tem 1213 contas analíticas ativas, por exemplo — > 1000).
-const LANCCTB_SEM_PAGINACAO_MAX=4999;
+// O Supabase corta em 1000 linhas por página NO SERVIDOR (db-max-rows) —
+// pedir um .range() maior no client não adianta, ele clipa mesmo assim.
+// Qualquer busca "todas as contas/lançamentos da empresa" (dropdowns,
+// ignorar em lote, filtro por conta, motor de matching) precisa paginar de
+// verdade com essa função, senão perde dado sem erro nenhum em empresas
+// grandes (Fast Lube já tem 1213 contas analíticas ativas — > 1000).
+async function _lancctbFetchTudo(construirQuery){
+  let todos=[];
+  let offset=0;
+  while(true){
+    const { data, error } = await construirQuery().range(offset,offset+999);
+    if(error) return { data: todos.length?todos:null, error };
+    const linhas=data||[];
+    todos=todos.concat(linhas);
+    if(!linhas.length) break;
+    offset+=linhas.length;
+  }
+  return { data:todos, error:null };
+}
 let _lancctbNfePagina=0;
 
 function renderLancctbLista(){
@@ -15842,7 +15855,7 @@ async function renderLancctbPlanoContas(){
   // confundir com duplicidade errada. Busca só a coluna classificacao de
   // toda a empresa (cabe numa leitura só, plano raramente passa de poucos
   // milhares de linhas) pra contar ocorrências além da página atual.
-  const { data: todasClassif } = await _supaClient.from('plano_contas').select('classificacao').eq('empresa_eid',eid).range(0,LANCCTB_SEM_PAGINACAO_MAX);
+  const { data: todasClassif } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('classificacao').eq('empresa_eid',eid));
   const contagemClassif={};
   (todasClassif||[]).forEach(r=>{ contagemClassif[r.classificacao]=(contagemClassif[r.classificacao]||0)+1; });
 
@@ -15951,10 +15964,9 @@ async function _lancctbAlternarIgnorarConta(id,ignorar){
 async function _lancctbIgnorarBusca(ignorar){
   const t=_lancctbPlanoBusca.trim().replace(/[%_]/g,'');
   if(!t){ toast('Digite algo na busca primeiro','err'); return; }
-  const { data: alvo } = await _supaClient.from('plano_contas').select('id')
+  const { data: alvo } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id')
     .eq('empresa_eid',_lancctbEidAtual)
-    .or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`)
-    .range(0,LANCCTB_SEM_PAGINACAO_MAX);
+    .or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`));
   if(!alvo||!alvo.length){ toast('Nenhuma conta encontrada para essa busca','err'); return; }
   if(!confirm(`${ignorar?'Ignorar':'Reativar'} ${alvo.length} conta(s) que batem com "${_lancctbPlanoBusca}" nas sugestões de Regra?`)) return;
   const { error } = await _supaClient.from('plano_contas').update({ignorada_em_regras:ignorar}).in('id',alvo.map(a=>a.id));
@@ -16178,7 +16190,7 @@ async function abrirLancctbAgenciaModal(id){
   document.getElementById('lancctbAgenciaTitulo').textContent=id?'Editar agência bancária':'Cadastrar agência bancária';
   const sel=document.getElementById('lancctbAgenciaContaContabil');
   sel.innerHTML='<option value="">— Sem vínculo —</option>';
-  const { data: contas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).order('classificacao').range(0,LANCCTB_SEM_PAGINACAO_MAX);
+  const { data: contas } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).order('classificacao'));
   (contas||[]).forEach(c=>{
     const o=document.createElement('option');
     o.value=c.id; o.textContent=`${c.numero_conta} - ${c.classificacao} - ${c.descricao}`;
@@ -16307,7 +16319,7 @@ async function abrirLancctbRegraModal(id){
 
   const selConta=document.getElementById('lancctbRegraContaContabil');
   selConta.innerHTML='<option value="">Selecione…</option>';
-  const { data: contas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).eq('tipo','A').eq('ignorada_em_regras',false).order('classificacao').range(0,LANCCTB_SEM_PAGINACAO_MAX);
+  const { data: contas } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).eq('tipo','A').eq('ignorada_em_regras',false).order('classificacao'));
   (contas||[]).forEach(c=>{
     const o=document.createElement('option');
     o.value=c.id; o.textContent=`${c.numero_conta} - ${c.classificacao} - ${c.descricao}`;
@@ -16489,19 +16501,19 @@ async function _lancctbRodarMatching(eid,contaId,statusCb){
   const log=(msg)=>{ if(statusCb) statusCb(msg); };
   log('Carregando pendências…');
 
-  const { data: lancamentos } = await _supaClient.from('lancamentos_extrato')
+  const { data: lancamentos } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
-    .order('data_pagamento',{ascending:true}).range(0,LANCCTB_SEM_PAGINACAO_MAX);
-  const { data: comprovantes } = await _supaClient.from('comprovantes_bancarios')
+    .order('data_pagamento',{ascending:true}));
+  const { data: comprovantes } = await _lancctbFetchTudo(()=>_supaClient.from('comprovantes_bancarios')
     .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago')
-    .eq('empresa_eid',eid).eq('status_conciliacao','pendente').range(0,LANCCTB_SEM_PAGINACAO_MAX);
-  const { data: parcelas } = await _supaClient.from('notas_fiscais_parcelas')
+    .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+  const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
     .select('id,nf_id,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero)')
-    .eq('empresa_eid',eid).eq('status_conciliacao','pendente').range(0,LANCCTB_SEM_PAGINACAO_MAX);
-  const { data: regras } = await _supaClient.from('regras_matching')
+    .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+  const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,tipo_regra,historico_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
-    .eq('empresa_eid',eid).eq('ativo',true).range(0,LANCCTB_SEM_PAGINACAO_MAX);
+    .eq('empresa_eid',eid).eq('ativo',true));
   const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
     .select('conta_contabil_id,plano_contas(classificacao)')
     .eq('id',contaId).single();
@@ -16717,14 +16729,12 @@ async function renderLancctbRegistroContabil(){
   // aquela conta naquele lado (D ou C).
   async function idsPorConta(termo,tipo){
     const t=termo.trim().replace(/[%_]/g,'');
-    const { data: contasAlvo } = await _supaClient.from('plano_contas').select('id')
-      .eq('empresa_eid',eid).or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`)
-      .range(0,LANCCTB_SEM_PAGINACAO_MAX);
+    const { data: contasAlvo } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id')
+      .eq('empresa_eid',eid).or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`));
     const contaIds=(contasAlvo||[]).map(c=>c.id);
     if(!contaIds.length) return [];
-    const { data: linhasAlvo } = await _supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id')
-      .eq('empresa_eid',eid).eq('estornado',false).eq('tipo',tipo).in('conta_contabil_id',contaIds).not('lancamento_extrato_id','is',null)
-      .range(0,LANCCTB_SEM_PAGINACAO_MAX);
+    const { data: linhasAlvo } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id')
+      .eq('empresa_eid',eid).eq('estornado',false).eq('tipo',tipo).in('conta_contabil_id',contaIds).not('lancamento_extrato_id','is',null));
     return [...new Set((linhasAlvo||[]).map(l=>l.lancamento_extrato_id))];
   }
   let idsPorContaD=null, idsPorContaC=null;
@@ -17277,14 +17287,13 @@ async function renderLancctbExtrato(){
   // anterior" editável (agencias_bancarias.saldo_inicial). 558
   // lançamentos/mês é tranquilo pro navegador; se algum cliente de volume
   // muito maior virar gargalo, dá pra revisar depois.
-  const { data: todosLancs, error } = await _supaClient
+  const { data: todosLancs, error } = await _lancctbFetchTudo(()=>_supaClient
     .from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao')
     .eq('empresa_eid',eid)
     .eq('conta_bancaria_id',_lancctbExtratoContaSel)
     .order('data_pagamento',{ascending:true})
-    .order('id',{ascending:true})
-    .range(0,LANCCTB_SEM_PAGINACAO_MAX);
+    .order('id',{ascending:true}));
 
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar extrato: ${esc(error.message)}</div>`; return; }
   const count=(todosLancs||[]).length;
