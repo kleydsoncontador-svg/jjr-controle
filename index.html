@@ -16732,7 +16732,13 @@ function _lancctbSubsetSum(valoresCentavos,alvoCentavos,toleranciaCentavos){
 }
 function _lancctbPopcount(m){ let c=0; while(m){c+=m&1;m>>=1;} return c; }
 
-async function _lancctbRodarMatching(eid,contaId,statusCb){
+// modo: 'completo' (padrão, usado pelo Extrato bancário — comprovante→NF→
+// regra, tudo em sequência) | 'comprovantes' (só processa lançamentos onde
+// um comprovante ancora o CNPJ; sem comprovante, nem tenta) | 'notas_fiscais'
+// (só tenta NF 1:1 direto, sem usar comprovante como âncora nem cair pra
+// Regra) — os 2 últimos são os botões "Processar Comprovantes"/"Processar
+// Notas Fiscais" do Registro Contábil, pra rodar cada fonte isoladamente.
+async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
   const log=(msg)=>{ if(statusCb) statusCb(msg); };
   log('Carregando pendências…');
 
@@ -16810,14 +16816,20 @@ async function _lancctbRodarMatching(eid,contaId,statusCb){
     const ehSaida=l.valor_saida>0;
     let resolvido=false;
 
-    // Passo 1: comprovante por valor+data
+    // Passo 1: comprovante por valor+data (pulado no modo 'notas_fiscais' —
+    // não deve usar comprovante como âncora nesse modo)
     let cnpjAncora=null,comprovanteMatch=null;
-    for(const c of comprovantes){
-      if(comprovantesUsados.has(c.id)) continue;
-      if(Math.abs(c.valor_pago-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR) continue;
-      if(_lancctbDiffDias(c.data_pagamento,l.data_pagamento)>LANCCTB_MATCH_TOLERANCIA_DIAS) continue;
-      comprovanteMatch=c; cnpjAncora=c.cnpj_cpf; break;
+    if(modo!=='notas_fiscais'){
+      for(const c of comprovantes){
+        if(comprovantesUsados.has(c.id)) continue;
+        if(Math.abs(c.valor_pago-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR) continue;
+        if(_lancctbDiffDias(c.data_pagamento,l.data_pagamento)>LANCCTB_MATCH_TOLERANCIA_DIAS) continue;
+        comprovanteMatch=c; cnpjAncora=c.cnpj_cpf; break;
+      }
     }
+    // Modo 'comprovantes': só segue se achou âncora — sem comprovante, nem
+    // tenta NF/Regra nessa passada (fica pendente pra próxima).
+    if(modo==='comprovantes'&&!cnpjAncora){ aindaPendente++; continue; }
 
     // Passo 2: NF — 1:1 direto, ou subset-sum se tiver CNPJ âncora. Bateu →
     // gera o lançamento contábil na hora (conta fixa 10000/10001 ou Regra
@@ -16875,8 +16887,9 @@ async function _lancctbRodarMatching(eid,contaId,statusCb){
       }
     }
 
-    // Passo 3: Regra (só entra se passo 2 não resolveu — item sem NF amarrada)
-    if(!resolvido){
+    // Passo 3: Regra (só entra se passo 2 não resolveu, e só no modo 'completo'
+    // — 'comprovantes'/'notas_fiscais' isolam a fonte, não caem pra Regra)
+    if(!resolvido&&modo==='completo'){
       const bancoTipo=ehSaida?'C':'D';
       const regra=regras.find(r=>{
         if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
@@ -16924,6 +16937,26 @@ async function _lancctbReprocessarPendencias(){
   if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
   renderLancctbExtrato();
 }
+// Botões "Processar Comprovantes"/"Processar Notas Fiscais" do Registro
+// Contábil — mesmo motor, mas isolando cada fonte (ver comentário do modo
+// em _lancctbRodarMatching).
+async function _lancctbProcessarFonteRegistro(modo){
+  if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  const btn=document.getElementById(modo==='comprovantes'?'lancctbProcessarComprovBtn':'lancctbProcessarNfBtn');
+  const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
+  if(btn) btn.disabled=true;
+  const resultado=await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,(msg)=>{ if(statusEl) statusEl.textContent=msg; },modo);
+  if(btn) btn.disabled=false;
+  if(statusEl) statusEl.textContent='';
+  if(resultado.erro){ toast(resultado.erro,'err'); return; }
+  const partes=[];
+  if(resultado.resolvNF) partes.push(`${resultado.resolvNF} por NF`);
+  if(resultado.resolvSubsetSum) partes.push(`${resultado.resolvSubsetSum} por soma de NFs`);
+  const resumo=partes.length?partes.join(', '):'nenhum';
+  toast(`${modo==='comprovantes'?'Comprovantes':'Notas Fiscais'}: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
+  if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
+  renderLancctbRegistroContabil();
+}
 
 // ─── Registro Contábil: todos os lançamentos do extrato + classificação ───
 // Ao contrário do Mister (1 linha por D e outra por C empilhadas), aqui cada
@@ -16935,8 +16968,7 @@ let _lancctbRegistroPagina=0;
 let _lancctbRegistroBusca='';
 let _lancctbRegistroContaDBusca='';
 let _lancctbRegistroContaCBusca='';
-let _lancctbRegistroValorDe='';
-let _lancctbRegistroValorAte='';
+let _lancctbRegistroValor='';
 let _lancctbRegistroDataDe='';
 let _lancctbRegistroDataAte='';
 let _lancctbRegistroStatus='';
@@ -16993,9 +17025,8 @@ async function renderLancctbRegistroContabil(){
   if(_lancctbRegistroStatus) q=q.eq('status_conciliacao',_lancctbRegistroStatus);
   if(_lancctbRegistroDataDe) q=q.gte('data_pagamento',_lancctbRegistroDataDe);
   if(_lancctbRegistroDataAte) q=q.lte('data_pagamento',_lancctbRegistroDataAte);
-  if(_lancctbRegistroValorDe||_lancctbRegistroValorAte){
-    const de=_lancctbRegistroValorDe?+_lancctbRegistroValorDe:0;
-    const ate=_lancctbRegistroValorAte?+_lancctbRegistroValorAte:999999999;
+  if(_lancctbRegistroValor){
+    const v=+_lancctbRegistroValor, de=v-0.01, ate=v+0.01;
     q=q.or(`and(valor_saida.gte.${de},valor_saida.lte.${ate}),and(valor_entrada.gte.${de},valor_entrada.lte.${ate})`);
   }
   if(idsInterseccao) q=q.in('id',idsInterseccao);
@@ -17015,6 +17046,23 @@ async function renderLancctbRegistroContabil(){
     (ctbLinhas||[]).forEach(l=>{ (ctbPorExtrato[l.lancamento_extrato_id]=ctbPorExtrato[l.lancamento_extrato_id]||[]).push(l); });
   }
   const linhas=(extratoRows||[]).map(r=>({ extrato:r, ctb:ctbPorExtrato[r.id]||[] }));
+
+  // Pra pendente sem classificação ainda, sugere o Cliente/Fornecedor de um
+  // comprovante que bate por valor+data — só visual (não altera nada),
+  // ajuda a enxergar "quem é" antes de rodar o matching de verdade.
+  const pendentes=linhas.filter(l=>!l.ctb.length);
+  if(pendentes.length){
+    const { data: comps } = await _lancctbFetchTudo(()=>_supaClient.from('comprovantes_bancarios')
+      .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
+      .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+    pendentes.forEach(item=>{
+      const r=item.extrato;
+      const valor=r.valor_saida||r.valor_entrada;
+      const match=(comps||[]).find(c=>Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+      if(match) item.comprovanteSugerido=match;
+    });
+  }
+
   _lancctbUltimoRegistro=linhas;
   el.innerHTML=_lancctbRegistroHtml({agencias,contaAtual,linhas,count});
 }
@@ -17082,7 +17130,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;text-align:right">R$ ${_fmt(valor)}</td>
     <td style="padding:7px 10px;${ellip}" title="${esc(r.historico_bancario||'')}">${esc(r.historico_bancario||'')}</td>
     <td style="padding:7px 10px;color:var(--slate)">—</td>
-    <td style="padding:7px 10px">—</td>
+    <td style="padding:7px 10px;${ellip}" title="${item.comprovanteSugerido?'Sugestão via comprovante (ainda não conciliado): '+esc(item.comprovanteSugerido.cliente_fornecedor_nome||''):''}">${item.comprovanteSugerido?`<span style="font-style:italic;color:var(--slate)">${esc(item.comprovanteSugerido.cliente_fornecedor_nome||'')} ?</span>`:'—'}</td>
     <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
   </tr>`;
 }
@@ -17103,14 +17151,18 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count}){
   let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
     <select class="si" onchange="_lancctbExtratoContaSel=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesConta}</select>
     <select class="si" onchange="_lancctbRegistroStatus=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesStatus}</select>
-    <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
+    <div style="display:flex;align-items:center;gap:6px">
+      <span id="lancctbRegistroProcessarStatus" style="font-size:11.5px;color:var(--slate)"></span>
+      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes')" title="Roda o matching só pra pendências que batem com um Comprovante">🔄 Processar Comprovantes</button>
+      <button class="btn bo bsm" id="lancctbProcessarNfBtn" onclick="_lancctbProcessarFonteRegistro('notas_fiscais')" title="Roda o matching só pra pendências que batem direto com uma Nota Fiscal">🔄 Processar Notas Fiscais</button>
+      <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
+    </div>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     <input class="si" placeholder="🔍 Histórico do extrato..." value="${esc(_lancctbRegistroBusca)}" style="flex:1;min-width:180px" oninput="_lancctbRegistroBuscaDebounced(this.value)">
     <input class="si" placeholder="Conta débito..." value="${esc(_lancctbRegistroContaDBusca)}" style="width:150px" oninput="_lancctbRegistroContaDebounced('D',this.value)">
     <input class="si" placeholder="Conta crédito..." value="${esc(_lancctbRegistroContaCBusca)}" style="width:150px" oninput="_lancctbRegistroContaDebounced('C',this.value)">
-    <input class="si" type="number" placeholder="Valor de" value="${esc(_lancctbRegistroValorDe)}" style="width:110px" onchange="_lancctbRegistroValorDe=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">
-    <input class="si" type="number" placeholder="Valor até" value="${esc(_lancctbRegistroValorAte)}" style="width:110px" onchange="_lancctbRegistroValorAte=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">
+    <input class="si" type="number" step="0.01" placeholder="Valor" value="${esc(_lancctbRegistroValor)}" style="width:110px" onchange="_lancctbRegistroValor=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">
     <input class="si" type="date" value="${_lancctbRegistroDataDe}" onchange="_lancctbRegistroDataDe=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data inicial">
     <input class="si" type="date" value="${_lancctbRegistroDataAte}" onchange="_lancctbRegistroDataAte=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data final">
   </div>
