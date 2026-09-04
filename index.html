@@ -15637,6 +15637,7 @@ function renderLancctbConteudo(){
   if(_lancctbAbaAtiva==='comprovantes'){ renderLancctbComprovantes(); return; }
   if(_lancctbAbaAtiva==='extrato'){ renderLancctbExtrato(); return; }
   if(_lancctbAbaAtiva==='regras'){ renderLancctbRegras(); return; }
+  if(_lancctbAbaAtiva==='registro'){ renderLancctbRegistroContabil(); return; }
   el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:60px 20px">
     <div style="font-size:2rem;margin-bottom:8px">🚧</div>
     <div>Esta aba entra numa próxima fase do módulo.</div>
@@ -16558,6 +16559,133 @@ async function _lancctbReprocessarPendencias(){
   toast(`Matching concluído: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
   if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
   renderLancctbExtrato();
+}
+
+// ─── Registro Contábil: resultado final do matching, partida dobrada ─────
+let _lancctbRegistroPagina=0;
+let _lancctbRegistroBusca='';
+let _lancctbRegistroDataDe='';
+let _lancctbRegistroDataAte='';
+let _lancctbRegistroOrigem='';
+let _lancctbUltimoRegistro=[];
+
+async function renderLancctbRegistroContabil(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE-1;
+
+  let q=_supaClient.from('lancamentos_contabeis')
+    .select('id,lote_id,data,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,estornado,plano_contas(numero_conta,descricao)',{count:'exact'})
+    .eq('empresa_eid',eid).eq('estornado',false);
+  if(_lancctbRegistroDataDe) q=q.gte('data',_lancctbRegistroDataDe);
+  if(_lancctbRegistroDataAte) q=q.lte('data',_lancctbRegistroDataAte);
+  if(_lancctbRegistroOrigem) q=q.eq('origem_match',_lancctbRegistroOrigem);
+  if(_lancctbRegistroBusca.trim()){
+    const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,'');
+    q=q.or(`historico.ilike.%${t}%,cliente_fornecedor_nome.ilike.%${t}%,classificacao.ilike.%${t}%`);
+  }
+  const { data: linhas, error, count } = await q.order('data',{ascending:false}).order('lote_id',{ascending:false}).range(from,to);
+
+  if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar registro contábil: ${esc(error.message)}</div>`; return; }
+  _lancctbUltimoRegistro=linhas||[];
+
+  const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
+  const opcoesOrigem=[
+    {v:'',t:'Todas as origens'},
+    {v:'regra',t:'Regra'},
+    {v:'automatico_triangular',t:'Automático (Extrato×Comprovante×NF)'},
+    {v:'manual',t:'Manual'},
+  ].map(o=>`<option value="${o.v}" ${_lancctbRegistroOrigem===o.v?'selected':''}>${o.t}</option>`).join('');
+
+  let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
+    <input class="si" placeholder="🔍 Pesquisar histórico, cliente/fornecedor ou classificação..." value="${esc(_lancctbRegistroBusca)}" style="flex:1;min-width:220px" oninput="_lancctbRegistroBuscaDebounced(this.value)">
+    <input class="si" type="date" value="${_lancctbRegistroDataDe}" onchange="_lancctbRegistroDataDe=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data inicial">
+    <input class="si" type="date" value="${_lancctbRegistroDataAte}" onchange="_lancctbRegistroDataAte=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data final">
+    <select class="si" onchange="_lancctbRegistroOrigem=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesOrigem}</select>
+    <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
+  </div>
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <thead><tr style="background:var(--ink2);color:#fff">
+      <th style="padding:8px 10px;text-align:left">Data</th>
+      <th style="padding:8px 10px;text-align:left">Conta</th>
+      <th style="padding:8px 10px;text-align:left">Classificação</th>
+      <th style="padding:8px 10px;text-align:left">Descrição da conta</th>
+      <th style="padding:8px 10px;text-align:center">D/C</th>
+      <th style="padding:8px 10px;text-align:right">Valor</th>
+      <th style="padding:8px 10px;text-align:left">Histórico</th>
+      <th style="padding:8px 10px;text-align:left">Cliente/Fornecedor</th>
+      <th style="padding:8px 10px;text-align:center">Origem</th>
+    </tr></thead>
+    <tbody>`;
+  if(!linhas||!linhas.length){
+    html+=`<tr><td colspan="9" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento contábil ainda — rode "Reprocessar pendências" no Extrato bancário pra gerar os primeiros.</td></tr>`;
+  } else {
+    let somaD=0,somaC=0;
+    linhas.forEach(l=>{ if(l.tipo==='D') somaD+=l.valor; else somaC+=l.valor; });
+    const bate=Math.abs(somaD-somaC)<0.01;
+    html+=`<tr style="background:var(--bg);font-weight:700">
+      <td colspan="4" style="padding:7px 10px">Soma da página ${bate?'✓ fechada':'⚠ não fecha'}</td>
+      <td style="padding:7px 10px;text-align:center">D / C</td>
+      <td style="padding:7px 10px;text-align:right">R$ ${_fmt(somaD)} / R$ ${_fmt(somaC)}</td>
+      <td colspan="3"></td>
+    </tr>`;
+    let ultimoLote=null;
+    linhas.forEach(l=>{
+      const novoBloco=l.lote_id!==ultimoLote;
+      ultimoLote=l.lote_id;
+      const origemLabel={regra:'Regra',automatico_triangular:'Automático',manual:'Manual'}[l.origem_match]||l.origem_match;
+      html+=`<tr style="border-bottom:1px solid var(--border);${novoBloco?'border-top:2px solid var(--border)':''}">
+        <td style="padding:7px 10px">${l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(l.plano_contas?.numero_conta||'')}</td>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(l.classificacao||'')}</td>
+        <td style="padding:7px 10px">${esc(l.plano_contas?.descricao||'')}</td>
+        <td style="padding:7px 10px;text-align:center;font-weight:700;color:${l.tipo==='D'?'#dc2626':'var(--teal)'}">${l.tipo}</td>
+        <td style="padding:7px 10px;text-align:right">R$ ${_fmt(l.valor)}</td>
+        <td style="padding:7px 10px">${esc(l.historico||'')}</td>
+        <td style="padding:7px 10px">${esc(l.cliente_fornecedor_nome||'')}</td>
+        <td style="padding:7px 10px;text-align:center;font-size:11px;color:var(--slate)">${esc(origemLabel)}</td>
+      </tr>`;
+    });
+  }
+  html+=`</tbody></table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12.5px;color:var(--slate)">
+      <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" ${_lancctbRegistroPagina===0?'disabled':''} onclick="_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">« Primeira</button>
+        <button class="btn bo bsm" ${_lancctbRegistroPagina===0?'disabled':''} onclick="_lancctbRegistroPagina--;renderLancctbRegistroContabil()">‹ Anterior</button>
+        <span style="padding:6px 10px">Página ${_lancctbRegistroPagina+1} de ${totalPaginas}</span>
+        <button class="btn bo bsm" ${_lancctbRegistroPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbRegistroPagina++;renderLancctbRegistroContabil()">Próxima ›</button>
+        <button class="btn bo bsm" ${_lancctbRegistroPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbRegistroPagina=${totalPaginas}-1;renderLancctbRegistroContabil()">Última »</button>
+      </div>
+    </div>`;
+  el.innerHTML=html;
+}
+let _lancctbRegistroBuscaTimer=null;
+function _lancctbRegistroBuscaDebounced(v){
+  _lancctbRegistroBusca=v;
+  _lancctbRegistroPagina=0;
+  clearTimeout(_lancctbRegistroBuscaTimer);
+  _lancctbRegistroBuscaTimer=setTimeout(renderLancctbRegistroContabil,350);
+}
+function exportarLancctbRegistroExcel(){
+  if(!_lancctbUltimoRegistro.length){ toast('Nada para exportar nesta página.','err'); return; }
+  const header=['Data','Conta','Classificação','Descrição da conta','D/C','Valor','Histórico','Cliente/Fornecedor','Origem'];
+  const origemLabel={regra:'Regra',automatico_triangular:'Automático',manual:'Manual'};
+  const rows=_lancctbUltimoRegistro.map(l=>[
+    l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    l.plano_contas?.numero_conta||'', l.classificacao||'', l.plano_contas?.descricao||'',
+    l.tipo, l.valor||0, l.historico||'', l.cliente_fornecedor_nome||'', origemLabel[l.origem_match]||l.origem_match||''
+  ]);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Registro Contábil');
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`RegistroContabil_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
 }
 
 // ─── Comprovantes bancários (upload PDF → IA → preview → confirmar) ───────
