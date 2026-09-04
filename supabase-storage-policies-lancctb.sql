@@ -37,3 +37,19 @@ DROP POLICY IF EXISTS extratos_delete_auth ON storage.objects;
 CREATE POLICY extratos_delete_auth ON storage.objects
   FOR DELETE TO authenticated
   USING (bucket_id = 'extratos-originais');
+
+-- ─── bucket "nf-xmls" (XML original de NF-e/NFS-e, Fase 6) ────────────────
+DROP POLICY IF EXISTS nfxmls_insert_auth ON storage.objects;
+CREATE POLICY nfxmls_insert_auth ON storage.objects
+  FOR INSERT TO authenticated
+  WITH CHECK (bucket_id = 'nf-xmls');
+
+DROP POLICY IF EXISTS nfxmls_select_auth ON storage.objects;
+CREATE POLICY nfxmls_select_auth ON storage.objects
+  FOR SELECT TO authenticated
+  USING (bucket_id = 'nf-xmls');
+
+DROP POLICY IF EXISTS nfxmls_delete_auth ON storage.objects;
+CREATE POLICY nfxmls_delete_auth ON storage.objects
+  FOR DELETE TO authenticated
+  USING (bucket_id = 'nf-xmls');

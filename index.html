@@ -2162,6 +2162,30 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: importação de XMLs de NF-e/NFS-e de uma pasta local (Fase 6,
+     alternativa à API da SIEG). -->
+<div class="mb" id="mLancctbImportXml" style="display:none">
+  <div class="modal" style="max-width:440px">
+    <div class="mt">
+      <h3>Importar XMLs da pasta local</h3>
+      <button onclick="closeModal('mLancctbImportXml')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <div id="lancctbImportXmlContagem" style="font-size:13px;margin-bottom:14px"></div>
+      <div class="fg">
+        <div class="fl">Importar só notas emitidas a partir de (opcional)</div>
+        <input class="fi" id="lancctbImportXmlDataCorte" type="date">
+      </div>
+      <div style="font-size:11.5px;color:var(--slate);margin-top:4px">Deixe em branco pra importar tudo que estiver na pasta. O que já existir (mesma chave) é só atualizado, nunca duplica.</div>
+      <div id="lancctbImportXmlStatus" style="font-size:12px;color:var(--slate);margin-top:10px"></div>
+      <div class="ma">
+        <button class="btn bo" onclick="closeModal('mLancctbImportXml')">Cancelar</button>
+        <button class="btn bp" id="lancctbImportXmlConfirmarBtn" onclick="confirmarLancctbImportXmlLocal()">📥 Importar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-conv-entradas">
   <div class="crumb-voltar"><button class="btn bo bsm" onclick="goPage('conversor-hub')">← Voltar ao Conversor de Arquivos</button></div>
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
@@ -15728,15 +15752,156 @@ async function _lancctbFilaSiegPainelHtml(eid){
   }).join('');
   return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;background:var(--bg)">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
-      <strong style="font-size:12.5px">🔌 Captura automática (SIEG)</strong>
-      <div style="display:flex;gap:6px">
+      <strong style="font-size:12.5px">📥 Importar XMLs de pasta local</strong>
+      <button class="btn bp bsm" onclick="document.getElementById('lancctbImportXmlInput').click()">📥 Selecionar pasta…</button>
+    </div>
+    <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Lê os XMLs já baixados pelo app de captura da SIEG na sua máquina — reconhece NF-e/NFS-e e Entrada/Saída (ou Serviço Tomado/Prestado) pela própria estrutura de pastas, sem precisar de API.</div>
+    <input type="file" id="lancctbImportXmlInput" webkitdirectory directory multiple style="display:none" onchange="processarLancctbImportXmlLocal(this.files)">
+    <details style="margin-top:4px">
+      <summary style="cursor:pointer;font-size:11.5px;color:var(--slate)">🔌 Captura automática via API da SIEG (avançado, autenticação ainda não confirmada)</summary>
+      <div style="display:flex;justify-content:flex-end;gap:6px;margin:8px 0 6px">
         <button class="btn bo bsm" onclick="sincronizarLancctbFilaSieg()">🔄 Sincronizar CNPJs</button>
         <button class="btn bo bsm" onclick="_lancctbTestarSieg()">▶ Rodar captura agora</button>
       </div>
-    </div>
-    ${linhas?`<table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead><tr style="color:var(--slate);text-align:left"><th style="padding:4px 8px">CNPJ</th><th style="padding:4px 8px">Tipo</th><th style="padding:4px 8px">Status</th><th style="padding:4px 8px">Janela</th><th style="padding:4px 8px">Último erro</th></tr></thead><tbody>${linhas}</tbody></table>`
-    :`<div style="font-size:12px;color:var(--slate)">Nenhum CNPJ na fila ainda — clique em "Sincronizar CNPJs" pra registrar a matriz e as filiais.</div>`}
+      ${linhas?`<table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead><tr style="color:var(--slate);text-align:left"><th style="padding:4px 8px">CNPJ</th><th style="padding:4px 8px">Tipo</th><th style="padding:4px 8px">Status</th><th style="padding:4px 8px">Janela</th><th style="padding:4px 8px">Último erro</th></tr></thead><tbody>${linhas}</tbody></table>`
+      :`<div style="font-size:12px;color:var(--slate)">Nenhum CNPJ na fila ainda.</div>`}
+    </details>
   </div>`;
+}
+// ─── Importação de XML local (NF-e/NFS-e) ─────────────────────────────────
+// Alternativa ao download via API da SIEG (mecanismo de autenticação da API
+// nova/engine não documentado publicamente e não respondeu a nenhuma
+// combinação testada — ver comentário em supabase/functions/
+// sieg-capturar-lote/index.ts). O usuário já tem um app próprio que baixa
+// os XMLs pra uma pasta local, estrutura confirmada com dados reais da
+// Fast Lube: <CNPJ>/<papel>/<Ano>/<Mês>/<chave>.xml — papel é
+// "Entrada"/"Saida" pra NF-e, "Servico Tomado"/"Servico Prestado" pra
+// NFS-e. A direção do documento vem do NOME DA PASTA (mais confiável que
+// comparar CNPJ emitente/destinatário — cobre casos como devolução,
+// transferência entre filiais etc.), não precisa saber os CNPJs da
+// empresa. Extração dos campos via regex (sem parser DOM), testada contra
+// XML real de NF-e (padrão nacional, nfeProc) e NFS-e (padrão nacional
+// novo, xmlns sped.fazenda.gov.br/nfse — usa <toma> ou <interm> pro
+// tomador conforme o tipo de serviço).
+function _lancctbExtrairTag(xml,tag){
+  const m=xml.match(new RegExp(`<${tag}[^>]*>([^<]*)<\\/${tag}>`,'i'));
+  return m?m[1].trim():null;
+}
+function _lancctbExtrairBloco(xml,tag){
+  const m=xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`,'i'));
+  return m?m[1]:null;
+}
+function _lancctbDirecaoDoCaminho(caminho){
+  if(/\/Entrada\//i.test(caminho)||/\/Servico Tomado\//i.test(caminho)||/\/Serviço Tomado\//i.test(caminho)) return 'compra';
+  if(/\/Saida\//i.test(caminho)||/\/Servico Prestado\//i.test(caminho)||/\/Serviço Prestado\//i.test(caminho)) return 'venda';
+  return null;
+}
+function _lancctbParsearNFeXml(xml){
+  const chaveMatch=xml.match(/Id="NFe(\d{44})"/i)||xml.match(/<chNFe>(\d{44})<\/chNFe>/i);
+  const numero=_lancctbExtrairTag(xml,'nNF');
+  if(!numero) return null;
+  const emitBloco=_lancctbExtrairBloco(xml,'emit')||'';
+  const destBloco=_lancctbExtrairBloco(xml,'dest')||'';
+  const icmsTotBloco=_lancctbExtrairBloco(xml,'ICMSTot')||xml;
+  const dataEmissaoBruta=_lancctbExtrairTag(xml,'dhEmi')||_lancctbExtrairTag(xml,'dEmi')||'';
+  const parcelas=[];
+  const dupRe=/<dup>([\s\S]*?)<\/dup>/gi;
+  let m,n=1;
+  while((m=dupRe.exec(xml))!==null){
+    const bloco=m[1];
+    const venc=_lancctbExtrairTag(bloco,'dVenc');
+    const val=_lancctbExtrairTag(bloco,'vDup');
+    if(venc&&val) parcelas.push({numero_parcela:n++,data_vencimento:venc.slice(0,10),valor_parcela:parseFloat(val)});
+  }
+  const valorTotal=parseFloat(_lancctbExtrairTag(icmsTotBloco,'vNF')||'0');
+  if(!parcelas.length) parcelas.push({numero_parcela:1,data_vencimento:dataEmissaoBruta.slice(0,10),valor_parcela:valorTotal});
+  return {
+    chave_acesso: chaveMatch?chaveMatch[1]:null,
+    numero, serie:_lancctbExtrairTag(xml,'serie'), modelo:_lancctbExtrairTag(xml,'mod'),
+    cnpj_emitente:(_lancctbExtrairTag(emitBloco,'CNPJ')||'').replace(/\D/g,''),
+    nome_emitente:_lancctbExtrairTag(emitBloco,'xNome'),
+    cnpj_destinatario:(_lancctbExtrairTag(destBloco,'CNPJ')||_lancctbExtrairTag(destBloco,'CPF')||'').replace(/\D/g,'')||null,
+    nome_destinatario:_lancctbExtrairTag(destBloco,'xNome'),
+    data_emissao:dataEmissaoBruta.slice(0,10),
+    valor_total:valorTotal, iss_valor:null, parcelas,
+  };
+}
+function _lancctbParsearNFSeXml(xml){
+  const idMatch=xml.match(/<infNFSe Id="([^"]+)"/i);
+  const numero=_lancctbExtrairTag(xml,'nNFSe');
+  if(!numero) return null;
+  const emitBloco=_lancctbExtrairBloco(xml,'emit')||'';
+  const tomaBloco=_lancctbExtrairBloco(xml,'toma')||_lancctbExtrairBloco(xml,'interm')||'';
+  const dataEmissaoBruta=_lancctbExtrairTag(xml,'dhEmi')||_lancctbExtrairTag(xml,'dCompet')||'';
+  const valorTotal=parseFloat(_lancctbExtrairTag(xml,'vServ')||_lancctbExtrairTag(xml,'vLiq')||'0');
+  const issValor=_lancctbExtrairTag(xml,'vISSQN');
+  return {
+    chave_acesso: idMatch?idMatch[1]:null,
+    numero, serie:null, modelo:'NFSe',
+    cnpj_emitente:(_lancctbExtrairTag(emitBloco,'CNPJ')||'').replace(/\D/g,''),
+    nome_emitente:_lancctbExtrairTag(emitBloco,'xNome'),
+    cnpj_destinatario:(_lancctbExtrairTag(tomaBloco,'CNPJ')||'').replace(/\D/g,'')||null,
+    nome_destinatario:_lancctbExtrairTag(tomaBloco,'xNome'),
+    data_emissao:dataEmissaoBruta.slice(0,10),
+    valor_total:valorTotal, iss_valor:issValor?parseFloat(issValor):null,
+    parcelas:[{numero_parcela:1,data_vencimento:dataEmissaoBruta.slice(0,10),valor_parcela:valorTotal}],
+  };
+}
+let _lancctbImportXmlArquivos=[];
+function processarLancctbImportXmlLocal(fileList){
+  const arquivos=Array.from(fileList).filter(f=>f.name.toLowerCase().endsWith('.xml'));
+  if(!arquivos.length){ toast('Nenhum .xml encontrado na pasta selecionada.','err'); return; }
+  _lancctbImportXmlArquivos=arquivos;
+  document.getElementById('lancctbImportXmlContagem').textContent=`${arquivos.length} arquivo(s) .xml encontrado(s) na pasta selecionada.`;
+  document.getElementById('lancctbImportXmlDataCorte').value='';
+  document.getElementById('lancctbImportXmlStatus').textContent='';
+  openModal('mLancctbImportXml');
+}
+async function confirmarLancctbImportXmlLocal(){
+  const dataCorte=document.getElementById('lancctbImportXmlDataCorte').value;
+  const arquivos=_lancctbImportXmlArquivos;
+  const eid=_lancctbEidAtual;
+  const statusEl=document.getElementById('lancctbImportXmlStatus');
+  const btn=document.getElementById('lancctbImportXmlConfirmarBtn');
+  btn.disabled=true;
+  let importadas=0, ignoradasData=0, erros=0, naoReconhecidos=0;
+  for(let i=0;i<arquivos.length;i++){
+    const f=arquivos[i];
+    statusEl.textContent=`Processando ${i+1}/${arquivos.length}… (${importadas} salvas)`;
+    try{
+      const xml=await f.text();
+      const caminho=f.webkitRelativePath||f.name;
+      const direcao=_lancctbDirecaoDoCaminho(caminho);
+      const ehNFSe=/xmlns="http:\/\/www\.sped\.fazenda\.gov\.br\/nfse"|<NFSe[ >]/.test(xml);
+      const nf=ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml);
+      if(!nf||!nf.cnpj_emitente||!direcao){ naoReconhecidos++; continue; }
+      if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte){ ignoradasData++; continue; }
+
+      const storagePath=`${eid}/${ehNFSe?'nfse':'nfe'}/${nf.chave_acesso||`${nf.cnpj_emitente}-${nf.numero}-${i}`}.xml`;
+      await _supaClient.storage.from('nf-xmls').upload(storagePath,f,{upsert:true});
+
+      const { data: nfInserida, error: nfErro } = await _supaClient.from('notas_fiscais').upsert({
+        empresa_eid:eid, tipo:ehNFSe?'nfse':'nfe', chave_acesso:nf.chave_acesso, numero:nf.numero,
+        serie:nf.serie, modelo:nf.modelo, cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
+        cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao,
+        data_emissao:nf.data_emissao||dataCorte||hoje_(), valor_total:nf.valor_total, iss_valor:nf.iss_valor,
+        xml_storage_path:storagePath, status_captura:'xml_completo',
+      },{onConflict: nf.chave_acesso?'empresa_eid,tipo,chave_acesso':'empresa_eid,tipo,cnpj_emitente,numero,serie'}).select('id').single();
+      if(nfErro||!nfInserida){ erros++; continue; }
+
+      for(const p of nf.parcelas){
+        await _supaClient.from('notas_fiscais_parcelas').upsert({
+          nf_id:nfInserida.id, empresa_eid:eid, numero_parcela:p.numero_parcela,
+          data_vencimento:p.data_vencimento||nf.data_emissao, valor_parcela:p.valor_parcela,
+        },{onConflict:'nf_id,numero_parcela'});
+      }
+      importadas++;
+    } catch(e){ erros++; }
+  }
+  btn.disabled=false;
+  closeModal('mLancctbImportXml');
+  toast(`Importação concluída: ${importadas} nota(s) salva(s), ${ignoradasData} ignorada(s) por data, ${naoReconhecidos} não reconhecida(s), ${erros} erro(s).`, erros?'err':'ok');
+  renderLancctbConteudo();
 }
 async function renderLancctbNotas(aba){
   const el=document.getElementById('lancctbConteudoAba');
