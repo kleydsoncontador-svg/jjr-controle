@@ -2187,6 +2187,29 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: Importar mês automático (File System Access API) — matriz +
+     filiais, todas as pastas de uma vez, sem seletor de arquivo. -->
+<div class="mb" id="mLancctbImportMes" style="display:none">
+  <div class="modal" style="max-width:400px">
+    <div class="mt">
+      <h3>Importar mês</h3>
+      <button onclick="closeModal('mLancctbImportMes')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <div class="fg">
+        <div class="fl">Mês/Ano</div>
+        <input class="fi" id="lancctbImportMesInput" type="month">
+      </div>
+      <div style="font-size:11.5px;color:var(--slate);margin-top:4px">Busca sozinho em NF-e e NFS-e, Entrada/Saída (ou Tomado/Prestado), na matriz e em todas as filiais.</div>
+      <div id="lancctbImportMesStatus" style="font-size:12px;color:var(--slate);margin-top:10px"></div>
+      <div class="ma">
+        <button class="btn bo" onclick="closeModal('mLancctbImportMes')">Cancelar</button>
+        <button class="btn bp" id="lancctbImportMesConfirmarBtn" onclick="confirmarLancctbImportarMes()">📥 Importar mês</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-conv-entradas">
   <div class="crumb-voltar"><button class="btn bo bsm" onclick="goPage('conversor-hub')">← Voltar ao Conversor de Arquivos</button></div>
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
@@ -15863,12 +15886,18 @@ async function _lancctbFilaSiegPainelHtml(eid){
       <td style="padding:4px 8px;color:var(--red);font-size:11px">${esc(f.ultimo_erro||'')}</td>
     </tr>`;
   }).join('');
+  const temAcessoPasta=await _lancctbTemAcessoPastaSieg();
+  const botaoImportar=temAcessoPasta
+    ? `<button class="btn bp bsm" onclick="abrirLancctbImportarMesModal()">📥 Importar mês</button>
+       <button class="btn bo bsm" onclick="document.getElementById('lancctbImportXmlInput').click()" title="Escolher uma pasta manualmente, se preferir">Selecionar pasta…</button>`
+    : `<button class="btn bp bsm" onclick="_lancctbConcederAcessoPastaSieg()" title="Concede acesso 1x — depois só pergunta o mês, sem abrir seletor de novo">🔑 Conceder acesso à pasta SIEG</button>
+       <button class="btn bo bsm" onclick="document.getElementById('lancctbImportXmlInput').click()">Selecionar pasta…</button>`;
   return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;background:var(--bg)">
     <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
       <strong style="font-size:12.5px">📥 Importar XMLs de pasta local</strong>
-      <button class="btn bp bsm" onclick="document.getElementById('lancctbImportXmlInput').click()">📥 Selecionar pasta…</button>
+      <div style="display:flex;gap:6px">${botaoImportar}</div>
     </div>
-    <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Lê os XMLs já baixados pelo app de captura da SIEG na sua máquina — reconhece NF-e/NFS-e e Entrada/Saída (ou Serviço Tomado/Prestado) pela própria estrutura de pastas, sem precisar de API.</div>
+    <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Lê os XMLs já baixados pelo app de captura da SIEG na sua máquina — reconhece NF-e/NFS-e e Entrada/Saída (ou Serviço Tomado/Prestado) pela própria estrutura de pastas, sem precisar de API. ${temAcessoPasta?'Acesso já concedido — "Importar mês" busca sozinho em todos os CNPJs do grupo.':'Conceda acesso à pasta uma vez pra não precisar selecionar toda vez.'}</div>
     ${_lancctbCaminhosReferenciaHtml(eid)}
     <input type="file" id="lancctbImportXmlInput" webkitdirectory directory multiple style="display:none" onchange="processarLancctbImportXmlLocal(this.files)">
     <details style="margin-top:4px">
@@ -15971,6 +16000,41 @@ function processarLancctbImportXmlLocal(fileList){
   document.getElementById('lancctbImportXmlStatus').textContent='';
   openModal('mLancctbImportXml');
 }
+// Salva 1 XML de NF-e/NFS-e (upsert por chave de acesso — reimportar nunca
+// duplica). direcaoConhecida vem pronta no fluxo automático (Importar mês,
+// que já sabe de qual subpasta veio); no fluxo manual (pasta escolhida à
+// mão) é inferida do caminho relativo do arquivo.
+async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice}={}){
+  try{
+    const xml=await file.text();
+    const caminho=file.webkitRelativePath||file.name;
+    const direcao=direcaoConhecida||_lancctbDirecaoDoCaminho(caminho);
+    const ehNFSe=/xmlns="http:\/\/www\.sped\.fazenda\.gov\.br\/nfse"|<NFSe[ >]/.test(xml);
+    const nf=ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml);
+    if(!nf||!nf.cnpj_emitente||!direcao) return 'naoReconhecido';
+    if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte) return 'ignoradaData';
+
+    const storagePath=`${eid}/${ehNFSe?'nfse':'nfe'}/${nf.chave_acesso||`${nf.cnpj_emitente}-${nf.numero}-${indice||Date.now()}`}.xml`;
+    await _supaClient.storage.from('nf-xmls').upload(storagePath,file,{upsert:true});
+
+    const { data: nfInserida, error: nfErro } = await _supaClient.from('notas_fiscais').upsert({
+      empresa_eid:eid, tipo:ehNFSe?'nfse':'nfe', chave_acesso:nf.chave_acesso, numero:nf.numero,
+      serie:nf.serie, modelo:nf.modelo, cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
+      cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao,
+      data_emissao:nf.data_emissao||dataCorte||hoje_(), valor_total:nf.valor_total, iss_valor:nf.iss_valor,
+      xml_storage_path:storagePath, status_captura:'xml_completo',
+    },{onConflict: nf.chave_acesso?'empresa_eid,tipo,chave_acesso':'empresa_eid,tipo,cnpj_emitente,numero,serie'}).select('id').single();
+    if(nfErro||!nfInserida) return 'erro';
+
+    for(const p of nf.parcelas){
+      await _supaClient.from('notas_fiscais_parcelas').upsert({
+        nf_id:nfInserida.id, empresa_eid:eid, numero_parcela:p.numero_parcela,
+        data_vencimento:p.data_vencimento||nf.data_emissao, valor_parcela:p.valor_parcela,
+      },{onConflict:'nf_id,numero_parcela'});
+    }
+    return 'importada';
+  } catch(e){ return 'erro'; }
+}
 async function confirmarLancctbImportXmlLocal(){
   const dataCorte=document.getElementById('lancctbImportXmlDataCorte').value;
   const arquivos=_lancctbImportXmlArquivos;
@@ -15978,43 +16042,135 @@ async function confirmarLancctbImportXmlLocal(){
   const statusEl=document.getElementById('lancctbImportXmlStatus');
   const btn=document.getElementById('lancctbImportXmlConfirmarBtn');
   btn.disabled=true;
-  let importadas=0, ignoradasData=0, erros=0, naoReconhecidos=0;
+  const contagem={importada:0,ignoradaData:0,erro:0,naoReconhecido:0};
   for(let i=0;i<arquivos.length;i++){
-    const f=arquivos[i];
-    statusEl.textContent=`Processando ${i+1}/${arquivos.length}… (${importadas} salvas)`;
-    try{
-      const xml=await f.text();
-      const caminho=f.webkitRelativePath||f.name;
-      const direcao=_lancctbDirecaoDoCaminho(caminho);
-      const ehNFSe=/xmlns="http:\/\/www\.sped\.fazenda\.gov\.br\/nfse"|<NFSe[ >]/.test(xml);
-      const nf=ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml);
-      if(!nf||!nf.cnpj_emitente||!direcao){ naoReconhecidos++; continue; }
-      if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte){ ignoradasData++; continue; }
-
-      const storagePath=`${eid}/${ehNFSe?'nfse':'nfe'}/${nf.chave_acesso||`${nf.cnpj_emitente}-${nf.numero}-${i}`}.xml`;
-      await _supaClient.storage.from('nf-xmls').upload(storagePath,f,{upsert:true});
-
-      const { data: nfInserida, error: nfErro } = await _supaClient.from('notas_fiscais').upsert({
-        empresa_eid:eid, tipo:ehNFSe?'nfse':'nfe', chave_acesso:nf.chave_acesso, numero:nf.numero,
-        serie:nf.serie, modelo:nf.modelo, cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
-        cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao,
-        data_emissao:nf.data_emissao||dataCorte||hoje_(), valor_total:nf.valor_total, iss_valor:nf.iss_valor,
-        xml_storage_path:storagePath, status_captura:'xml_completo',
-      },{onConflict: nf.chave_acesso?'empresa_eid,tipo,chave_acesso':'empresa_eid,tipo,cnpj_emitente,numero,serie'}).select('id').single();
-      if(nfErro||!nfInserida){ erros++; continue; }
-
-      for(const p of nf.parcelas){
-        await _supaClient.from('notas_fiscais_parcelas').upsert({
-          nf_id:nfInserida.id, empresa_eid:eid, numero_parcela:p.numero_parcela,
-          data_vencimento:p.data_vencimento||nf.data_emissao, valor_parcela:p.valor_parcela,
-        },{onConflict:'nf_id,numero_parcela'});
-      }
-      importadas++;
-    } catch(e){ erros++; }
+    statusEl.textContent=`Processando ${i+1}/${arquivos.length}… (${contagem.importada} salvas)`;
+    const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i],eid,{dataCorte,indice:i});
+    contagem[resultado]++;
   }
   btn.disabled=false;
   closeModal('mLancctbImportXml');
-  toast(`Importação concluída: ${importadas} nota(s) salva(s), ${ignoradasData} ignorada(s) por data, ${naoReconhecidos} não reconhecida(s), ${erros} erro(s).`, erros?'err':'ok');
+  toast(`Importação concluída: ${contagem.importada} nota(s) salva(s), ${contagem.ignoradaData} ignorada(s) por data, ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
+  renderLancctbConteudo();
+}
+
+// ─── Importar mês automático (File System Access API) ────────────────────
+// Alternativa ao "Selecionar pasta..." manual: concede acesso à raiz da
+// pasta UMA VEZ (fica salvo no IndexedDB do navegador, não precisa repetir
+// o seletor do SO toda vez) e depois só pergunta o mês — navega sozinho em
+// NF-es/NFS-es × Entrada/Saída (ou Servico Tomado/Prestado) × cada CNPJ do
+// grupo (matriz + filiais), sem abrir diálogo nenhum de novo.
+const LANCCTB_MESES_PASTA=['Janeiro','Fevereiro','Marco','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+function _lancctbAbrirDbHandles(){
+  return new Promise((resolve,reject)=>{
+    const req=indexedDB.open('lancctb_handles',1);
+    req.onupgradeneeded=()=>{ req.result.createObjectStore('handles'); };
+    req.onsuccess=()=>resolve(req.result);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _lancctbSalvarHandlePasta(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readwrite');
+    tx.objectStore('handles').put(handle,'raizSieg');
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function _lancctbCarregarHandlePasta(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readonly');
+    const req=tx.objectStore('handles').get('raizSieg');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _lancctbTemAcessoPastaSieg(){
+  if(!window.showDirectoryPicker) return false;
+  try{
+    const handle=await _lancctbCarregarHandlePasta();
+    if(!handle) return false;
+    return (await handle.queryPermission({mode:'read'}))==='granted';
+  } catch { return false; }
+}
+async function _lancctbConcederAcessoPastaSieg(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso — use o "Selecionar pasta..." manual.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    await _lancctbSalvarHandlePasta(handle);
+    toast('Acesso concedido! Agora é só clicar em "Importar mês".','ok');
+    renderLancctbConteudo();
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+// A pasta concedida pode ser a "HUB SIEG" (pai de "XML") ou já a "XML" —
+// tenta descer 1 nível, se não achar assume que já está na pasta certa.
+async function _lancctbResolverPastaXml(handleRaiz){
+  try { return await handleRaiz.getDirectoryHandle('XML'); }
+  catch { return handleRaiz; }
+}
+async function abrirLancctbImportarMesModal(){
+  const handle=await _lancctbCarregarHandlePasta();
+  if(!handle){ toast('Conceda acesso à pasta primeiro.','err'); return; }
+  const perm=await handle.requestPermission({mode:'read'});
+  if(perm!=='granted'){ toast('Acesso à pasta não concedido.','err'); return; }
+  document.getElementById('lancctbImportMesInput').value='';
+  document.getElementById('lancctbImportMesStatus').textContent='';
+  openModal('mLancctbImportMes');
+}
+async function confirmarLancctbImportarMes(){
+  const anoMes=document.getElementById('lancctbImportMesInput').value;
+  if(!anoMes){ toast('Escolha o mês.','err'); return; }
+  const [ano,mesNum]=anoMes.split('-').map(Number);
+  const mesNome=LANCCTB_MESES_PASTA[mesNum-1];
+  const eid=_lancctbEidAtual;
+  const emp=S.emps().find(e=>String(e.eid)===String(eid));
+  if(!emp){ toast('Empresa não encontrada em Cadastro de Empresas.','err'); return; }
+  const cnpjs=[...new Set([emp.cnpjNum,...(getFiliais(eid)||[]).map(f=>(f.cnpj||'').replace(/\D/g,''))].filter(Boolean))];
+
+  const handleRaiz=await _lancctbCarregarHandlePasta();
+  const dirXml=await _lancctbResolverPastaXml(handleRaiz);
+  const statusEl=document.getElementById('lancctbImportMesStatus');
+  const btn=document.getElementById('lancctbImportMesConfirmarBtn');
+  btn.disabled=true;
+
+  const alvos=[];
+  cnpjs.forEach(cnpj=>{
+    alvos.push({tipoPasta:'NF-es',papelPasta:'Entrada',direcao:'compra',cnpj});
+    alvos.push({tipoPasta:'NF-es',papelPasta:'Saida',direcao:'venda',cnpj});
+    alvos.push({tipoPasta:'NFS-es',papelPasta:'Servico Tomado',direcao:'compra',cnpj});
+    alvos.push({tipoPasta:'NFS-es',papelPasta:'Servico Prestado',direcao:'venda',cnpj});
+  });
+
+  const arquivos=[]; // {file, direcao}
+  for(const alvo of alvos){
+    try{
+      const dirMes=await dirXml.getDirectoryHandle(alvo.tipoPasta)
+        .then(d=>d.getDirectoryHandle(alvo.cnpj)).then(d=>d.getDirectoryHandle(alvo.papelPasta))
+        .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+      for await (const [nome,fh] of dirMes.entries()){
+        if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')){
+          arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
+        }
+      }
+    } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
+  }
+  if(!arquivos.length){
+    btn.disabled=false;
+    toast('Nenhum XML encontrado pra esse mês (conferi matriz e filiais, Entrada/Saída e Tomado/Prestado).','err');
+    return;
+  }
+
+  const contagem={importada:0,ignoradaData:0,erro:0,naoReconhecido:0};
+  for(let i=0;i<arquivos.length;i++){
+    statusEl.textContent=`Processando ${i+1}/${arquivos.length}… (${contagem.importada} salvas)`;
+    const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i});
+    contagem[resultado]++;
+  }
+  btn.disabled=false;
+  closeModal('mLancctbImportMes');
+  toast(`${mesNome}/${ano}: ${contagem.importada} nota(s) salva(s), ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
   renderLancctbConteudo();
 }
 async function renderLancctbNotas(aba){
