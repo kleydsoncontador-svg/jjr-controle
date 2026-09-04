@@ -16215,6 +16215,38 @@ function abrirLancctbUploadComprovanteModal(){
     </div>`;
   openModal('mLancctbUpload');
 }
+// Chama uma Edge Function de extração (comprovante/extrato) uma vez, com o
+// corpo já pronto ({texto} ou {imagens}) — erro amigável se falhar.
+async function _lancctbChamarEdgeExtracao(edgeFn,body){
+  const resp=await fetch(SUPABASE_URL+'/functions/v1/'+edgeFn,{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+    body:JSON.stringify(body)
+  });
+  if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
+  const d=await resp.json();
+  if(d.error) throw new Error(d.error);
+  return d;
+}
+function _lancctbEmLotes(arr,tam){
+  const lotes=[];
+  for(let i=0;i<arr.length;i+=tam) lotes.push(arr.slice(i,i+tam));
+  return lotes;
+}
+// Tamanho de lote por chamada. Um PDF grande processado de uma vez só pode
+// estourar o limite de tempo/recursos do Edge Function do Supabase —
+// confirmado ao vivo em 05/09/2026: um extrato de 14 páginas travou com
+// "WORKER_RESOURCE_LIMIT" depois de ~150s numa chamada só (mesmo já tendo
+// sido roteado pro Gemini, que não tem o teto de TPM do Groq — o gargalo
+// aqui é o tempo de execução do PRÓPRIO Edge Function, não da IA). Por isso
+// o texto (e as imagens) são divididos em lotes de poucas páginas, com uma
+// chamada por lote — mais lento no total, mas cada chamada isolada fica
+// bem dentro do limite. Extrato usa lote menor que comprovante porque cada
+// página de extrato é muito mais densa em lançamentos.
+const LANCCTB_COMPROV_PAGINAS_POR_LOTE=15;
+const LANCCTB_EXTRATO_PAGINAS_POR_LOTE=4;
+const LANCCTB_IMAGENS_POR_LOTE=15; // Edge Function aceita até 20/chamada; 15 dá folga
+
 // Extrai texto de todas as páginas via pdfjsLib (reaproveita
 // _convItauGarantirWorker já usado no resto do site); se vier vazio/curto
 // (PDF escaneado sem texto selecionável), renderiza páginas como imagem e
@@ -16222,7 +16254,7 @@ function abrirLancctbUploadComprovanteModal(){
 // usado em _convAplicFinExtrairGenerico. Processa 1 arquivo: sobe o PDF
 // original pro Storage (1x, mesmo que vire dezenas de comprovantes — todos
 // apontam pro mesmo path, evidência de auditoria preservada sem
-// granularidade de página) e chama a Edge Function de extração.
+// granularidade de página) e chama a Edge Function de extração em lotes.
 async function _lancctbProcessarUmComprovantePdf(file,status){
   const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
   const { error: erroUpload } = await _supaClient.storage.from('comprovantes').upload(pathArquivo,file);
@@ -16232,18 +16264,19 @@ async function _lancctbProcessarUmComprovantePdf(file,status){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  let textoCompleto='';
-  const imagens=[];
+  const paginasTexto=[];
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p);
     const content=await page.getTextContent();
-    const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
-    textoCompleto+='\n--- página '+p+' ---\n'+texto;
+    paginasTexto.push(content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim());
   }
-  textoCompleto=textoCompleto.trim();
-  if(textoCompleto.replace(/---.*?---/g,'').trim().length<20){
+  const textoTotal=paginasTexto.join(' ').trim();
+  const comprovantes=[];
+
+  if(textoTotal.length<20){
     status.textContent=`PDF "${file.name}" sem texto selecionável — renderizando páginas como imagem…`;
-    for(let p=1;p<=Math.min(pdf.numPages,20);p++){
+    const imagens=[];
+    for(let p=1;p<=pdf.numPages;p++){
       const page=await pdf.getPage(p);
       const viewport=page.getViewport({scale:2});
       const canvas=document.createElement('canvas');
@@ -16252,19 +16285,25 @@ async function _lancctbProcessarUmComprovantePdf(file,status){
       await page.render({canvasContext:ctx,viewport}).promise;
       imagens.push(canvas.toDataURL('image/jpeg',0.85));
     }
+    const lotes=_lancctbEmLotes(imagens,LANCCTB_IMAGENS_POR_LOTE);
+    for(let i=0;i<lotes.length;i++){
+      status.textContent=`"${file.name}" — lote de imagens ${i+1}/${lotes.length}…`;
+      const d=await _lancctbChamarEdgeExtracao('lancctb-parse-comprovante',{imagens:lotes[i]});
+      if(Array.isArray(d.comprovantes)) comprovantes.push(...d.comprovantes);
+    }
+  } else {
+    const lotes=_lancctbEmLotes(paginasTexto,LANCCTB_COMPROV_PAGINAS_POR_LOTE);
+    for(let i=0;i<lotes.length;i++){
+      status.textContent=lotes.length>1
+        ? `"${file.name}" — lote ${i+1}/${lotes.length} (páginas ${i*LANCCTB_COMPROV_PAGINAS_POR_LOTE+1}-${Math.min((i+1)*LANCCTB_COMPROV_PAGINAS_POR_LOTE,pdf.numPages)})…`
+        : `"${file.name}" — extraindo…`;
+      const d=await _lancctbChamarEdgeExtracao('lancctb-parse-comprovante',{texto:lotes[i].join('\n')});
+      if(Array.isArray(d.comprovantes)) comprovantes.push(...d.comprovantes);
+    }
   }
-  const body=imagens.length?{imagens}:{texto:textoCompleto};
-  const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-comprovante',{
-    method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
-    body:JSON.stringify(body)
-  });
-  if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
-  const d=await resp.json();
-  if(d.error) throw new Error(d.error);
-  if(!Array.isArray(d.comprovantes)||!d.comprovantes.length) throw new Error('Não foi possível identificar nenhum comprovante neste PDF.');
 
-  return d.comprovantes.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:arquivoStoragePath}));
+  if(!comprovantes.length) throw new Error('Não foi possível identificar nenhum comprovante neste PDF.');
+  return comprovantes.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:arquivoStoragePath}));
 }
 // Percorre todos os arquivos selecionados (o input aceita múltiplos PDFs de
 // uma vez) sequencialmente — falha em 1 arquivo não derruba os outros, só
@@ -16490,18 +16529,19 @@ async function processarLancctbUploadExtrato(){
       _convItauGarantirWorker();
       const buf=await file.arrayBuffer();
       const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-      let textoCompleto='';
-      const imagens=[];
+      const paginasTexto=[];
       for(let p=1;p<=pdf.numPages;p++){
         const page=await pdf.getPage(p);
         const content=await page.getTextContent();
-        textoCompleto+='\n'+content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+        paginasTexto.push(content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim());
       }
-      textoCompleto=textoCompleto.trim();
-      if(textoCompleto.length<20){
+      const textoTotal=paginasTexto.join(' ').trim();
+
+      if(textoTotal.length<20){
         origem='pdf_ocr_ia';
         status.textContent='PDF sem texto selecionável — renderizando páginas como imagem…';
-        for(let p=1;p<=Math.min(pdf.numPages,20);p++){
+        const imagens=[];
+        for(let p=1;p<=pdf.numPages;p++){
           const page=await pdf.getPage(p);
           const viewport=page.getViewport({scale:2});
           const canvas=document.createElement('canvas');
@@ -16510,19 +16550,23 @@ async function processarLancctbUploadExtrato(){
           await page.render({canvasContext:ctx,viewport}).promise;
           imagens.push(canvas.toDataURL('image/jpeg',0.85));
         }
+        const lotes=_lancctbEmLotes(imagens,LANCCTB_IMAGENS_POR_LOTE);
+        for(let i=0;i<lotes.length;i++){
+          status.textContent=`Lote de imagens ${i+1}/${lotes.length}…`;
+          const d=await _lancctbChamarEdgeExtracao('lancctb-parse-extrato',{imagens:lotes[i]});
+          if(Array.isArray(d.lancamentos)) lancamentos.push(...d.lancamentos);
+        }
+      } else {
+        const lotes=_lancctbEmLotes(paginasTexto,LANCCTB_EXTRATO_PAGINAS_POR_LOTE);
+        for(let i=0;i<lotes.length;i++){
+          status.textContent=lotes.length>1
+            ? `Lote ${i+1}/${lotes.length} (páginas ${i*LANCCTB_EXTRATO_PAGINAS_POR_LOTE+1}-${Math.min((i+1)*LANCCTB_EXTRATO_PAGINAS_POR_LOTE,pdf.numPages)})…`
+            : 'Chamando IA para extrair o extrato…';
+          const d=await _lancctbChamarEdgeExtracao('lancctb-parse-extrato',{texto:lotes[i].join('\n')});
+          if(Array.isArray(d.lancamentos)) lancamentos.push(...d.lancamentos);
+        }
       }
-      status.textContent='Chamando IA para extrair o extrato…';
-      const body=imagens.length?{imagens}:{texto:textoCompleto};
-      const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-extrato',{
-        method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
-        body:JSON.stringify(body)
-      });
-      if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
-      const d=await resp.json();
-      if(d.error) throw new Error(d.error);
-      if(!Array.isArray(d.lancamentos)||!d.lancamentos.length) throw new Error('Não foi possível identificar lançamentos neste PDF.');
-      lancamentos=d.lancamentos;
+      if(!lancamentos.length) throw new Error('Não foi possível identificar lançamentos neste PDF.');
     } else {
       const buf=await file.arrayBuffer();
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
