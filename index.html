@@ -2157,7 +2157,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <input class="fi" id="lancctbConfirmarExclusaoInput" type="text" placeholder="Digite o número pra confirmar">
       <div class="ma">
         <button class="btn bo" onclick="closeModal('mLancctbConfirmarExclusao')">Cancelar</button>
-        <button class="btn" style="background:#dc2626;color:#fff" id="lancctbConfirmarExclusaoBtn" onclick="_lancctbExecutarExclusaoExtrato()">🗑️ Excluir permanentemente</button>
+        <button class="btn" style="background:#dc2626;color:#fff" id="lancctbConfirmarExclusaoBtn" onclick="_lancctbExecutarExclusaoGenerica()">🗑️ Excluir permanentemente</button>
       </div>
     </div>
   </div>
@@ -17595,6 +17595,7 @@ async function renderLancctbComprovantes(){
     ${_lancctbMesPickerHtml(_lancctbComprovMes,'_lancctbComprovMudarMes')}
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbComprovantesExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbComprovantesConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes comprovantes</button>
       <button class="btn bp bsm" onclick="abrirLancctbUploadComprovanteModal()">⬆ Upload PDF de Comprovantes</button>
     </div>
   </div>
@@ -17986,8 +17987,10 @@ async function renderLancctbExtrato(){
 // prompt() nativo não funciona de forma confiável em automação de
 // navegador (retorna null direto, sem mostrar diálogo nenhum).
 let _lancctbExclusaoExtratoQtd=0;
+let _lancctbExclusaoTipo='extrato'; // 'extrato' | 'comprovantes' — qual delete o modal genérico executa
 function excluirLancctbExtratoConta(qtd){
   if(!qtd){ toast('Nenhum lançamento pra excluir nesta conta.','err'); return; }
+  _lancctbExclusaoTipo='extrato';
   _lancctbExclusaoExtratoQtd=qtd;
   const escopo=_lancctbExtratoMes
     ? `de <strong>${new Date(_lancctbExtratoMes+'-01T00:00:00').toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</strong> desta conta`
@@ -17996,6 +17999,62 @@ function excluirLancctbExtratoConta(qtd){
     `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> lançamento(s) de extrato ${escopo}. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
   document.getElementById('lancctbConfirmarExclusaoInput').value='';
   openModal('mLancctbConfirmarExclusao');
+}
+// Dispatcher do modal genérico de exclusão — chama a rotina certa conforme
+// de onde o usuário abriu o modal (Extrato Bancário ou Comprovantes).
+function _lancctbExecutarExclusaoGenerica(){
+  if(_lancctbExclusaoTipo==='comprovantes') return _lancctbExecutarExclusaoComprovantes();
+  return _lancctbExecutarExclusaoExtrato();
+}
+let _lancctbExclusaoComprovQtd=0;
+function excluirLancctbComprovantesConta(qtd){
+  if(!qtd){ toast('Nenhum comprovante pra excluir com esse filtro.','err'); return; }
+  _lancctbExclusaoTipo='comprovantes';
+  _lancctbExclusaoComprovQtd=qtd;
+  const partesEscopo=[];
+  if(_lancctbComprovContaSel){
+    const conta=_lancctbUltimasAgencias?.find?.(a=>String(a.id)===String(_lancctbComprovContaSel));
+    partesEscopo.push(conta?`da conta <strong>${esc(conta.banco_nome)}</strong>`:'desta conta');
+  } else partesEscopo.push('de todas as contas');
+  if(_lancctbComprovMes) partesEscopo.push(`de <strong>${new Date(_lancctbComprovMes+'-01T00:00:00').toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</strong>`);
+  document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
+    `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> comprovante(s) ${partesEscopo.join(' ')}. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
+  document.getElementById('lancctbConfirmarExclusaoInput').value='';
+  openModal('mLancctbConfirmarExclusao');
+}
+async function _lancctbExecutarExclusaoComprovantes(){
+  const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
+  if(digitado!==String(_lancctbExclusaoComprovQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
+  const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
+  btn.disabled=true; btn.textContent='Excluindo…';
+  let mesDe=null,mesAte=null;
+  if(_lancctbComprovMes){
+    const [ano,mes]=_lancctbComprovMes.split('-').map(Number);
+    const ultimoDia=new Date(ano,mes,0).getDate();
+    mesDe=`${_lancctbComprovMes}-01`; mesAte=`${_lancctbComprovMes}-${String(ultimoDia).padStart(2,'0')}`;
+  }
+  const { data: idsComprovRows } = await _lancctbFetchTudo(()=>{
+    let q=_supaClient.from('comprovantes_bancarios').select('id').eq('empresa_eid',_lancctbEidAtual);
+    if(_lancctbComprovContaSel) q=q.eq('conta_bancaria_id',_lancctbComprovContaSel);
+    if(mesDe) q=q.gte('data_pagamento',mesDe).lte('data_pagamento',mesAte);
+    return q;
+  });
+  const ids=(idsComprovRows||[]).map(r=>r.id);
+  if(ids.length){
+    // lancamentos_contabeis.comprovante_id é só rastreabilidade (a
+    // classificação em si já foi feita via NF/regra) — desvincula em vez
+    // de apagar o lançamento, senão perderia o Registro Contábil à toa.
+    await _supaClient.from('lancamentos_contabeis').update({comprovante_id:null}).in('comprovante_id',ids);
+  }
+  const { error } = ids.length
+    ? await _supaClient.from('comprovantes_bancarios').delete().in('id',ids)
+    : { error:null };
+  btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast(`${_lancctbExclusaoComprovQtd} comprovante(s) excluído(s)`,'ok');
+  closeModal('mLancctbConfirmarExclusao');
+  _lancctbComprovPagina=0;
+  renderLancctbComprovantes();
 }
 async function _lancctbExecutarExclusaoExtrato(){
   const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
