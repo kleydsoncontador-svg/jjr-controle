@@ -16459,6 +16459,7 @@ async function renderLancctbExtrato(){
     </div>
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbExtratoExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbExtratoConta(${count})" ${count?'':'disabled'}>🗑️ Excluir tudo desta conta</button>
       <button class="btn bp bsm" onclick="abrirLancctbUploadExtratoModal()">⬆ Upload Extrato</button>
     </div>
   </div>
@@ -16506,6 +16507,21 @@ async function renderLancctbExtrato(){
       </div>
     </div>`;
   el.innerHTML=html;
+}
+// Exclui TODOS os lançamentos de extrato da conta selecionada — ação
+// irreversível (delete de verdade, não soft-delete), útil pra reimportar
+// do zero depois de corrigir alguma regra do parser. Confirmação reforçada
+// (digitar o número exato de lançamentos) por ser destrutivo em massa.
+async function excluirLancctbExtratoConta(qtd){
+  if(!qtd){ toast('Nenhum lançamento pra excluir nesta conta.','err'); return; }
+  const digitado=prompt(`Isso vai APAGAR PERMANENTEMENTE os ${qtd} lançamento(s) de extrato desta conta. Essa ação não pode ser desfeita.\n\nPra confirmar, digite o número ${qtd}:`);
+  if(digitado===null) return;
+  if(digitado.trim()!==String(qtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
+  const { error } = await _supaClient.from('lancamentos_extrato').delete().eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel);
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast(`${qtd} lançamento(s) excluído(s)`,'ok');
+  _lancctbExtratoPagina=0;
+  renderLancctbExtrato();
 }
 // Salva o "Saldo anterior" (âncora do saldo corrido, editável direto na
 // tela) na conta bancária selecionada — o usuário pode ajustar pra bater
@@ -16563,16 +16579,28 @@ function abrirLancctbUploadExtratoModal(){
 //   aparecer uma nova data.
 // - Nesse banco, "-" no valor = saída; sem "-" = entrada (a própria coluna
 //   em que o valor cai já confirma isso, mas mantemos a checagem dupla).
-// - A tabela "Conta Corrente | Movimentação" termina em "Saldo em C/C" /
-//   "Saldo final" — tudo depois disso é outro tipo de informação
-//   (aplicações automáticas, CDB, indicadores de mercado, notas
-//   explicativas), não lançamento de conta corrente.
-// - As linhas "Apl Aplic Aut Mais"/"Res Aplic Aut Mais"/"Rend Pago Aplic
-//   Aut Mais"/"SALDO APLIC AUT MAIS" são aplicação automática (sweep pro
-//   CDB, sem terceiro envolvido) — o próprio extrato registra em nota que
-//   "os valores referentes ao totalizador de aplicações automáticas não
-//   estão somados no resumo de movimentação de conta corrente", então são
-//   excluídas daqui (não fazem sentido pra conciliar com NF/comprovante).
+// - A tabela "Conta Corrente | Movimentação" termina em "Saldo final" —
+//   tudo depois disso é outro tipo de informação (detalhe de aplicações
+//   automáticas, CDB, indicadores de mercado, notas explicativas), não
+//   lançamento de conta corrente.
+// - "Apl Aplic Aut Mais" (aplica) e "Res Aplic Aut Mais" (resgata) entram
+//   como lançamento normal por decisão explícita do usuário — mesmo
+//   sabendo que isso faz a conferência abaixo NÃO fechar. Achado real
+//   testando com o extrato de junho/2026 da Fast Lube: incluindo essas 2
+//   linhas, entrada e saída ficam EXATAMENTE iguais (R$7.722.618,70 cada),
+//   ou seja, o saldo corrido nunca muda — só bate com o saldo real do
+//   extrato quando elas ficam de fora (aí sim entrada−saída = R$539.462,20,
+//   exatamente a mudança real de saldo do mês). Ou seja, são lançamentos-
+//   espelho do próprio banco (rastreiam a posição do CDB, sem sair de
+//   verdade do caixa da conta corrente) — mas o usuário decidiu manter
+//   registrado mesmo assim (ex: pra mostrar a movimentação bruta e tratar
+//   a classificação contábil depois). "SALDO APLIC AUT MAIS" (marcador de
+//   saldo do sub-razão, sem entrada/saída própria) continua de fora — cai
+//   sozinho por não ter valor nem em entradas nem em saídas.
+// - Conferência: bate contra o "Saldo final" que o extrato imprime (saldo
+//   anterior + soma(entradas) − soma(saídas)) — mas com Apl/Res incluídos
+//   ela NUNCA vai fechar (ver acima); o aviso ⚠ na tela é esperado nesse
+//   caso, não indica erro de leitura.
 
 async function _lancctbExtrairItensPagina(page){
   const content=await page.getTextContent();
@@ -16604,14 +16632,9 @@ async function _lancctbParsearExtratoItauMensal(pdf){
   if(!mMes) return null;
   const mesRef=LANCCTB_MESES_PT[mMes[1].toLowerCase()], anoRef=parseInt(mMes[2],10);
 
-  // Total oficial do próprio extrato ("total entradas total saídas
-  // (créditos) (débitos) R$ X R$ Y") — usado como conferência depois.
-  let totalEntradasDoc=null,totalSaidasDoc=null;
-  const mTotais=textoPagina1.match(/total\s+entradas\s+total\s+sa[ií]das[\s\S]{0,80}?r\$\s*([\d.,]+)\s*r\$\s*([\d.,]+)/i);
-  if(mTotais){ totalEntradasDoc=_lancctbParseValorBR(mTotais[1]); totalSaidasDoc=_lancctbParseValorBR(mTotais[2]); }
-
   const lancamentos=[];
   let colunas=null, dataAtual=null, encerrado=false;
+  let saldoAnteriorDoc=null, saldoFinalDoc=null;
 
   for(let p=1;p<=pdf.numPages&&!encerrado;p++){
     const page=p===1?pagina1:await pdf.getPage(p);
@@ -16658,16 +16681,9 @@ async function _lancctbParsearExtratoItauMensal(pdf){
       });
       Object.keys(celulas).forEach(k=>celulas[k]=celulas[k].trim());
 
-      if(/^saldo em c\/c/i.test(celulas.descricao)||/^saldo final/i.test(celulas.descricao)){ encerrado=true; break; }
-      if(/^saldo anterior/i.test(celulas.descricao)){ if(celulas.data) dataAtual=celulas.data; continue; }
-      // "Apl Aplic Aut Mais" (aplica) e "Res Aplic Aut Mais" (resgata) são só
-      // o mesmo dinheiro indo e voltando da aplicação automática — não é
-      // receita/despesa real, exclui. Mas "Rend Pago Aplic Aut Mais" (juros
-      // líquidos realmente creditados) É receita de verdade e entra como
-      // entrada normal — confirmado batendo com o total oficial do extrato
-      // (a diferença residual de R$487,11 era exatamente o total do mês de
-      // "rendimento líquido pago" que estava sendo excluído por engano).
-      if(/^(apl|res|saldo)\s+aplic\s+aut\s+mais/i.test(celulas.descricao)) continue;
+      if(/^saldo final/i.test(celulas.descricao)){ if(celulas.saldo) saldoFinalDoc=_lancctbParseValorBR(celulas.saldo); encerrado=true; break; }
+      if(/^saldo em c\/c/i.test(celulas.descricao)) continue; // não é lançamento, mas ainda não é o fim (vem antes de "Saldo final")
+      if(/^saldo anterior/i.test(celulas.descricao)){ if(celulas.data) dataAtual=celulas.data; if(celulas.saldo) saldoAnteriorDoc=_lancctbParseValorBR(celulas.saldo); continue; }
 
       if(celulas.data) dataAtual=celulas.data;
       if(!dataAtual) continue;
@@ -16691,7 +16707,7 @@ async function _lancctbParsearExtratoItauMensal(pdf){
     }
   }
   if(!lancamentos.length) return null;
-  return {lancamentos,totalEntradasDoc,totalSaidasDoc};
+  return {lancamentos,saldoAnteriorDoc,saldoFinalDoc};
 }
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
@@ -16721,12 +16737,12 @@ async function processarLancctbUploadExtrato(forcarIA){
         const somaEntrada=lancamentos.reduce((s,l)=>s+(l.valor_entrada||0),0);
         const somaSaida=lancamentos.reduce((s,l)=>s+(l.valor_saida||0),0);
         let confere='';
-        if(reconhecido.totalEntradasDoc!=null&&reconhecido.totalSaidasDoc!=null){
-          const bateEntrada=Math.abs(somaEntrada-reconhecido.totalEntradasDoc)<0.05;
-          const bateSaida=Math.abs(somaSaida-reconhecido.totalSaidasDoc)<0.05;
-          confere=(bateEntrada&&bateSaida)
-            ? ' ✓ bate com o total informado no extrato.'
-            : ` ⚠ o total do extrato diz R$ ${_fmt(reconhecido.totalEntradasDoc)} entrada / R$ ${_fmt(reconhecido.totalSaidasDoc)} saída — confira antes de salvar.`;
+        if(reconhecido.saldoAnteriorDoc!=null&&reconhecido.saldoFinalDoc!=null){
+          const saldoCalculado=Math.round((reconhecido.saldoAnteriorDoc+somaEntrada-somaSaida)*100)/100;
+          const bate=Math.abs(saldoCalculado-reconhecido.saldoFinalDoc)<0.05;
+          confere=bate
+            ? ' ✓ saldo final bate com o do extrato.'
+            : ` ⚠ saldo final calculado (R$ ${_fmt(saldoCalculado)}) diverge do impresso no extrato (R$ ${_fmt(reconhecido.saldoFinalDoc)}) — confira antes de salvar.`;
         }
         status.textContent=`Layout reconhecido (leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}`;
         _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
