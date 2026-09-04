@@ -15385,9 +15385,16 @@ function _fmtCnpjCpf(v){
   if(d.length===11) return d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/,'$1.$2.$3-$4');
   return v||'';
 }
+// 4 telas separadas (não 2 com coluna de tipo) — replica a distinção real
+// do Mister Contador: NF-e é Entrada/Saída (mercadoria), NFS-e é
+// Tomado/Prestado (serviço). direcaoNf mapeia pro campo notas_fiscais.direcao
+// ('compra'/'venda' no banco — nomenclatura do schema — mas exibido como
+// Entrada/Saída aqui, que é como o usuário e o Mister chamam isso).
 const LANCCTB_ABAS=[
-  {id:'nfe',   label:'NF-e'},
-  {id:'nfse',  label:'NFS-e'},
+  {id:'nfe-entrada',   label:'NF-e Entrada', tipoDoc:'nfe',  direcaoNf:'compra'},
+  {id:'nfe-saida',     label:'NF-e Saída',   tipoDoc:'nfe',  direcaoNf:'venda'},
+  {id:'nfse-tomado',   label:'NFS-e Tomado', tipoDoc:'nfse', direcaoNf:'compra'},
+  {id:'nfse-prestado', label:'NFS-e Prestado', tipoDoc:'nfse', direcaoNf:'venda'},
   {id:'comprovantes', label:'Comprovantes'},
   {id:'extrato', label:'Extrato bancário'},
   {id:'plano', label:'Plano de Contas'},
@@ -15396,7 +15403,7 @@ const LANCCTB_ABAS=[
   {id:'registro', label:'Registro Contábil'},
 ];
 let _lancctbEidAtual=null;
-let _lancctbAbaAtiva='nfe';
+let _lancctbAbaAtiva='nfe-entrada';
 const LANCCTB_PAGE_SIZE=50;
 let _lancctbNfePagina=0;
 
@@ -15432,7 +15439,7 @@ function renderLancctbLista(){
 
 function abrirLancctbEmpresa(eid){
   _lancctbEidAtual=String(eid);
-  _lancctbAbaAtiva='nfe';
+  _lancctbAbaAtiva='nfe-entrada';
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   document.getElementById('lancctbWsTitulo').textContent=emp?`#${emp.eid} - ${emp.nome}`:'';
   document.getElementById('lancctbListaContainer').parentElement.querySelectorAll(':scope > *').forEach(()=>{}); // no-op, mantém estrutura
@@ -15461,23 +15468,34 @@ function trocarLancctbAba(aba){
 }
 function renderLancctbConteudo(){
   const el=document.getElementById('lancctbConteudoAba');
-  if(_lancctbAbaAtiva==='nfe'){ renderLancctbNfe(); return; }
+  const aba=LANCCTB_ABAS.find(a=>a.id===_lancctbAbaAtiva);
+  if(aba&&aba.tipoDoc){ renderLancctbNotas(aba); return; }
   el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:60px 20px">
     <div style="font-size:2rem;margin-bottom:8px">🚧</div>
     <div>Esta aba entra numa próxima fase do módulo.</div>
   </div>`;
 }
 
-// ─── Aba Nf-e: lê direto de notas_fiscais/notas_fiscais_parcelas ──────────
+// Guarda a última leitura de cada aba de notas (parcelas+dados), pra
+// exportar em Excel exatamente o que está na tela sem precisar refazer
+// a consulta ao Supabase.
+let _lancctbUltimaLeitura=[];
+
+// ─── Abas NF-e Entrada/Saída e NFS-e Tomado/Prestado ──────────────────────
 // Tabelas relacionais dedicadas (não é padrão S.g/S.s) — ver
 // supabase-schema-lancctb.sql. Paginação real no servidor via .range(),
 // evitando o bug de limite de 1000 linhas do PostgREST sem range explícito
-// (já mordeu o backup-diario.js uma vez).
-async function renderLancctbNfe(){
+// (já mordeu o backup-diario.js uma vez). Uma função só, parametrizada por
+// tipoDoc('nfe'/'nfse')+direcaoNf('compra'/'venda') — as 4 abas chamam a
+// mesma lógica, só muda o filtro e os rótulos de coluna.
+async function renderLancctbNotas(aba){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const ehServico=aba.tipoDoc==='nfse';
+  const colTerceiro=ehServico?(aba.direcaoNf==='venda'?'Prestado a':'Tomado de'):'Empresa';
 
   const from=_lancctbNfePagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
@@ -15488,28 +15506,41 @@ async function renderLancctbNfe(){
     .from('notas_fiscais')
     .select('numero,created_at')
     .eq('empresa_eid', eid)
+    .eq('tipo', aba.tipoDoc)
+    .eq('direcao', aba.direcaoNf)
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
 
   const { data: parcelas, error, count } = await _supaClient
     .from('notas_fiscais_parcelas')
-    .select('id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,modelo,empresa_eid,data_emissao)', { count: 'exact' })
+    .select('id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,iss_valor)', { count: 'exact' })
     .eq('notas_fiscais.empresa_eid', eid)
+    .eq('notas_fiscais.tipo', aba.tipoDoc)
+    .eq('notas_fiscais.direcao', aba.direcaoNf)
     .order('data_vencimento', { ascending: false })
     .range(from, to);
 
   if(error){
-    el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar NFs: ${esc(error.message)}</div>`;
+    el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar: ${esc(error.message)}</div>`;
     return;
   }
 
+  _lancctbUltimaLeitura=(parcelas||[]).map(p=>{
+    const nf=p.notas_fiscais;
+    const nomeTerc=nf.direcao==='venda'?nf.nome_destinatario:nf.nome_emitente;
+    const cnpjTerc=nf.direcao==='venda'?nf.cnpj_destinatario:nf.cnpj_emitente;
+    return {p,nf,nomeTerc,cnpjTerc};
+  });
+
   const totalPaginas=Math.max(1, Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const destaqueUltima=ultimaNf?`<div style="background:var(--teal-bg);border-left:3px solid var(--teal);border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px">
-    <strong>Última NF capturada:</strong> nº ${esc(ultimaNf.numero)} — em ${new Date(ultimaNf.created_at).toLocaleDateString('pt-BR')} às ${new Date(ultimaNf.created_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
+    <strong>Última ${ehServico?'NFS-e':'NF-e'} capturada:</strong> nº ${esc(ultimaNf.numero)} — em ${new Date(ultimaNf.created_at).toLocaleDateString('pt-BR')} às ${new Date(ultimaNf.created_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
   </div>`:'';
 
-  let html=destaqueUltima+`
+  let html=`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+      <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
+    </div>`+destaqueUltima+`
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse;font-size:12.5px">
       <thead><tr style="background:var(--ink2);color:#fff">
@@ -15517,21 +15548,18 @@ async function renderLancctbNfe(){
         <th style="padding:8px 10px;text-align:left">Dt Vencimento</th>
         <th style="padding:8px 10px;text-align:left">Número</th>
         <th style="padding:8px 10px;text-align:left">CNPJ</th>
-        <th style="padding:8px 10px;text-align:left">Empresa</th>
+        <th style="padding:8px 10px;text-align:left">${esc(colTerceiro)}</th>
         <th style="padding:8px 10px;text-align:right">Valor Parcela</th>
         <th style="padding:8px 10px;text-align:center">Parcela</th>
-        <th style="padding:8px 10px;text-align:left">Compra/Venda</th>
+        ${ehServico?'<th style="padding:8px 10px;text-align:right">ISS</th>':''}
         <th style="padding:8px 10px;text-align:left">Modelo</th>
         <th style="padding:8px 10px;text-align:center">Status</th>
       </tr></thead>
       <tbody>`;
-  if(!parcelas||!parcelas.length){
-    html+=`<tr><td colspan="10" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma NF encontrada para esta empresa ainda.</td></tr>`;
+  if(!_lancctbUltimaLeitura.length){
+    html+=`<tr><td colspan="${ehServico?10:9}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
   } else {
-    parcelas.forEach(p=>{
-      const nf=p.notas_fiscais;
-      const nomeTerc=nf.direcao==='venda'?nf.nome_destinatario:nf.nome_emitente;
-      const cnpjTerc=nf.direcao==='venda'?nf.cnpj_destinatario:nf.cnpj_emitente;
+    _lancctbUltimaLeitura.forEach(({p,nf,nomeTerc,cnpjTerc})=>{
       const statusCor=p.status_conciliacao==='conciliado'?'var(--teal)':p.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
       html+=`<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:7px 10px">${nf.data_emissao?new Date(nf.data_emissao+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
@@ -15541,7 +15569,7 @@ async function renderLancctbNfe(){
         <td style="padding:7px 10px">${esc(nomeTerc||'')}</td>
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(p.valor_parcela||0)}</td>
         <td style="padding:7px 10px;text-align:center">${p.numero_parcela}</td>
-        <td style="padding:7px 10px">${nf.direcao==='venda'?'NF Venda':'NF Compra'}</td>
+        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:''}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
       </tr>`;
@@ -15551,12 +15579,42 @@ async function renderLancctbNfe(){
     <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12.5px;color:var(--slate)">
       <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
       <div style="display:flex;gap:6px">
-        <button class="btn bo bsm" ${_lancctbNfePagina===0?'disabled':''} onclick="_lancctbNfePagina--;renderLancctbNfe()">‹ Anterior</button>
+        <button class="btn bo bsm" ${_lancctbNfePagina===0?'disabled':''} onclick="_lancctbNfePagina--;renderLancctbConteudo()">‹ Anterior</button>
         <span style="padding:6px 10px">Página ${_lancctbNfePagina+1} de ${totalPaginas}</span>
-        <button class="btn bo bsm" ${_lancctbNfePagina>=totalPaginas-1?'disabled':''} onclick="_lancctbNfePagina++;renderLancctbNfe()">Próxima ›</button>
+        <button class="btn bo bsm" ${_lancctbNfePagina>=totalPaginas-1?'disabled':''} onclick="_lancctbNfePagina++;renderLancctbConteudo()">Próxima ›</button>
       </div>
     </div>`;
   el.innerHTML=html;
+}
+
+// Exporta a página atual da tabela em .xlsx real (SheetJS — mesmo padrão
+// já usado no site: XLSX.utils.aoa_to_sheet + XLSX.writeFile), já aberto
+// pra edição no Excel — não é o hack de HTML disfarçado de .xls usado por
+// exportarPagina() nas telas antigas.
+function exportarLancctbNotasExcel(abaId){
+  const aba=LANCCTB_ABAS.find(a=>a.id===abaId);
+  if(!aba||!_lancctbUltimaLeitura.length){ toast('Nada para exportar nesta página.','err'); return; }
+  const ehServico=aba.tipoDoc==='nfse';
+  const colTerceiro=ehServico?(aba.direcaoNf==='venda'?'Prestado a':'Tomado de'):'Empresa';
+  const header=['Dt Emissão','Dt Vencimento','Número','CNPJ',colTerceiro,'Valor Parcela','Parcela'];
+  if(ehServico) header.push('ISS');
+  header.push('Modelo','Status');
+  const rows=_lancctbUltimaLeitura.map(({p,nf,nomeTerc,cnpjTerc})=>{
+    const linha=[
+      nf.data_emissao?new Date(nf.data_emissao+'T00:00:00').toLocaleDateString('pt-BR'):'',
+      p.data_vencimento?new Date(p.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'',
+      nf.numero||'', _fmtCnpjCpf(cnpjTerc), nomeTerc||'', p.valor_parcela||0, p.numero_parcela,
+    ];
+    if(ehServico) linha.push(nf.iss_valor||0);
+    linha.push((nf.modelo||'').toUpperCase(), p.status_conciliacao||'');
+    return linha;
+  });
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  const ws=XLSX.utils.aoa_to_sheet([header,...rows]);
+  XLSX.utils.book_append_sheet(wb,ws,aba.label.substring(0,31));
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`${aba.label.replace(/\s/g,'_')}_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
 }
 
 // ─── CONVERSOR DE ARQUIVOS: EXTRATO MOVIMENTAÇÃO COBRANÇA BANCO DO BRASIL ───
