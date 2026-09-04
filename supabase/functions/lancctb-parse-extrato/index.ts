@@ -13,9 +13,18 @@
 // o prompt normaliza tudo pro mesmo formato de saída independente do banco
 // de origem, em vez de tentar um parser fixo por banco.
 //
-// Aceita `texto` (via pdfjsLib no client, processado via Groq) OU `imagens`
-// (extrato escaneado, processado via Gemini). Mesmo padrão das outras
-// functions de extração deste projeto.
+// Aceita `texto` (via pdfjsLib no client) OU `imagens` (extrato escaneado).
+// Mesmo padrão das outras functions de extração deste projeto.
+//
+// Groq vs. Gemini: a conta usada em GROQ_API_KEY tem um teto de 8.000
+// tokens/minuto (tier "on_demand", compartilhado com as outras Edge
+// Functions do projeto) — um extrato consolidado de mês inteiro em PDF
+// facilmente passa disso (mesmo problema confirmado com o
+// lancctb-parse-comprovante em 04-05/09/2026, com os comprovantes reais da
+// Fast Lube). Gemini não tem esse teto apertado: texto pequeno → Groq
+// (mais rápido/barato); texto grande OU imagem → Gemini. Se mesmo assim o
+// Groq estourar (concorrência com outras functions pela mesma cota no
+// mesmo minuto), cai pro Gemini como fallback antes de desistir.
 //
 // Deploy: Supabase Dashboard → Edge Functions → Deploy a new function → Via
 // Editor → nome "lancctb-parse-extrato" → colar este código → Deploy.
@@ -29,6 +38,10 @@ const CORS_HEADERS = {
 
 const GROQ_MODEL_TEXTO = 'openai/gpt-oss-120b';
 const GEMINI_MODEL = 'gemini-3.6-flash';
+// Acima disso (em caracteres) o texto vai direto pro Gemini — abaixo, tenta
+// Groq primeiro. ~8000 caracteres ≈ 3000 tokens, com folga sob o teto de
+// 8000 TPM da conta mesmo somando o prompt fixo (~700 tokens) e a resposta.
+const TEXTO_LIMITE_GROQ = 8000;
 
 const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo os lançamentos de um extrato de conta corrente (PDF) para conciliação bancária. O extrato pode ser de qualquer banco (Itaú, Santander, Sicoob, Safra, Banco do Brasil, Mercado Pago, etc.) — os formatos de coluna variam bastante entre bancos; normalize tudo para a mesma estrutura de saída abaixo, não tente preservar as colunas originais.
 
@@ -63,13 +76,12 @@ async function extrairViaGroq(texto: string): Promise<unknown> {
   const apiKey = Deno.env.get('GROQ_API_KEY');
   if (!apiKey) throw new Error('GROQ_API_KEY não configurada nos secrets da function');
 
-  const textoLimitado = texto.slice(0, 60000);
   const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
     body: JSON.stringify({
       model: GROQ_MODEL_TEXTO,
-      messages: [{ role: 'user', content: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + textoLimitado + '\n"""' }],
+      messages: [{ role: 'user', content: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + texto + '\n"""' }],
       response_format: { type: 'json_object' },
       temperature: 0.1,
     }),
@@ -87,17 +99,9 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function extrairViaGemini(imagens: string[]): Promise<unknown> {
+async function chamarGemini(parts: unknown[]): Promise<unknown> {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
-
-  const imgs = imagens.slice(0, 20);
-  const parts: unknown[] = [{ text: PROMPT }];
-  for (const img of imgs) {
-    const m = img.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-    if (!m) continue;
-    parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
-  }
 
   const MAX_TENTATIVAS = 3;
   let ultimoErro = '';
@@ -128,6 +132,24 @@ async function extrairViaGemini(imagens: string[]): Promise<unknown> {
   throw new Error(ultimoErro);
 }
 
+async function extrairViaGeminiImagens(imagens: string[]): Promise<unknown> {
+  const imgs = imagens.slice(0, 20);
+  const parts: unknown[] = [{ text: PROMPT }];
+  for (const img of imgs) {
+    const m = img.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+    if (!m) continue;
+    parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+  }
+  return chamarGemini(parts);
+}
+
+async function extrairViaGeminiTexto(texto: string): Promise<unknown> {
+  // Sem o teto apertado de TPM do Groq — o limite aqui é só o contexto do
+  // modelo (bem maior que qualquer extrato mensal real).
+  const textoLimitado = texto.slice(0, 400000);
+  return chamarGemini([{ text: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + textoLimitado + '\n"""' }]);
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS_HEADERS });
@@ -146,7 +168,27 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const dados = temTexto ? await extrairViaGroq(texto) : await extrairViaGemini(imagens);
+    let dados: unknown;
+    if (temImagens) {
+      dados = await extrairViaGeminiImagens(imagens);
+    } else if (texto.length > TEXTO_LIMITE_GROQ) {
+      dados = await extrairViaGeminiTexto(texto);
+    } else {
+      try {
+        dados = await extrairViaGroq(texto);
+      } catch (e) {
+        // Groq pode estourar o TPM mesmo abaixo do nosso teto de tamanho —
+        // a cota é compartilhada com outras Edge Functions do projeto que
+        // podem estar consumindo no mesmo minuto. Cai pro Gemini antes de
+        // desistir.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/Groq/.test(msg) && /(413|429)/.test(msg)) {
+          dados = await extrairViaGeminiTexto(texto);
+        } else {
+          throw e;
+        }
+      }
+    }
 
     return new Response(JSON.stringify(dados), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },

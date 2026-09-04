@@ -22,10 +22,20 @@
 // Por isso a extração pede uma LISTA de comprovantes, não um objeto único,
 // e o prompt orienta explicitamente a tratar cada subtipo.
 //
-// Aceita `texto` (extraído via pdfjsLib no client, processado via Groq) OU
-// `imagens` (array de data URIs base64, para PDF escaneado sem texto
-// selecionável — processado via Gemini). Mesmo padrão de
-// convaplicfin-extrair-tabela/index.ts.
+// Aceita `texto` (extraído via pdfjsLib no client) OU `imagens` (array de
+// data URIs base64, para PDF escaneado sem texto selecionável). Mesmo
+// padrão de convaplicfin-extrair-tabela/index.ts.
+//
+// Groq vs. Gemini: a conta usada em GROQ_API_KEY tem um teto de 8.000
+// tokens/minuto (tier "on_demand", compartilhado com as outras Edge
+// Functions do projeto que também usam Groq) — um PDF de 50 páginas gera
+// ~60.000 caracteres (~22.800 tokens) de texto, bem acima do teto, e a API
+// responde 413 "Request too large". Testado ao vivo em 04-05/09/2026 com os
+// comprovantes reais da Fast Lube. Gemini não tem esse teto apertado, então:
+// texto pequeno → Groq (mais rápido/barato); texto grande OU imagem →
+// Gemini. Se mesmo assim o Groq estourar (outras functions concorrendo pela
+// mesma cota no mesmo minuto), cai pro Gemini como fallback antes de
+// desistir.
 //
 // Deploy: Supabase Dashboard → Edge Functions → Deploy a new function → Via
 // Editor → nome "lancctb-parse-comprovante" → colar este código → Deploy.
@@ -39,6 +49,10 @@ const CORS_HEADERS = {
 
 const GROQ_MODEL_TEXTO = 'openai/gpt-oss-120b';
 const GEMINI_MODEL = 'gemini-3.6-flash';
+// Acima disso (em caracteres) o texto vai direto pro Gemini — abaixo, tenta
+// Groq primeiro. ~8000 caracteres ≈ 3000 tokens, com folga sob o teto de
+// 8000 TPM da conta mesmo somando o prompt fixo (~700 tokens) e a resposta.
+const TEXTO_LIMITE_GROQ = 8000;
 
 const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo dados de comprovantes bancários (PDF) para conciliação contábil. Um único documento pode conter VÁRIOS comprovantes diferentes (um por página ou mais), de tipos diferentes: transferência entre contas (TED), PIX, pagamento de boleto, pagamento de concessionária (só código de barras), DARF (imposto federal), guia SEFAZ/DARE (imposto estadual), entre outros. Extraia CADA comprovante como um item separado da lista, mesmo que sejam do mesmo tipo repetido várias vezes.
 
@@ -77,15 +91,12 @@ async function extrairViaGroq(texto: string): Promise<unknown> {
   const apiKey = Deno.env.get('GROQ_API_KEY');
   if (!apiKey) throw new Error('GROQ_API_KEY não configurada nos secrets da function');
 
-  // Comprovantes em lote podem ser longos (50+ páginas) — limite maior que
-  // o de convaplicfin-extrair-tabela (que é sempre 1-2 páginas).
-  const textoLimitado = texto.slice(0, 60000);
   const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
     body: JSON.stringify({
       model: GROQ_MODEL_TEXTO,
-      messages: [{ role: 'user', content: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + textoLimitado + '\n"""' }],
+      messages: [{ role: 'user', content: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + texto + '\n"""' }],
       response_format: { type: 'json_object' },
       temperature: 0.1,
     }),
@@ -103,20 +114,9 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function extrairViaGemini(imagens: string[]): Promise<unknown> {
+async function chamarGemini(parts: unknown[]): Promise<unknown> {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
-
-  // Até 20 páginas por request — comprovantes em lote podem ter dezenas de
-  // páginas; o client deve dividir em blocos de 20 e chamar a function
-  // várias vezes se o arquivo for maior que isso.
-  const imgs = imagens.slice(0, 20);
-  const parts: unknown[] = [{ text: PROMPT }];
-  for (const img of imgs) {
-    const m = img.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-    if (!m) continue;
-    parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
-  }
 
   const MAX_TENTATIVAS = 3;
   let ultimoErro = '';
@@ -147,6 +147,27 @@ async function extrairViaGemini(imagens: string[]): Promise<unknown> {
   throw new Error(ultimoErro);
 }
 
+async function extrairViaGeminiImagens(imagens: string[]): Promise<unknown> {
+  // Até 20 páginas por request — comprovantes em lote podem ter dezenas de
+  // páginas; o client deve dividir em blocos de 20 e chamar a function
+  // várias vezes se o arquivo for maior que isso.
+  const imgs = imagens.slice(0, 20);
+  const parts: unknown[] = [{ text: PROMPT }];
+  for (const img of imgs) {
+    const m = img.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
+    if (!m) continue;
+    parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
+  }
+  return chamarGemini(parts);
+}
+
+async function extrairViaGeminiTexto(texto: string): Promise<unknown> {
+  // Sem o teto apertado de TPM do Groq — o limite aqui é só o contexto do
+  // modelo (bem maior que qualquer PDF de comprovantes real).
+  const textoLimitado = texto.slice(0, 400000);
+  return chamarGemini([{ text: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + textoLimitado + '\n"""' }]);
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS_HEADERS });
@@ -165,7 +186,27 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    const dados = temTexto ? await extrairViaGroq(texto) : await extrairViaGemini(imagens);
+    let dados: unknown;
+    if (temImagens) {
+      dados = await extrairViaGeminiImagens(imagens);
+    } else if (texto.length > TEXTO_LIMITE_GROQ) {
+      dados = await extrairViaGeminiTexto(texto);
+    } else {
+      try {
+        dados = await extrairViaGroq(texto);
+      } catch (e) {
+        // Groq pode estourar o TPM mesmo abaixo do nosso teto de tamanho —
+        // a cota é compartilhada com outras Edge Functions do projeto que
+        // podem estar consumindo no mesmo minuto. Cai pro Gemini antes de
+        // desistir.
+        const msg = e instanceof Error ? e.message : String(e);
+        if (/Groq/.test(msg) && /(413|429)/.test(msg)) {
+          dados = await extrairViaGeminiTexto(texto);
+        } else {
+          throw e;
+        }
+      }
+    }
 
     return new Response(JSON.stringify(dados), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
