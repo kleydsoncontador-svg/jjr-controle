@@ -2079,6 +2079,8 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     </div>
     <div class="mc">
       <input type="hidden" id="lancctbRegraId">
+      <div id="lancctbRegraOrigemInfo" style="display:none;background:#EEF2FF;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
+      <div id="lancctbRegraSugestaoCnpj" style="display:none;background:#FEF3C7;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
       <div class="fg">
         <div class="fl">Descrição *</div>
         <input class="fi" id="lancctbRegraDescricao" placeholder="Ex: Tarifas bancárias Itaú">
@@ -16253,9 +16255,7 @@ async function renderLancctbRegras(){
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar regras: ${esc(error.message)}</div>`; return; }
   _lancctbUltimasRegras=regras||[];
 
-  let html=`<div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:14px">
-    <button class="btn bp bsm" onclick="abrirLancctbRegraModal()">+ Cadastrar regra</button>
-  </div>`;
+  let html=`<div style="background:#EEF2FF;border-radius:6px;padding:10px 14px;font-size:12.5px;color:var(--ink);margin-bottom:14px">Regras novas são criadas a partir de um lançamento — clique em qualquer linha no <strong>Registro Contábil</strong> pra associar uma regra a ele. Aqui você só vê, edita ou exclui as já cadastradas.</div>`;
   if(!regras||!regras.length){
     html+=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma regra cadastrada ainda — o motor de matching usa Regras só como último recurso, quando não acha NF nem comprovante correspondente.</div>`;
   } else {
@@ -16290,7 +16290,11 @@ function _lancctbAtualizarCamposRegra(){
   document.getElementById('lancctbRegraCampoHistorico').style.display=tipo==='historico'?'':'none';
   document.getElementById('lancctbRegraCampoCnpj').style.display=tipo==='cliente_fornecedor'?'':'none';
 }
+let _lancctbRegraContexto='regras'; // 'regras' (aba Regras) ou 'registro' (clicou num lançamento)
 async function abrirLancctbRegraModal(id){
+  _lancctbRegraContexto='regras';
+  document.getElementById('lancctbRegraOrigemInfo').style.display='none';
+  document.getElementById('lancctbRegraSugestaoCnpj').style.display='none';
   document.getElementById('lancctbRegraId').value=id||'';
   document.getElementById('lancctbRegraTitulo').textContent=id?'Editar regra':'Cadastrar regra';
 
@@ -16342,6 +16346,45 @@ async function abrirLancctbRegraModal(id){
   _lancctbAtualizarCamposRegra();
   openModal('mLancctbRegra');
 }
+// Abre o modal de Regra a partir de um lançamento clicado no Registro
+// Contábil (é assim que o Mister cria regra também — não existe botão
+// avulso "+ Cadastrar" lá, a regra nasce de um lançamento real). Pré-
+// preenche descrição/gatilho com o histórico bancário da linha, e sugere
+// o CNPJ/nome do terceiro quando dá pra achar (ctb já resolvido, ou um
+// comprovante pendente que bate por valor+data).
+async function abrirLancctbRegraModalDeLinha(item){
+  const r=item.extrato;
+  await abrirLancctbRegraModal(null);
+  const hist=(r.historico_bancario||'').trim();
+  document.getElementById('lancctbRegraDescricao').value=hist;
+  document.getElementById('lancctbRegraHistoricoGatilho').value=hist;
+
+  const origemInfo=document.getElementById('lancctbRegraOrigemInfo');
+  const dataFmt=r.data_pagamento?new Date(r.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'';
+  const valor=r.valor_saida||r.valor_entrada;
+  origemInfo.style.display='';
+  origemInfo.innerHTML=`Lançamento: <strong>${dataFmt}</strong> — R$ ${_fmt(valor)} — ${esc(hist)}`;
+
+  let cnpjSugerido=null, nomeSugerido=null;
+  if(item.ctb.length){
+    cnpjSugerido=item.ctb[0].cnpj_cpf||null;
+    nomeSugerido=item.ctb[0].cliente_fornecedor_nome||null;
+  } else {
+    const { data: comps } = await _supaClient.from('comprovantes_bancarios')
+      .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
+      .eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente');
+    const match=(comps||[]).find(c=>c.cnpj_cpf&&Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+    if(match){ cnpjSugerido=match.cnpj_cpf; nomeSugerido=match.cliente_fornecedor_nome; }
+  }
+  const sugestao=document.getElementById('lancctbRegraSugestaoCnpj');
+  if(cnpjSugerido){
+    sugestao.style.display='';
+    sugestao.innerHTML=`Terceiro identificado: <strong>${esc(nomeSugerido||'')}</strong> (${esc(_fmtCnpjCpf(cnpjSugerido))}) — <a href="#" onclick="document.getElementById('lancctbRegraTipo').value='cliente_fornecedor';document.getElementById('lancctbRegraCnpjGatilho').value='${esc(cnpjSugerido)}';_lancctbAtualizarCamposRegra();return false;">usar CNPJ como gatilho em vez do histórico</a>`;
+  } else {
+    sugestao.style.display='none';
+  }
+  _lancctbRegraContexto='registro';
+}
 async function salvarLancctbRegra(){
   const id=document.getElementById('lancctbRegraId').value;
   const descricao=document.getElementById('lancctbRegraDescricao').value.trim();
@@ -16366,9 +16409,15 @@ async function salvarLancctbRegra(){
   const query=id?_supaClient.from('regras_matching').update(registro).eq('id',id):_supaClient.from('regras_matching').insert(registro);
   const { error } = await query;
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
-  toast('Regra salva com sucesso','ok');
   closeModal('mLancctbRegra');
-  renderLancctbRegras();
+  if(_lancctbRegraContexto==='registro'&&_lancctbExtratoContaSel){
+    toast('Regra salva — aplicando aos lançamentos pendentes…','ok');
+    await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,null);
+    renderLancctbRegistroContabil();
+  } else {
+    toast('Regra salva com sucesso','ok');
+    renderLancctbRegras();
+  }
 }
 async function excluirLancctbRegra(id){
   if(!confirm('Excluir esta regra?'))return;
@@ -16728,7 +16777,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   if(item.ctb.length&&ds.length===1&&cs.length===1){
     const d=ds[0], c=cs[0];
     const ellip='white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-    return `<tr style="border-bottom:1px solid var(--border)">
+    return `<tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="abrirLancctbRegraModalDeExtratoId(${r.id})" title="Clique pra associar uma regra a este lançamento">
       <td style="padding:7px 10px">${dataFmt}</td>
       <td style="padding:7px 10px;font-family:var(--mono)">${esc(d.plano_contas?.numero_conta||'')}</td>
       <td style="padding:7px 6px;font-family:var(--mono);font-size:10px;${ellip}" title="${esc(d.classificacao||'')}">${esc(d.classificacao||'')}</td>
@@ -16738,7 +16787,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 6px;font-size:10.5px;${ellip}" title="${esc(c.plano_contas?.descricao||'')}">${esc(c.plano_contas?.descricao||'')}</td>
       <td style="padding:7px 10px;text-align:right">R$ ${_fmt(valor)}</td>
       <td style="padding:7px 10px">${esc(r.historico_bancario||'')}</td>
-      <td style="padding:7px 10px"><input class="si" style="width:100%;min-width:160px" value="${esc(d.historico||'')}" data-lote="${d.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+      <td style="padding:7px 10px" onclick="event.stopPropagation()"><input class="si" style="width:100%;min-width:160px" value="${esc(d.historico||'')}" data-lote="${d.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
       <td style="padding:7px 10px">${esc(d.cliente_fornecedor_nome||'')}</td>
       <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
     </tr>`;
@@ -16748,7 +16797,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     return item.ctb.map(l=>{
       const ehD=l.tipo==='D';
       const ellip='white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-      return `<tr style="border-bottom:1px solid var(--border)">
+      return `<tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="abrirLancctbRegraModalDeExtratoId(${r.id})" title="Clique pra associar uma regra a este lançamento">
         <td style="padding:7px 10px">${dataFmt}</td>
         <td style="padding:7px 10px;font-family:var(--mono)">${ehD?esc(l.plano_contas?.numero_conta||''):''}</td>
         <td style="padding:7px 6px;font-family:var(--mono);font-size:10px;${ellip}" title="${ehD?esc(l.classificacao||''):''}">${ehD?esc(l.classificacao||''):''}</td>
@@ -16758,7 +16807,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 6px;font-size:10.5px;${ellip}" title="${!ehD?esc(l.plano_contas?.descricao||''):''}">${!ehD?esc(l.plano_contas?.descricao||''):''}</td>
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(l.valor)}</td>
         <td style="padding:7px 10px">${esc(r.historico_bancario||'')}</td>
-        <td style="padding:7px 10px"><input class="si" style="width:100%;min-width:160px" value="${esc(l.historico||'')}" data-lote="${l.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+        <td style="padding:7px 10px" onclick="event.stopPropagation()"><input class="si" style="width:100%;min-width:160px" value="${esc(l.historico||'')}" data-lote="${l.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td style="padding:7px 10px">${esc(l.cliente_fornecedor_nome||'')}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
       </tr>`;
@@ -16768,7 +16817,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   const contaBancoNum=contaAtual.plano_contas?.numero_conta||'', contaBancoClassif=contaAtual.plano_contas?.classificacao||'', contaBancoDesc=contaAtual.plano_contas?.descricao||'';
   const bancoEhD=!ehSaida;
   const ellip='white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
-  return `<tr style="border-bottom:1px solid var(--border)">
+  return `<tr style="border-bottom:1px solid var(--border);cursor:pointer" onclick="abrirLancctbRegraModalDeExtratoId(${r.id})" title="Clique pra associar uma regra a este lançamento">
     <td style="padding:7px 10px">${dataFmt}</td>
     <td style="padding:7px 10px;font-family:var(--mono);color:var(--slate)">${bancoEhD?esc(contaBancoNum):''}</td>
     <td style="padding:7px 6px;font-family:var(--mono);color:var(--slate);font-size:10px;${ellip}" title="${bancoEhD?esc(contaBancoClassif):''}">${bancoEhD?esc(contaBancoClassif):''}</td>
@@ -16782,6 +16831,10 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px">—</td>
     <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
   </tr>`;
+}
+function abrirLancctbRegraModalDeExtratoId(extratoId){
+  const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
+  if(item) abrirLancctbRegraModalDeLinha(item);
 }
 
 function _lancctbRegistroHtml({agencias,contaAtual,linhas,count}){
