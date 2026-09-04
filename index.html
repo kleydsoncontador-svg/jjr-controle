@@ -2033,7 +2033,8 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <input type="hidden" id="lancctbAgenciaId">
       <div class="fg">
         <div class="fl">Banco *</div>
-        <input class="fi" id="lancctbAgenciaBanco" placeholder="Ex: Itaú, BB, Safra...">
+        <input class="fi" id="lancctbAgenciaBanco" list="lancctbBancosDatalist" placeholder="Ex: Itaú, BB, Safra..." autocomplete="off">
+        <datalist id="lancctbBancosDatalist"></datalist>
       </div>
       <div class="grid2">
         <div class="fg">
@@ -15590,6 +15591,21 @@ const LANCCTB_ABAS=[
   {id:'agencias', label:'Agência bancária'},
   {id:'registro', label:'Registro Contábil'},
 ];
+// Lista de bancos autorizados a operar pelo Bacen (código Compe + nome) —
+// pros mais usados nas empresas da JJR, pra sugerir no campo "Banco" da
+// Agência bancária em vez de texto livre. Datalist, então o usuário ainda
+// pode digitar um nome fora da lista se precisar.
+const LANCCTB_BANCOS_BR=[
+  ['001','Banco do Brasil'],['033','Santander'],['041','Banrisul'],['070','BRB'],
+  ['077','Banco Inter'],['085','Ailos (Cooperativa)'],['104','Caixa Econômica Federal'],
+  ['136','Unicred'],['151','COOP (Sicoob antigo)'],['197','Stone'],['208','BTG Pactual'],
+  ['212','Banco Original'],['218','BS2'],['237','Bradesco'],['260','Nu Pagamentos (Nubank)'],
+  ['290','PagSeguro (PagBank)'],['323','Mercado Pago'],['336','C6 Bank'],['341','Itaú Unibanco'],
+  ['380','PicPay'],['403','Cora'],['422','Banco Safra'],['461','Asaas'],
+  ['623','Banco Pan'],['633','Banco Rendimento'],['637','Banco Sofisa'],['655','Banco Votorantim (BV)'],
+  ['707','Banco Daycoval'],['735','Banco Neon'],['739','Banco Cetelem'],['741','Banco Ribeirão Preto'],
+  ['745','Citibank'],['748','Sicredi'],['756','Sicoob'],['804','EFI (Gerencianet)'],
+];
 let _lancctbEidAtual=null;
 let _lancctbAbaAtiva='nfe-entrada';
 const LANCCTB_PAGE_SIZE=50;
@@ -16414,6 +16430,10 @@ async function renderLancctbAgencias(){
 async function abrirLancctbAgenciaModal(id){
   document.getElementById('lancctbAgenciaId').value=id||'';
   document.getElementById('lancctbAgenciaTitulo').textContent=id?'Editar agência bancária':'Cadastrar agência bancária';
+  const dl=document.getElementById('lancctbBancosDatalist');
+  if(dl&&!dl.children.length){
+    dl.innerHTML=LANCCTB_BANCOS_BR.map(b=>`<option value="${esc(b[0]+' - '+b[1])}">`).join('');
+  }
   const sel=document.getElementById('lancctbAgenciaContaContabil');
   sel.innerHTML='<option value="">— Sem vínculo —</option>';
   const { data: contas } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).order('classificacao'));
@@ -17677,6 +17697,19 @@ async function _lancctbExecutarExclusaoExtrato(){
   if(digitado!==String(_lancctbExclusaoExtratoQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
   btn.disabled=true; btn.textContent='Excluindo…';
+  // Antes de excluir, desfaz qualquer conciliação apontando pra essas linhas
+  // (notas_fiscais_parcelas/comprovantes_bancarios/lancamentos_contabeis têm
+  // FK pra lancamentos_extrato) — senão o delete inteiro é bloqueado por
+  // violação de chave estrangeira assim que existir 1 lançamento já
+  // conciliado na conta (bug real relatado pelo usuário).
+  const { data: idsExtratoRows } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id')
+    .eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel));
+  const ids=(idsExtratoRows||[]).map(r=>r.id);
+  if(ids.length){
+    await _supaClient.from('notas_fiscais_parcelas').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',ids);
+    await _supaClient.from('comprovantes_bancarios').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',ids);
+    await _supaClient.from('lancamentos_contabeis').delete().in('lancamento_extrato_id',ids);
+  }
   const { error } = await _supaClient.from('lancamentos_extrato').delete().eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel);
   btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
@@ -17688,10 +17721,24 @@ async function _lancctbExecutarExclusaoExtrato(){
 // Salva o "Saldo anterior" (âncora do saldo corrido, editável direto na
 // tela) na conta bancária selecionada — o usuário pode ajustar pra bater
 // com o saldo real do banco antes do 1º lançamento importado.
+// Aceita tanto formato BR (1.234.567,89 — vírgula decimal) quanto EN
+// (1234567.89 — ponto decimal) digitado no campo Saldo anterior. Antes só
+// tratava vírgula como decimal e removia TODO ponto como se fosse milhar —
+// se o usuário digitasse com ponto decimal (comum em teclado numérico/
+// locale diferente), o valor virava 100x maior (bug real relatado: salvar
+// não "pegava" o valor digitado).
+function _lancctbParseValorInput(str){
+  str=String(str||'').trim();
+  if(!str) return 0;
+  if(str.includes(',')) return parseFloat(str.replace(/\./g,'').replace(',','.'))||0;
+  const partes=str.split('.');
+  if(partes.length===2&&partes[1].length<=2) return parseFloat(str)||0;
+  return parseFloat(str.replace(/\./g,''))||0;
+}
 async function salvarLancctbSaldoInicial(){
   const input=document.getElementById('lancctbSaldoInicialInput');
   if(!input) return;
-  const valor=parseFloat(input.value.replace(/\./g,'').replace(',','.'))||0;
+  const valor=_lancctbParseValorInput(input.value);
   const { error } = await _supaClient.from('agencias_bancarias').update({saldo_inicial:valor}).eq('id',_lancctbExtratoContaSel);
   if(error){ toast('Erro ao salvar saldo anterior: '+error.message,'err'); return; }
   toast('Saldo anterior atualizado','ok');
