@@ -94,9 +94,11 @@ async function chamarSieg(apiKey: string, body: Record<string, unknown>): Promis
 async function diagnosticoSieg(apiKey: string): Promise<Record<string, unknown>> {
   const bodyMinimo = { XmlType: 1, Take: 1, Skip: 0, DataEmissaoInicio: `${hoje()}T00:00:00`, DataEmissaoFim: `${hoje()}T23:59:59` };
   const bodyMinimoEngine = { TipoXml: 1, Take: 1, Skip: 0, DataEmissaoInicio: `${hoje()}T00:00:00`, DataEmissaoFim: `${hoje()}T23:59:59` };
-  async function tentativa(nome: string, url: string, headers: Record<string, string>, body: Record<string, unknown>) {
+  async function tentativa(nome: string, url: string, headers: Record<string, string>, body: Record<string, unknown> | null, metodo: 'POST' | 'GET' = 'POST') {
     try {
-      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+      const init: RequestInit = { method: metodo, headers: { ...headers } };
+      if (metodo === 'POST') { (init.headers as Record<string,string>)['Content-Type'] = 'application/json'; init.body = JSON.stringify(body || {}); }
+      const resp = await fetch(url, init);
       const raw = await resp.text();
       return { nome, status: resp.status, resposta: raw.slice(0, 300) };
     } catch (e) {
@@ -112,6 +114,12 @@ async function diagnosticoSieg(apiKey: string): Promise<Record<string, unknown>>
     tentativa('engine: header Api-Key', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, { 'Api-Key': apiKey }, bodyMinimoEngine),
     tentativa('engine: header X-Api-Key', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, { 'X-Api-Key': apiKey }, bodyMinimoEngine),
     tentativa('contar-xmls: query ?api_key=', `${SIEG_BASE_URL}/api/v1/contar-xmls?api_key=${encodeURIComponent(apiKey)}`, {}, { DataEmissaoInicio: `${hoje()}T00:00:00`, DataEmissaoFim: `${hoje()}T23:59:59` }),
+    tentativa('engine: query ?ApiKey=', `${SIEG_BASE_URL}/api/v1/baixar-xmls?ApiKey=${encodeURIComponent(apiKey)}`, {}, bodyMinimoEngine),
+    tentativa('engine: query ?apikey=', `${SIEG_BASE_URL}/api/v1/baixar-xmls?apikey=${encodeURIComponent(apiKey)}`, {}, bodyMinimoEngine),
+    tentativa('engine: header apikey', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, { apikey: apiKey }, bodyMinimoEngine),
+    tentativa('engine: body ApiKey', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, {}, { ...bodyMinimoEngine, ApiKey: apiKey }),
+    tentativa('engine listar certificados: query ?api_key=', `${SIEG_BASE_URL}/api/v1/listar?active=true&api_key=${encodeURIComponent(apiKey)}`, {}, null, 'GET'),
+    tentativa('legada listar certificados: query ?api_key=', `${SIEG_BASE_URL}/api/Certificado/ListarCertificados?active=true&api_key=${encodeURIComponent(apiKey)}`, {}, null, 'GET'),
   ]);
   return { resultados };
 }
