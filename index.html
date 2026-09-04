@@ -16807,11 +16807,18 @@ function _lancctbExtratoToggleTodos(marcar){
   _lancctbExtratoPreview.forEach(l=>l._incluir=marcar);
   renderLancctbExtratoPreview();
 }
-// Hash de deduplicação simples (mesmo dado nunca gera 2 linhas se o mesmo
-// arquivo for importado 2x sem querer) — combina os campos que juntos
-// identificam um lançamento único dentro da mesma conta bancária.
-function _lancctbHashLancamento(contaId,l){
-  const base=`${contaId}|${l.data}|${l.valor_entrada||0}|${l.valor_saida||0}|${(l.historico||'').trim()}`;
+// Hash de deduplicação (mesmo dado nunca gera 2 linhas se o mesmo arquivo
+// for importado 2x sem querer) — combina os campos que juntos identificam
+// um lançamento dentro da mesma conta bancária, MAIS um índice de repetição
+// (`ocorrencia`, 0/1/2...) pra quando 2+ lançamentos DISTINTOS de verdade
+// coincidem em data+histórico+valor (ex: vários "Sispag Salários" do mesmo
+// valor, dias funcionários diferentes pagos o mesmo tanto no mesmo dia —
+// confirmado real no extrato de teste da Fast Lube: 18 grupos assim,
+// perdendo 30 lançamentos reais quando a chave não tinha esse índice).
+// Reimportar o MESMO arquivo 2x ainda deduplica certo, porque a ordem das
+// linhas se repete e cada uma recebe o mesmo índice de novo.
+function _lancctbHashLancamento(contaId,l,ocorrencia){
+  const base=`${contaId}|${l.data}|${l.valor_entrada||0}|${l.valor_saida||0}|${(l.historico||'').trim()}|${ocorrencia}`;
   let h=0;
   for(let i=0;i<base.length;i++){ h=((h<<5)-h+base.charCodeAt(i))|0; }
   return 'h'+Math.abs(h).toString(36);
@@ -16820,17 +16827,22 @@ async function confirmarLancctbImportExtrato(){
   const selecionados=_lancctbExtratoPreview.filter(l=>l._incluir);
   if(!selecionados.length){ toast('Nenhum lançamento selecionado','err'); return; }
   const contaId=_lancctbExtratoContaSel;
-  const registros=selecionados.map(l=>({
-    empresa_eid: _lancctbEidAtual,
-    conta_bancaria_id: contaId,
-    data_pagamento: l.data,
-    valor_saida: l.valor_saida||0,
-    valor_entrada: l.valor_entrada||0,
-    historico_bancario: l.historico||null,
-    documento: l.documento||null,
-    origem_importacao: l._origem||'excel',
-    hash_dedup: _lancctbHashLancamento(contaId,l),
-  }));
+  const contadorOcorrencias={};
+  const registros=selecionados.map(l=>{
+    const chaveGrupo=`${l.data}|${l.valor_entrada||0}|${l.valor_saida||0}|${(l.historico||'').trim()}`;
+    const ocorrencia=contadorOcorrencias[chaveGrupo]=(contadorOcorrencias[chaveGrupo]||0)+1;
+    return {
+      empresa_eid: _lancctbEidAtual,
+      conta_bancaria_id: contaId,
+      data_pagamento: l.data,
+      valor_saida: l.valor_saida||0,
+      valor_entrada: l.valor_entrada||0,
+      historico_bancario: l.historico||null,
+      documento: l.documento||null,
+      origem_importacao: l._origem||'excel',
+      hash_dedup: _lancctbHashLancamento(contaId,l,ocorrencia),
+    };
+  });
   const { error } = await _supaClient.from('lancamentos_extrato').upsert(registros,{onConflict:'conta_bancaria_id,hash_dedup',ignoreDuplicates:true});
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
   toast(`${registros.length} lançamento(s) processado(s) (duplicados foram ignorados)`,'ok');
