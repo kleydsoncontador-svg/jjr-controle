@@ -16119,8 +16119,7 @@ function exportarLancctbAgenciasExcel(){
 // Edge Function lancctb-parse-comprovante) — por isso o fluxo sempre passa
 // por uma tela de preview com checkbox antes de gravar, nunca insere direto.
 let _lancctbComprovPagina=0;
-let _lancctbComprovPreview=[]; // [{...campo, _incluir:true}]
-let _lancctbComprovArquivoPath=null; // path no bucket 'comprovantes' do PDF original recém-enviado
+let _lancctbComprovPreview=[]; // [{...campo, _incluir:true, _arquivoNome, _arquivoStoragePath}]
 
 async function renderLancctbComprovantes(){
   const el=document.getElementById('lancctbConteudoAba');
@@ -16205,9 +16204,9 @@ function abrirLancctbUploadComprovanteModal(){
   document.getElementById('lancctbUploadTitulo').textContent='Upload de Comprovantes (PDF)';
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-      Um único PDF pode conter vários comprovantes (um por página) — todos serão extraídos e você confere/desmarca antes de salvar.
+      Pode selecionar vários PDFs de uma vez (segure Ctrl ou Shift na janela de seleção) — e cada PDF ainda pode trazer vários comprovantes empilhados (um por página). Tudo é extraído junto e você confere/desmarca antes de salvar.
     </div>
-    <input class="fi" id="lancctbComprovArquivo" type="file" accept=".pdf">
+    <input class="fi" id="lancctbComprovArquivo" type="file" accept=".pdf" multiple>
     <div id="lancctbComprovStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
     <div id="lancctbComprovPreviewArea" style="margin-top:14px"></div>
     <div class="ma">
@@ -16220,72 +16219,87 @@ function abrirLancctbUploadComprovanteModal(){
 // _convItauGarantirWorker já usado no resto do site); se vier vazio/curto
 // (PDF escaneado sem texto selecionável), renderiza páginas como imagem e
 // manda pra Edge Function via Gemini em vez de Groq — mesmo fallback já
-// usado em _convAplicFinExtrairGenerico.
+// usado em _convAplicFinExtrairGenerico. Processa 1 arquivo: sobe o PDF
+// original pro Storage (1x, mesmo que vire dezenas de comprovantes — todos
+// apontam pro mesmo path, evidência de auditoria preservada sem
+// granularidade de página) e chama a Edge Function de extração.
+async function _lancctbProcessarUmComprovantePdf(file,status){
+  const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+  const { error: erroUpload } = await _supaClient.storage.from('comprovantes').upload(pathArquivo,file);
+  const arquivoStoragePath = erroUpload ? null : pathArquivo;
+  if(erroUpload) console.error('Falha ao arquivar PDF original:',erroUpload);
+
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let textoCompleto='';
+  const imagens=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+    textoCompleto+='\n--- página '+p+' ---\n'+texto;
+  }
+  textoCompleto=textoCompleto.trim();
+  if(textoCompleto.replace(/---.*?---/g,'').trim().length<20){
+    status.textContent=`PDF "${file.name}" sem texto selecionável — renderizando páginas como imagem…`;
+    for(let p=1;p<=Math.min(pdf.numPages,20);p++){
+      const page=await pdf.getPage(p);
+      const viewport=page.getViewport({scale:2});
+      const canvas=document.createElement('canvas');
+      canvas.width=viewport.width;canvas.height=viewport.height;
+      const ctx=canvas.getContext('2d');
+      await page.render({canvasContext:ctx,viewport}).promise;
+      imagens.push(canvas.toDataURL('image/jpeg',0.85));
+    }
+  }
+  const body=imagens.length?{imagens}:{texto:textoCompleto};
+  const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-comprovante',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+    body:JSON.stringify(body)
+  });
+  if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
+  const d=await resp.json();
+  if(d.error) throw new Error(d.error);
+  if(!Array.isArray(d.comprovantes)||!d.comprovantes.length) throw new Error('Não foi possível identificar nenhum comprovante neste PDF.');
+
+  return d.comprovantes.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:arquivoStoragePath}));
+}
+// Percorre todos os arquivos selecionados (o input aceita múltiplos PDFs de
+// uma vez) sequencialmente — falha em 1 arquivo não derruba os outros, só
+// fica registrada no resumo final.
 async function processarLancctbUploadComprovante(){
-  const file=document.getElementById('lancctbComprovArquivo')?.files[0];
+  const files=Array.from(document.getElementById('lancctbComprovArquivo')?.files||[]);
   const status=document.getElementById('lancctbComprovStatus');
   const btn=document.getElementById('lancctbComprovProcessarBtn');
-  if(!file){ toast('Selecione um arquivo PDF','err'); return; }
+  if(!files.length){ toast('Selecione ao menos um arquivo PDF','err'); return; }
   btn.disabled=true; btn.textContent='Extraindo…';
-  status.textContent='Enviando PDF original para o arquivo…';
-  _lancctbComprovArquivoPath=null;
-  try{
-    // Um PDF de comprovantes pode virar dezenas de registros — sobe o
-    // arquivo original 1x só, e todos apontam pro mesmo path (evidência
-    // de auditoria do pagamento fica preservada, mesmo sem granularidade
-    // de página).
-    const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
-    const { error: erroUpload } = await _supaClient.storage.from('comprovantes').upload(pathArquivo,file);
-    if(erroUpload){ console.error('Falha ao arquivar PDF original:',erroUpload); }
-    else { _lancctbComprovArquivoPath=pathArquivo; }
-
-    status.textContent='Lendo PDF…';
-    _convItauGarantirWorker();
-    const buf=await file.arrayBuffer();
-    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-    let textoCompleto='';
-    const imagens=[];
-    for(let p=1;p<=pdf.numPages;p++){
-      const page=await pdf.getPage(p);
-      const content=await page.getTextContent();
-      const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
-      textoCompleto+='\n--- página '+p+' ---\n'+texto;
+  const encontrados=[];
+  const erros=[];
+  for(let i=0;i<files.length;i++){
+    const file=files[i];
+    status.textContent=`Processando arquivo ${i+1} de ${files.length}: "${file.name}"…`;
+    try{
+      const comprovantes=await _lancctbProcessarUmComprovantePdf(file,status);
+      encontrados.push(...comprovantes);
+    }catch(e){
+      console.error('Falha ao processar '+file.name+':',e);
+      erros.push(`"${file.name}": ${e.message}`);
     }
-    textoCompleto=textoCompleto.trim();
-    if(textoCompleto.replace(/---.*?---/g,'').trim().length<20){
-      status.textContent='PDF sem texto selecionável — renderizando páginas como imagem…';
-      for(let p=1;p<=Math.min(pdf.numPages,20);p++){
-        const page=await pdf.getPage(p);
-        const viewport=page.getViewport({scale:2});
-        const canvas=document.createElement('canvas');
-        canvas.width=viewport.width;canvas.height=viewport.height;
-        const ctx=canvas.getContext('2d');
-        await page.render({canvasContext:ctx,viewport}).promise;
-        imagens.push(canvas.toDataURL('image/jpeg',0.85));
-      }
-    }
-    status.textContent='Chamando IA para extrair os comprovantes…';
-    const body=imagens.length?{imagens}:{texto:textoCompleto};
-    const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-comprovante',{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
-      body:JSON.stringify(body)
-    });
-    if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
-    const d=await resp.json();
-    if(d.error) throw new Error(d.error);
-    if(!Array.isArray(d.comprovantes)||!d.comprovantes.length) throw new Error('Não foi possível identificar nenhum comprovante neste PDF.');
-
-    _lancctbComprovPreview=d.comprovantes.map(c=>({...c,_incluir:true}));
-    status.textContent=`${_lancctbComprovPreview.length} comprovante(s) encontrado(s) — confira abaixo antes de salvar.`;
-    renderLancctbComprovPreview();
-  }catch(e){
-    console.error(e);
-    status.textContent='Erro: '+e.message;
-    toast('Erro ao extrair: '+e.message,'err');
-  }finally{
-    btn.disabled=false; btn.textContent='▶ Extrair';
   }
+  _lancctbComprovPreview=encontrados;
+  if(!encontrados.length){
+    status.textContent='Nenhum comprovante encontrado. '+(erros.length?erros.join(' | '):'');
+    toast('Não foi possível extrair nenhum comprovante.','err');
+  } else {
+    status.textContent=`${encontrados.length} comprovante(s) encontrado(s) em ${files.length} arquivo(s)`
+      +(erros.length?` — ${erros.length} arquivo(s) com erro: ${erros.join(' | ')}`:'')
+      +' — confira abaixo antes de salvar.';
+    if(erros.length) toast(`${erros.length} arquivo(s) falharam na extração — veja o aviso acima da lista.`,'err');
+    renderLancctbComprovPreview();
+  }
+  btn.disabled=false; btn.textContent='▶ Extrair';
 }
 function renderLancctbComprovPreview(){
   const el=document.getElementById('lancctbComprovPreviewArea');
@@ -16298,6 +16312,7 @@ function renderLancctbComprovPreview(){
         <th style="padding:6px 8px;text-align:left">Documento</th>
         <th style="padding:6px 8px;text-align:right">Valor</th>
         <th style="padding:6px 8px;text-align:left">Observação</th>
+        <th style="padding:6px 8px;text-align:left">Arquivo</th>
       </tr></thead><tbody>`;
   _lancctbComprovPreview.forEach((c,i)=>{
     html+=`<tr style="border-bottom:1px solid var(--border);opacity:${c._incluir?1:.4}">
@@ -16307,6 +16322,7 @@ function renderLancctbComprovPreview(){
       <td style="padding:5px 8px">${esc(c.documento_numero||'')}</td>
       <td style="padding:5px 8px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
       <td style="padding:5px 8px;color:var(--slate)">${esc(c.observacao||'')}</td>
+      <td style="padding:5px 8px;color:var(--slate);font-size:11px">${esc(c._arquivoNome||'')}</td>
     </tr>`;
   });
   html+='</tbody></table></div>';
@@ -16336,7 +16352,7 @@ async function confirmarLancctbImportComprovantes(){
     multa: c.multa||0,
     desconto: c.desconto||0,
     observacao: c.observacao||null,
-    arquivo_storage_path: _lancctbComprovArquivoPath,
+    arquivo_storage_path: c._arquivoStoragePath||null,
   }));
   const { error } = await _supaClient.from('comprovantes_bancarios').insert(registros);
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
