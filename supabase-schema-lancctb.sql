@@ -104,8 +104,13 @@ CREATE TABLE IF NOT EXISTS public.plano_contas (
   ativo           BOOLEAN NOT NULL DEFAULT true,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  UNIQUE (empresa_eid, numero_conta),
-  UNIQUE (empresa_eid, classificacao)
+  UNIQUE (empresa_eid, numero_conta)
+  -- Sem UNIQUE(empresa_eid, classificacao): a mesma classificação contábil
+  -- pode aparecer 2x legitimamente quando matriz e filial compartilham a
+  -- mesma linha do plano com números de conta diferentes (ex: "SHOPEE PAY
+  -- C/C ... " da matriz e da Filial SP, ambas em 1.1.1.02.200001) — mesmo
+  -- padrão já visto em outras partes do jjr-controle (ver memória "Vagas
+  -- reservadas no plano JJR").
 );
 CREATE INDEX IF NOT EXISTS idx_plano_contas_empresa ON public.plano_contas (empresa_eid);
 

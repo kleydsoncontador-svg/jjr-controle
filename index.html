@@ -1998,6 +1998,79 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: importar Plano de Contas via Excel -->
+<div class="mb" id="mLancctbImportPlano" style="display:none">
+  <div class="modal" style="max-width:520px">
+    <div class="mt">
+      <h3>Importar Plano de Contas</h3>
+      <button onclick="closeModal('mLancctbImportPlano')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
+        <strong>Colunas esperadas</strong> (mesmo padrão do Mister Contador): Conta | Classificação | Tipo (S/A) | Descrição | Grau. A importação faz upsert por número de conta — reimportar atualiza as existentes sem duplicar.
+      </div>
+      <div class="fg">
+        <div class="fl">Arquivo Excel</div>
+        <input class="fi" id="lancctbPlanoArquivo" type="file" accept=".xls,.xlsx,.csv">
+      </div>
+      <div id="lancctbPlanoImportStatus" style="font-size:12.5px;margin-top:8px;min-height:16px"></div>
+    </div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbImportPlano')">Cancelar</button>
+      <button class="btn bp" id="lancctbPlanoImportBtn" onclick="processarLancctbImportPlano()">⬆ Importar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: cadastrar/editar Agência Bancária -->
+<div class="mb" id="mLancctbAgencia" style="display:none">
+  <div class="modal" style="max-width:480px">
+    <div class="mt">
+      <h3 id="lancctbAgenciaTitulo">Cadastrar agência bancária</h3>
+      <button onclick="closeModal('mLancctbAgencia')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <input type="hidden" id="lancctbAgenciaId">
+      <div class="fg">
+        <div class="fl">Banco *</div>
+        <input class="fi" id="lancctbAgenciaBanco" placeholder="Ex: Itaú, BB, Safra...">
+      </div>
+      <div class="grid2">
+        <div class="fg">
+          <div class="fl">Nº da Agência (sem dígitos) *</div>
+          <input class="fi" id="lancctbAgenciaNum" placeholder="0454">
+        </div>
+        <div class="fg">
+          <div class="fl">Filial (Cod.)</div>
+          <input class="fi" id="lancctbAgenciaFilial" placeholder="Opcional">
+        </div>
+      </div>
+      <div class="grid2">
+        <div class="fg">
+          <div class="fl">Conta Corrente *</div>
+          <input class="fi" id="lancctbAgenciaConta" placeholder="22895">
+        </div>
+        <div class="fg">
+          <div class="fl">Dígito da C/C</div>
+          <input class="fi" id="lancctbAgenciaDigito" placeholder="8">
+        </div>
+      </div>
+      <div class="fg">
+        <div class="fl">Descrição</div>
+        <input class="fi" id="lancctbAgenciaDescricao" placeholder="Ex: Itaú-Fast Lube">
+      </div>
+      <div class="fg">
+        <div class="fl">Conta Contábil vinculada</div>
+        <select class="si" id="lancctbAgenciaContaContabil" style="width:100%"><option value="">— Sem vínculo —</option></select>
+      </div>
+    </div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbAgencia')">Cancelar</button>
+      <button class="btn bp" onclick="salvarLancctbAgencia()">✓ Salvar</button>
+    </div>
+  </div>
+</div>
+
 <div class="page" id="page-conv-entradas">
   <div class="crumb-voltar"><button class="btn bo bsm" onclick="goPage('conversor-hub')">← Voltar ao Conversor de Arquivos</button></div>
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
@@ -15470,6 +15543,8 @@ function renderLancctbConteudo(){
   const el=document.getElementById('lancctbConteudoAba');
   const aba=LANCCTB_ABAS.find(a=>a.id===_lancctbAbaAtiva);
   if(aba&&aba.tipoDoc){ renderLancctbNotas(aba); return; }
+  if(_lancctbAbaAtiva==='plano'){ renderLancctbPlanoContas(); return; }
+  if(_lancctbAbaAtiva==='agencias'){ renderLancctbAgencias(); return; }
   el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:60px 20px">
     <div style="font-size:2rem;margin-bottom:8px">🚧</div>
     <div>Esta aba entra numa próxima fase do módulo.</div>
@@ -15615,6 +15690,385 @@ function exportarLancctbNotasExcel(abaId){
   XLSX.utils.book_append_sheet(wb,ws,aba.label.substring(0,31));
   const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
   XLSX.writeFile(wb,`${aba.label.replace(/\s/g,'_')}_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+
+// ─── Plano de Contas ───────────────────────────────────────────────────────
+let _lancctbPlanoBusca='';
+let _lancctbPlanoPagina=0;
+let _lancctbUltimoPlano=[];
+
+async function renderLancctbPlanoContas(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const from=_lancctbPlanoPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE-1;
+
+  let q=_supaClient.from('plano_contas').select('id,numero_conta,classificacao,tipo,descricao,grau',{count:'exact'}).eq('empresa_eid',eid);
+  if(_lancctbPlanoBusca.trim()){
+    const t=_lancctbPlanoBusca.trim().replace(/[%_]/g,'');
+    q=q.or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`);
+  }
+  const { data: contas, error, count } = await q.order('classificacao',{ascending:true}).range(from,to);
+
+  if(error){
+    el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar plano de contas: ${esc(error.message)}</div>`;
+    return;
+  }
+  _lancctbUltimoPlano=contas||[];
+
+  // Classificações compartilhadas entre matriz e filial (mesma linha do
+  // plano, números de conta diferentes) — destacadas em amarelo pra não
+  // confundir com duplicidade errada. Busca só a coluna classificacao de
+  // toda a empresa (cabe numa leitura só, plano raramente passa de poucos
+  // milhares de linhas) pra contar ocorrências além da página atual.
+  const { data: todasClassif } = await _supaClient.from('plano_contas').select('classificacao').eq('empresa_eid',eid);
+  const contagemClassif={};
+  (todasClassif||[]).forEach(r=>{ contagemClassif[r.classificacao]=(contagemClassif[r.classificacao]||0)+1; });
+
+  const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
+  let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+    <input class="si" id="lancctbPlanoBuscaInput" placeholder="🔍 Pesquisar conta, classificação ou descrição..." value="${esc(_lancctbPlanoBusca)}" style="flex:1;min-width:220px" oninput="_lancctbPlanoBuscaDebounced(this.value)">
+    <div style="display:flex;gap:6px">
+      <button class="btn bo bsm" onclick="abrirLancctbImportPlanoModal()">⬆ Importar Excel</button>
+      <button class="action-btn action-btn-excel" onclick="exportarLancctbPlanoExcel()">📊 Gerar Excel</button>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <thead><tr style="background:var(--ink2);color:#fff">
+      <th style="padding:8px 10px;text-align:left">Conta</th>
+      <th style="padding:8px 10px;text-align:left">Classificação</th>
+      <th style="padding:8px 10px;text-align:center">Tipo</th>
+      <th style="padding:8px 10px;text-align:left">Descrição</th>
+      <th style="padding:8px 10px;text-align:center">Grau</th>
+      <th style="padding:8px 10px;text-align:center">&nbsp;</th>
+    </tr></thead>
+    <tbody>`;
+  if(!contas||!contas.length){
+    html+=`<tr><td colspan="6" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma conta cadastrada ainda. Use "Importar Excel" para trazer o plano do Mister Contador.</td></tr>`;
+  } else {
+    contas.forEach(c=>{
+      const compartilhada=(contagemClassif[c.classificacao]||0)>1;
+      const rowStyle=compartilhada?'border-bottom:1px solid var(--border);background:#FEF3C7':'border-bottom:1px solid var(--border)';
+      const titulo=compartilhada?` title="Classificação ${esc(c.classificacao)} compartilhada entre matriz e filial — confira se está correta"`:'';
+      html+=`<tr style="${rowStyle}"${titulo}>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(c.numero_conta||'')}</td>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(c.classificacao||'')}${compartilhada?' ⚠️':''}</td>
+        <td style="padding:7px 10px;text-align:center">${esc(c.tipo||'')}</td>
+        <td style="padding:7px 10px">${esc(c.descricao||'')}</td>
+        <td style="padding:7px 10px;text-align:center">${c.grau||''}</td>
+        <td style="padding:7px 10px;text-align:center"><button class="icon-btn" onclick="excluirLancctbConta(${c.id})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:#dc2626">🗑️</button></td>
+      </tr>`;
+    });
+  }
+  html+=`</tbody></table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12.5px;color:var(--slate)">
+      <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" ${_lancctbPlanoPagina===0?'disabled':''} onclick="_lancctbPlanoPagina--;renderLancctbPlanoContas()">‹ Anterior</button>
+        <span style="padding:6px 10px">Página ${_lancctbPlanoPagina+1} de ${totalPaginas}</span>
+        <button class="btn bo bsm" ${_lancctbPlanoPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbPlanoPagina++;renderLancctbPlanoContas()">Próxima ›</button>
+      </div>
+    </div>`;
+  el.innerHTML=html;
+}
+let _lancctbPlanoBuscaTimer=null;
+function _lancctbPlanoBuscaDebounced(v){
+  _lancctbPlanoBusca=v;
+  _lancctbPlanoPagina=0;
+  clearTimeout(_lancctbPlanoBuscaTimer);
+  _lancctbPlanoBuscaTimer=setTimeout(renderLancctbPlanoContas,350);
+}
+async function excluirLancctbConta(id){
+  if(!confirm('Excluir esta conta do plano? Contas já usadas em regras/agências podem ficar sem vínculo.'))return;
+  const { error } = await _supaClient.from('plano_contas').delete().eq('id',id);
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast('Conta excluída','ok');
+  renderLancctbPlanoContas();
+}
+function exportarLancctbPlanoExcel(){
+  if(!_lancctbUltimoPlano.length){ toast('Nada para exportar nesta página.','err'); return; }
+  const header=['Conta','Classificação','Tipo','Descrição','Grau'];
+  const rows=_lancctbUltimoPlano.map(c=>[c.numero_conta||'',c.classificacao||'',c.tipo||'',c.descricao||'',c.grau||'']);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Plano de Contas');
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`PlanoContas_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+function abrirLancctbImportPlanoModal(){
+  document.getElementById('lancctbPlanoArquivo').value='';
+  document.getElementById('lancctbPlanoImportStatus').textContent='';
+  openModal('mLancctbImportPlano');
+}
+// Import em lote com upsert por (empresa_eid, numero_conta) — reimportar o
+// mesmo arquivo atualiza as contas existentes em vez de duplicar. Colunas
+// aceitas com nomes flexíveis (maiúsc/minúsc, com/sem acento) porque o
+// arquivo de origem é exportado do Mister Contador, fora do nosso controle.
+// O export real do Mister Contador ("Gerar Excel" do Plano de Contas) não é
+// uma tabela simples — é um relatório impresso: cabeçalho com Empresa/CNPJ/
+// Folha/Emissão, depois uma linha de rótulos (Código/T/Classificação/Nome/
+// Grau), e o Nome de cada conta fica numa COLUNA DIFERENTE conforme o Grau
+// (indentação por outline — grau 1 na coluna X, grau 2 na X+1, etc., não
+// numa única coluna "Nome"). T vazio = Tipo A (só essas recebem lançamento,
+// confirmado pelo usuário); só 'S' marca Sintética. Rodapé
+// "Sistema licenciado para..." no fim, sem código — ignorado.
+function _lancctbParsearPlanoOutline(matriz){
+  // Acha a linha de cabeçalho procurando "código" numa célula. As posições
+  // de Código/Grau no header podem estar desalinhadas em ±1 coluna em
+  // relação aos dados reais (célula de rótulo mesclada) — Tipo e
+  // Classificação batem certinho, mas Código/Grau não são confiáveis vindos
+  // só do header. Por isso a posição real de Código/Grau é inferida a
+  // partir da primeira linha de dado de verdade, não do texto do rótulo.
+  let linhaHeader=-1, colCodigoHeader=-1, colTipo=-1, colClassif=-1, colGrauHeader=-1;
+  for(let i=0;i<Math.min(matriz.length,30);i++){
+    const row=matriz[i]||[];
+    const idxCod=row.findIndex(c=>String(c||'').trim().toLowerCase().startsWith('código')||String(c||'').trim().toLowerCase().startsWith('codigo'));
+    if(idxCod>=0){
+      linhaHeader=i; colCodigoHeader=idxCod;
+      colTipo=row.findIndex(c=>String(c||'').trim()==='T');
+      colClassif=row.findIndex(c=>String(c||'').trim().toLowerCase().startsWith('classifica'));
+      colGrauHeader=row.findIndex(c=>String(c||'').trim().toLowerCase()==='grau');
+      break;
+    }
+  }
+  if(linhaHeader<0||colClassif<0||colGrauHeader<0) return null; // não é esse formato — cai no fallback de tabela simples
+
+  // Primeira linha de dado real (a que tem algo na coluna Classificação),
+  // usada só pra recalibrar onde Código/Grau realmente caem.
+  let primeiraLinhaDado=-1;
+  for(let i=linhaHeader+1;i<matriz.length;i++){
+    if(String((matriz[i]||[])[colClassif]||'').trim()){ primeiraLinhaDado=i; break; }
+  }
+  if(primeiraLinhaDado<0) return [];
+  const acharColNumerica=(row,colEstimada)=>{
+    for(const delta of [0,-1,1,-2,2]){
+      const c=colEstimada+delta;
+      if(c>=0 && typeof row[c]==='number') return c;
+    }
+    return colEstimada;
+  };
+  const rowRef=matriz[primeiraLinhaDado]||[];
+  const colCodigo=acharColNumerica(rowRef,colCodigoHeader);
+  const colGrau=acharColNumerica(rowRef,colGrauHeader);
+
+  const registros=[];
+  for(let i=linhaHeader+1;i<matriz.length;i++){
+    const row=matriz[i]||[];
+    const codigo=row[colCodigo];
+    if(typeof codigo!=='number') continue; // pula linhas vazias/rodapé
+    const classificacao=String(row[colClassif]||'').trim();
+    if(!classificacao) continue;
+    const tipo=String(row[colTipo]||'').trim().toUpperCase()==='S'?'S':'A';
+    const grau=typeof row[colGrau]==='number'?row[colGrau]:null;
+    // Nome: primeira célula de texto entre Classificação e Grau — a
+    // indentação por outline põe o nome numa coluna que varia com o grau.
+    let nome='';
+    for(let c=colClassif+1;c<colGrau;c++){
+      const v=row[c];
+      if(v!==undefined && v!==null && String(v).trim()!==''){ nome=String(v).trim(); break; }
+    }
+    if(!nome) continue;
+    registros.push({
+      empresa_eid: _lancctbEidAtual,
+      numero_conta: String(codigo),
+      classificacao,
+      tipo,
+      descricao: nome,
+      grau,
+    });
+  }
+  return registros;
+}
+async function processarLancctbImportPlano(){
+  const file=document.getElementById('lancctbPlanoArquivo')?.files[0];
+  const status=document.getElementById('lancctbPlanoImportStatus');
+  const btn=document.getElementById('lancctbPlanoImportBtn');
+  if(!file){ toast('Selecione um arquivo','err'); return; }
+  btn.disabled=true; btn.textContent='Importando…';
+  status.textContent='Lendo arquivo…';
+  try{
+    const buf=await file.arrayBuffer();
+    const wb=XLSX.read(buf,{type:'array'});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+
+    // Tenta primeiro o formato real de relatório (outline) do Mister
+    // Contador; se não bater, cai para tabela simples (Conta/Classificação/
+    // Tipo/Descrição/Grau como colunas nomeadas).
+    const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+    let registros=_lancctbParsearPlanoOutline(matriz);
+
+    if(!registros){
+      const linhas=XLSX.utils.sheet_to_json(ws,{defval:''});
+      if(!linhas.length){ status.textContent='Arquivo vazio.'; btn.disabled=false; btn.textContent='⬆ Importar'; return; }
+      const acharCampo=(row,nomes)=>{
+        const chaves=Object.keys(row);
+        for(const n of nomes){
+          const k=chaves.find(c=>c.trim().toLowerCase()===n);
+          if(k!==undefined && row[k]!=='') return row[k];
+        }
+        return '';
+      };
+      registros=linhas.map(row=>({
+        empresa_eid: _lancctbEidAtual,
+        numero_conta: String(acharCampo(row,['conta','nº','numero','número'])||'').trim(),
+        classificacao: String(acharCampo(row,['classificação','classificacao'])||'').trim(),
+        tipo: String(acharCampo(row,['tipo'])||'').trim().toUpperCase()==='S'?'S':'A',
+        descricao: String(acharCampo(row,['descrição','descricao'])||'').trim(),
+        grau: parseInt(acharCampo(row,['grau']),10)||null,
+      })).filter(r=>r.numero_conta && r.classificacao);
+    }
+
+    if(!registros.length){ status.textContent='Nenhuma linha válida encontrada (verifique as colunas Conta/Classificação).'; btn.disabled=false; btn.textContent='⬆ Importar'; return; }
+
+    status.textContent=`Importando ${registros.length} contas…`;
+    // upsert em lotes de 500 (limite prático de payload por request)
+    const TAM_LOTE=500;
+    let importadas=0;
+    for(let i=0;i<registros.length;i+=TAM_LOTE){
+      const lote=registros.slice(i,i+TAM_LOTE);
+      const { error } = await _supaClient.from('plano_contas').upsert(lote,{onConflict:'empresa_eid,numero_conta'});
+      if(error) throw error;
+      importadas+=lote.length;
+      status.textContent=`Importando… ${importadas}/${registros.length}`;
+    }
+    toast(`${importadas} contas importadas com sucesso`,'ok');
+    closeModal('mLancctbImportPlano');
+    _lancctbPlanoPagina=0;
+    renderLancctbPlanoContas();
+  }catch(e){
+    console.error(e);
+    status.textContent='Erro: '+e.message;
+    toast('Erro ao importar: '+e.message,'err');
+  }finally{
+    btn.disabled=false; btn.textContent='⬆ Importar';
+  }
+}
+
+// ─── Agência Bancária ───────────────────────────────────────────────────────
+// Sempre da MATRIZ (ver nota no schema) — mesmo quando NFs de filiais
+// aparecem nas abas de NF-e/NFS-e, as contas bancárias cadastradas aqui
+// não têm filial própria.
+let _lancctbUltimasAgencias=[];
+async function renderLancctbAgencias(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const { data: agencias, error } = await _supaClient
+    .from('agencias_bancarias')
+    .select('id,banco_nome,filial_codigo,agencia,conta_corrente,digito_cc,descricao,conta_contabil_id,plano_contas(numero_conta,classificacao,descricao)')
+    .eq('empresa_eid',eid)
+    .eq('ativo',true)
+    .order('banco_nome',{ascending:true});
+
+  if(error){
+    el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar agências: ${esc(error.message)}</div>`;
+    return;
+  }
+  _lancctbUltimasAgencias=agencias||[];
+
+  let html=`<div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:14px">
+    <button class="action-btn action-btn-excel" onclick="exportarLancctbAgenciasExcel()">📊 Gerar Excel</button>
+    <button class="btn bp bsm" onclick="abrirLancctbAgenciaModal()">+ Cadastrar agência</button>
+  </div>`;
+  if(!agencias||!agencias.length){
+    html+=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma agência bancária cadastrada ainda.</div>`;
+  } else {
+    html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px">';
+    agencias.forEach(a=>{
+      const contaVinc=a.plano_contas?`${esc(a.plano_contas.numero_conta)} / ${esc(a.plano_contas.classificacao)}`:'— sem vínculo —';
+      html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--white)">
+        <div style="font-weight:700;color:#1E3558;margin-bottom:8px">🏦 ${esc(a.banco_nome||'')}</div>
+        <div style="font-size:12.5px;display:grid;grid-template-columns:auto 1fr;gap:4px 10px;color:var(--ink)">
+          <span style="color:var(--slate)">Agência</span><span>${esc(a.agencia||'')}</span>
+          <span style="color:var(--slate)">Conta Corrente</span><span>${esc(a.conta_corrente||'')}${a.digito_cc?'-'+esc(a.digito_cc):''}</span>
+          <span style="color:var(--slate)">Descrição</span><span>${esc(a.descricao||'—')}</span>
+          <span style="color:var(--slate)">Conta / Classificação</span><span>${contaVinc}</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <button class="btn bo bsm" onclick="abrirLancctbAgenciaModal(${a.id})">✎ Editar</button>
+          <button class="btn bo bsm" style="color:#dc2626" onclick="excluirLancctbAgencia(${a.id})">🗑️ Excluir</button>
+        </div>
+      </div>`;
+    });
+    html+='</div>';
+  }
+  el.innerHTML=html;
+}
+async function abrirLancctbAgenciaModal(id){
+  document.getElementById('lancctbAgenciaId').value=id||'';
+  document.getElementById('lancctbAgenciaTitulo').textContent=id?'Editar agência bancária':'Cadastrar agência bancária';
+  const sel=document.getElementById('lancctbAgenciaContaContabil');
+  sel.innerHTML='<option value="">— Sem vínculo —</option>';
+  const { data: contas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).order('classificacao');
+  (contas||[]).forEach(c=>{
+    const o=document.createElement('option');
+    o.value=c.id; o.textContent=`${c.numero_conta} - ${c.descricao}`;
+    sel.appendChild(o);
+  });
+  if(id){
+    const ag=_lancctbUltimasAgencias.find(a=>a.id===id);
+    if(ag){
+      document.getElementById('lancctbAgenciaBanco').value=ag.banco_nome||'';
+      document.getElementById('lancctbAgenciaFilial').value=ag.filial_codigo||'';
+      document.getElementById('lancctbAgenciaNum').value=ag.agencia||'';
+      document.getElementById('lancctbAgenciaConta').value=ag.conta_corrente||'';
+      document.getElementById('lancctbAgenciaDigito').value=ag.digito_cc||'';
+      document.getElementById('lancctbAgenciaDescricao').value=ag.descricao||'';
+      sel.value=ag.conta_contabil_id||'';
+    }
+  } else {
+    ['lancctbAgenciaBanco','lancctbAgenciaFilial','lancctbAgenciaNum','lancctbAgenciaConta','lancctbAgenciaDigito','lancctbAgenciaDescricao'].forEach(id2=>document.getElementById(id2).value='');
+  }
+  openModal('mLancctbAgencia');
+}
+async function salvarLancctbAgencia(){
+  const id=document.getElementById('lancctbAgenciaId').value;
+  const banco=document.getElementById('lancctbAgenciaBanco').value.trim();
+  const numAgencia=document.getElementById('lancctbAgenciaNum').value.trim();
+  const contaCorrente=document.getElementById('lancctbAgenciaConta').value.trim();
+  if(!banco||!numAgencia||!contaCorrente){ toast('Preencha Banco, Agência e Conta Corrente','err'); return; }
+  const registro={
+    empresa_eid: _lancctbEidAtual,
+    banco_nome: banco,
+    filial_codigo: document.getElementById('lancctbAgenciaFilial').value.trim()||null,
+    agencia: numAgencia,
+    conta_corrente: contaCorrente,
+    digito_cc: document.getElementById('lancctbAgenciaDigito').value.trim()||null,
+    descricao: document.getElementById('lancctbAgenciaDescricao').value.trim()||null,
+    conta_contabil_id: document.getElementById('lancctbAgenciaContaContabil').value||null,
+  };
+  const query=id?_supaClient.from('agencias_bancarias').update(registro).eq('id',id):_supaClient.from('agencias_bancarias').insert(registro);
+  const { error } = await query;
+  if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+  toast('Agência salva com sucesso','ok');
+  closeModal('mLancctbAgencia');
+  renderLancctbAgencias();
+}
+async function excluirLancctbAgencia(id){
+  if(!confirm('Excluir esta agência bancária?'))return;
+  const { error } = await _supaClient.from('agencias_bancarias').update({ativo:false}).eq('id',id);
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast('Agência removida','ok');
+  renderLancctbAgencias();
+}
+function exportarLancctbAgenciasExcel(){
+  if(!_lancctbUltimasAgencias.length){ toast('Nada para exportar.','err'); return; }
+  const header=['Banco','Filial','Agência','Conta Corrente','Dígito','Descrição','Conta Contábil'];
+  const rows=_lancctbUltimasAgencias.map(a=>[
+    a.banco_nome||'', a.filial_codigo||'', a.agencia||'', a.conta_corrente||'', a.digito_cc||'', a.descricao||'',
+    a.plano_contas?`${a.plano_contas.numero_conta} - ${a.plano_contas.descricao}`:''
+  ]);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Agências Bancárias');
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`AgenciasBancarias_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
 }
 
 // ─── CONVERSOR DE ARQUIVOS: EXTRATO MOVIMENTAÇÃO COBRANÇA BANCO DO BRASIL ───
