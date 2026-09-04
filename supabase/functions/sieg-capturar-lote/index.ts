@@ -86,6 +86,36 @@ async function chamarSieg(apiKey: string, body: Record<string, unknown>): Promis
   return { ok: resp.ok, status: resp.status, json, raw };
 }
 
+// Modo diagnóstico (body: {"diagnostico": true}) — testa várias formas de
+// autenticar contra as duas APIs (legada e engine) num corpo mínimo
+// (Take:1, hoje), sem tocar em fila_sieg/notas_fiscais. Usado só pra
+// descobrir empiricamente qual mecanismo a chave real aceita, já que a doc
+// pública da SIEG não documenta isso. Remover depois de confirmado.
+async function diagnosticoSieg(apiKey: string): Promise<Record<string, unknown>> {
+  const bodyMinimo = { XmlType: 1, Take: 1, Skip: 0, DataEmissaoInicio: `${hoje()}T00:00:00`, DataEmissaoFim: `${hoje()}T23:59:59` };
+  const bodyMinimoEngine = { TipoXml: 1, Take: 1, Skip: 0, DataEmissaoInicio: `${hoje()}T00:00:00`, DataEmissaoFim: `${hoje()}T23:59:59` };
+  async function tentativa(nome: string, url: string, headers: Record<string, string>, body: Record<string, unknown>) {
+    try {
+      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json', ...headers }, body: JSON.stringify(body) });
+      const raw = await resp.text();
+      return { nome, status: resp.status, resposta: raw.slice(0, 300) };
+    } catch (e) {
+      return { nome, erro: e instanceof Error ? e.message : String(e) };
+    }
+  }
+  const resultados = await Promise.all([
+    tentativa('legada: query ?api_key=', `${SIEG_BASE_URL}/BaixarXmlsV2?api_key=${encodeURIComponent(apiKey)}`, {}, bodyMinimo),
+    tentativa('legada: header Authorization Bearer', `${SIEG_BASE_URL}/BaixarXmlsV2`, { Authorization: `Bearer ${apiKey}` }, bodyMinimo),
+    tentativa('engine: query ?api_key=', `${SIEG_BASE_URL}/api/v1/baixar-xmls?api_key=${encodeURIComponent(apiKey)}`, {}, bodyMinimoEngine),
+    tentativa('engine: header Authorization Bearer', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, { Authorization: `Bearer ${apiKey}` }, bodyMinimoEngine),
+    tentativa('engine: header Authorization (sem Bearer)', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, { Authorization: apiKey }, bodyMinimoEngine),
+    tentativa('engine: header Api-Key', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, { 'Api-Key': apiKey }, bodyMinimoEngine),
+    tentativa('engine: header X-Api-Key', `${SIEG_BASE_URL}/api/v1/baixar-xmls`, { 'X-Api-Key': apiKey }, bodyMinimoEngine),
+    tentativa('contar-xmls: query ?api_key=', `${SIEG_BASE_URL}/api/v1/contar-xmls?api_key=${encodeURIComponent(apiKey)}`, {}, { DataEmissaoInicio: `${hoje()}T00:00:00`, DataEmissaoFim: `${hoje()}T23:59:59` }),
+  ]);
+  return { resultados };
+}
+
 // Tenta achar a lista de XMLs (string, cada um o conteúdo do XML — cru ou
 // base64) na resposta da SIEG, testando os formatos mais plausíveis. A doc
 // pública não confirma qual é — ajustar aqui assim que um teste real
@@ -208,6 +238,12 @@ Deno.serve(async (req: Request) => {
     return new Response(JSON.stringify({ error: 'SIEG_API_KEY não configurada nos secrets da function.' }), {
       status: 500, headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
     });
+  }
+
+  const bodyReq = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
+  if (bodyReq?.diagnostico) {
+    const diag = await diagnosticoSieg(apiKey);
+    return new Response(JSON.stringify(diag), { headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } });
   }
 
   const supabase = createClient(
