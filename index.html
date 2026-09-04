@@ -15677,6 +15677,67 @@ let _lancctbUltimaLeitura=[];
 // (já mordeu o backup-diario.js uma vez). Uma função só, parametrizada por
 // tipoDoc('nfe'/'nfse')+direcaoNf('compra'/'venda') — as 4 abas chamam a
 // mesma lógica, só muda o filtro e os rótulos de coluna.
+// ─── Fase 6: captura automática via SIEG (fila_sieg + Edge Function) ──────
+// fila_sieg tem 1 linha por CNPJ (matriz + cada filial) × tipo_doc — é isso
+// que consolida a captura de filiais sob o mesmo empresa_eid (ver
+// warm-zooming-spindle.md, seção "Matriz + Filiais"). Sincronizar só
+// INSERE combinações novas (ignoreDuplicates) — nunca reseta o checkpoint
+// de quem já está rodando.
+async function sincronizarLancctbFilaSieg(){
+  const eid=_lancctbEidAtual;
+  const emp=S.emps().find(e=>String(e.eid)===String(eid));
+  if(!emp){ toast('Empresa não encontrada em Cadastro de Empresas.','err'); return; }
+  const cnpjs=[...new Set([emp.cnpjNum, ...(getFiliais(eid)||[]).map(f=>(f.cnpj||'').replace(/\D/g,''))].filter(Boolean))];
+  if(!cnpjs.length){ toast('Empresa sem CNPJ cadastrado.','err'); return; }
+  const agora=new Date().toISOString();
+  const hojeStr=hoje_();
+  const linhas=[];
+  cnpjs.forEach(cnpj=>{
+    ['nfe','nfse'].forEach(tipo_doc=>{
+      linhas.push({ empresa_eid:eid, cnpj, tipo_doc, status:'pendente', data_emissao_inicio:hojeStr, proxima_execucao:agora });
+    });
+  });
+  const { error } = await _supaClient.from('fila_sieg').upsert(linhas,{onConflict:'empresa_eid,cnpj,tipo_doc',ignoreDuplicates:true});
+  if(error){ toast('Erro ao sincronizar fila SIEG: '+error.message,'err'); return; }
+  toast(`Fila SIEG sincronizada: ${cnpjs.length} CNPJ(s) × NF-e/NFS-e.`,'ok');
+  renderLancctbConteudo();
+}
+function hoje_(){ return new Date().toISOString().slice(0,10); }
+async function _lancctbTestarSieg(){
+  toast('Chamando sieg-capturar-lote (1 página)…','ok');
+  const { data, error } = await _supaClient.functions.invoke('sieg-capturar-lote',{body:{}});
+  if(error){ toast('Erro: '+error.message,'err'); console.error('sieg-capturar-lote erro:',error); return; }
+  console.log('sieg-capturar-lote resultado:',data);
+  toast(data?.mensagem||`SIEG: ${data?.notasSalvas||0} nota(s) salva(s), ${data?.xmlsRecebidos||0} recebida(s).`,'ok');
+  renderLancctbConteudo();
+}
+async function _lancctbFilaSiegPainelHtml(eid){
+  const { data: fila } = await _supaClient.from('fila_sieg')
+    .select('cnpj,tipo_doc,status,data_emissao_inicio,data_emissao_fim_checkpoint,tentativas,ultimo_erro')
+    .eq('empresa_eid',eid).order('cnpj').order('tipo_doc');
+  const linhas=(fila||[]).map(f=>{
+    const cor={pendente:'#D97706',processando:'#2563eb',erro:'#dc2626',concluido:'var(--teal)'}[f.status]||'var(--slate)';
+    const janela=f.data_emissao_inicio?`${new Date(f.data_emissao_inicio+'T00:00:00').toLocaleDateString('pt-BR')}${f.data_emissao_fim_checkpoint?' – '+new Date(f.data_emissao_fim_checkpoint+'T00:00:00').toLocaleDateString('pt-BR'):''}`:'—';
+    return `<tr>
+      <td style="padding:4px 8px;font-family:var(--mono)">${esc(_fmtCnpjCpf(f.cnpj))}</td>
+      <td style="padding:4px 8px">${f.tipo_doc.toUpperCase()}</td>
+      <td style="padding:4px 8px;color:${cor};font-weight:600">${esc(f.status)}</td>
+      <td style="padding:4px 8px">${janela}</td>
+      <td style="padding:4px 8px;color:var(--red);font-size:11px">${esc(f.ultimo_erro||'')}</td>
+    </tr>`;
+  }).join('');
+  return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;background:var(--bg)">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+      <strong style="font-size:12.5px">🔌 Captura automática (SIEG)</strong>
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" onclick="sincronizarLancctbFilaSieg()">🔄 Sincronizar CNPJs</button>
+        <button class="btn bo bsm" onclick="_lancctbTestarSieg()">▶ Rodar captura agora</button>
+      </div>
+    </div>
+    ${linhas?`<table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead><tr style="color:var(--slate);text-align:left"><th style="padding:4px 8px">CNPJ</th><th style="padding:4px 8px">Tipo</th><th style="padding:4px 8px">Status</th><th style="padding:4px 8px">Janela</th><th style="padding:4px 8px">Último erro</th></tr></thead><tbody>${linhas}</tbody></table>`
+    :`<div style="font-size:12px;color:var(--slate)">Nenhum CNPJ na fila ainda — clique em "Sincronizar CNPJs" pra registrar a matriz e as filiais.</div>`}
+  </div>`;
+}
 async function renderLancctbNotas(aba){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
@@ -15737,7 +15798,7 @@ async function renderLancctbNotas(aba){
     <strong>Última ${ehServico?'NFS-e':'NF-e'} capturada:</strong> nº ${esc(ultimaNf.numero)} — em ${new Date(ultimaNf.created_at).toLocaleDateString('pt-BR')} às ${new Date(ultimaNf.created_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
   </div>`:'';
 
-  let html=`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+  let html=(await _lancctbFilaSiegPainelHtml(eid))+`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
     <div style="overflow-x:auto">

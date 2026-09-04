@@ -1,0 +1,38 @@
+name: Captura automática de NF via SIEG
+
+# Cada chamada de sieg-capturar-lote processa só 1 página (até 50 XMLs) de
+# 1 CNPJ×tipo_doc pendente em fila_sieg (não retroage histórico — só captura
+# a partir da data em que o CNPJ entrou na fila). Como o módulo não migra
+# anos de dados antigos, o volume diário por empresa é baixo; roda a cada
+# 15 minutos e dispara várias chamadas seguidas por execução pra drenar a
+# fila mais rápido sem precisar de um cron mais agressivo.
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch: {}
+
+jobs:
+  capturar:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Chamar sieg-capturar-lote repetidas vezes (drena a fila pendente)
+        # URL e anon key não são segredo — já estão em texto puro no
+        # supabase-config.js deste mesmo repo público (a anon key só permite
+        # o que a RLS já libera pra "authenticated"/"anon"; quem protege de
+        # verdade é a service_role key dentro da própria Edge Function).
+        run: |
+          SUPABASE_URL="https://hzotkhxmvausugzfkgbf.supabase.co"
+          SUPABASE_ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh6b3RraHhtdmF1c3VnemZrZ2JmIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODE3NDExMjksImV4cCI6MjA5NzMxNzEyOX0.D7o6lHZa7T5yJMZ-J_s884yrIDj9TW3AQCu6nuz3gjA"
+          for i in $(seq 1 10); do
+            echo "--- chamada $i ---"
+            resp=$(curl -s -X POST \
+              "$SUPABASE_URL/functions/v1/sieg-capturar-lote" \
+              -H "Authorization: Bearer $SUPABASE_ANON_KEY" \
+              -H "apikey: $SUPABASE_ANON_KEY" \
+              -H "Content-Type: application/json" -d '{}')
+            echo "$resp"
+            if echo "$resp" | grep -q "Nada pendente"; then
+              echo "Fila vazia, parando."
+              break
+            fi
+          done
