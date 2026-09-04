@@ -147,7 +147,7 @@ CREATE TABLE IF NOT EXISTS public.lancamentos_extrato (
   documento              TEXT,
   status_conciliacao     TEXT NOT NULL DEFAULT 'pendente'
                           CHECK (status_conciliacao IN ('pendente','conciliado','parcial','ignorado')),
-  origem_importacao      TEXT NOT NULL CHECK (origem_importacao IN ('excel','csv','pdf_texto','pdf_ocr_ia','manual')),
+  origem_importacao      TEXT NOT NULL CHECK (origem_importacao IN ('excel','csv','pdf_texto','pdf_ocr_ia','pdf_estruturado','manual')),
   hash_dedup             TEXT NOT NULL, -- sha256(conta+data+entrada+saida+historico), calculado em app
   lancamento_contabil_lote_id UUID,     -- preenchido quando resolvido (lancamentos_contabeis.lote_id)
   created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW(),
