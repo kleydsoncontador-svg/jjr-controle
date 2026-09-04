@@ -243,7 +243,11 @@ Deno.serve(async (req: Request) => {
   const bodyReq = req.method === 'POST' ? await req.json().catch(() => ({})) : {};
   if (bodyReq?.diagnostico) {
     const diag = await diagnosticoSieg(apiKey);
-    return new Response(JSON.stringify(diag), { headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } });
+    const semEspaco = apiKey.trim();
+    return new Response(JSON.stringify({
+      chaveInfo: { tamanho: apiKey.length, tamanhoSemEspacos: semEspaco.length, temEspacoOuQuebra: apiKey !== semEspaco, inicio: apiKey.slice(0, 4), fim: apiKey.slice(-4) },
+      ...diag,
+    }), { headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' } });
   }
 
   const supabase = createClient(
