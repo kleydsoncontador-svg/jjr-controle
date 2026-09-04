@@ -16413,30 +16413,49 @@ async function renderLancctbExtrato(){
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
 
-  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente,saldo_inicial').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
   if(!agencias||!agencias.length){
     el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Cadastre uma conta em "Agência bancária" antes de importar o extrato — cada lançamento precisa estar vinculado a uma conta.</div>`;
     return;
   }
   if(!_lancctbExtratoContaSel) _lancctbExtratoContaSel=String(agencias[0].id);
+  const contaAtual=agencias.find(a=>String(a.id)===_lancctbExtratoContaSel);
+  const saldoInicial=contaAtual?.saldo_inicial||0;
 
-  const from=_lancctbExtratoPagina*LANCCTB_PAGE_SIZE;
-  const to=from+LANCCTB_PAGE_SIZE-1;
-  const { data: lancs, error, count } = await _supaClient
+  // Busca TODOS os lançamentos da conta (não paginado no servidor) pra
+  // conseguir calcular o saldo acumulado corretamente — a paginação vira
+  // client-side depois de somar em ordem cronológica, a partir do "Saldo
+  // anterior" editável (agencias_bancarias.saldo_inicial). 558
+  // lançamentos/mês é tranquilo pro navegador; se algum cliente de volume
+  // muito maior virar gargalo, dá pra revisar depois.
+  const { data: todosLancs, error } = await _supaClient
     .from('lancamentos_extrato')
-    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao',{count:'exact'})
+    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao')
     .eq('empresa_eid',eid)
     .eq('conta_bancaria_id',_lancctbExtratoContaSel)
-    .order('data_pagamento',{ascending:false})
-    .range(from,to);
+    .order('data_pagamento',{ascending:true})
+    .order('id',{ascending:true});
 
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar extrato: ${esc(error.message)}</div>`; return; }
-  _lancctbUltimoExtrato=lancs||[];
+  const count=(todosLancs||[]).length;
+  let saldoCorrido=saldoInicial;
+  const comSaldo=(todosLancs||[]).map(l=>{
+    saldoCorrido += (l.valor_entrada||0) - (l.valor_saida||0);
+    return {...l, saldo_acumulado: Math.round(saldoCorrido*100)/100};
+  });
+  const from=_lancctbExtratoPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE;
+  const lancs=comSaldo.slice(from,to);
+  _lancctbUltimoExtrato=lancs;
 
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const opcoesConta=agencias.map(a=>`<option value="${a.id}" ${String(a.id)===_lancctbExtratoContaSel?'selected':''}>${esc(a.banco_nome)} — Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('');
   let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     <select class="si" onchange="_lancctbExtratoContaSel=this.value;_lancctbExtratoPagina=0;renderLancctbExtrato()">${opcoesConta}</select>
+    <div style="display:flex;align-items:center;gap:6px;font-size:12.5px">
+      <span style="color:var(--slate)">Saldo anterior:</span>
+      <input class="si" id="lancctbSaldoInicialInput" type="text" style="width:130px;text-align:right" value="${_fmt(saldoInicial)}" onblur="salvarLancctbSaldoInicial()" onkeydown="if(event.key==='Enter')this.blur()">
+    </div>
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbExtratoExcel()">📊 Gerar Excel</button>
       <button class="btn bp bsm" onclick="abrirLancctbUploadExtratoModal()">⬆ Upload Extrato</button>
@@ -16449,11 +16468,12 @@ async function renderLancctbExtrato(){
       <th style="padding:8px 10px;text-align:right">Saída</th>
       <th style="padding:8px 10px;text-align:right">Entrada</th>
       <th style="padding:8px 10px;text-align:left">Histórico Bancário</th>
+      <th style="padding:8px 10px;text-align:right">Saldo</th>
       <th style="padding:8px 10px;text-align:center">Status</th>
     </tr></thead>
     <tbody>`;
   if(!lancs||!lancs.length){
-    html+=`<tr><td colspan="5" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento de extrato importado ainda para esta conta.</td></tr>`;
+    html+=`<tr><td colspan="6" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento de extrato importado ainda para esta conta.</td></tr>`;
   } else {
     let somaSaida=0,somaEntrada=0;
     lancs.forEach(l=>{ somaSaida+=l.valor_saida||0; somaEntrada+=l.valor_entrada||0; });
@@ -16461,7 +16481,7 @@ async function renderLancctbExtrato(){
       <td style="padding:7px 10px">Soma da página</td>
       <td style="padding:7px 10px;text-align:right;color:#dc2626">R$ ${_fmt(somaSaida)}</td>
       <td style="padding:7px 10px;text-align:right;color:var(--teal)">R$ ${_fmt(somaEntrada)}</td>
-      <td></td><td></td>
+      <td></td><td></td><td></td>
     </tr>`;
     lancs.forEach(l=>{
       const statusCor=l.status_conciliacao==='conciliado'?'var(--teal)':l.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
@@ -16470,6 +16490,7 @@ async function renderLancctbExtrato(){
         <td style="padding:7px 10px;text-align:right">${l.valor_saida?'R$ '+_fmt(l.valor_saida):''}</td>
         <td style="padding:7px 10px;text-align:right">${l.valor_entrada?'R$ '+_fmt(l.valor_entrada):''}</td>
         <td style="padding:7px 10px">${esc(l.historico_bancario||'')}</td>
+        <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(l.saldo_acumulado)}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(l.status_conciliacao||'')}</span></td>
       </tr>`;
     });
@@ -16485,12 +16506,24 @@ async function renderLancctbExtrato(){
     </div>`;
   el.innerHTML=html;
 }
+// Salva o "Saldo anterior" (âncora do saldo corrido, editável direto na
+// tela) na conta bancária selecionada — o usuário pode ajustar pra bater
+// com o saldo real do banco antes do 1º lançamento importado.
+async function salvarLancctbSaldoInicial(){
+  const input=document.getElementById('lancctbSaldoInicialInput');
+  if(!input) return;
+  const valor=parseFloat(input.value.replace(/\./g,'').replace(',','.'))||0;
+  const { error } = await _supaClient.from('agencias_bancarias').update({saldo_inicial:valor}).eq('id',_lancctbExtratoContaSel);
+  if(error){ toast('Erro ao salvar saldo anterior: '+error.message,'err'); return; }
+  toast('Saldo anterior atualizado','ok');
+  renderLancctbExtrato();
+}
 function exportarLancctbExtratoExcel(){
   if(!_lancctbUltimoExtrato.length){ toast('Nada para exportar nesta página.','err'); return; }
-  const header=['Dt Pagamento','Saída','Entrada','Histórico Bancário','Status'];
+  const header=['Dt Pagamento','Saída','Entrada','Histórico Bancário','Saldo','Status'];
   const rows=_lancctbUltimoExtrato.map(l=>[
     l.data_pagamento?new Date(l.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'',
-    l.valor_saida||0, l.valor_entrada||0, l.historico_bancario||'', l.status_conciliacao||''
+    l.valor_saida||0, l.valor_entrada||0, l.historico_bancario||'', l.saldo_acumulado||0, l.status_conciliacao||''
   ]);
   const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
   const wb=XLSX.utils.book_new();

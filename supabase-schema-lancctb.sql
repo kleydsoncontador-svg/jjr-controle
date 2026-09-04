@@ -128,6 +128,9 @@ CREATE TABLE IF NOT EXISTS public.agencias_bancarias (
   digito_cc           TEXT,
   descricao           TEXT,
   conta_contabil_id   BIGINT REFERENCES public.plano_contas(id),
+  saldo_inicial       NUMERIC(15,2) NOT NULL DEFAULT 0, -- saldo do dia anterior ao 1º lançamento
+                                                          -- importado, editável na tela de Extrato
+                                                          -- bancário — âncora do saldo corrido exibido
   ativo               BOOLEAN NOT NULL DEFAULT true,
   created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at          TIMESTAMPTZ NOT NULL DEFAULT NOW()
