@@ -15,10 +15,16 @@
 //     "Não Autenticado: Erro ao obter dados de usuário" (não 404) — confirma
 //     que a autenticação é via ?api_key= na query string, lida por um filtro
 //     customizado (não aparece no Swagger como securityDefinition).
-//   - Endpoint usado aqui: POST /api/v1/baixar-xmls (equivalente ao
-//     /BaixarXmlsV2 da API legada — mesmo formato de retorno).
-//   - Corpo (DownloadRequestDtoV2): TipoXml (1=NFe,2=CTe,3=NFSe,4=NFCe,5=CFe),
-//     Take, Skip, DataEmissaoInicio/Fim (ISO), CnpjEmit, CnpjDest.
+//   - Endpoint usado aqui: POST /BaixarXmlsV2 (API legada "ver", não a
+//     "engine") — testei a "engine" (/api/v1/baixar-xmls) primeiro, mas ela
+//     devolveu "API Key ou token JWT não fornecidos" mesmo com uma chave
+//     real (04/09/2026), sinal de que ela espera a chave em outro lugar
+//     (header?, não documentado). A /BaixarXmlsV2 usa o MESMO mecanismo já
+//     confirmado (?api_key= na query), só muda os nomes dos campos do
+//     corpo (inglês, não português).
+//   - Corpo (DownloadRequestDto, API "ver"): XmlType (1=NFe,2=CTe,3=NFSe,
+//     4=NFCe,5=CFe), Take, Skip, DataEmissaoInicio/Fim (ISO), CnpjEmit,
+//     CnpjDest.
 //   - Resposta documentada (DownloadResponse) só declara Status/Codigo/
 //     Mensagens[] — o Swagger NÃO deixa explícito onde fica o conteúdo do
 //     XML (typo comum em Swashbuckle quando o retorno real não bate com o
@@ -69,7 +75,7 @@ function menorData(a: string, b: string): string {
 }
 
 async function chamarSieg(apiKey: string, body: Record<string, unknown>): Promise<{ ok: boolean; status: number; json: any; raw: string }> {
-  const resp = await fetch(`${SIEG_BASE_URL}/api/v1/baixar-xmls?api_key=${encodeURIComponent(apiKey)}`, {
+  const resp = await fetch(`${SIEG_BASE_URL}/BaixarXmlsV2?api_key=${encodeURIComponent(apiKey)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -236,7 +242,7 @@ Deno.serve(async (req: Request) => {
     const skip = item.skip_checkpoint || 0;
 
     const bodyBase = {
-      TipoXml: tipoXml,
+      XmlType: tipoXml,
       Take: TAKE_POR_PAGINA,
       Skip: skip,
       DataEmissaoInicio: `${inicioJanela}T00:00:00`,
