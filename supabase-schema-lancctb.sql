@@ -101,6 +101,14 @@ CREATE TABLE IF NOT EXISTS public.plano_contas (
   descricao       TEXT NOT NULL,
   grau            SMALLINT,
   conta_pai_id    BIGINT REFERENCES public.plano_contas(id),
+  ignorada_em_regras BOOLEAN NOT NULL DEFAULT false, -- não aparece no select
+                                                        -- de contrapartida ao
+                                                        -- criar Regra (ex:
+                                                        -- contas de dedução
+                                                        -- de receita) — por
+                                                        -- conta única ou em
+                                                        -- lote por grupo de
+                                                        -- classificação, sempre reversível
   ativo           BOOLEAN NOT NULL DEFAULT true,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),

@@ -15802,6 +15802,7 @@ function exportarLancctbNotasExcel(abaId){
 let _lancctbPlanoBusca='';
 let _lancctbPlanoPagina=0;
 let _lancctbUltimoPlano=[];
+let _lancctbPlanoFiltroIgnoradas='todas'; // 'todas'|'ativas'|'ignoradas'
 
 async function renderLancctbPlanoContas(){
   const el=document.getElementById('lancctbConteudoAba');
@@ -15812,11 +15813,13 @@ async function renderLancctbPlanoContas(){
   const from=_lancctbPlanoPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
 
-  let q=_supaClient.from('plano_contas').select('id,numero_conta,classificacao,tipo,descricao,grau',{count:'exact'}).eq('empresa_eid',eid);
+  let q=_supaClient.from('plano_contas').select('id,numero_conta,classificacao,tipo,descricao,grau,ignorada_em_regras',{count:'exact'}).eq('empresa_eid',eid);
   if(_lancctbPlanoBusca.trim()){
     const t=_lancctbPlanoBusca.trim().replace(/[%_]/g,'');
     q=q.or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`);
   }
+  if(_lancctbPlanoFiltroIgnoradas==='ativas') q=q.eq('ignorada_em_regras',false);
+  if(_lancctbPlanoFiltroIgnoradas==='ignoradas') q=q.eq('ignorada_em_regras',true);
   const { data: contas, error, count } = await q.order('classificacao',{ascending:true}).range(from,to);
 
   if(error){
@@ -15835,12 +15838,22 @@ async function renderLancctbPlanoContas(){
   (todasClassif||[]).forEach(r=>{ contagemClassif[r.classificacao]=(contagemClassif[r.classificacao]||0)+1; });
 
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
-  let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:12px">
+  const temBusca=!!_lancctbPlanoBusca.trim();
+  let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
     <input class="si" id="lancctbPlanoBuscaInput" placeholder="🔍 Pesquisar conta, classificação ou descrição..." value="${esc(_lancctbPlanoBusca)}" style="flex:1;min-width:220px" oninput="_lancctbPlanoBuscaDebounced(this.value)">
+    <select class="si" onchange="_lancctbPlanoFiltroIgnoradas=this.value;_lancctbPlanoPagina=0;renderLancctbPlanoContas()">
+      <option value="todas" ${_lancctbPlanoFiltroIgnoradas==='todas'?'selected':''}>Todas as contas</option>
+      <option value="ativas" ${_lancctbPlanoFiltroIgnoradas==='ativas'?'selected':''}>Só ativas nas regras</option>
+      <option value="ignoradas" ${_lancctbPlanoFiltroIgnoradas==='ignoradas'?'selected':''}>Só ignoradas</option>
+    </select>
     <div style="display:flex;gap:6px">
       <button class="btn bo bsm" onclick="abrirLancctbImportPlanoModal()">⬆ Importar Excel</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbPlanoExcel()">📊 Gerar Excel</button>
     </div>
+  </div>
+  <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:12px">
+    <button class="btn bo bsm" ${temBusca?'':'disabled'} onclick="_lancctbIgnorarBusca(true)" title="Marca todas as contas que aparecem na busca acima como ignoradas nas sugestões de Regra">🚫 Ignorar todos da busca</button>
+    <button class="btn bo bsm" ${temBusca?'':'disabled'} onclick="_lancctbIgnorarBusca(false)" title="Reativa todas as contas que aparecem na busca acima">✓ Reativar todos da busca</button>
   </div>
   <div style="overflow-x:auto">
   <table style="width:100%;border-collapse:collapse;font-size:12.5px">
@@ -15850,11 +15863,12 @@ async function renderLancctbPlanoContas(){
       <th style="padding:8px 10px;text-align:center">Tipo</th>
       <th style="padding:8px 10px;text-align:left">Descrição</th>
       <th style="padding:8px 10px;text-align:center">Grau</th>
+      <th style="padding:8px 10px;text-align:center">Nas regras</th>
       <th style="padding:8px 10px;text-align:center">&nbsp;</th>
     </tr></thead>
     <tbody>`;
   if(!contas||!contas.length){
-    html+=`<tr><td colspan="6" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma conta cadastrada ainda. Use "Importar Excel" para trazer o plano do Mister Contador.</td></tr>`;
+    html+=`<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma conta cadastrada ainda. Use "Importar Excel" para trazer o plano do Mister Contador.</td></tr>`;
   } else {
     // Hierarquia visual por Grau (contas sintéticas mais "altas" ficam mais
     // escuras, clareando conforme desce até a analítica) — pedido explícito
@@ -15874,12 +15888,16 @@ async function renderLancctbPlanoContas(){
       const cor=compartilhada?'#111827':(corGrau?corGrau.cor:'inherit');
       const rowStyle=`border-bottom:1px solid var(--border);${bg?`background:${bg};`:''}${cor!=='inherit'?`color:${cor};`:''}`;
       const titulo=compartilhada?` title="Classificação ${esc(c.classificacao)} compartilhada entre matriz e filial — confira se está correta"`:'';
+      const ignorada=!!c.ignorada_em_regras;
       html+=`<tr style="${rowStyle}"${titulo}>
         <td style="padding:7px 10px;font-family:var(--mono)">${esc(c.numero_conta||'')}</td>
         <td style="padding:7px 10px;font-family:var(--mono)">${esc(c.classificacao||'')}${compartilhada?' ⚠️':''}</td>
         <td style="padding:7px 10px;text-align:center">${esc(c.tipo||'')}</td>
         <td style="padding:7px 10px">${esc(c.descricao||'')}</td>
         <td style="padding:7px 10px;text-align:center">${c.grau||''}</td>
+        <td style="padding:7px 10px;text-align:center">
+          <button class="icon-btn" onclick="_lancctbAlternarIgnorarConta(${c.id},${!ignorada})" title="${ignorada?'Reativar nas sugestões de Regra':'Ignorar nas sugestões de Regra'}" style="padding:2px 8px;border-radius:10px;border:1px solid ${ignorada?'#9ca3af':'#10b981'};background:none;cursor:pointer;font-size:11px;color:${ignorada?(cor==='#ffffff'?'#d1d5db':'#6b7280'):(cor==='#ffffff'?'#6ee7b7':'#059669')}">${ignorada?'🚫 Ignorada':'✓ Ativa'}</button>
+        </td>
         <td style="padding:7px 10px;text-align:center"><button class="icon-btn" onclick="excluirLancctbConta(${c.id})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:${cor==='#ffffff'?'#fca5a5':'#dc2626'}">🗑️</button></td>
       </tr>`;
     });
@@ -15907,6 +15925,31 @@ async function excluirLancctbConta(id){
   const { error } = await _supaClient.from('plano_contas').delete().eq('id',id);
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
   toast('Conta excluída','ok');
+  renderLancctbPlanoContas();
+}
+// Ignorar/reativar 1 conta só — sempre reversível (ver comentário na
+// coluna do schema). "Ignorada" só afeta o select de contrapartida ao
+// criar Regra, não esconde a conta do Plano de Contas em si.
+async function _lancctbAlternarIgnorarConta(id,ignorar){
+  const { error } = await _supaClient.from('plano_contas').update({ignorada_em_regras:ignorar}).eq('id',id);
+  if(error){ toast('Erro: '+error.message,'err'); return; }
+  toast(ignorar?'Conta ignorada nas sugestões de Regra':'Conta reativada nas sugestões de Regra','ok');
+  renderLancctbPlanoContas();
+}
+// Ignora/reativa em lote TODAS as contas que batem com a busca atual (não
+// só a página visível) — é assim que o usuário marca um grupo inteiro de
+// classificação (ex: buscar "3.1.2" e ignorar tudo que aparecer).
+async function _lancctbIgnorarBusca(ignorar){
+  const t=_lancctbPlanoBusca.trim().replace(/[%_]/g,'');
+  if(!t){ toast('Digite algo na busca primeiro','err'); return; }
+  const { data: alvo } = await _supaClient.from('plano_contas').select('id')
+    .eq('empresa_eid',_lancctbEidAtual)
+    .or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`);
+  if(!alvo||!alvo.length){ toast('Nenhuma conta encontrada para essa busca','err'); return; }
+  if(!confirm(`${ignorar?'Ignorar':'Reativar'} ${alvo.length} conta(s) que batem com "${_lancctbPlanoBusca}" nas sugestões de Regra?`)) return;
+  const { error } = await _supaClient.from('plano_contas').update({ignorada_em_regras:ignorar}).in('id',alvo.map(a=>a.id));
+  if(error){ toast('Erro: '+error.message,'err'); return; }
+  toast(`${alvo.length} conta(s) ${ignorar?'ignorada(s)':'reativada(s)'}`,'ok');
   renderLancctbPlanoContas();
 }
 function exportarLancctbPlanoExcel(){
@@ -16252,7 +16295,7 @@ async function abrirLancctbRegraModal(id){
 
   const selConta=document.getElementById('lancctbRegraContaContabil');
   selConta.innerHTML='<option value="">Selecione…</option>';
-  const { data: contas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).eq('tipo','A').order('classificacao');
+  const { data: contas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).eq('tipo','A').eq('ignorada_em_regras',false).order('classificacao');
   (contas||[]).forEach(c=>{
     const o=document.createElement('option');
     o.value=c.id; o.textContent=`${c.numero_conta} - ${c.classificacao} - ${c.descricao}`;
@@ -16276,6 +16319,15 @@ async function abrirLancctbRegraModal(id){
       document.getElementById('lancctbRegraHistoricoGatilho').value=r.historico_gatilho||'';
       document.getElementById('lancctbRegraCnpjGatilho').value=r.cnpj_cpf_gatilho||'';
       document.getElementById('lancctbRegraDc').value=r.dc||'D';
+      // Se a conta vinculada a essa regra foi ignorada depois (não está
+      // mais na lista carregada acima), adiciona ela mesmo assim — senão o
+      // select fica em branco e salvar de novo apagaria o vínculo.
+      if(r.conta_contabil_id&&!contas.some(c=>c.id===r.conta_contabil_id)){
+        const o=document.createElement('option');
+        o.value=r.conta_contabil_id;
+        o.textContent=r.plano_contas?`${r.plano_contas.numero_conta} - ${r.plano_contas.descricao} (ignorada)`:'Conta ignorada';
+        selConta.appendChild(o);
+      }
       selConta.value=r.conta_contabil_id||'';
       selAgencia.value=r.agencia_bancaria_id||'';
     }
