@@ -15608,10 +15608,11 @@ const LANCCTB_BANCOS_BR=[
 ];
 // Logo oficial do banco (pelo domínio real da instituição) a partir do nome
 // digitado em "Banco" — casa por palavra-chave (sem acento/maiúscula) já
-// que o campo é texto livre, não um código fixo. Serviço público de logo
-// por domínio (mesmo princípio de favicon), só como <img src>, sem
-// download/hospedagem nenhuma da minha parte — se não reconhecer o nome
-// ou a imagem falhar, cai pro emblema genérico 🏦 (onerror no <img>).
+// que o campo é texto livre, não um código fixo. Usa o favicon do site
+// oficial do banco via serviço público do Google (logo.clearbit.com saiu
+// do ar em 2026 — testado, não resolve mais) — só como <img src>, sem
+// download/hospedagem nenhuma da minha parte; se não reconhecer o nome ou
+// a imagem falhar, cai pro emblema genérico 🏦 (onerror no <img>).
 const LANCCTB_BANCO_DOMINIOS=[
   [/ita[uú]/,'itau.com.br'],[/banco do brasil|^bb$|\bbb\b/,'bb.com.br'],[/bradesco/,'bradesco.com.br'],
   [/santander/,'santander.com.br'],[/caixa/,'caixa.gov.br'],[/nubank|nu pagamentos/,'nubank.com.br'],
@@ -15627,7 +15628,7 @@ const LANCCTB_BANCO_DOMINIOS=[
 function _lancctbBancoLogoUrl(nomeBanco){
   const norm=(nomeBanco||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
   const achado=LANCCTB_BANCO_DOMINIOS.find(([re])=>re.test(norm));
-  return achado?`https://logo.clearbit.com/${achado[1]}?size=64`:null;
+  return achado?`https://www.google.com/s2/favicons?domain=${achado[1]}&sz=64`:null;
 }
 // Cards de seleção de Conta Corrente (Extrato Bancário/Comprovantes) — cada
 // banco em um card clicável, mais fácil de separar um do outro do que um
@@ -16764,10 +16765,25 @@ async function salvarLancctbRegra(){
   }
 }
 async function excluirLancctbRegra(id){
-  if(!confirm('Excluir esta regra?'))return;
+  if(!confirm('Excluir esta regra? Os lançamentos que ela já resolveu voltam a ficar pendentes no Registro Contábil.'))return;
+  // Desfaz na hora tudo que essa regra tinha resolvido — senão o Registro
+  // Contábil continua mostrando "conciliado" apontando pra uma regra que
+  // não existe mais (bug relatado pelo usuário: regra excluída, lançamento
+  // continuava conciliado com o histórico/conta da regra apagada).
+  const { data: linhasDaRegra } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
+    .select('lancamento_extrato_id,comprovante_id').eq('regra_matching_id',id).eq('estornado',false));
+  const idsExtrato=[...new Set((linhasDaRegra||[]).map(l=>l.lancamento_extrato_id).filter(Boolean))];
+  const idsComprovante=[...new Set((linhasDaRegra||[]).map(l=>l.comprovante_id).filter(Boolean))];
+  if(idsExtrato.length){
+    await _supaClient.from('lancamentos_contabeis').delete().eq('regra_matching_id',id);
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).in('id',idsExtrato);
+  }
+  if(idsComprovante.length){
+    await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComprovante);
+  }
   const { error } = await _supaClient.from('regras_matching').update({ativo:false}).eq('id',id);
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
-  toast('Regra removida','ok');
+  toast(idsExtrato.length?`Regra removida — ${idsExtrato.length} lançamento(s) voltaram a ficar pendente(s).`:'Regra removida','ok');
   renderLancctbRegras();
 }
 
@@ -17786,8 +17802,11 @@ let _lancctbExclusaoExtratoQtd=0;
 function excluirLancctbExtratoConta(qtd){
   if(!qtd){ toast('Nenhum lançamento pra excluir nesta conta.','err'); return; }
   _lancctbExclusaoExtratoQtd=qtd;
+  const escopo=_lancctbExtratoMes
+    ? `de <strong>${new Date(_lancctbExtratoMes+'-01T00:00:00').toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</strong> desta conta`
+    : 'desta conta (todos os meses)';
   document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
-    `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> lançamento(s) de extrato desta conta. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
+    `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> lançamento(s) de extrato ${escopo}. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
   document.getElementById('lancctbConfirmarExclusaoInput').value='';
   openModal('mLancctbConfirmarExclusao');
 }
@@ -17796,20 +17815,37 @@ async function _lancctbExecutarExclusaoExtrato(){
   if(digitado!==String(_lancctbExclusaoExtratoQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
   btn.disabled=true; btn.textContent='Excluindo…';
+  // Excluir respeita o filtro de mês ativo — se tiver um mês selecionado,
+  // apaga só aquele mês, não a conta inteira (pedido do usuário: reimportar
+  // só um mês errado sem mexer no resto do histórico).
+  let mesDe=null,mesAte=null;
+  if(_lancctbExtratoMes){
+    const [ano,mes]=_lancctbExtratoMes.split('-').map(Number);
+    const ultimoDia=new Date(ano,mes,0).getDate();
+    mesDe=`${_lancctbExtratoMes}-01`; mesAte=`${_lancctbExtratoMes}-${String(ultimoDia).padStart(2,'0')}`;
+  }
   // Antes de excluir, desfaz qualquer conciliação apontando pra essas linhas
   // (notas_fiscais_parcelas/comprovantes_bancarios/lancamentos_contabeis têm
   // FK pra lancamentos_extrato) — senão o delete inteiro é bloqueado por
   // violação de chave estrangeira assim que existir 1 lançamento já
-  // conciliado na conta (bug real relatado pelo usuário).
-  const { data: idsExtratoRows } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id')
-    .eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel));
+  // conciliado na conta (bug real relatado pelo usuário). Isso também
+  // desfaz o Registro Contábil junto (lancamentos_contabeis é apagado, não
+  // só desvinculado).
+  const { data: idsExtratoRows } = await _lancctbFetchTudo(()=>{
+    let q=_supaClient.from('lancamentos_extrato').select('id')
+      .eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel);
+    if(mesDe) q=q.gte('data_pagamento',mesDe).lte('data_pagamento',mesAte);
+    return q;
+  });
   const ids=(idsExtratoRows||[]).map(r=>r.id);
   if(ids.length){
     await _supaClient.from('notas_fiscais_parcelas').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',ids);
     await _supaClient.from('comprovantes_bancarios').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',ids);
     await _supaClient.from('lancamentos_contabeis').delete().in('lancamento_extrato_id',ids);
   }
-  const { error } = await _supaClient.from('lancamentos_extrato').delete().eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel);
+  const { error } = ids.length
+    ? await _supaClient.from('lancamentos_extrato').delete().in('id',ids)
+    : { error:null };
   btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
   toast(`${_lancctbExclusaoExtratoQtd} lançamento(s) excluído(s)`,'ok');
