@@ -2071,6 +2071,19 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: upload de Comprovantes ou Extrato bancário (PDF/Excel/CSV) —
+     conteúdo montado via JS em abrirLancctbUploadModal(), pois o preview
+     da lista extraída é dinâmico. -->
+<div class="mb" id="mLancctbUpload" style="display:none">
+  <div class="modal" style="max-width:720px">
+    <div class="mt">
+      <h3 id="lancctbUploadTitulo">Upload</h3>
+      <button onclick="closeModal('mLancctbUpload')">&#x2715;</button>
+    </div>
+    <div class="mc" id="lancctbUploadBody"></div>
+  </div>
+</div>
+
 <div class="page" id="page-conv-entradas">
   <div class="crumb-voltar"><button class="btn bo bsm" onclick="goPage('conversor-hub')">← Voltar ao Conversor de Arquivos</button></div>
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
@@ -15545,6 +15558,8 @@ function renderLancctbConteudo(){
   if(aba&&aba.tipoDoc){ renderLancctbNotas(aba); return; }
   if(_lancctbAbaAtiva==='plano'){ renderLancctbPlanoContas(); return; }
   if(_lancctbAbaAtiva==='agencias'){ renderLancctbAgencias(); return; }
+  if(_lancctbAbaAtiva==='comprovantes'){ renderLancctbComprovantes(); return; }
+  if(_lancctbAbaAtiva==='extrato'){ renderLancctbExtrato(); return; }
   el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:60px 20px">
     <div style="font-size:2rem;margin-bottom:8px">🚧</div>
     <div>Esta aba entra numa próxima fase do módulo.</div>
@@ -16097,6 +16112,484 @@ function exportarLancctbAgenciasExcel(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Agências Bancárias');
   const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
   XLSX.writeFile(wb,`AgenciasBancarias_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+
+// ─── Comprovantes bancários (upload PDF → IA → preview → confirmar) ───────
+// Um PDF pode trazer dezenas de comprovantes empilhados (ver comentário na
+// Edge Function lancctb-parse-comprovante) — por isso o fluxo sempre passa
+// por uma tela de preview com checkbox antes de gravar, nunca insere direto.
+let _lancctbComprovPagina=0;
+let _lancctbComprovPreview=[]; // [{...campo, _incluir:true}]
+
+async function renderLancctbComprovantes(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const from=_lancctbComprovPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE-1;
+  const { data: comprovantes, error, count } = await _supaClient
+    .from('comprovantes_bancarios')
+    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,documento_numero,data_vencimento,valor_pago,status_conciliacao',{count:'exact'})
+    .eq('empresa_eid',eid)
+    .order('data_pagamento',{ascending:false})
+    .range(from,to);
+
+  if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar comprovantes: ${esc(error.message)}</div>`; return; }
+  _lancctbUltimoComprov=comprovantes||[];
+
+  const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
+  let html=`<div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:14px">
+    <button class="action-btn action-btn-excel" onclick="exportarLancctbComprovantesExcel()">📊 Gerar Excel</button>
+    <button class="btn bp bsm" onclick="abrirLancctbUploadComprovanteModal()">⬆ Upload PDF de Comprovantes</button>
+  </div>
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <thead><tr style="background:var(--ink2);color:#fff">
+      <th style="padding:8px 10px;text-align:left">Dt Pgto</th>
+      <th style="padding:8px 10px;text-align:left">Cliente/Fornecedor</th>
+      <th style="padding:8px 10px;text-align:left">CPF/CNPJ</th>
+      <th style="padding:8px 10px;text-align:left">Documento</th>
+      <th style="padding:8px 10px;text-align:left">Dt Vcto</th>
+      <th style="padding:8px 10px;text-align:right">Valor</th>
+      <th style="padding:8px 10px;text-align:center">Status</th>
+    </tr></thead>
+    <tbody>`;
+  if(!comprovantes||!comprovantes.length){
+    html+=`<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--slate)">Nenhum comprovante importado ainda.</td></tr>`;
+  } else {
+    comprovantes.forEach(c=>{
+      const statusCor=c.status_conciliacao==='conciliado'?'var(--teal)':c.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
+      html+=`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:7px 10px">${c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px">${esc(c.cliente_fornecedor_nome||'')}</td>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(_fmtCnpjCpf(c.cnpj_cpf))}</td>
+        <td style="padding:7px 10px">${esc(c.documento_numero||'')}</td>
+        <td style="padding:7px 10px">${c.data_vencimento?new Date(c.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
+        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(c.status_conciliacao||'')}</span></td>
+      </tr>`;
+    });
+  }
+  html+=`</tbody></table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12.5px;color:var(--slate)">
+      <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" ${_lancctbComprovPagina===0?'disabled':''} onclick="_lancctbComprovPagina--;renderLancctbComprovantes()">‹ Anterior</button>
+        <span style="padding:6px 10px">Página ${_lancctbComprovPagina+1} de ${totalPaginas}</span>
+        <button class="btn bo bsm" ${_lancctbComprovPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbComprovPagina++;renderLancctbComprovantes()">Próxima ›</button>
+      </div>
+    </div>`;
+  el.innerHTML=html;
+}
+let _lancctbUltimoComprov=[];
+function exportarLancctbComprovantesExcel(){
+  if(!_lancctbUltimoComprov.length){ toast('Nada para exportar nesta página.','err'); return; }
+  const header=['Dt Pgto','Cliente/Fornecedor','CPF/CNPJ','Documento','Dt Vcto','Valor','Status'];
+  const rows=_lancctbUltimoComprov.map(c=>[
+    c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    c.cliente_fornecedor_nome||'', _fmtCnpjCpf(c.cnpj_cpf), c.documento_numero||'',
+    c.data_vencimento?new Date(c.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    c.valor_pago||0, c.status_conciliacao||''
+  ]);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Comprovantes');
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`Comprovantes_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+
+function abrirLancctbUploadComprovanteModal(){
+  document.getElementById('lancctbUploadTitulo').textContent='Upload de Comprovantes (PDF)';
+  document.getElementById('lancctbUploadBody').innerHTML=`
+    <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
+      Um único PDF pode conter vários comprovantes (um por página) — todos serão extraídos e você confere/desmarca antes de salvar.
+    </div>
+    <input class="fi" id="lancctbComprovArquivo" type="file" accept=".pdf">
+    <div id="lancctbComprovStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
+    <div id="lancctbComprovPreviewArea" style="margin-top:14px"></div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+      <button class="btn bp" id="lancctbComprovProcessarBtn" onclick="processarLancctbUploadComprovante()">▶ Extrair</button>
+    </div>`;
+  openModal('mLancctbUpload');
+}
+// Extrai texto de todas as páginas via pdfjsLib (reaproveita
+// _convItauGarantirWorker já usado no resto do site); se vier vazio/curto
+// (PDF escaneado sem texto selecionável), renderiza páginas como imagem e
+// manda pra Edge Function via Gemini em vez de Groq — mesmo fallback já
+// usado em _convAplicFinExtrairGenerico.
+async function processarLancctbUploadComprovante(){
+  const file=document.getElementById('lancctbComprovArquivo')?.files[0];
+  const status=document.getElementById('lancctbComprovStatus');
+  const btn=document.getElementById('lancctbComprovProcessarBtn');
+  if(!file){ toast('Selecione um arquivo PDF','err'); return; }
+  btn.disabled=true; btn.textContent='Extraindo…';
+  status.textContent='Lendo PDF…';
+  try{
+    _convItauGarantirWorker();
+    const buf=await file.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    let textoCompleto='';
+    const imagens=[];
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=await pdf.getPage(p);
+      const content=await page.getTextContent();
+      const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+      textoCompleto+='\n--- página '+p+' ---\n'+texto;
+    }
+    textoCompleto=textoCompleto.trim();
+    if(textoCompleto.replace(/---.*?---/g,'').trim().length<20){
+      status.textContent='PDF sem texto selecionável — renderizando páginas como imagem…';
+      for(let p=1;p<=Math.min(pdf.numPages,20);p++){
+        const page=await pdf.getPage(p);
+        const viewport=page.getViewport({scale:2});
+        const canvas=document.createElement('canvas');
+        canvas.width=viewport.width;canvas.height=viewport.height;
+        const ctx=canvas.getContext('2d');
+        await page.render({canvasContext:ctx,viewport}).promise;
+        imagens.push(canvas.toDataURL('image/jpeg',0.85));
+      }
+    }
+    status.textContent='Chamando IA para extrair os comprovantes…';
+    const body=imagens.length?{imagens}:{texto:textoCompleto};
+    const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-comprovante',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+      body:JSON.stringify(body)
+    });
+    if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
+    const d=await resp.json();
+    if(d.error) throw new Error(d.error);
+    if(!Array.isArray(d.comprovantes)||!d.comprovantes.length) throw new Error('Não foi possível identificar nenhum comprovante neste PDF.');
+
+    _lancctbComprovPreview=d.comprovantes.map(c=>({...c,_incluir:true}));
+    status.textContent=`${_lancctbComprovPreview.length} comprovante(s) encontrado(s) — confira abaixo antes de salvar.`;
+    renderLancctbComprovPreview();
+  }catch(e){
+    console.error(e);
+    status.textContent='Erro: '+e.message;
+    toast('Erro ao extrair: '+e.message,'err');
+  }finally{
+    btn.disabled=false; btn.textContent='▶ Extrair';
+  }
+}
+function renderLancctbComprovPreview(){
+  const el=document.getElementById('lancctbComprovPreviewArea');
+  let html=`<div style="overflow-x:auto;max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+        <th style="padding:6px 8px"><input type="checkbox" checked onclick="_lancctbComprovToggleTodos(this.checked)"></th>
+        <th style="padding:6px 8px;text-align:left">Data</th>
+        <th style="padding:6px 8px;text-align:left">Cliente/Fornecedor</th>
+        <th style="padding:6px 8px;text-align:left">Documento</th>
+        <th style="padding:6px 8px;text-align:right">Valor</th>
+        <th style="padding:6px 8px;text-align:left">Observação</th>
+      </tr></thead><tbody>`;
+  _lancctbComprovPreview.forEach((c,i)=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${c._incluir?1:.4}">
+      <td style="padding:5px 8px"><input type="checkbox" ${c._incluir?'checked':''} onclick="_lancctbComprovPreview[${i}]._incluir=this.checked;renderLancctbComprovPreview()"></td>
+      <td style="padding:5px 8px">${c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+      <td style="padding:5px 8px">${esc(c.cliente_fornecedor_nome||'')}</td>
+      <td style="padding:5px 8px">${esc(c.documento_numero||'')}</td>
+      <td style="padding:5px 8px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
+      <td style="padding:5px 8px;color:var(--slate)">${esc(c.observacao||'')}</td>
+    </tr>`;
+  });
+  html+='</tbody></table></div>';
+  const qtd=_lancctbComprovPreview.filter(c=>c._incluir).length;
+  html+=`<div style="display:flex;justify-content:flex-end;margin-top:10px">
+    <button class="btn bp" onclick="confirmarLancctbImportComprovantes()">✓ Salvar ${qtd} comprovante(s)</button>
+  </div>`;
+  el.innerHTML=html;
+}
+function _lancctbComprovToggleTodos(marcar){
+  _lancctbComprovPreview.forEach(c=>c._incluir=marcar);
+  renderLancctbComprovPreview();
+}
+async function confirmarLancctbImportComprovantes(){
+  const selecionados=_lancctbComprovPreview.filter(c=>c._incluir);
+  if(!selecionados.length){ toast('Nenhum comprovante selecionado','err'); return; }
+  const registros=selecionados.map(c=>({
+    empresa_eid: _lancctbEidAtual,
+    data_pagamento: c.data_pagamento||null,
+    cliente_fornecedor_nome: c.cliente_fornecedor_nome||null,
+    cnpj_cpf: c.cnpj_cpf||null,
+    documento_numero: c.documento_numero||null,
+    data_vencimento: c.data_vencimento||null,
+    valor_documento: c.valor_documento||null,
+    valor_pago: c.valor_pago||0,
+    juros: c.juros||0,
+    multa: c.multa||0,
+    desconto: c.desconto||0,
+    observacao: c.observacao||null,
+  }));
+  const { error } = await _supaClient.from('comprovantes_bancarios').insert(registros);
+  if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+  toast(`${registros.length} comprovante(s) salvo(s) com sucesso`,'ok');
+  closeModal('mLancctbUpload');
+  _lancctbComprovPagina=0;
+  renderLancctbComprovantes();
+}
+
+// ─── Extrato bancário (upload Excel/CSV determinístico OU PDF via IA) ─────
+let _lancctbExtratoPagina=0;
+let _lancctbExtratoContaSel='';
+let _lancctbUltimoExtrato=[];
+let _lancctbExtratoPreview=[];
+
+async function renderLancctbExtrato(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  if(!agencias||!agencias.length){
+    el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Cadastre uma conta em "Agência bancária" antes de importar o extrato — cada lançamento precisa estar vinculado a uma conta.</div>`;
+    return;
+  }
+  if(!_lancctbExtratoContaSel) _lancctbExtratoContaSel=String(agencias[0].id);
+
+  const from=_lancctbExtratoPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE-1;
+  const { data: lancs, error, count } = await _supaClient
+    .from('lancamentos_extrato')
+    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao',{count:'exact'})
+    .eq('empresa_eid',eid)
+    .eq('conta_bancaria_id',_lancctbExtratoContaSel)
+    .order('data_pagamento',{ascending:false})
+    .range(from,to);
+
+  if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar extrato: ${esc(error.message)}</div>`; return; }
+  _lancctbUltimoExtrato=lancs||[];
+
+  const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
+  const opcoesConta=agencias.map(a=>`<option value="${a.id}" ${String(a.id)===_lancctbExtratoContaSel?'selected':''}>${esc(a.banco_nome)} — Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('');
+  let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+    <select class="si" onchange="_lancctbExtratoContaSel=this.value;_lancctbExtratoPagina=0;renderLancctbExtrato()">${opcoesConta}</select>
+    <div style="display:flex;gap:6px">
+      <button class="action-btn action-btn-excel" onclick="exportarLancctbExtratoExcel()">📊 Gerar Excel</button>
+      <button class="btn bp bsm" onclick="abrirLancctbUploadExtratoModal()">⬆ Upload Extrato</button>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <thead><tr style="background:var(--ink2);color:#fff">
+      <th style="padding:8px 10px;text-align:left">Dt Pagamento</th>
+      <th style="padding:8px 10px;text-align:right">Saída</th>
+      <th style="padding:8px 10px;text-align:right">Entrada</th>
+      <th style="padding:8px 10px;text-align:left">Histórico Bancário</th>
+      <th style="padding:8px 10px;text-align:center">Status</th>
+    </tr></thead>
+    <tbody>`;
+  if(!lancs||!lancs.length){
+    html+=`<tr><td colspan="5" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento de extrato importado ainda para esta conta.</td></tr>`;
+  } else {
+    let somaSaida=0,somaEntrada=0;
+    lancs.forEach(l=>{ somaSaida+=l.valor_saida||0; somaEntrada+=l.valor_entrada||0; });
+    html+=`<tr style="background:var(--bg);font-weight:700">
+      <td style="padding:7px 10px">Soma da página</td>
+      <td style="padding:7px 10px;text-align:right;color:#dc2626">R$ ${_fmt(somaSaida)}</td>
+      <td style="padding:7px 10px;text-align:right;color:var(--teal)">R$ ${_fmt(somaEntrada)}</td>
+      <td></td><td></td>
+    </tr>`;
+    lancs.forEach(l=>{
+      const statusCor=l.status_conciliacao==='conciliado'?'var(--teal)':l.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
+      html+=`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:7px 10px">${l.data_pagamento?new Date(l.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px;text-align:right">${l.valor_saida?'R$ '+_fmt(l.valor_saida):''}</td>
+        <td style="padding:7px 10px;text-align:right">${l.valor_entrada?'R$ '+_fmt(l.valor_entrada):''}</td>
+        <td style="padding:7px 10px">${esc(l.historico_bancario||'')}</td>
+        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(l.status_conciliacao||'')}</span></td>
+      </tr>`;
+    });
+  }
+  html+=`</tbody></table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12.5px;color:var(--slate)">
+      <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" ${_lancctbExtratoPagina===0?'disabled':''} onclick="_lancctbExtratoPagina--;renderLancctbExtrato()">‹ Anterior</button>
+        <span style="padding:6px 10px">Página ${_lancctbExtratoPagina+1} de ${totalPaginas}</span>
+        <button class="btn bo bsm" ${_lancctbExtratoPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbExtratoPagina++;renderLancctbExtrato()">Próxima ›</button>
+      </div>
+    </div>`;
+  el.innerHTML=html;
+}
+function exportarLancctbExtratoExcel(){
+  if(!_lancctbUltimoExtrato.length){ toast('Nada para exportar nesta página.','err'); return; }
+  const header=['Dt Pagamento','Saída','Entrada','Histórico Bancário','Status'];
+  const rows=_lancctbUltimoExtrato.map(l=>[
+    l.data_pagamento?new Date(l.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    l.valor_saida||0, l.valor_entrada||0, l.historico_bancario||'', l.status_conciliacao||''
+  ]);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Extrato');
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`Extrato_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+function abrirLancctbUploadExtratoModal(){
+  document.getElementById('lancctbUploadTitulo').textContent='Upload de Extrato Bancário';
+  document.getElementById('lancctbUploadBody').innerHTML=`
+    <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
+      Aceita Excel/CSV (lido direto, mais rápido) ou PDF (extraído via IA — qualquer banco, sem precisar reconhecer o layout).
+    </div>
+    <input class="fi" id="lancctbExtratoArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
+    <div id="lancctbExtratoStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
+    <div id="lancctbExtratoPreviewArea" style="margin-top:14px"></div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+      <button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato()">▶ Extrair</button>
+    </div>`;
+  openModal('mLancctbUpload');
+}
+async function processarLancctbUploadExtrato(){
+  const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
+  const status=document.getElementById('lancctbExtratoStatus');
+  const btn=document.getElementById('lancctbExtratoProcessarBtn');
+  if(!file){ toast('Selecione um arquivo','err'); return; }
+  btn.disabled=true; btn.textContent='Extraindo…';
+  status.textContent='Lendo arquivo…';
+  try{
+    const ehPdf=/\.pdf$/i.test(file.name);
+    let lancamentos=[];
+    let origem='excel';
+    if(ehPdf){
+      origem='pdf_texto';
+      _convItauGarantirWorker();
+      const buf=await file.arrayBuffer();
+      const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+      let textoCompleto='';
+      const imagens=[];
+      for(let p=1;p<=pdf.numPages;p++){
+        const page=await pdf.getPage(p);
+        const content=await page.getTextContent();
+        textoCompleto+='\n'+content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+      }
+      textoCompleto=textoCompleto.trim();
+      if(textoCompleto.length<20){
+        origem='pdf_ocr_ia';
+        status.textContent='PDF sem texto selecionável — renderizando páginas como imagem…';
+        for(let p=1;p<=Math.min(pdf.numPages,20);p++){
+          const page=await pdf.getPage(p);
+          const viewport=page.getViewport({scale:2});
+          const canvas=document.createElement('canvas');
+          canvas.width=viewport.width;canvas.height=viewport.height;
+          const ctx=canvas.getContext('2d');
+          await page.render({canvasContext:ctx,viewport}).promise;
+          imagens.push(canvas.toDataURL('image/jpeg',0.85));
+        }
+      }
+      status.textContent='Chamando IA para extrair o extrato…';
+      const body=imagens.length?{imagens}:{texto:textoCompleto};
+      const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-extrato',{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+        body:JSON.stringify(body)
+      });
+      if(!resp.ok) throw new Error('A extração retornou status '+resp.status);
+      const d=await resp.json();
+      if(d.error) throw new Error(d.error);
+      if(!Array.isArray(d.lancamentos)||!d.lancamentos.length) throw new Error('Não foi possível identificar lançamentos neste PDF.');
+      lancamentos=d.lancamentos;
+    } else {
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const linhas=XLSX.utils.sheet_to_json(ws,{defval:''});
+      const acharCampo=(row,nomes)=>{
+        const chaves=Object.keys(row);
+        for(const n of nomes){ const k=chaves.find(c=>c.trim().toLowerCase()===n); if(k!==undefined&&row[k]!=='')return row[k]; }
+        return '';
+      };
+      lancamentos=linhas.map(row=>{
+        const dataRaw=acharCampo(row,['data','dt pagamento','data pagamento']);
+        const data=dataRaw instanceof Date?dataRaw.toISOString().split('T')[0]:String(dataRaw||'').split('/').reverse().join('-');
+        const saida=parseFloat(acharCampo(row,['saída','saida','débito','debito']))||0;
+        const entrada=parseFloat(acharCampo(row,['entrada','crédito','credito']))||0;
+        return { data, historico: String(acharCampo(row,['histórico','historico','descrição','descricao'])||'').trim(),
+          valor_saida: Math.abs(saida), valor_entrada: Math.abs(entrada) };
+      }).filter(l=>l.data && (l.valor_saida||l.valor_entrada));
+      if(!lancamentos.length) throw new Error('Nenhuma linha válida encontrada (verifique as colunas Data/Saída/Entrada/Histórico).');
+    }
+
+    _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
+    status.textContent=`${_lancctbExtratoPreview.length} lançamento(s) encontrado(s) — confira abaixo antes de salvar.`;
+    renderLancctbExtratoPreview();
+  }catch(e){
+    console.error(e);
+    status.textContent='Erro: '+e.message;
+    toast('Erro ao extrair: '+e.message,'err');
+  }finally{
+    btn.disabled=false; btn.textContent='▶ Extrair';
+  }
+}
+function renderLancctbExtratoPreview(){
+  const el=document.getElementById('lancctbExtratoPreviewArea');
+  const somaSaida=_lancctbExtratoPreview.reduce((s,l)=>s+(l.valor_saida||0),0);
+  const somaEntrada=_lancctbExtratoPreview.reduce((s,l)=>s+(l.valor_entrada||0),0);
+  let html=`<div style="font-size:12px;color:var(--slate);margin-bottom:6px">Soma total: <strong style="color:#dc2626">R$ ${_fmt(somaSaida)}</strong> saída / <strong style="color:var(--teal)">R$ ${_fmt(somaEntrada)}</strong> entrada — confira contra o saldo do extrato original.</div>
+    <div style="overflow-x:auto;max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+        <th style="padding:6px 8px"><input type="checkbox" checked onclick="_lancctbExtratoToggleTodos(this.checked)"></th>
+        <th style="padding:6px 8px;text-align:left">Data</th>
+        <th style="padding:6px 8px;text-align:left">Histórico</th>
+        <th style="padding:6px 8px;text-align:right">Saída</th>
+        <th style="padding:6px 8px;text-align:right">Entrada</th>
+      </tr></thead><tbody>`;
+  _lancctbExtratoPreview.forEach((l,i)=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${l._incluir?1:.4}">
+      <td style="padding:5px 8px"><input type="checkbox" ${l._incluir?'checked':''} onclick="_lancctbExtratoPreview[${i}]._incluir=this.checked;renderLancctbExtratoPreview()"></td>
+      <td style="padding:5px 8px">${l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+      <td style="padding:5px 8px">${esc(l.historico||'')}</td>
+      <td style="padding:5px 8px;text-align:right">${l.valor_saida?'R$ '+_fmt(l.valor_saida):''}</td>
+      <td style="padding:5px 8px;text-align:right">${l.valor_entrada?'R$ '+_fmt(l.valor_entrada):''}</td>
+    </tr>`;
+  });
+  html+='</tbody></table></div>';
+  const qtd=_lancctbExtratoPreview.filter(l=>l._incluir).length;
+  html+=`<div style="display:flex;justify-content:flex-end;margin-top:10px">
+    <button class="btn bp" onclick="confirmarLancctbImportExtrato()">✓ Salvar ${qtd} lançamento(s)</button>
+  </div>`;
+  el.innerHTML=html;
+}
+function _lancctbExtratoToggleTodos(marcar){
+  _lancctbExtratoPreview.forEach(l=>l._incluir=marcar);
+  renderLancctbExtratoPreview();
+}
+// Hash de deduplicação simples (mesmo dado nunca gera 2 linhas se o mesmo
+// arquivo for importado 2x sem querer) — combina os campos que juntos
+// identificam um lançamento único dentro da mesma conta bancária.
+function _lancctbHashLancamento(contaId,l){
+  const base=`${contaId}|${l.data}|${l.valor_entrada||0}|${l.valor_saida||0}|${(l.historico||'').trim()}`;
+  let h=0;
+  for(let i=0;i<base.length;i++){ h=((h<<5)-h+base.charCodeAt(i))|0; }
+  return 'h'+Math.abs(h).toString(36);
+}
+async function confirmarLancctbImportExtrato(){
+  const selecionados=_lancctbExtratoPreview.filter(l=>l._incluir);
+  if(!selecionados.length){ toast('Nenhum lançamento selecionado','err'); return; }
+  const contaId=_lancctbExtratoContaSel;
+  const registros=selecionados.map(l=>({
+    empresa_eid: _lancctbEidAtual,
+    conta_bancaria_id: contaId,
+    data_pagamento: l.data,
+    valor_saida: l.valor_saida||0,
+    valor_entrada: l.valor_entrada||0,
+    historico_bancario: l.historico||null,
+    documento: l.documento||null,
+    origem_importacao: l._origem||'excel',
+    hash_dedup: _lancctbHashLancamento(contaId,l),
+  }));
+  const { error } = await _supaClient.from('lancamentos_extrato').upsert(registros,{onConflict:'conta_bancaria_id,hash_dedup',ignoreDuplicates:true});
+  if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+  toast(`${registros.length} lançamento(s) processado(s) (duplicados foram ignorados)`,'ok');
+  closeModal('mLancctbUpload');
+  _lancctbExtratoPagina=0;
+  renderLancctbExtrato();
 }
 
 // ─── CONVERSOR DE ARQUIVOS: EXTRATO MOVIMENTAÇÃO COBRANÇA BANCO DO BRASIL ───
