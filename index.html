@@ -15589,7 +15589,7 @@ async function renderLancctbNotas(aba){
 
   const { data: parcelas, error, count } = await _supaClient
     .from('notas_fiscais_parcelas')
-    .select('id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,iss_valor)', { count: 'exact' })
+    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor)', { count: 'exact' })
     .eq('notas_fiscais.empresa_eid', eid)
     .eq('notas_fiscais.tipo', aba.tipoDoc)
     .eq('notas_fiscais.direcao', aba.direcaoNf)
@@ -15601,11 +15601,21 @@ async function renderLancctbNotas(aba){
     return;
   }
 
+  // Quantidade de parcelas por NF — não vem pronto do Postgrest (sem group
+  // by no select), então busca à parte só pros nf_id desta página.
+  const nfIds=[...new Set((parcelas||[]).map(p=>p.nf_id))];
+  const qtdParcelasPorNf={};
+  if(nfIds.length){
+    const { data: todasParcelasDestasNf } = await _supaClient.from('notas_fiscais_parcelas').select('nf_id').in('nf_id', nfIds);
+    (todasParcelasDestasNf||[]).forEach(r=>{ qtdParcelasPorNf[r.nf_id]=(qtdParcelasPorNf[r.nf_id]||0)+1; });
+  }
+
   _lancctbUltimaLeitura=(parcelas||[]).map(p=>{
     const nf=p.notas_fiscais;
     const nomeTerc=nf.direcao==='venda'?nf.nome_destinatario:nf.nome_emitente;
     const cnpjTerc=nf.direcao==='venda'?nf.cnpj_destinatario:nf.cnpj_emitente;
-    return {p,nf,nomeTerc,cnpjTerc};
+    const qtdParcelas=qtdParcelasPorNf[p.nf_id]||1;
+    return {p,nf,nomeTerc,cnpjTerc,qtdParcelas};
   });
 
   const totalPaginas=Math.max(1, Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
@@ -15620,21 +15630,23 @@ async function renderLancctbNotas(aba){
     <table style="width:100%;border-collapse:collapse;font-size:12.5px">
       <thead><tr style="background:var(--ink2);color:#fff">
         <th style="padding:8px 10px;text-align:left">Dt Emissão</th>
-        <th style="padding:8px 10px;text-align:left">Dt Vencimento</th>
+        <th style="padding:8px 10px;text-align:left">Data da Parcela</th>
         <th style="padding:8px 10px;text-align:left">Número</th>
         <th style="padding:8px 10px;text-align:left">CNPJ</th>
         <th style="padding:8px 10px;text-align:left">${esc(colTerceiro)}</th>
+        <th style="padding:8px 10px;text-align:right">Valor Bruto</th>
         <th style="padding:8px 10px;text-align:right">Valor Parcela</th>
         <th style="padding:8px 10px;text-align:center">Parcela</th>
+        <th style="padding:8px 10px;text-align:center">Qtd Parcelas</th>
         ${ehServico?'<th style="padding:8px 10px;text-align:right">ISS</th>':''}
         <th style="padding:8px 10px;text-align:left">Modelo</th>
         <th style="padding:8px 10px;text-align:center">Status</th>
       </tr></thead>
       <tbody>`;
   if(!_lancctbUltimaLeitura.length){
-    html+=`<tr><td colspan="${ehServico?10:9}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
+    html+=`<tr><td colspan="${ehServico?12:11}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
   } else {
-    _lancctbUltimaLeitura.forEach(({p,nf,nomeTerc,cnpjTerc})=>{
+    _lancctbUltimaLeitura.forEach(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
       const statusCor=p.status_conciliacao==='conciliado'?'var(--teal)':p.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
       html+=`<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:7px 10px">${nf.data_emissao?new Date(nf.data_emissao+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
@@ -15642,8 +15654,10 @@ async function renderLancctbNotas(aba){
         <td style="padding:7px 10px">${esc(nf.numero||'')}</td>
         <td style="padding:7px 10px;font-family:var(--mono)">${esc(_fmtCnpjCpf(cnpjTerc))}</td>
         <td style="padding:7px 10px">${esc(nomeTerc||'')}</td>
+        <td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.valor_total||0)}</td>
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(p.valor_parcela||0)}</td>
         <td style="padding:7px 10px;text-align:center">${p.numero_parcela}</td>
+        <td style="padding:7px 10px;text-align:center">${qtdParcelas}</td>
         ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:''}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
@@ -15671,14 +15685,14 @@ function exportarLancctbNotasExcel(abaId){
   if(!aba||!_lancctbUltimaLeitura.length){ toast('Nada para exportar nesta página.','err'); return; }
   const ehServico=aba.tipoDoc==='nfse';
   const colTerceiro=ehServico?(aba.direcaoNf==='venda'?'Prestado a':'Tomado de'):'Empresa';
-  const header=['Dt Emissão','Dt Vencimento','Número','CNPJ',colTerceiro,'Valor Parcela','Parcela'];
+  const header=['Dt Emissão','Data da Parcela','Número','CNPJ',colTerceiro,'Valor Bruto','Valor Parcela','Parcela','Qtd Parcelas'];
   if(ehServico) header.push('ISS');
   header.push('Modelo','Status');
-  const rows=_lancctbUltimaLeitura.map(({p,nf,nomeTerc,cnpjTerc})=>{
+  const rows=_lancctbUltimaLeitura.map(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
     const linha=[
       nf.data_emissao?new Date(nf.data_emissao+'T00:00:00').toLocaleDateString('pt-BR'):'',
       p.data_vencimento?new Date(p.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'',
-      nf.numero||'', _fmtCnpjCpf(cnpjTerc), nomeTerc||'', p.valor_parcela||0, p.numero_parcela,
+      nf.numero||'', _fmtCnpjCpf(cnpjTerc), nomeTerc||'', nf.valor_total||0, p.valor_parcela||0, p.numero_parcela, qtdParcelas,
     ];
     if(ehServico) linha.push(nf.iss_valor||0);
     linha.push((nf.modelo||'').toUpperCase(), p.status_conciliacao||'');
