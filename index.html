@@ -2071,6 +2071,61 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<div class="mb" id="mLancctbRegra" style="display:none">
+  <div class="modal" style="max-width:480px">
+    <div class="mt">
+      <h3 id="lancctbRegraTitulo">Cadastrar regra</h3>
+      <button onclick="closeModal('mLancctbRegra')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <input type="hidden" id="lancctbRegraId">
+      <div class="fg">
+        <div class="fl">Descrição *</div>
+        <input class="fi" id="lancctbRegraDescricao" placeholder="Ex: Tarifas bancárias Itaú">
+      </div>
+      <div class="fg">
+        <div class="fl">Tipo de gatilho *</div>
+        <select class="si" id="lancctbRegraTipo" style="width:100%" onchange="_lancctbAtualizarCamposRegra()">
+          <option value="historico">Histórico do extrato contém…</option>
+          <option value="cliente_fornecedor">CNPJ/CPF exato…</option>
+        </select>
+      </div>
+      <div class="fg" id="lancctbRegraCampoHistorico">
+        <div class="fl">Texto que deve aparecer no histórico bancário</div>
+        <input class="fi" id="lancctbRegraHistoricoGatilho" placeholder="Ex: Tar/Custas Cobrança">
+      </div>
+      <div class="fg" id="lancctbRegraCampoCnpj" style="display:none">
+        <div class="fl">CNPJ/CPF (só dígitos)</div>
+        <input class="fi" id="lancctbRegraCnpjGatilho" placeholder="Ex: 12345678000190">
+      </div>
+      <div class="grid2">
+        <div class="fg">
+          <div class="fl">Natureza na conta abaixo *</div>
+          <select class="si" id="lancctbRegraDc" style="width:100%">
+            <option value="D">Débito</option>
+            <option value="C">Crédito</option>
+          </select>
+        </div>
+        <div class="fg">
+          <div class="fl">Só nesta agência bancária</div>
+          <select class="si" id="lancctbRegraAgencia" style="width:100%"><option value="">— Todas as contas —</option></select>
+        </div>
+      </div>
+      <div class="fg">
+        <div class="fl">Conta contábil (contrapartida) *</div>
+        <select class="si" id="lancctbRegraContaContabil" style="width:100%"><option value="">Selecione…</option></select>
+      </div>
+      <div style="background:#EEF2FF;border-radius:4px;padding:10px;font-size:12px;color:var(--slate)">
+        O banco entra automaticamente do lado oposto: se o lançamento do extrato for uma <strong>saída</strong>, o banco fica a Crédito; se for <strong>entrada</strong>, o banco fica a Débito.
+      </div>
+    </div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbRegra')">Cancelar</button>
+      <button class="btn bp" onclick="salvarLancctbRegra()">✓ Salvar</button>
+    </div>
+  </div>
+</div>
+
 <!-- Modal: upload de Comprovantes ou Extrato bancário (PDF/Excel/CSV) —
      conteúdo montado via JS em abrirLancctbUploadModal(), pois o preview
      da lista extraída é dinâmico. -->
@@ -15581,6 +15636,7 @@ function renderLancctbConteudo(){
   if(_lancctbAbaAtiva==='agencias'){ renderLancctbAgencias(); return; }
   if(_lancctbAbaAtiva==='comprovantes'){ renderLancctbComprovantes(); return; }
   if(_lancctbAbaAtiva==='extrato'){ renderLancctbExtrato(); return; }
+  if(_lancctbAbaAtiva==='regras'){ renderLancctbRegras(); return; }
   el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:60px 20px">
     <div style="font-size:2rem;margin-bottom:8px">🚧</div>
     <div>Esta aba entra numa próxima fase do módulo.</div>
@@ -16133,6 +16189,140 @@ function exportarLancctbAgenciasExcel(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Agências Bancárias');
   const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
   XLSX.writeFile(wb,`AgenciasBancarias_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+
+// ─── Regras de matching (fallback manual pro motor automático) ────────────
+let _lancctbUltimasRegras=[];
+async function renderLancctbRegras(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const { data: regras, error } = await _supaClient
+    .from('regras_matching')
+    .select('id,descricao,tipo_regra,historico_gatilho,cnpj_cpf_gatilho,dc,origem,plano_contas(numero_conta,descricao),agencias_bancarias(banco_nome,agencia,conta_corrente)')
+    .eq('empresa_eid',eid)
+    .eq('ativo',true)
+    .order('descricao',{ascending:true});
+
+  if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar regras: ${esc(error.message)}</div>`; return; }
+  _lancctbUltimasRegras=regras||[];
+
+  let html=`<div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:14px">
+    <button class="btn bp bsm" onclick="abrirLancctbRegraModal()">+ Cadastrar regra</button>
+  </div>`;
+  if(!regras||!regras.length){
+    html+=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma regra cadastrada ainda — o motor de matching usa Regras só como último recurso, quando não acha NF nem comprovante correspondente.</div>`;
+  } else {
+    html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:14px">';
+    regras.forEach(r=>{
+      const gatilho=r.tipo_regra==='historico'
+        ? `Histórico contém "<strong>${esc(r.historico_gatilho||'')}</strong>"`
+        : `CNPJ/CPF = <strong>${esc(_fmtCnpjCpf(r.cnpj_cpf_gatilho))}</strong>`;
+      const conta=r.plano_contas?`${esc(r.plano_contas.numero_conta)} - ${esc(r.plano_contas.descricao)}`:'—';
+      const agenciaTxt=r.agencias_bancarias?`${esc(r.agencias_bancarias.banco_nome)} Ag ${esc(r.agencias_bancarias.agencia)} Cc ${esc(r.agencias_bancarias.conta_corrente)}`:'Todas as contas';
+      html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--white)">
+        <div style="font-weight:700;color:#1E3558;margin-bottom:8px">📐 ${esc(r.descricao)}</div>
+        <div style="font-size:12.5px;display:grid;grid-template-columns:auto 1fr;gap:4px 10px;color:var(--ink)">
+          <span style="color:var(--slate)">Gatilho</span><span>${gatilho}</span>
+          <span style="color:var(--slate)">Natureza</span><span>${r.dc==='D'?'Débito':'Crédito'}</span>
+          <span style="color:var(--slate)">Conta contábil</span><span>${conta}</span>
+          <span style="color:var(--slate)">Conta bancária</span><span>${agenciaTxt}</span>
+          <span style="color:var(--slate)">Origem</span><span>${r.origem==='ia_sugerida'?'🤖 Sugerida por IA':'Manual'}</span>
+        </div>
+        <div style="display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+          <button class="btn bo bsm" onclick="abrirLancctbRegraModal(${r.id})">✎ Editar</button>
+          <button class="btn bo bsm" style="color:#dc2626" onclick="excluirLancctbRegra(${r.id})">🗑️ Excluir</button>
+        </div>
+      </div>`;
+    });
+    html+='</div>';
+  }
+  el.innerHTML=html;
+}
+function _lancctbAtualizarCamposRegra(){
+  const tipo=document.getElementById('lancctbRegraTipo').value;
+  document.getElementById('lancctbRegraCampoHistorico').style.display=tipo==='historico'?'':'none';
+  document.getElementById('lancctbRegraCampoCnpj').style.display=tipo==='cliente_fornecedor'?'':'none';
+}
+async function abrirLancctbRegraModal(id){
+  document.getElementById('lancctbRegraId').value=id||'';
+  document.getElementById('lancctbRegraTitulo').textContent=id?'Editar regra':'Cadastrar regra';
+
+  const selConta=document.getElementById('lancctbRegraContaContabil');
+  selConta.innerHTML='<option value="">Selecione…</option>';
+  const { data: contas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',_lancctbEidAtual).eq('tipo','A').order('classificacao');
+  (contas||[]).forEach(c=>{
+    const o=document.createElement('option');
+    o.value=c.id; o.textContent=`${c.numero_conta} - ${c.descricao}`;
+    selConta.appendChild(o);
+  });
+
+  const selAgencia=document.getElementById('lancctbRegraAgencia');
+  selAgencia.innerHTML='<option value="">— Todas as contas —</option>';
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).order('banco_nome');
+  (agencias||[]).forEach(a=>{
+    const o=document.createElement('option');
+    o.value=a.id; o.textContent=`${a.banco_nome} Ag ${a.agencia} Cc ${a.conta_corrente}`;
+    selAgencia.appendChild(o);
+  });
+
+  if(id){
+    const r=_lancctbUltimasRegras.find(x=>x.id===id);
+    if(r){
+      document.getElementById('lancctbRegraDescricao').value=r.descricao||'';
+      document.getElementById('lancctbRegraTipo').value=r.tipo_regra||'historico';
+      document.getElementById('lancctbRegraHistoricoGatilho').value=r.historico_gatilho||'';
+      document.getElementById('lancctbRegraCnpjGatilho').value=r.cnpj_cpf_gatilho||'';
+      document.getElementById('lancctbRegraDc').value=r.dc||'D';
+      selConta.value=r.conta_contabil_id||'';
+      selAgencia.value=r.agencia_bancaria_id||'';
+    }
+  } else {
+    document.getElementById('lancctbRegraDescricao').value='';
+    document.getElementById('lancctbRegraTipo').value='historico';
+    document.getElementById('lancctbRegraHistoricoGatilho').value='';
+    document.getElementById('lancctbRegraCnpjGatilho').value='';
+    document.getElementById('lancctbRegraDc').value='D';
+  }
+  _lancctbAtualizarCamposRegra();
+  openModal('mLancctbRegra');
+}
+async function salvarLancctbRegra(){
+  const id=document.getElementById('lancctbRegraId').value;
+  const descricao=document.getElementById('lancctbRegraDescricao').value.trim();
+  const tipo=document.getElementById('lancctbRegraTipo').value;
+  const historicoGatilho=document.getElementById('lancctbRegraHistoricoGatilho').value.trim();
+  const cnpjGatilho=document.getElementById('lancctbRegraCnpjGatilho').value.replace(/\D/g,'');
+  const contaContabilId=document.getElementById('lancctbRegraContaContabil').value;
+  if(!descricao){ toast('Preencha a Descrição','err'); return; }
+  if(tipo==='historico'&&!historicoGatilho){ toast('Preencha o texto do histórico gatilho','err'); return; }
+  if(tipo==='cliente_fornecedor'&&!cnpjGatilho){ toast('Preencha o CNPJ/CPF gatilho','err'); return; }
+  if(!contaContabilId){ toast('Selecione a Conta contábil','err'); return; }
+  const registro={
+    empresa_eid: _lancctbEidAtual,
+    descricao,
+    tipo_regra: tipo,
+    historico_gatilho: tipo==='historico'?historicoGatilho:null,
+    cnpj_cpf_gatilho: tipo==='cliente_fornecedor'?cnpjGatilho:null,
+    dc: document.getElementById('lancctbRegraDc').value,
+    conta_contabil_id: contaContabilId,
+    agencia_bancaria_id: document.getElementById('lancctbRegraAgencia').value||null,
+  };
+  const query=id?_supaClient.from('regras_matching').update(registro).eq('id',id):_supaClient.from('regras_matching').insert(registro);
+  const { error } = await query;
+  if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+  toast('Regra salva com sucesso','ok');
+  closeModal('mLancctbRegra');
+  renderLancctbRegras();
+}
+async function excluirLancctbRegra(id){
+  if(!confirm('Excluir esta regra?'))return;
+  const { error } = await _supaClient.from('regras_matching').update({ativo:false}).eq('id',id);
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast('Regra removida','ok');
+  renderLancctbRegras();
 }
 
 // ─── Comprovantes bancários (upload PDF → IA → preview → confirmar) ───────
