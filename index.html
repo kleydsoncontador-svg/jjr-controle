@@ -16267,6 +16267,14 @@ function _lancctbParsearNFSeXml(xml){
     parcelas:[{numero_parcela:1,data_vencimento:dataEmissaoBruta.slice(0,10),valor_parcela:valorTotal}],
   };
 }
+// Chaves de acesso já gravadas pra essa empresa — pré-carregada 1x por
+// rodada de import pra permitir pular arquivo já conhecido sem gastar
+// upload/upsert de novo (ver comentário em _lancctbSalvarNotaFiscalArquivo).
+async function _lancctbChavesConhecidas(eid){
+  const { data } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais')
+    .select('chave_acesso').eq('empresa_eid',eid).not('chave_acesso','is',null));
+  return new Set((data||[]).map(r=>r.chave_acesso));
+}
 let _lancctbImportXmlArquivos=[];
 function processarLancctbImportXmlLocal(fileList){
   const arquivos=Array.from(fileList).filter(f=>f.name.toLowerCase().endsWith('.xml'));
@@ -16281,7 +16289,7 @@ function processarLancctbImportXmlLocal(fileList){
 // duplica). direcaoConhecida vem pronta no fluxo automático (Importar mês,
 // que já sabe de qual subpasta veio); no fluxo manual (pasta escolhida à
 // mão) é inferida do caminho relativo do arquivo.
-async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice}={}){
+async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice,chavesConhecidas}={}){
   try{
     const xml=await file.text();
     const caminho=file.webkitRelativePath||file.name;
@@ -16290,6 +16298,12 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
     const nf=ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml);
     if(!nf||!nf.cnpj_emitente||!direcao) return 'naoReconhecido';
     if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte) return 'ignoradaData';
+    // Já capturada antes (mesma chave de acesso) — pula upload+upsert, que
+    // são os passos caros (rede). Achado real (05/09/2026): "Importar mês"
+    // reprocessando um mês com ~40 mil arquivos, quase tudo já importado
+    // de uma rodada anterior — sem esse atalho, reimporta tudo de novo do
+    // zero toda vez, bem mais lento do que precisa ser.
+    if(chavesConhecidas&&nf.chave_acesso&&chavesConhecidas.has(nf.chave_acesso)) return 'jaExistente';
 
     const storagePath=`${eid}/${ehNFSe?'nfse':'nfe'}/${nf.chave_acesso||`${nf.cnpj_emitente}-${nf.numero}-${indice||Date.now()}`}.xml`;
     await _supaClient.storage.from('nf-xmls').upload(storagePath,file,{upsert:true});
@@ -16320,15 +16334,16 @@ async function confirmarLancctbImportXmlLocal(){
   const statusEl=document.getElementById('lancctbImportXmlStatus');
   const btn=document.getElementById('lancctbImportXmlConfirmarBtn');
   btn.disabled=true;
-  const contagem={importada:0,ignoradaData:0,erro:0,naoReconhecido:0};
+  const chavesConhecidas=await _lancctbChavesConhecidas(eid);
+  const contagem={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
   for(let i=0;i<arquivos.length;i++){
     statusEl.textContent=`Processando ${i+1}/${arquivos.length}… (${contagem.importada} salvas)`;
-    const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i],eid,{dataCorte,indice:i});
+    const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i],eid,{dataCorte,indice:i,chavesConhecidas});
     contagem[resultado]++;
   }
   btn.disabled=false;
   closeModal('mLancctbImportXml');
-  toast(`Importação concluída: ${contagem.importada} nota(s) salva(s), ${contagem.ignoradaData} ignorada(s) por data, ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
+  toast(`Importação concluída: ${contagem.importada} nota(s) salva(s), ${contagem.jaExistente} já existente(s) (pulada), ${contagem.ignoradaData} ignorada(s) por data, ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
   renderLancctbConteudo();
 }
 
@@ -16649,6 +16664,16 @@ async function confirmarLancctbImportarMes(){
   const btn=document.getElementById('lancctbImportMesConfirmarBtn');
   btn.disabled=true;
 
+  // Pré-carrega as chaves de acesso já gravadas — o nome do arquivo de NF-e
+  // na pasta da SIEG É a própria chave de 44 dígitos, então dá pra pular um
+  // arquivo já conhecido sem nem abrir/ler ele (mais rápido ainda que o
+  // atalho genérico de _lancctbSalvarNotaFiscalArquivo, que só evita
+  // upload/upsert mas ainda lê e faz parse do XML). NFS-e não tem esse
+  // atalho (o nome do arquivo na pasta da SIEG não é a chave), só NF-e.
+  statusEl.textContent='Carregando chaves já importadas…';
+  const chavesConhecidas=await _lancctbChavesConhecidas(eid);
+  let puladasPorNome=0;
+
   const alvos=[];
   cnpjs.forEach(cnpj=>{
     alvos.push({tipoPasta:'NF-es',papelPasta:'Entrada',direcao:'compra',cnpj});
@@ -16664,9 +16689,9 @@ async function confirmarLancctbImportarMes(){
         .then(d=>d.getDirectoryHandle(alvo.cnpj)).then(d=>d.getDirectoryHandle(alvo.papelPasta))
         .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
       for await (const [nome,fh] of dirMes.entries()){
-        if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')){
-          arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
-        }
+        if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
+        if(alvo.tipoPasta==='NF-es'&&chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
+        arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
       }
     } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
   }
@@ -16695,21 +16720,29 @@ async function confirmarLancctbImportarMes(){
     }
   }
 
-  if(!arquivos.length){
+  if(!arquivos.length&&!puladasPorNome){
     btn.disabled=false;
     toast('Nenhum XML encontrado pra esse mês (conferi matriz e filiais, Entrada/Saída e Tomado/Prestado, e o Portal NFS-e se configurado).','err');
     return;
   }
+  if(!arquivos.length){
+    btn.disabled=false;
+    closeModal('mLancctbImportMes');
+    toast(`${mesNome}/${ano}: nada novo — ${puladasPorNome} NF-e já importada(s) antes (puladas sem reler).`,'ok');
+    renderLancctbConteudo();
+    return;
+  }
 
-  const contagem={importada:0,ignoradaData:0,erro:0,naoReconhecido:0};
+  const contagem={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
   for(let i=0;i<arquivos.length;i++){
     statusEl.textContent=`Processando ${i+1}/${arquivos.length}… (${contagem.importada} salvas)`;
-    const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i});
+    const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas});
     contagem[resultado]++;
   }
   btn.disabled=false;
   closeModal('mLancctbImportMes');
-  toast(`${mesNome}/${ano}: ${contagem.importada} nota(s) salva(s), ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
+  const totalPuladas=puladasPorNome+contagem.jaExistente;
+  toast(`${mesNome}/${ano}: ${contagem.importada} nota(s) salva(s), ${totalPuladas} já existente(s) (pulada), ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
   renderLancctbConteudo();
 }
 // Aba "Importar XMLs" — pedido do usuário (05/09/2026): enquanto a API da
