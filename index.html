@@ -15735,6 +15735,7 @@ function _fmtCnpjCpf(v){
 // ('compra'/'venda' no banco — nomenclatura do schema — mas exibido como
 // Entrada/Saída aqui, que é como o usuário e o Mister chamam isso).
 const LANCCTB_ABAS=[
+  {id:'importar-xmls', label:'Importar XMLs'},
   {id:'nfe-entrada',   label:'NF-e Entrada', tipoDoc:'nfe',  direcaoNf:'compra'},
   {id:'nfe-saida',     label:'NF-e Saída',   tipoDoc:'nfe',  direcaoNf:'venda'},
   {id:'nfse-tomado',   label:'NFS-e Tomado', tipoDoc:'nfse', direcaoNf:'compra'},
@@ -15869,6 +15870,33 @@ async function _lancctbEmLotesDb(ids,tamLote,fn){
   return { error:null };
 }
 let _lancctbNfePagina=0;
+// Filtros da listagem de NF-e/NFS-e (compartilhados pelas 4 abas — pedido
+// do usuário 05/09/2026: nome do Prestador/Tomado/Empresa, número, CNPJ,
+// data de emissão e data de parcela).
+let _lancctbNfeBuscaNome='';
+let _lancctbNfeBuscaNumero='';
+let _lancctbNfeBuscaCnpj='';
+let _lancctbNfeEmissaoDe='';
+let _lancctbNfeEmissaoAte='';
+let _lancctbNfeParcelaDe='';
+let _lancctbNfeParcelaAte='';
+let _lancctbNfeFiltroTimer=null;
+function _lancctbNfeFiltroDebounced(campo,v){
+  if(campo==='nome') _lancctbNfeBuscaNome=v;
+  else if(campo==='numero') _lancctbNfeBuscaNumero=v;
+  else if(campo==='cnpj') _lancctbNfeBuscaCnpj=v;
+  _lancctbNfePagina=0;
+  clearTimeout(_lancctbNfeFiltroTimer);
+  _lancctbNfeFiltroTimer=setTimeout(renderLancctbConteudo,350);
+}
+function _lancctbNfeFiltroData(campo,v){
+  if(campo==='emissaoDe') _lancctbNfeEmissaoDe=v;
+  else if(campo==='emissaoAte') _lancctbNfeEmissaoAte=v;
+  else if(campo==='parcelaDe') _lancctbNfeParcelaDe=v;
+  else if(campo==='parcelaAte') _lancctbNfeParcelaAte=v;
+  _lancctbNfePagina=0;
+  renderLancctbConteudo();
+}
 
 function renderLancctbLista(){
   const adicionadas=ensureMenuAdicionadasMigrado('lancctb');
@@ -15933,6 +15961,7 @@ function renderLancctbConteudo(){
   const el=document.getElementById('lancctbConteudoAba');
   const aba=LANCCTB_ABAS.find(a=>a.id===_lancctbAbaAtiva);
   if(aba&&aba.tipoDoc){ renderLancctbNotas(aba); return; }
+  if(_lancctbAbaAtiva==='importar-xmls'){ renderLancctbImportarXmls(); return; }
   if(_lancctbAbaAtiva==='plano'){ renderLancctbPlanoContas(); return; }
   if(_lancctbAbaAtiva==='agencias'){ renderLancctbAgencias(); return; }
   if(_lancctbAbaAtiva==='comprovantes'){ renderLancctbComprovantes(); return; }
@@ -16062,6 +16091,31 @@ async function _lancctbFilaSiegPainelHtml(eid){
       ${linhas?`<table style="width:100%;border-collapse:collapse;font-size:11.5px"><thead><tr style="color:var(--slate);text-align:left"><th style="padding:4px 8px">CNPJ</th><th style="padding:4px 8px">Tipo</th><th style="padding:4px 8px">Status</th><th style="padding:4px 8px">Janela</th><th style="padding:4px 8px">Último erro</th></tr></thead><tbody>${linhas}</tbody></table>`
       :`<div style="font-size:12px;color:var(--slate)">Nenhum CNPJ na fila ainda.</div>`}
     </details>
+  </div>
+  ${await _lancctbNfsePortalPainelHtml(eid)}`;
+}
+// Card da 2ª fonte de NFS-e (Portal de Gestão NFS-e - Contribuinte) — só
+// complementa o que a SIEG não capturou, entra no MESMO botão "Importar
+// mês" acima (ver confirmarLancctbImportarMes). Pasta raiz e nomes de
+// subpasta são um mapeamento manual por empresa (ver comentário em
+// _lancctbConcederAcessoPastaNfsePortal).
+async function _lancctbNfsePortalPainelHtml(eid){
+  const temAcesso=await _lancctbTemAcessoPastaNfsePortal();
+  const pastas=_lancctbPastasNfsePortalGet(eid);
+  const botao=temAcesso
+    ? `<button class="btn bo bsm" onclick="_lancctbConcederAcessoPastaNfsePortal()" title="Trocar a pasta raiz, se precisar">Trocar pasta…</button>`
+    : `<button class="btn bp bsm" onclick="_lancctbConcederAcessoPastaNfsePortal()" title="Concede acesso 1x à pasta raiz do Portal NFS-e">🔑 Conceder acesso ao Portal NFS-e</button>`;
+  return `<div style="border:1px solid var(--border);border-radius:8px;padding:10px 14px;margin-bottom:14px;background:var(--bg)">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px">
+      <strong style="font-size:12.5px">📥 NFS-e do Portal de Gestão (Contribuinte)</strong>
+      ${botao}
+    </div>
+    <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Complementa NFS-e de serviço que a SIEG não capturou (pasta "X:\\03 - CONTABIL\\NFS-e - Portal de Gestão NFS-e - Contribuinte"). Entra junto no botão "Importar mês" acima — sem acesso concedido ou sem pasta configurada abaixo, esta fonte é simplesmente pulada.</div>
+    <div style="font-size:11.5px;color:var(--slate);margin-bottom:4px">Nome da pasta desta empresa no Portal (matriz + filiais, 1 por linha — o nome muda um pouco do cadastro, confira exatamente como aparece lá):</div>
+    <textarea id="lancctbPastasNfseTextarea" rows="3" style="width:100%;font-family:var(--mono);font-size:12px;padding:6px 8px;border:1px solid var(--border);border-radius:6px;color:var(--ink)">${esc(pastas.join('\n'))}</textarea>
+    <div style="display:flex;justify-content:flex-end;margin-top:6px">
+      <button class="btn bo bsm" onclick="salvarLancctbPastasNfsePortal('${eid}')">💾 Salvar pastas</button>
+    </div>
   </div>`;
 }
 // ─── Importação de XML local (NF-e/NFS-e) ─────────────────────────────────
@@ -16183,6 +16237,7 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
       await _supaClient.from('notas_fiscais_parcelas').upsert({
         nf_id:nfInserida.id, empresa_eid:eid, numero_parcela:p.numero_parcela,
         data_vencimento:p.data_vencimento||nf.data_emissao, valor_parcela:p.valor_parcela,
+        data_emissao:nf.data_emissao||dataCorte||hoje_(),
       },{onConflict:'nf_id,numero_parcela'});
     }
     return 'importada';
@@ -16307,6 +16362,72 @@ async function _lancctbConcederAcessoPastaTributos(){
     toast('Acesso à pasta "Tributos do Mês" concedido!','ok');
     if(_lancctbRegraExtratoAlvo) _lancctbAtualizarSugestoesTributos();
   } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+
+// ─── NFS-e Portal de Gestão (Contribuinte) — 2ª fonte de NFS-e, complementa
+// o que a SIEG não capturou (pedido do usuário, 05/09/2026). Pasta real:
+// X:\03 - CONTABIL\NFS-e - Portal de Gestão NFS-e - Contribuinte\{empresa}\
+// {AAAA}\{MM}\{Recebidas|Emitidas|Eventos}\*.xml — Recebidas=tomado
+// (compra), Emitidas=prestado (venda), Eventos=cancelamento/outros (nunca
+// importado, não é uma NFS-e nova). Raiz separada da pasta do SIEG, então
+// precisa de um handle próprio ('raizNfsePortal', mesmo IndexedDB). As
+// pastas são organizadas por NOME da empresa, não CNPJ — e o nome muda um
+// pouco do cadastro real (confirmado pelo usuário: Fast Lube tem 3 pastas,
+// "FAST LUBE FILTROS E PEÇAS EIRELI" pra matriz e "FAST LUBE FILTROS E
+// PECAS LTDA (0003)"/"(0004)" pras filiais — nomes só PARECIDOS, nunca
+// idênticos ao cadastro) — por isso o mapeamento é manual e editável por
+// empresa (lancctb_pastas_nfse_<eid>), nunca por match automático de texto.
+// O XML em si é o mesmo padrão nacional que _lancctbParsearNFSeXml já lê.
+async function _lancctbSalvarHandleNfsePortal(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readwrite');
+    tx.objectStore('handles').put(handle,'raizNfsePortal');
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function _lancctbCarregarHandleNfsePortal(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readonly');
+    const req=tx.objectStore('handles').get('raizNfsePortal');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _lancctbTemAcessoPastaNfsePortal(){
+  if(!window.showDirectoryPicker) return false;
+  try{
+    const handle=await _lancctbCarregarHandleNfsePortal();
+    if(!handle) return false;
+    return (await handle.queryPermission({mode:'read'}))==='granted';
+  } catch { return false; }
+}
+async function _lancctbConcederAcessoPastaNfsePortal(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    await _lancctbSalvarHandleNfsePortal(handle);
+    toast('Acesso à pasta do Portal NFS-e concedido!','ok');
+    renderLancctbConteudo();
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+// Lista de nomes de pasta (matriz + filiais) desta empresa dentro do
+// Portal NFS-e — mapeamento manual (ver comentário acima), 1 nome por
+// linha na tela, salvo como config leve (nunca tabela relacional, é só
+// texto de configuração por empresa).
+function _lancctbPastasNfsePortalGet(eid){
+  return S.g('lancctb_pastas_nfse_'+eid)||[];
+}
+function _lancctbPastasNfsePortalSet(eid,lista){
+  S.s('lancctb_pastas_nfse_'+eid,lista);
+}
+function salvarLancctbPastasNfsePortal(eid){
+  const texto=document.getElementById('lancctbPastasNfseTextarea').value;
+  const lista=texto.split('\n').map(s=>s.trim()).filter(Boolean);
+  _lancctbPastasNfsePortalSet(eid,lista);
+  toast(`${lista.length} pasta(s) salva(s) pra essa empresa.`,'ok');
 }
 // Busca os PDFs da pasta "Tributos do Mês_{anoMes}" cujo nome bata com a
 // empresa (pelo "(eid)" — padrão confirmado com dado real). Devolve []
@@ -16479,9 +16600,34 @@ async function confirmarLancctbImportarMes(){
       }
     } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
   }
+
+  // 2ª fonte: NFS-e do Portal de Gestão (Contribuinte) — complementa o que
+  // a SIEG não capturou (pedido do usuário 05/09/2026). Só entra se o
+  // usuário já concedeu acesso à pasta raiz E configurou os nomes de pasta
+  // desta empresa (mapeamento manual — ver _lancctbNfsePortalPainelHtml);
+  // sem isso, é pulada em silêncio, igual à pasta de Tributos do Mês.
+  const handleRaizNfse=await _lancctbCarregarHandleNfsePortal();
+  const pastasNfse=_lancctbPastasNfsePortalGet(eid);
+  if(handleRaizNfse&&pastasNfse.length){
+    const mesNumStr=String(mesNum).padStart(2,'0');
+    for(const nomePasta of pastasNfse){
+      for(const [subpasta,direcao] of [['Recebidas','compra'],['Emitidas','venda']]){
+        try{
+          const dirMes=await handleRaizNfse.getDirectoryHandle(nomePasta)
+            .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNumStr)).then(d=>d.getDirectoryHandle(subpasta));
+          for await (const [nome,fh] of dirMes.entries()){
+            if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')){
+              arquivos.push({ file:await fh.getFile(), direcao });
+            }
+          }
+        } catch(e){ /* pasta não existe pra essa empresa/mês/direção — ok, próximo */ }
+      }
+    }
+  }
+
   if(!arquivos.length){
     btn.disabled=false;
-    toast('Nenhum XML encontrado pra esse mês (conferi matriz e filiais, Entrada/Saída e Tomado/Prestado).','err');
+    toast('Nenhum XML encontrado pra esse mês (conferi matriz e filiais, Entrada/Saída e Tomado/Prestado, e o Portal NFS-e se configurado).','err');
     return;
   }
 
@@ -16495,6 +16641,20 @@ async function confirmarLancctbImportarMes(){
   closeModal('mLancctbImportMes');
   toast(`${mesNome}/${ano}: ${contagem.importada} nota(s) salva(s), ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
   renderLancctbConteudo();
+}
+// Aba "Importar XMLs" — pedido do usuário (05/09/2026): enquanto a API da
+// SIEG não funcionar, o card de importação sai de dentro de cada uma das 4
+// abas de NF-e/NFS-e (onde ficava duplicado) e vira uma aba própria, ANTES
+// de "NF-e Entrada". Botão único "Importar mês" já busca todos os tipos
+// (NF-e Entrada/Saída, NFS-e Tomado/Prestado) pra matriz+filiais de uma vez
+// só (ver confirmarLancctbImportarMes) — as 4 abas de NF-e/NFS-e viram só
+// listagem do que já foi importado.
+async function renderLancctbImportarXmls(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+  el.innerHTML=await _lancctbFilaSiegPainelHtml(eid);
 }
 async function renderLancctbNotas(aba){
   const el=document.getElementById('lancctbConteudoAba');
@@ -16520,13 +16680,29 @@ async function renderLancctbNotas(aba){
     .limit(1)
     .maybeSingle();
 
-  const { data: parcelas, error, count } = await _supaClient
+  const campoNomeTerc=aba.direcaoNf==='venda'?'notas_fiscais.nome_destinatario':'notas_fiscais.nome_emitente';
+  const campoCnpjTerc=aba.direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
+  let q=_supaClient
     .from('notas_fiscais_parcelas')
-    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor)', { count: 'exact' })
+    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor)', { count: 'exact' })
     .eq('notas_fiscais.empresa_eid', eid)
     .eq('notas_fiscais.tipo', aba.tipoDoc)
-    .eq('notas_fiscais.direcao', aba.direcaoNf)
-    .order('data_vencimento', { ascending: false })
+    .eq('notas_fiscais.direcao', aba.direcaoNf);
+  if(_lancctbNfeBuscaNome.trim()) q=q.ilike(campoNomeTerc,`%${_lancctbNfeBuscaNome.trim().replace(/[%_]/g,'')}%`);
+  if(_lancctbNfeBuscaNumero.trim()) q=q.ilike('notas_fiscais.numero',`%${_lancctbNfeBuscaNumero.trim().replace(/[%_]/g,'')}%`);
+  if(_lancctbNfeBuscaCnpj.trim()) q=q.ilike(campoCnpjTerc,`%${_lancctbNfeBuscaCnpj.replace(/\D/g,'')}%`);
+  // data_emissao vive DUPLICADA em notas_fiscais_parcelas (cópia gravada na
+  // importação — ver Fase 15) porque o PostgREST não ordena a query externa
+  // por uma coluna de uma tabela embutida many-to-one (embed !inner só
+  // reordenaria um array um-pra-muitos, que não é o caso aqui); sem essa
+  // cópia a ordenação abaixo seria silenciosamente ignorada.
+  if(_lancctbNfeEmissaoDe) q=q.gte('data_emissao',_lancctbNfeEmissaoDe);
+  if(_lancctbNfeEmissaoAte) q=q.lte('data_emissao',_lancctbNfeEmissaoAte);
+  if(_lancctbNfeParcelaDe) q=q.gte('data_vencimento',_lancctbNfeParcelaDe);
+  if(_lancctbNfeParcelaAte) q=q.lte('data_vencimento',_lancctbNfeParcelaAte);
+  const { data: parcelas, error, count } = await q
+    .order('data_emissao', { ascending: true })
+    .order('numero_parcela', { ascending: true })
     .range(from, to);
 
   if(error){
@@ -16556,9 +16732,18 @@ async function renderLancctbNotas(aba){
     <strong>Última ${ehServico?'NFS-e':'NF-e'} capturada:</strong> nº ${esc(ultimaNf.numero)} — em ${new Date(ultimaNf.created_at).toLocaleDateString('pt-BR')} às ${new Date(ultimaNf.created_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
   </div>`:'';
 
-  let html=(await _lancctbFilaSiegPainelHtml(eid))+`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+  let html=`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+      <input class="si" placeholder="🔍 ${esc(colTerceiro)}..." value="${esc(_lancctbNfeBuscaNome)}" style="flex:1;min-width:180px" oninput="_lancctbNfeFiltroDebounced('nome',this.value)">
+      <input class="si" placeholder="Número..." value="${esc(_lancctbNfeBuscaNumero)}" style="width:120px" oninput="_lancctbNfeFiltroDebounced('numero',this.value)">
+      <input class="si" placeholder="CNPJ..." value="${esc(_lancctbNfeBuscaCnpj)}" style="width:160px" oninput="_lancctbNfeFiltroDebounced('cnpj',this.value)">
+      <input class="si" type="date" value="${_lancctbNfeEmissaoDe}" onchange="_lancctbNfeFiltroData('emissaoDe',this.value)" title="Dt Emissão de">
+      <input class="si" type="date" value="${_lancctbNfeEmissaoAte}" onchange="_lancctbNfeFiltroData('emissaoAte',this.value)" title="Dt Emissão até">
+      <input class="si" type="date" value="${_lancctbNfeParcelaDe}" onchange="_lancctbNfeFiltroData('parcelaDe',this.value)" title="Data da Parcela de">
+      <input class="si" type="date" value="${_lancctbNfeParcelaAte}" onchange="_lancctbNfeFiltroData('parcelaAte',this.value)" title="Data da Parcela até">
+    </div>
     <div style="overflow-x:auto">
     <table style="width:100%;border-collapse:collapse;font-size:12.5px">
       <thead><tr style="background:var(--ink2);color:#fff">
