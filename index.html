@@ -18718,17 +18718,69 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
         comprovanteMatch=c; cnpjAncora=c.cnpj_cpf; break;
       }
     }
+    // Passo 1b: múltiplos comprovantes somando o valor total (pedido do
+    // usuário 05/09/2026 — ex.: um único lançamento de banco "Sispag
+    // Salários"/"Sispag Fornecedores" que na verdade cobre vários
+    // comprovantes individuais, cada um com seu próprio CNPJ/nome). Só
+    // tenta quando o Passo 1 (comprovante único) NÃO achou nada — 1
+    // comprovante batendo sozinho sempre tem prioridade sobre um grupo.
+    let gruposComprovantes=null;
+    if(!comprovanteMatch&&modo!=='notas_fiscais'&&modo!=='ia'){
+      const candidatosGrupo=comprovantesFonte.filter(c=>!comprovantesUsados.has(c.id)&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS).slice(0,20);
+      const alvoCentavosGrupo=Math.round(valor*100);
+      const subsetGrupo=_lancctbSubsetSum(candidatosGrupo.map(c=>Math.round(c.valor_pago*100)),alvoCentavosGrupo,Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR*100));
+      if(subsetGrupo&&subsetGrupo.length>1) gruposComprovantes=subsetGrupo.map(idx=>candidatosGrupo[idx]);
+    }
     // Modos 'comprovantes_pagamento'/'comprovantes_recebimento': só segue se
-    // achou âncora — sem comprovante, nem tenta NF/Regra nessa passada (fica
-    // pendente pra próxima, ou pro usuário pular direto pro próximo passo da
-    // ordem se não houver comprovante anexado no site).
-    if((modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento')&&!cnpjAncora){ aindaPendente++; continue; }
+    // achou âncora (única ou em grupo) — sem comprovante, nem tenta NF/Regra
+    // nessa passada (fica pendente pra próxima, ou pro usuário pular direto
+    // pro próximo passo da ordem se não houver comprovante anexado no site).
+    if((modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento')&&!cnpjAncora&&!gruposComprovantes){ aindaPendente++; continue; }
 
-    // Passo 2: NF — 1:1 direto, ou subset-sum se tiver CNPJ âncora. Bateu →
+    // Passo 1c: grupo de comprovantes resolvido via Regra por CNPJ de CADA
+    // um (nunca via NF — um lote "Sispag" normalmente não tem NF associada).
+    // Só comita se TODOS os comprovantes do grupo tiverem Regra — sem isso,
+    // nunca assume conta contábil sozinho, fica pendente igual hoje. Linha
+    // do banco leva o valor total; 1 linha de contrapartida por comprovante,
+    // já com Cliente/Fornecedor + CPF/CNPJ trazidos do comprovante (pedido
+    // do usuário: ajuda o passo de Notas Fiscais a casar depois).
+    if(!resolvido&&gruposComprovantes&&modo!=='notas_fiscais'&&modo!=='ia'){
+      const bancoTipoGrupo=ehSaida?'C':'D', contrapartidaTipoGrupo=ehSaida?'D':'C';
+      const resolucoesGrupo=gruposComprovantes.map(c=>({
+        comprovante:c,
+        regra:regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&r.cnpj_cpf_gatilho===c.cnpj_cpf),
+      }));
+      if(resolucoesGrupo.every(rg=>rg.regra)){
+        const historicosGrupo=resolucoesGrupo.map(rg=>rg.regra.descricao||`${ehSaida?'Pagamento a':'Recebimento de'} ${rg.comprovante.cliente_fornecedor_nome||''}`.trim());
+        const historicoBancoGrupo=new Set(historicosGrupo).size<=1?historicosGrupo[0]:(ehSaida?'Pagamentos Diversos':'Recebimentos Diversos');
+        const linhasGrupo=[
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipoGrupo, valor, historico:historicoBancoGrupo, cliente_fornecedor_nome:null, cnpj_cpf:null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' },
+        ];
+        resolucoesGrupo.forEach((rg,i)=>{
+          linhasGrupo.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:rg.regra.plano_contas.classificacao, conta_contabil_id:rg.regra.conta_contabil_id, tipo:contrapartidaTipoGrupo, valor:rg.comprovante.valor_pago, historico:historicosGrupo[i], cliente_fornecedor_nome:rg.comprovante.cliente_fornecedor_nome||null, cnpj_cpf:rg.comprovante.cnpj_cpf||null, comprovante_id:rg.comprovante.id, lancamento_extrato_id:l.id, regra_matching_id:rg.regra.id, origem_match:'regra' });
+        });
+        const { error:erroGrupo } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasGrupo });
+        if(erroGrupo){
+          erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${erroGrupo.message}`);
+        } else {
+          await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+          const idsCompGrupo=resolucoesGrupo.map(rg=>rg.comprovante.id);
+          idsCompGrupo.forEach(id=>comprovantesUsados.add(id));
+          await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',idsCompGrupo);
+          await checarAlertaAutomatico(linhasGrupo,l,valor,historicoBancoGrupo,null);
+          resolvRegra++; resolvido=true;
+        }
+      }
+    }
+
+    // Passo 2: NF — 1:1 direto, ou subset-sum se tiver CNPJ âncora. Nunca
+    // roda pra um grupo de múltiplos comprovantes (Passo 1c) — um lote tipo
+    // "Sispag" normalmente não tem NF, e tentar casar por valor+data sem
+    // CNPJ âncora arriscaria pegar uma NF errada. Bateu →
     // gera o lançamento contábil na hora (conta fixa 10000/10001 ou Regra
     // específica do CNPJ, ver gerarLancamentoNF). Tolerância própria e mais
     // rígida (ver LANCCTB_MATCH_TOLERANCIA_VALOR_NF/JANELA_DIAS_NF).
-    const nfCandidatas=parcelas.filter(p=>{
+    const nfCandidatas=gruposComprovantes?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       // Sem isso, uma saída sem CNPJ âncora (histórico genérico tipo "Tar/
       // Custas Cobrança"/"Sispag Salários") podia casar por coincidência de
@@ -18746,7 +18798,9 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       }
       return true;
     });
-    if(nfCandidatas.length>=1){
+    if(gruposComprovantes){
+      // já tratado no Passo 1c acima — não tenta NF pra grupo.
+    } else if(nfCandidatas.length>=1){
       nfCandidatas.sort((a,b)=>Math.abs(a.valor_parcela-valor)-Math.abs(b.valor_parcela-valor));
       const escolhida=nfCandidatas[0];
       const nf=escolhida.notas_fiscais;
@@ -18791,14 +18845,19 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       }
     }
 
-    // Passo 3: Regra (só entra se passo 2 não resolveu, e só no modo 'completo'
-    // — 'comprovantes'/'notas_fiscais' isolam a fonte, não caem pra Regra).
+    // Passo 3: Regra (só entra se passo 2 não resolveu). Roda no modo
+    // 'completo' sempre, e também nos modos 'comprovantes_pagamento'/
+    // 'comprovantes_recebimento' QUANDO já achou um comprovante único
+    // (cnpjAncora) — antes esses modos só resolviam via NF, deixando
+    // pendente um comprovante que já tinha Regra por CNPJ (gap real
+    // encontrado pelo usuário 05/09/2026). 'notas_fiscais'/'ia' continuam
+    // isolados, nunca caem pra Regra.
     // Antes de avaliar as regras, procura um lançamento de Fluxo de Caixa
     // (Fase 10) do mesmo valor/data ainda não associado — se achar, o texto
     // dele entra como candidato ADICIONAL pro histórico_gatilho bater, além
     // do histórico cru do banco (o Fluxo geralmente é mais rico: "Sispag
     // Fornecedores" no banco vs "Fornecedor Tal Ltda" no Fluxo).
-    if(!resolvido&&modo==='completo'){
+    if(!resolvido&&(modo==='completo'||((modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento')&&cnpjAncora))){
       const bancoTipo=ehSaida?'C':'D';
       const fluxoMatch=(fluxoCaixa||[]).find(f=>{
         if(f.conta_bancaria_id&&String(f.conta_bancaria_id)!==String(contaId)) return false;
