@@ -2118,6 +2118,12 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
         <div class="fl">Conta contábil (contrapartida) *</div>
         <select class="si" id="lancctbRegraContaContabil" style="width:100%"><option value="">Selecione…</option></select>
       </div>
+      <div id="lancctbRegraAprenderWrap" style="display:none;background:#FEF3C7;border-radius:4px;padding:10px;font-size:12.5px;color:var(--ink);margin-bottom:10px">
+        <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer">
+          <input type="checkbox" id="lancctbRegraAprenderCheckbox" checked style="margin-top:2px">
+          <span>Também criar uma <strong>Regra</strong> com este histórico — assim, nos próximos meses, um lançamento parecido já vem com a conta sugerida sozinho.</span>
+        </label>
+      </div>
       <div style="background:#EEF2FF;border-radius:4px;padding:10px;font-size:12px;color:var(--slate)">
         O banco entra automaticamente do lado oposto: se o lançamento do extrato for uma <strong>saída</strong>, o banco fica a Crédito; se for <strong>entrada</strong>, o banco fica a Débito.
       </div>
@@ -2207,6 +2213,18 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
         <button class="btn bp" id="lancctbImportMesConfirmarBtn" onclick="confirmarLancctbImportarMes()">📥 Importar mês</button>
       </div>
     </div>
+  </div>
+</div>
+
+<!-- Modal: associar 1 linha do Fluxo de Caixa a 1 lançamento pendente do
+     extrato (Fase 10) — conteúdo montado via JS em abrirLancctbFluxoAssociarModal(). -->
+<div class="mb" id="mLancctbFluxoAssociar" style="display:none">
+  <div class="modal" style="max-width:560px">
+    <div class="mt">
+      <h3>Associar ao extrato</h3>
+      <button onclick="closeModal('mLancctbFluxoAssociar')">&#x2715;</button>
+    </div>
+    <div class="mc" id="lancctbFluxoAssociarBody"></div>
   </div>
 </div>
 
@@ -15720,6 +15738,21 @@ async function _lancctbFetchTudo(construirQuery){
   }
   return { data:todos, error:null };
 }
+// PostgREST codifica .in() como parte da URL — uma lista com milhares de
+// ids estoura o limite de tamanho da URL e o request inteiro falha com 400
+// "Bad Request" (achado ao testar exclusão em massa do Fluxo de Caixa com
+// 4789 ids numa chamada só — nenhum aviso claro, só falha calada). Toda
+// operação (update/delete) por uma lista de ids que pode crescer sem limite
+// passa por aqui em vez de um .in() direto — mesmo espírito de segurança do
+// _lancctbFetchTudo acima, só que pro lado de escrita.
+async function _lancctbEmLotesDb(ids,tamLote,fn){
+  for(let i=0;i<ids.length;i+=tamLote){
+    const lote=ids.slice(i,i+tamLote);
+    const { error } = await fn(lote);
+    if(error) return { error };
+  }
+  return { error:null };
+}
 let _lancctbNfePagina=0;
 
 function renderLancctbLista(){
@@ -16476,7 +16509,7 @@ async function _lancctbIgnorarBusca(ignorar){
     .or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`));
   if(!alvo||!alvo.length){ toast('Nenhuma conta encontrada para essa busca','err'); return; }
   if(!confirm(`${ignorar?'Ignorar':'Reativar'} ${alvo.length} conta(s) que batem com "${_lancctbPlanoBusca}" nas sugestões de Regra?`)) return;
-  const { error } = await _supaClient.from('plano_contas').update({ignorada_em_regras:ignorar}).in('id',alvo.map(a=>a.id));
+  const { error } = await _lancctbEmLotesDb(alvo.map(a=>a.id),200,lote=>_supaClient.from('plano_contas').update({ignorada_em_regras:ignorar}).in('id',lote));
   if(error){ toast('Erro: '+error.message,'err'); return; }
   toast(`${alvo.length} conta(s) ${ignorar?'ignorada(s)':'reativada(s)'}`,'ok');
   renderLancctbPlanoContas();
@@ -16499,7 +16532,7 @@ async function _lancctbPontosAtencaoBusca(marcar){
     .or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`));
   if(!alvo||!alvo.length){ toast('Nenhuma conta encontrada para essa busca','err'); return; }
   if(!confirm(`${marcar?'Ativar':'Desativar'} envio automático ao Pontos de Atenção pra ${alvo.length} conta(s) que batem com "${_lancctbPlanoBusca}"?`)) return;
-  const { error } = await _supaClient.from('plano_contas').update({enviar_pontos_atencao:marcar}).in('id',alvo.map(a=>a.id));
+  const { error } = await _lancctbEmLotesDb(alvo.map(a=>a.id),200,lote=>_supaClient.from('plano_contas').update({enviar_pontos_atencao:marcar}).in('id',lote));
   if(error){ toast('Erro: '+error.message,'err'); return; }
   toast(`${alvo.length} conta(s) ${marcar?'passaram a enviar':'pararam de enviar'} automaticamente`,'ok');
   renderLancctbPlanoContas();
@@ -16856,11 +16889,17 @@ function _lancctbAtualizarCamposRegra(){
   document.getElementById('lancctbRegraCampoHistorico').style.display=tipo==='historico'?'':'none';
   document.getElementById('lancctbRegraCampoCnpj').style.display=tipo==='cliente_fornecedor'?'':'none';
 }
-let _lancctbRegraContexto='regras'; // 'regras' (aba Regras) ou 'registro' (clicou num lançamento)
+let _lancctbRegraContexto='regras'; // 'regras' (aba Regras) | 'registro' (clicou num lançamento) | 'fluxo-associacao' (botão Associar do Fluxo de Caixa)
+let _lancctbFluxoAssociandoFluxoId=null;
+let _lancctbFluxoAssociandoExtrato=null;
 async function abrirLancctbRegraModal(id){
   _lancctbRegraContexto='regras';
+  _lancctbFluxoAssociandoFluxoId=null;
+  _lancctbFluxoAssociandoExtrato=null;
   document.getElementById('lancctbRegraOrigemInfo').style.display='none';
   document.getElementById('lancctbRegraSugestaoCnpj').style.display='none';
+  document.getElementById('lancctbRegraAprenderWrap').style.display='none';
+  document.getElementById('lancctbRegraAprenderCheckbox').checked=true;
   document.getElementById('lancctbRegraId').value=id||'';
   document.getElementById('lancctbRegraTitulo').textContent=id?'Editar regra':'Cadastrar regra';
 
@@ -16918,11 +16957,16 @@ async function abrirLancctbRegraModal(id){
 // preenche descrição/gatilho com o histórico bancário da linha, e sugere
 // o CNPJ/nome do terceiro quando dá pra achar (ctb já resolvido, ou um
 // comprovante pendente que bate por valor+data).
-async function abrirLancctbRegraModalDeLinha(item){
+// opts.historico substitui o histórico bancário cru como sugestão de
+// Descrição/gatilho (usado pela associação do Fluxo de Caixa — Fase 10 —
+// que tem um texto melhor que o do banco); opts.cnpjSugerido/nomeSugerido
+// já vêm prontos nesse caso, pulando a busca por comprovante.
+async function abrirLancctbRegraModalDeLinha(item,opts){
+  opts=opts||{};
   const r=item.extrato;
   await abrirLancctbRegraModal(null);
   _lancctbRegraContexto='registro'; // abrirLancctbRegraModal(null) reseta pra 'regras' — sobrescreve logo, antes de qualquer await abaixo, senão um Salvar rápido corre na frente
-  const hist=(r.historico_bancario||'').trim();
+  const hist=(opts.historico||r.historico_bancario||'').trim();
   document.getElementById('lancctbRegraDescricao').value=hist;
   document.getElementById('lancctbRegraHistoricoGatilho').value=hist;
 
@@ -16930,19 +16974,21 @@ async function abrirLancctbRegraModalDeLinha(item){
   const dataFmt=r.data_pagamento?new Date(r.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'';
   const valor=r.valor_saida||r.valor_entrada;
   origemInfo.style.display='';
-  origemInfo.innerHTML=`Lançamento: <strong>${dataFmt}</strong> — R$ ${_fmt(valor)} — ${esc(hist)}`;
+  origemInfo.innerHTML=`Lançamento: <strong>${dataFmt}</strong> — R$ ${_fmt(valor)} — ${esc((r.historico_bancario||'').trim())}`;
 
-  let cnpjSugerido=null, nomeSugerido=null;
-  if(item.ctb.length){
-    cnpjSugerido=item.ctb[0].cnpj_cpf||null;
-    nomeSugerido=item.ctb[0].cliente_fornecedor_nome||null;
-  } else {
-    const ehSaida=r.valor_saida>0;
-    const { data: comps } = await _supaClient.from(ehSaida?'comprovantes_bancarios':'comprovantes_recebimento')
-      .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
-      .eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente');
-    const match=(comps||[]).find(c=>c.cnpj_cpf&&Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
-    if(match){ cnpjSugerido=match.cnpj_cpf; nomeSugerido=match.cliente_fornecedor_nome; }
+  let cnpjSugerido=opts.cnpjSugerido||null, nomeSugerido=opts.nomeSugerido||null;
+  if(!cnpjSugerido){
+    if(item.ctb.length){
+      cnpjSugerido=item.ctb[0].cnpj_cpf||null;
+      nomeSugerido=item.ctb[0].cliente_fornecedor_nome||null;
+    } else {
+      const ehSaida=r.valor_saida>0;
+      const { data: comps } = await _supaClient.from(ehSaida?'comprovantes_bancarios':'comprovantes_recebimento')
+        .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
+        .eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente');
+      const match=(comps||[]).find(c=>c.cnpj_cpf&&Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+      if(match){ cnpjSugerido=match.cnpj_cpf; nomeSugerido=match.cliente_fornecedor_nome; }
+    }
   }
   const sugestao=document.getElementById('lancctbRegraSugestaoCnpj');
   if(cnpjSugerido){
@@ -16951,6 +16997,28 @@ async function abrirLancctbRegraModalDeLinha(item){
   } else {
     sugestao.style.display='none';
   }
+}
+// Chamado pelo botão "🔗 Associar" da aba Fluxo de Caixa (Fase 10): o
+// usuário já disse manualmente que essa linha do Fluxo de Caixa É esse
+// lançamento do extrato — abre o mesmo modal de Regra, mas pré-preenchido
+// com o texto do Fluxo (melhor que o histórico cru do banco) e resolve o
+// lançamento na hora, sem depender do motor de matching genérico bater a
+// substring (ver branch 'fluxo-associacao' em salvarLancctbRegra).
+async function abrirLancctbRegraModalFluxoAssociacao(fluxoRow,extratoRow){
+  _lancctbExtratoContaSel=String(extratoRow.conta_bancaria_id);
+  await abrirLancctbRegraModalDeLinha({extrato:extratoRow,ctb:[]},{
+    historico: fluxoRow.descricao,
+    cnpjSugerido: fluxoRow.cnpj_cpf||null,
+    nomeSugerido: fluxoRow.cliente_fornecedor_nome||null,
+  });
+  // abrirLancctbRegraModalDeLinha chama abrirLancctbRegraModal(null) por
+  // dentro, que zera _lancctbFluxoAssociando*/_lancctbRegraContexto — por
+  // isso essas atribuições só valem DEPOIS desse await, nunca antes (mesmo
+  // cuidado que _lancctbRegraContexto='registro' já tomava aqui do lado).
+  _lancctbFluxoAssociandoFluxoId=fluxoRow.id;
+  _lancctbFluxoAssociandoExtrato=extratoRow;
+  _lancctbRegraContexto='fluxo-associacao';
+  document.getElementById('lancctbRegraAprenderWrap').style.display='';
 }
 async function salvarLancctbRegra(){
   const id=document.getElementById('lancctbRegraId').value;
@@ -16973,6 +17041,51 @@ async function salvarLancctbRegra(){
     conta_contabil_id: contaContabilId,
     agencia_bancaria_id: document.getElementById('lancctbRegraAgencia').value||null,
   };
+  // Associação vinda do Fluxo de Caixa (Fase 10): resolve DIRETO o
+  // lançamento específico que o usuário associou manualmente — não dá pra
+  // confiar no motor de matching genérico pra pegar esse caso, porque o
+  // texto do Fluxo (usado como gatilho) costuma ser mais rico que o
+  // histórico cru do banco e não bate por substring nele. A Regra em si
+  // (se o usuário deixou "aprender" marcado) continua servindo pros
+  // PRÓXIMOS meses, quando o histórico do banco se repetir.
+  if(_lancctbRegraContexto==='fluxo-associacao'){
+    const aprender=document.getElementById('lancctbRegraAprenderCheckbox').checked;
+    let regraId=null, classifContrapartida=null;
+    if(aprender){
+      const { data: contaRow } = await _supaClient.from('plano_contas').select('classificacao').eq('id',contaContabilId).single();
+      classifContrapartida=contaRow?.classificacao||'';
+      const { data: novaRegra, error: erroRegra } = await _supaClient.from('regras_matching').insert(registro).select('id').single();
+      if(erroRegra){ toast('Erro ao salvar regra: '+erroRegra.message,'err'); return; }
+      regraId=novaRegra.id;
+    } else {
+      const { data: contaRow } = await _supaClient.from('plano_contas').select('classificacao').eq('id',contaContabilId).single();
+      classifContrapartida=contaRow?.classificacao||'';
+    }
+    const extrato=_lancctbFluxoAssociandoExtrato;
+    const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
+      .select('conta_contabil_id,plano_contas(classificacao)').eq('id',extrato.conta_bancaria_id).single();
+    if(!contaBancoInfo?.conta_contabil_id){ toast('Essa conta bancária não tem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+    const ehSaida=extrato.valor_saida>0;
+    const valor=extrato.valor_saida||extrato.valor_entrada;
+    const bancoTipo=ehSaida?'C':'D';
+    const dc=document.getElementById('lancctbRegraDc').value;
+    const cnpjCpf=document.getElementById('lancctbRegraCnpjGatilho').value.replace(/\D/g,'')||null;
+    const linhas=[
+      { empresa_eid:_lancctbEidAtual, data:extrato.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor, historico:descricao, cnpj_cpf:cnpjCpf, lancamento_extrato_id:extrato.id, regra_matching_id:regraId, origem_match:regraId?'regra':'manual' },
+      { empresa_eid:_lancctbEidAtual, data:extrato.data_pagamento, classificacao:classifContrapartida, conta_contabil_id:contaContabilId, tipo:dc, valor, historico:descricao, cnpj_cpf:cnpjCpf, lancamento_extrato_id:extrato.id, regra_matching_id:regraId, origem_match:regraId?'regra':'manual' },
+    ];
+    const { error: erroLanc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(erroLanc){ toast('Erro ao gerar lançamento: '+erroLanc.message,'err'); return; }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',extrato.id);
+    await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).eq('id',_lancctbFluxoAssociandoFluxoId);
+    const { data: contaAlertaRow } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('id',contaContabilId).eq('enviar_pontos_atencao',true).maybeSingle();
+    if(contaAlertaRow) _lancctbEnviarAoPontosAtencao(_lancctbEidAtual,contaAlertaRow,{ data:extrato.data_pagamento, valor, historico:descricao });
+    closeModal('mLancctbRegra');
+    toast('Associado com sucesso'+(aprender?' — regra criada pros próximos meses':''),'ok');
+    _lancctbFluxoAssociandoFluxoId=null; _lancctbFluxoAssociandoExtrato=null;
+    renderLancctbFluxoCaixa();
+    return;
+  }
   const query=id?_supaClient.from('regras_matching').update(registro).eq('id',id):_supaClient.from('regras_matching').insert(registro);
   const { error } = await query;
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
@@ -16998,10 +17111,11 @@ async function excluirLancctbRegra(id){
   const idsComprovante=[...new Set((linhasDaRegra||[]).map(l=>l.comprovante_id).filter(Boolean))];
   if(idsExtrato.length){
     await _supaClient.from('lancamentos_contabeis').delete().eq('regra_matching_id',id);
-    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).in('id',idsExtrato);
+    await _lancctbEmLotesDb(idsExtrato,200,lote=>_supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).in('id',lote));
   }
   if(idsComprovante.length){
-    await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComprovante);
+    await _lancctbEmLotesDb(idsComprovante,200,lote=>_supaClient.from('comprovantes_bancarios').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',lote));
+    await _lancctbEmLotesDb(idsComprovante,200,lote=>_supaClient.from('comprovantes_recebimento').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',lote));
   }
   const { error } = await _supaClient.from('regras_matching').update({ativo:false}).eq('id',id);
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
@@ -17116,6 +17230,11 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,tipo_regra,historico_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
     .eq('empresa_eid',eid).eq('ativo',true));
+  // Fluxo de Caixa (Fase 10) ainda não associado — usado só como melhorador
+  // de texto pro Passo 3 (Regra) bater; nunca resolve sozinho.
+  const { data: fluxoCaixa } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id')
+    .eq('empresa_eid',eid).eq('status_associado','nao_associado'));
   const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
     .select('conta_contabil_id,plano_contas(classificacao)')
     .eq('id',contaId).single();
@@ -17276,20 +17395,39 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     }
 
     // Passo 3: Regra (só entra se passo 2 não resolveu, e só no modo 'completo'
-    // — 'comprovantes'/'notas_fiscais' isolam a fonte, não caem pra Regra)
+    // — 'comprovantes'/'notas_fiscais' isolam a fonte, não caem pra Regra).
+    // Antes de avaliar as regras, procura um lançamento de Fluxo de Caixa
+    // (Fase 10) do mesmo valor/data ainda não associado — se achar, o texto
+    // dele entra como candidato ADICIONAL pro histórico_gatilho bater, além
+    // do histórico cru do banco (o Fluxo geralmente é mais rico: "Sispag
+    // Fornecedores" no banco vs "Fornecedor Tal Ltda" no Fluxo).
     if(!resolvido&&modo==='completo'){
       const bancoTipo=ehSaida?'C':'D';
+      const fluxoMatch=(fluxoCaixa||[]).find(f=>{
+        if(f.conta_bancaria_id&&String(f.conta_bancaria_id)!==String(contaId)) return false;
+        const v=f.valor_saida||f.valor_entrada;
+        const mesmaDirecao=ehSaida?f.valor_saida>0:f.valor_entrada>0;
+        return mesmaDirecao&&Math.abs(v-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
+      });
       const regra=regras.find(r=>{
         if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
-        if(r.tipo_regra==='historico') return r.historico_gatilho&&(l.historico_bancario||'').toLowerCase().includes(r.historico_gatilho.toLowerCase());
+        if(r.tipo_regra==='historico'){
+          if(!r.historico_gatilho) return false;
+          const gatilho=r.historico_gatilho.toLowerCase();
+          if((l.historico_bancario||'').toLowerCase().includes(gatilho)) return true;
+          if(fluxoMatch&&(fluxoMatch.descricao||'').toLowerCase().includes(gatilho)) return true;
+          return false;
+        }
         if(r.tipo_regra==='cliente_fornecedor') return cnpjAncora&&r.cnpj_cpf_gatilho===cnpjAncora;
         return false;
       });
       if(regra){
         const historicoUtilizado=regra.descricao||l.historico_bancario||'';
+        const nomeParaLinha=comprovanteMatch?.cliente_fornecedor_nome||fluxoMatch?.cliente_fornecedor_nome||null;
+        const cnpjParaLinha=cnpjAncora||fluxoMatch?.cnpj_cpf||null;
         const linhas=[
-          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:comprovanteMatch?.cliente_fornecedor_nome||null, cnpj_cpf:cnpjAncora||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
-          { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:historicoUtilizado, cliente_fornecedor_nome:comprovanteMatch?.cliente_fornecedor_nome||null, cnpj_cpf:cnpjAncora||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
         ];
         const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
         if(error){
@@ -17297,7 +17435,8 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
         } else {
           await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
           if(comprovanteMatch){ comprovantesUsados.add(comprovanteMatch.id); await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',comprovanteMatch.id); }
-          await checarAlertaAutomatico(linhas,l,valor,historicoUtilizado,comprovanteMatch?.cliente_fornecedor_nome);
+          if(fluxoMatch) await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxoMatch.id);
+          await checarAlertaAutomatico(linhas,l,valor,historicoUtilizado,nomeParaLinha);
           resolvRegra++; resolvido=true;
         }
       }
@@ -18113,7 +18252,7 @@ async function _lancctbExecutarExclusaoComprovantesReceb(){
   });
   const ids=(idsComprovRows||[]).map(r=>r.id);
   const { error } = ids.length
-    ? await _supaClient.from('comprovantes_recebimento').delete().in('id',ids)
+    ? await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('comprovantes_recebimento').delete().in('id',lote))
     : { error:null };
   btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
@@ -18121,6 +18260,523 @@ async function _lancctbExecutarExclusaoComprovantesReceb(){
   closeModal('mLancctbConfirmarExclusao');
   _lancctbComprovRecebPagina=0;
   renderLancctbComprovantesReceb();
+}
+
+// ─── Fluxo de Caixa — planilha própria do cliente (contas a pagar/receber já
+// baixadas), fonte extra de nome/CNPJ/classificação quando o histórico do
+// banco é genérico demais (ex: "Sispag Fornecedores"). Real: arquivos como
+// PAGOS_AAAA-MM.xls/RECEBIDOS_AAAA-MM.xls (Fast Lube) já trazem Razão
+// social/CNPJ/Descrição da conta/Histórico prontos — mapeamento de colunas
+// é confirmado na hora do import (nem todo cliente manda tão completo).
+// Associação com uma conta bancária é OPCIONAL — sem ela, o lançamento
+// vale como sugestão de histórico pra QUALQUER conta no matching. ─────────
+let _lancctbFluxoContaSel='';
+let _lancctbFluxoMes='';
+let _lancctbFluxoStatus=''; // ''|'associado'|'nao_associado'
+let _lancctbFluxoPagina=0;
+let _lancctbUltimoFluxo=[];
+let _lancctbFluxoImportTipo='saida'; // 'saida'(Pagamentos)|'entrada'(Recebimentos)
+let _lancctbFluxoImportLinhas=null; // matriz crua (header:1) entre os 2 estágios do modal
+let _lancctbFluxoImportNomeArquivo='';
+
+const LANCCTB_FLUXO_CAMPOS=[
+  {key:'data', label:'Data', obrigatorio:true, candidatos:['data de pagamento','pagamento','data','dt pagamento','vencimento']},
+  {key:'valor', label:'Valor', obrigatorio:true, candidatos:['valor pago','valor titulo','valor título','valor','valor original']},
+  {key:'descricao', label:'Descrição / Histórico', obrigatorio:false, candidatos:['historico','histórico','descricao','descrição']},
+  {key:'cliente_fornecedor_nome', label:'Cliente/Fornecedor (Razão social)', obrigatorio:false, candidatos:['razao social','razão social','raz social']},
+  {key:'cnpj_cpf', label:'CNPJ/CPF', obrigatorio:false, candidatos:['cnpj/cpf do parceiro comercial','cnpj/cpf','cnpj','cpf']},
+  {key:'documento_numero', label:'Nº Documento/Título', obrigatorio:false, candidatos:['numero','número','titulo','título','numero doc','num doc']},
+  {key:'descricao_conta_origem', label:'Descrição da conta (classificação do cliente)', obrigatorio:false, candidatos:['descricao da conta','descrição da conta']},
+];
+function _lancctbNormalizarHeader(s){
+  return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+}
+// Varre os candidatos NA ORDEM DE PRIORIDADE da lista (não na ordem em que
+// as colunas aparecem no arquivo) — importante porque um mesmo arquivo pode
+// ter mais de uma coluna candidata (ex: "Vencimento" E "Data de pagamento";
+// "Valor original" E "Valor pago") e a mais correta nem sempre é a que
+// aparece primeiro no cabeçalho. Confirmado com arquivo real de RECEBIDOS
+// da Fast Lube: sem essa ordem, pegava "Valor original" (bruto, antes de
+// abatimento) em vez de "Valor pago" (o que realmente entrou no banco).
+function _lancctbFluxoAutoDetectar(headers){
+  const norm=headers.map(h=>_lancctbNormalizarHeader(h));
+  const mapa={};
+  LANCCTB_FLUXO_CAMPOS.forEach(campo=>{
+    let idx=-1;
+    for(const cand of campo.candidatos){ idx=norm.findIndex(h=>h===cand); if(idx>=0) break; }
+    if(idx<0){ for(const cand of campo.candidatos){ idx=norm.findIndex(h=>h.includes(cand)); if(idx>=0) break; } }
+    mapa[campo.key]=idx;
+  });
+  return mapa;
+}
+function _lancctbFluxoParseData(v){
+  if(v instanceof Date && !isNaN(v)) return v.toISOString().slice(0,10);
+  if(typeof v==='number'){
+    const d=XLSX.SSF.parse_date_code(v);
+    if(d) return `${d.y}-${String(d.m).padStart(2,'0')}-${String(d.d).padStart(2,'0')}`;
+  }
+  const s=String(v||'').trim();
+  let m=s.match(/^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{4})/);
+  if(m) return `${m[3]}-${m[2].padStart(2,'0')}-${m[1].padStart(2,'0')}`;
+  m=s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if(m) return s.slice(0,10);
+  return null;
+}
+function _lancctbFluxoParseValorCel(v){
+  if(typeof v==='number') return Math.abs(v);
+  return Math.abs(_lancctbParseValorInput(v));
+}
+function _lancctbFluxoSelecionarConta(id){ _lancctbFluxoContaSel=id; _lancctbFluxoPagina=0; renderLancctbFluxoCaixa(); }
+function _lancctbFluxoMudarMes(v){ _lancctbFluxoMes=v; _lancctbFluxoPagina=0; renderLancctbFluxoCaixa(); }
+
+async function renderLancctbFluxoCaixa(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  _lancctbUltimasAgencias=agencias||_lancctbUltimasAgencias;
+  const agenciasPorId={}; (agencias||[]).forEach(a=>agenciasPorId[a.id]=a);
+
+  const from=_lancctbFluxoPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE-1;
+  let q=_supaClient.from('fluxo_caixa_lancamentos')
+    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,status_associado',{count:'exact'})
+    .eq('empresa_eid',eid);
+  if(_lancctbFluxoContaSel) q=q.eq('conta_bancaria_id',_lancctbFluxoContaSel);
+  if(_lancctbFluxoStatus) q=q.eq('status_associado',_lancctbFluxoStatus);
+  if(_lancctbFluxoMes){
+    const [ano,mes]=_lancctbFluxoMes.split('-').map(Number);
+    const ultimoDia=new Date(ano,mes,0).getDate();
+    q=q.gte('data',`${_lancctbFluxoMes}-01`).lte('data',`${_lancctbFluxoMes}-${String(ultimoDia).padStart(2,'0')}`);
+  }
+  const { data: linhas, error, count } = await q.order('data',{ascending:true}).order('id',{ascending:true}).range(from,to);
+  if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar fluxo de caixa: ${esc(error.message)}</div>`; return; }
+  _lancctbUltimoFluxo=linhas||[];
+
+  const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
+  let html=(agencias&&agencias.length)?_lancctbContaCardsHtml(agencias,_lancctbFluxoContaSel,'_lancctbFluxoSelecionarConta',true):'';
+  html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+      ${_lancctbMesPickerHtml(_lancctbFluxoMes,'_lancctbFluxoMudarMes')}
+      <select class="si" onchange="_lancctbFluxoStatus=this.value;_lancctbFluxoPagina=0;renderLancctbFluxoCaixa()">
+        <option value="" ${!_lancctbFluxoStatus?'selected':''}>Todos</option>
+        <option value="nao_associado" ${_lancctbFluxoStatus==='nao_associado'?'selected':''}>Não associados</option>
+        <option value="associado" ${_lancctbFluxoStatus==='associado'?'selected':''}>Associados</option>
+      </select>
+    </div>
+    <div style="display:flex;gap:6px">
+      <button class="action-btn action-btn-excel" onclick="exportarLancctbFluxoExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbFluxoConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes lançamentos</button>
+      <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Excel</button>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <thead><tr style="background:var(--ink2);color:#fff">
+      <th style="padding:8px 10px;text-align:left">Data</th>
+      <th style="padding:8px 10px;text-align:left">Descrição</th>
+      <th style="padding:8px 10px;text-align:left">Cliente/Fornecedor</th>
+      <th style="padding:8px 10px;text-align:left">CPF/CNPJ</th>
+      <th style="padding:8px 10px;text-align:left">Conta</th>
+      <th style="padding:8px 10px;text-align:right">Valor</th>
+      <th style="padding:8px 10px;text-align:center">Status</th>
+      <th style="padding:8px 10px;text-align:center">&nbsp;</th>
+    </tr></thead>
+    <tbody>`;
+  if(!linhas||!linhas.length){
+    html+=`<tr><td colspan="8" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento de fluxo de caixa importado ainda.</td></tr>`;
+  } else {
+    linhas.forEach(l=>{
+      const valor=l.valor_saida||l.valor_entrada;
+      const contaNome=l.conta_bancaria_id?(agenciasPorId[l.conta_bancaria_id]?.banco_nome||'—'):'Qualquer conta';
+      const associado=l.status_associado==='associado';
+      html+=`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:7px 10px">${l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(l.descricao||'')}">${esc(l.descricao||'')}</td>
+        <td style="padding:7px 10px">${esc(l.cliente_fornecedor_nome||'')}</td>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
+        <td style="padding:7px 10px;color:${l.conta_bancaria_id?'inherit':'var(--slate)'}">${esc(contaNome)}</td>
+        <td style="padding:7px 10px;text-align:right">R$ ${_fmt(valor)}</td>
+        <td style="padding:7px 10px;text-align:center"><span style="color:${associado?'var(--teal)':'#D97706'};font-weight:600;font-size:11px">${associado?'associado':'não associado'}</span></td>
+        <td style="padding:7px 10px;text-align:center">${associado?'':`<button class="btn bo bsm" onclick="abrirLancctbFluxoAssociarModal(${l.id})">🔗 Associar</button>`}</td>
+      </tr>`;
+    });
+  }
+  html+=`</tbody></table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12.5px;color:var(--slate)">
+      <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" ${_lancctbFluxoPagina===0?'disabled':''} onclick="_lancctbFluxoPagina=0;renderLancctbFluxoCaixa()">« Primeira</button>
+        <button class="btn bo bsm" ${_lancctbFluxoPagina===0?'disabled':''} onclick="_lancctbFluxoPagina--;renderLancctbFluxoCaixa()">‹ Anterior</button>
+        <span style="padding:6px 10px">Página ${_lancctbFluxoPagina+1} de ${totalPaginas}</span>
+        <button class="btn bo bsm" ${_lancctbFluxoPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbFluxoPagina++;renderLancctbFluxoCaixa()">Próxima ›</button>
+        <button class="btn bo bsm" ${_lancctbFluxoPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbFluxoPagina=${totalPaginas}-1;renderLancctbFluxoCaixa()">Última »</button>
+      </div>
+    </div>`;
+  el.innerHTML=html;
+}
+function exportarLancctbFluxoExcel(){
+  if(!_lancctbUltimoFluxo.length){ toast('Nada para exportar nesta página.','err'); return; }
+  const header=['Data','Descrição','Cliente/Fornecedor','CPF/CNPJ','Valor','Status'];
+  const rows=_lancctbUltimoFluxo.map(l=>[
+    l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    l.descricao||'', l.cliente_fornecedor_nome||'', _fmtCnpjCpf(l.cnpj_cpf),
+    l.valor_saida||l.valor_entrada||0, l.status_associado||''
+  ]);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Fluxo de Caixa');
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`Fluxo_Caixa_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+
+// ─── Upload/mapeamento de colunas (reaproveita o modal genérico mLancctbUpload) ─
+async function abrirLancctbFluxoImportModal(){
+  _lancctbFluxoImportLinhas=null;
+  document.getElementById('lancctbUploadTitulo').textContent='Importar Fluxo de Caixa (Excel)';
+  document.getElementById('lancctbUploadBody').innerHTML=`
+    <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
+      Suba o Fluxo de Caixa do cliente em <strong>Excel ou PDF</strong>. No Excel, se o arquivo misturar pagamentos e recebimentos, importe 2 vezes (um de cada, usando o seletor abaixo) — na próxima tela você confirma qual coluna é qual. No PDF, a leitura é por IA e já identifica entrada/saída linha a linha, então o seletor "Pagamentos/Recebimentos" não se aplica.
+    </div>
+    <div class="grid2">
+      <div class="fg" id="lancctbFluxoImportTipoWrap">
+        <div class="fl">Este arquivo é de (só Excel)</div>
+        <select class="si" id="lancctbFluxoImportTipo" style="width:100%">
+          <option value="saida">Pagamentos (saída)</option>
+          <option value="entrada">Recebimentos (entrada)</option>
+        </select>
+      </div>
+      <div class="fg">
+        <div class="fl">Vincular a uma conta (opcional)</div>
+        <select class="si" id="lancctbFluxoImportConta" style="width:100%"><option value="">— Vale pra qualquer conta —</option></select>
+      </div>
+    </div>
+    <div class="fg">
+      <div class="fl">Arquivo (Excel ou PDF)</div>
+      <input class="fi" id="lancctbFluxoImportArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
+    </div>
+    <div id="lancctbFluxoImportStatus" style="font-size:12.5px;margin-top:8px;min-height:16px;color:var(--slate)"></div>
+    <div id="lancctbFluxoImportMappingArea" style="margin-top:14px"></div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+      <button class="btn bp" id="lancctbFluxoImportLerBtn" onclick="_lancctbFluxoLerArquivo()">▶ Ler arquivo</button>
+    </div>`;
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).order('banco_nome');
+  const selConta=document.getElementById('lancctbFluxoImportConta');
+  (agencias||[]).forEach(a=>{
+    const o=document.createElement('option'); o.value=a.id; o.textContent=`${a.banco_nome} Ag ${a.agencia} Cc ${a.conta_corrente}`; selConta.appendChild(o);
+  });
+  openModal('mLancctbUpload');
+}
+async function _lancctbFluxoLerArquivo(){
+  const file=document.getElementById('lancctbFluxoImportArquivo')?.files[0];
+  const status=document.getElementById('lancctbFluxoImportStatus');
+  if(!file){ toast('Selecione um arquivo','err'); return; }
+  _lancctbFluxoImportTipo=document.getElementById('lancctbFluxoImportTipo').value;
+  _lancctbFluxoImportNomeArquivo=file.name;
+  const ehPdf=/\.pdf$/i.test(file.name);
+  if(ehPdf){ await _lancctbFluxoLerPdf(file,status); return; }
+  status.textContent='Lendo arquivo…';
+  try{
+    const buf=await file.arrayBuffer();
+    const wb=XLSX.read(buf,{type:'array',cellDates:true});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+    if(!matriz.length){ status.textContent='Arquivo vazio.'; return; }
+    _lancctbFluxoImportLinhas=matriz;
+    const headers=matriz[0].map(h=>String(h||'').trim());
+    const mapa=_lancctbFluxoAutoDetectar(headers);
+    status.textContent=`${matriz.length-1} linha(s) encontrada(s). Confira o mapeamento de colunas abaixo antes de importar.`;
+    document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoMappingHtml(headers,mapa);
+    document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+  }catch(e){
+    console.error(e);
+    status.textContent='Erro ao ler arquivo: '+e.message;
+  }
+}
+// PDF: reaproveita a MESMA Edge Function de extração do Extrato Bancário
+// (lancctb-parse-extrato) — o formato de saída (data/histórico/valor_saída/
+// valor_entrada) já é exatamente o que o Fluxo de Caixa precisa, então não
+// existe mapeamento de coluna aqui: a IA já lê o layout do PDF e devolve
+// cada linha com o lado (entrada/saída) identificado, por isso o seletor
+// "Pagamentos/Recebimentos" não vale pra esse caminho.
+let _lancctbFluxoImportPreviewPdf=[];
+async function _lancctbFluxoLerPdf(file,status){
+  document.getElementById('lancctbFluxoImportTipoWrap').style.display='none';
+  status.textContent='Lendo PDF…';
+  try{
+    _convItauGarantirWorker();
+    const buf=await file.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    const paginasTexto=[];
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=await pdf.getPage(p);
+      const content=await page.getTextContent();
+      paginasTexto.push(content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim());
+    }
+    const textoTotal=paginasTexto.join(' ').trim();
+    const lancamentos=[];
+    if(textoTotal.length<20){
+      status.textContent='PDF sem texto selecionável — renderizando páginas como imagem…';
+      const imagens=[];
+      for(let p=1;p<=pdf.numPages;p++){
+        const page=await pdf.getPage(p);
+        const viewport=page.getViewport({scale:2});
+        const canvas=document.createElement('canvas');
+        canvas.width=viewport.width;canvas.height=viewport.height;
+        const ctx=canvas.getContext('2d');
+        await page.render({canvasContext:ctx,viewport}).promise;
+        imagens.push(canvas.toDataURL('image/jpeg',0.85));
+      }
+      const lotes=_lancctbEmLotes(imagens,LANCCTB_IMAGENS_POR_LOTE);
+      for(let i=0;i<lotes.length;i++){
+        status.textContent=`Lote de imagens ${i+1}/${lotes.length}…`;
+        const d=await _lancctbChamarEdgeExtracao('lancctb-parse-extrato',{imagens:lotes[i]});
+        if(Array.isArray(d.lancamentos)) lancamentos.push(...d.lancamentos);
+      }
+    } else {
+      const lotes=_lancctbEmLotes(paginasTexto,LANCCTB_EXTRATO_PAGINAS_POR_LOTE);
+      for(let i=0;i<lotes.length;i++){
+        status.textContent=lotes.length>1?`Lote ${i+1}/${lotes.length}…`:'Chamando IA para extrair o fluxo de caixa…';
+        const d=await _lancctbChamarEdgeExtracao('lancctb-parse-extrato',{texto:lotes[i].join('\n')});
+        if(Array.isArray(d.lancamentos)) lancamentos.push(...d.lancamentos);
+      }
+    }
+    if(!lancamentos.length){ status.textContent='Não foi possível identificar nenhum lançamento neste PDF.'; return; }
+    _lancctbFluxoImportPreviewPdf=lancamentos.map(l=>({...l,_incluir:true}));
+    status.textContent=`${lancamentos.length} lançamento(s) encontrado(s) — confira abaixo antes de importar.`;
+    document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoPdfPreviewHtml();
+    document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+  }catch(e){
+    console.error(e);
+    status.textContent='Erro ao ler PDF: '+e.message;
+  }
+}
+function _lancctbFluxoPdfPreviewHtml(){
+  let html=`<div style="overflow-x:auto;max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+        <th style="padding:6px 8px"><input type="checkbox" checked onclick="_lancctbFluxoPdfToggleTodos(this.checked)"></th>
+        <th style="padding:6px 8px;text-align:left">Data</th>
+        <th style="padding:6px 8px;text-align:left">Histórico</th>
+        <th style="padding:6px 8px;text-align:right">Saída</th>
+        <th style="padding:6px 8px;text-align:right">Entrada</th>
+      </tr></thead><tbody>`;
+  _lancctbFluxoImportPreviewPdf.forEach((l,i)=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${l._incluir?1:.4}">
+      <td style="padding:5px 8px"><input type="checkbox" ${l._incluir?'checked':''} onclick="_lancctbFluxoImportPreviewPdf[${i}]._incluir=this.checked;document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoPdfPreviewHtml()"></td>
+      <td style="padding:5px 8px">${l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+      <td style="padding:5px 8px">${esc(l.historico||'')}</td>
+      <td style="padding:5px 8px;text-align:right">${l.valor_saida?'R$ '+_fmt(l.valor_saida):''}</td>
+      <td style="padding:5px 8px;text-align:right">${l.valor_entrada?'R$ '+_fmt(l.valor_entrada):''}</td>
+    </tr>`;
+  });
+  const qtd=_lancctbFluxoImportPreviewPdf.filter(l=>l._incluir).length;
+  html+=`</tbody></table></div>
+  <div class="ma" style="margin-top:14px">
+    <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+    <button class="btn bp" onclick="confirmarLancctbFluxoImportPdf()">✓ Importar ${qtd} lançamento(s)</button>
+  </div>`;
+  return html;
+}
+function _lancctbFluxoPdfToggleTodos(marcar){
+  _lancctbFluxoImportPreviewPdf.forEach(l=>l._incluir=marcar);
+  document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoPdfPreviewHtml();
+}
+async function confirmarLancctbFluxoImportPdf(){
+  const selecionados=_lancctbFluxoImportPreviewPdf.filter(l=>l._incluir);
+  if(!selecionados.length){ toast('Nenhum lançamento selecionado','err'); return; }
+  const contaSel=document.getElementById('lancctbFluxoImportConta').value||null;
+  const registros=selecionados.map(l=>({
+    empresa_eid: _lancctbEidAtual,
+    conta_bancaria_id: contaSel,
+    data: l.data,
+    descricao: l.historico||'(sem descrição)',
+    valor_saida: l.valor_saida||0,
+    valor_entrada: l.valor_entrada||0,
+    arquivo_origem: _lancctbFluxoImportNomeArquivo,
+  }));
+  const status=document.getElementById('lancctbFluxoImportStatus');
+  const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(registros);
+  if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
+  toast(`${registros.length} lançamento(s) de fluxo de caixa importado(s)`,'ok');
+  closeModal('mLancctbUpload');
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
+}
+function _lancctbFluxoMappingHtml(headers,mapa){
+  const opcoes=(sel)=>{
+    let h=`<option value="-1">— não usar —</option>`;
+    headers.forEach((nome,i)=>{ h+=`<option value="${i}" ${sel===i?'selected':''}>${esc(nome||('Coluna '+(i+1)))}</option>`; });
+    return h;
+  };
+  let html='<div style="display:grid;gap:8px">';
+  LANCCTB_FLUXO_CAMPOS.forEach(campo=>{
+    html+=`<div class="fg" style="margin-bottom:0">
+      <div class="fl">${esc(campo.label)}${campo.obrigatorio?' *':''}</div>
+      <select class="si" id="lancctbFluxoMap_${campo.key}" style="width:100%">${opcoes(mapa[campo.key])}</select>
+    </div>`;
+  });
+  html+=`</div>
+  <div class="ma" style="margin-top:14px">
+    <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+    <button class="btn bp" onclick="confirmarLancctbFluxoImport()">✓ Importar</button>
+  </div>`;
+  return html;
+}
+async function confirmarLancctbFluxoImport(){
+  const matriz=_lancctbFluxoImportLinhas;
+  if(!matriz){ toast('Leia o arquivo primeiro','err'); return; }
+  const mapa={};
+  LANCCTB_FLUXO_CAMPOS.forEach(campo=>{ mapa[campo.key]=+document.getElementById('lancctbFluxoMap_'+campo.key).value; });
+  if(mapa.data<0||mapa.valor<0){ toast('Selecione ao menos as colunas de Data e Valor','err'); return; }
+  const contaSel=document.getElementById('lancctbFluxoImportConta').value||null;
+  const ehSaida=_lancctbFluxoImportTipo==='saida';
+  const pegar=(row,key)=>mapa[key]>=0?String(row[mapa[key]]??'').trim():'';
+  const registros=[];
+  for(let i=1;i<matriz.length;i++){
+    const row=matriz[i]||[];
+    const dataIso=_lancctbFluxoParseData(row[mapa.data]);
+    if(!dataIso) continue;
+    const valor=_lancctbFluxoParseValorCel(row[mapa.valor]);
+    if(!valor) continue;
+    const cnpjCpf=pegar(row,'cnpj_cpf').replace(/\D/g,'')||null;
+    const descontoOrigem=pegar(row,'descricao_conta_origem');
+    const clienteNome=pegar(row,'cliente_fornecedor_nome');
+    const docNumero=pegar(row,'documento_numero');
+    let descricao=pegar(row,'descricao');
+    if(!descricao) descricao=[descontoOrigem,clienteNome,docNumero?'Doc '+docNumero:''].filter(Boolean).join(' — ');
+    if(!descricao) descricao='(sem descrição)';
+    registros.push({
+      empresa_eid: _lancctbEidAtual,
+      conta_bancaria_id: contaSel,
+      data: dataIso,
+      descricao,
+      valor_saida: ehSaida?valor:0,
+      valor_entrada: ehSaida?0:valor,
+      cliente_fornecedor_nome: clienteNome||null,
+      cnpj_cpf: cnpjCpf,
+      documento_numero: docNumero||null,
+      descricao_conta_origem: descontoOrigem||null,
+      arquivo_origem: _lancctbFluxoImportNomeArquivo,
+    });
+  }
+  if(!registros.length){ toast('Nenhuma linha válida encontrada (confira as colunas Data e Valor).','err'); return; }
+  const status=document.getElementById('lancctbFluxoImportStatus');
+  const TAM_LOTE=500;
+  let importados=0;
+  for(let i=0;i<registros.length;i+=TAM_LOTE){
+    const lote=registros.slice(i,i+TAM_LOTE);
+    const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(lote);
+    if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
+    importados+=lote.length;
+    if(status) status.textContent=`Importando… ${importados}/${registros.length}`;
+  }
+  toast(`${importados} lançamento(s) de fluxo de caixa importado(s)`,'ok');
+  closeModal('mLancctbUpload');
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
+}
+
+// ─── Associação manual (1 linha do Fluxo ↔ 1 lançamento pendente do extrato) ─
+let _lancctbFluxoAssociarAlvo=null;
+let _lancctbFluxoAssociarCandidatos=[];
+async function abrirLancctbFluxoAssociarModal(fluxoId){
+  const fluxoRow=(_lancctbUltimoFluxo||[]).find(f=>f.id===fluxoId);
+  if(!fluxoRow){ toast('Lançamento não encontrado nesta página — recarregue a lista.','err'); return; }
+  _lancctbFluxoAssociarAlvo=fluxoRow;
+  const body=document.getElementById('lancctbFluxoAssociarBody');
+  body.innerHTML='<div style="padding:16px;color:var(--slate)">Buscando lançamentos pendentes parecidos…</div>';
+  openModal('mLancctbFluxoAssociar');
+
+  const valor=fluxoRow.valor_saida||fluxoRow.valor_entrada;
+  const ehSaida=fluxoRow.valor_saida>0;
+  let q=_supaClient.from('lancamentos_extrato')
+    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id,agencias_bancarias(banco_nome,agencia,conta_corrente)')
+    .eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente');
+  if(fluxoRow.conta_bancaria_id) q=q.eq('conta_bancaria_id',fluxoRow.conta_bancaria_id);
+  const { data: candidatos } = await q;
+  // Tolerância mais larga que o motor de matching automático (5x) — aqui é
+  // o usuário escolhendo visualmente, não uma decisão automática, então
+  // vale mostrar mais opções plausíveis mesmo que não batam "certinho".
+  const filtrados=(candidatos||[]).filter(c=>{
+    const v=c.valor_saida||c.valor_entrada;
+    const mesmaDirecao=ehSaida?c.valor_saida>0:c.valor_entrada>0;
+    return mesmaDirecao && Math.abs(v-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR*5 && _lancctbDiffDias(c.data_pagamento,fluxoRow.data)<=15;
+  }).sort((a,b)=>Math.abs((a.valor_saida||a.valor_entrada)-valor)-Math.abs((b.valor_saida||b.valor_entrada)-valor));
+  _lancctbFluxoAssociarCandidatos=filtrados;
+
+  if(!filtrados.length){
+    body.innerHTML=`<div style="padding:16px;text-align:center;color:var(--slate)">Nenhum lançamento pendente do extrato bate por valor/data com este item (R$ ${_fmt(valor)} em ${new Date(fluxoRow.data+'T00:00:00').toLocaleDateString('pt-BR')}).</div>`;
+    return;
+  }
+  let html=`<div style="font-size:12.5px;color:var(--slate);margin-bottom:10px">Fluxo de Caixa: <strong>${esc(fluxoRow.descricao||'')}</strong> — R$ ${_fmt(valor)} em ${new Date(fluxoRow.data+'T00:00:00').toLocaleDateString('pt-BR')}. Escolha a qual lançamento do extrato isso corresponde:</div>
+  <div style="display:grid;gap:6px;max-height:360px;overflow-y:auto">`;
+  filtrados.forEach((c,i)=>{
+    const v=c.valor_saida||c.valor_entrada;
+    const banco=c.agencias_bancarias?`${c.agencias_bancarias.banco_nome} Ag ${c.agencias_bancarias.agencia} Cc ${c.agencias_bancarias.conta_corrente}`:'';
+    html+=`<div style="border:1px solid var(--border);border-radius:6px;padding:10px;cursor:pointer" onclick="escolherLancctbFluxoAssociar(${i})">
+      <div style="display:flex;justify-content:space-between"><strong>${new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR')}</strong><span>R$ ${_fmt(v)}</span></div>
+      <div style="font-size:12px;color:var(--slate)">${esc(c.historico_bancario||'')}</div>
+      <div style="font-size:11px;color:var(--slate)">${esc(banco)}</div>
+    </div>`;
+  });
+  html+='</div>';
+  body.innerHTML=html;
+}
+function escolherLancctbFluxoAssociar(idx){
+  const extratoRow=_lancctbFluxoAssociarCandidatos[idx];
+  closeModal('mLancctbFluxoAssociar');
+  abrirLancctbRegraModalFluxoAssociacao(_lancctbFluxoAssociarAlvo,extratoRow);
+}
+
+// ─── Exclusão em lote (mesmo padrão de Comprovantes/Extrato) ──────────────
+let _lancctbExclusaoFluxoQtd=0;
+function excluirLancctbFluxoConta(qtd){
+  if(!qtd){ toast('Nenhum lançamento pra excluir com esse filtro.','err'); return; }
+  _lancctbExclusaoTipo='fluxo';
+  _lancctbExclusaoFluxoQtd=qtd;
+  const partesEscopo=[];
+  if(_lancctbFluxoContaSel){
+    const conta=_lancctbUltimasAgencias?.find?.(a=>String(a.id)===String(_lancctbFluxoContaSel));
+    partesEscopo.push(conta?`da conta <strong>${esc(conta.banco_nome)}</strong>`:'desta conta');
+  } else partesEscopo.push('de todas as contas/sem conta vinculada');
+  if(_lancctbFluxoMes) partesEscopo.push(`de <strong>${new Date(_lancctbFluxoMes+'-01T00:00:00').toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</strong>`);
+  document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
+    `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> lançamento(s) de fluxo de caixa ${partesEscopo.join(' ')}. Lançamentos já associados não desfazem a conciliação, só removem o registro do Fluxo. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
+  document.getElementById('lancctbConfirmarExclusaoInput').value='';
+  openModal('mLancctbConfirmarExclusao');
+}
+async function _lancctbExecutarExclusaoFluxo(){
+  const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
+  if(digitado!==String(_lancctbExclusaoFluxoQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
+  const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
+  btn.disabled=true; btn.textContent='Excluindo…';
+  let mesDe=null,mesAte=null;
+  if(_lancctbFluxoMes){
+    const [ano,mes]=_lancctbFluxoMes.split('-').map(Number);
+    const ultimoDia=new Date(ano,mes,0).getDate();
+    mesDe=`${_lancctbFluxoMes}-01`; mesAte=`${_lancctbFluxoMes}-${String(ultimoDia).padStart(2,'0')}`;
+  }
+  const { data: idsRows } = await _lancctbFetchTudo(()=>{
+    let q=_supaClient.from('fluxo_caixa_lancamentos').select('id').eq('empresa_eid',_lancctbEidAtual);
+    if(_lancctbFluxoContaSel) q=q.eq('conta_bancaria_id',_lancctbFluxoContaSel);
+    if(mesDe) q=q.gte('data',mesDe).lte('data',mesAte);
+    if(_lancctbFluxoStatus) q=q.eq('status_associado',_lancctbFluxoStatus);
+    return q;
+  });
+  const ids=(idsRows||[]).map(r=>r.id);
+  const { error } = ids.length
+    ? await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').delete().in('id',lote))
+    : { error:null };
+  btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast(`${_lancctbExclusaoFluxoQtd} lançamento(s) excluído(s)`,'ok');
+  closeModal('mLancctbConfirmarExclusao');
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
 }
 
 // ─── Extrato Bancário (upload Excel/CSV determinístico OU PDF via IA) ─────
@@ -18268,6 +18924,8 @@ function excluirLancctbExtratoConta(qtd){
 // de onde o usuário abriu o modal (Extrato Bancário ou Comprovantes).
 function _lancctbExecutarExclusaoGenerica(){
   if(_lancctbExclusaoTipo==='comprovantes') return _lancctbExecutarExclusaoComprovantes();
+  if(_lancctbExclusaoTipo==='comprovantes-receb') return _lancctbExecutarExclusaoComprovantesReceb();
+  if(_lancctbExclusaoTipo==='fluxo') return _lancctbExecutarExclusaoFluxo();
   return _lancctbExecutarExclusaoExtrato();
 }
 let _lancctbExclusaoComprovQtd=0;
@@ -18308,10 +18966,10 @@ async function _lancctbExecutarExclusaoComprovantes(){
     // lancamentos_contabeis.comprovante_id é só rastreabilidade (a
     // classificação em si já foi feita via NF/regra) — desvincula em vez
     // de apagar o lançamento, senão perderia o Registro Contábil à toa.
-    await _supaClient.from('lancamentos_contabeis').update({comprovante_id:null}).in('comprovante_id',ids);
+    await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('lancamentos_contabeis').update({comprovante_id:null}).in('comprovante_id',lote));
   }
   const { error } = ids.length
-    ? await _supaClient.from('comprovantes_bancarios').delete().in('id',ids)
+    ? await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('comprovantes_bancarios').delete().in('id',lote))
     : { error:null };
   btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
@@ -18349,12 +19007,14 @@ async function _lancctbExecutarExclusaoExtrato(){
   });
   const ids=(idsExtratoRows||[]).map(r=>r.id);
   if(ids.length){
-    await _supaClient.from('notas_fiscais_parcelas').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',ids);
-    await _supaClient.from('comprovantes_bancarios').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',ids);
-    await _supaClient.from('lancamentos_contabeis').delete().in('lancamento_extrato_id',ids);
+    await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('notas_fiscais_parcelas').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',lote));
+    await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('comprovantes_bancarios').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',lote));
+    await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('comprovantes_recebimento').update({lancamento_extrato_id:null,status_conciliacao:'pendente'}).in('lancamento_extrato_id',lote));
+    await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({lancamento_extrato_id:null,status_associado:'nao_associado'}).in('lancamento_extrato_id',lote));
+    await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('lancamentos_contabeis').delete().in('lancamento_extrato_id',lote));
   }
   const { error } = ids.length
-    ? await _supaClient.from('lancamentos_extrato').delete().in('id',ids)
+    ? await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('lancamentos_extrato').delete().in('id',lote))
     : { error:null };
   btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
