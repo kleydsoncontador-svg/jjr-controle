@@ -18141,12 +18141,15 @@ function exportarLancctbComprovantesExcel(){
 let _lancctbUploadComprovTipo='pagamento';
 function abrirLancctbUploadComprovanteModal(tipo){
   _lancctbUploadComprovTipo=tipo||'pagamento';
-  document.getElementById('lancctbUploadTitulo').textContent=_lancctbUploadComprovTipo==='recebimento'?'Upload de Comprovantes de Recebimento (PDF)':'Upload de Comprovantes (PDF)';
+  const ehReceb=_lancctbUploadComprovTipo==='recebimento';
+  document.getElementById('lancctbUploadTitulo').textContent=ehReceb?'Upload de Comprovantes de Recebimento':'Upload de Comprovantes (PDF)';
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-      Pode selecionar vários PDFs de uma vez (segure Ctrl ou Shift na janela de seleção) — e cada PDF ainda pode trazer vários comprovantes empilhados (um por página). Tudo é extraído junto e você confere/desmarca antes de salvar.
+      ${ehReceb
+        ? 'Pode subir o relatório de cobrança pronto do banco — Itaú ("Extrato de movimentação de boletos", PDF) ou Banco do Brasil ("Movimentações de Cobrança"/BoletosConsulta, Excel) são reconhecidos automaticamente (só entram os boletos já liquidados). Qualquer outro PDF cai na extração por IA, igual comprovante avulso.'
+        : 'Pode selecionar vários PDFs de uma vez (segure Ctrl ou Shift na janela de seleção) — e cada PDF ainda pode trazer vários comprovantes empilhados (um por página). Tudo é extraído junto e você confere/desmarca antes de salvar.'}
     </div>
-    <input class="fi" id="lancctbComprovArquivo" type="file" accept=".pdf" multiple>
+    <input class="fi" id="lancctbComprovArquivo" type="file" accept="${ehReceb?'.pdf,.xls,.xlsx':'.pdf'}" multiple>
     <div id="lancctbComprovStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
     <div id="lancctbComprovPreviewArea" style="margin-top:14px"></div>
     <div class="ma">
@@ -18154,6 +18157,155 @@ function abrirLancctbUploadComprovanteModal(tipo){
       <button class="btn bp" id="lancctbComprovProcessarBtn" onclick="processarLancctbUploadComprovante()">▶ Extrair</button>
     </div>`;
   openModal('mLancctbUpload');
+}
+// ─── Formatos dedicados de Comprovantes de Recebimento — a Fast Lube manda
+// relatórios PRONTOS de cobrança do próprio banco (não comprovantes
+// avulsos), um por banco: Itaú manda "Extrato de movimentação de boletos"
+// em PDF (multi-página, um resumo diário por página, cada boleto liquidado
+// numa linha "liquidação"); Banco do Brasil manda a planilha
+// "BoletosConsulta" já tabular. Confirmado com arquivo real de julho/2026 e
+// pelo usuário: "Seu Número" tem 2 grupos de dígitos — o 1º não é usado; o
+// 2º é NF+parcela concatenados (o ÚLTIMO dígito é a parcela, o resto é o
+// número da NF — ex: 1541451 → NF 154145, parcela 1).
+function _lancctbSeuNumeroNfParcela(str){
+  const grupos=String(str||'').match(/\d+/g);
+  if(!grupos||!grupos.length) return null;
+  const real=grupos[grupos.length-1];
+  if(real.length<2) return { nf:real, parcela:'' };
+  return { nf:real.slice(0,-1), parcela:real.slice(-1) };
+}
+function _lancctbDocumentoDeSeuNumero(str,fallback){
+  const r=_lancctbSeuNumeroNfParcela(str);
+  if(!r||!r.nf) return fallback||'';
+  return r.parcela?`${r.nf}-${r.parcela}`:r.nf;
+}
+// Banco do Brasil — planilha "BoletosConsulta". Só entram linhas com
+// Situação = Liquidado (as demais ainda não foram pagas pelo cliente).
+// Retorna null se o cabeçalho não bater com esse formato, sinal pro
+// chamador tentar outro caminho (não é esse layout).
+function _lancctbParsearBBCobrancaExcel(matriz){
+  if(!matriz||!matriz.length) return null;
+  const headers=(matriz[0]||[]).map(h=>_lancctbNormalizarHeader(h));
+  const idx=nome=>headers.indexOf(nome);
+  const iNome=idx('nome do pagador'), iCnpj=idx('cpf/cnpj do pagador'), iVenc=idx('vencimento'),
+        iSeuNum=idx('seu numero'), iSituacao=idx('situacao'), iDataSit=idx('data situacao'),
+        iValor=idx('valor'), iValorLiq=idx('valor liquidacao');
+  if(iNome<0||iSituacao<0||iValorLiq<0) return null;
+  const registros=[];
+  for(let i=1;i<matriz.length;i++){
+    const row=matriz[i]||[];
+    if(!row.length) continue;
+    if(String(row[iSituacao]||'').trim().toLowerCase()!=='liquidado') continue;
+    registros.push({
+      data_pagamento: _lancctbFluxoParseData(row[iDataSit]),
+      cliente_fornecedor_nome: String(row[iNome]||'').trim(),
+      cnpj_cpf: String(row[iCnpj]||'').replace(/\D/g,''),
+      documento_numero: _lancctbDocumentoDeSeuNumero(row[iSeuNum]),
+      data_vencimento: _lancctbFluxoParseData(row[iVenc]),
+      valor_documento: _lancctbFluxoParseValorCel(row[iValor]),
+      valor_pago: _lancctbFluxoParseValorCel(row[iValorLiq]),
+      juros:0, multa:0, desconto:0, observacao:'',
+    });
+  }
+  return registros.filter(r=>r.data_pagamento&&r.valor_pago);
+}
+// Itaú — "Extrato de movimentação de boletos" (PDF multi-página). Só conta
+// linhas "liquidação" (boleto efetivamente pago); "entrada"/"tarifa de
+// cobrança" são ignoradas (não são recebimento em si — a linha de
+// liquidação já traz o valor líquido em Crédito/Débito).
+// Agrupa itens em "linhas" por posição X (não Y!) — achado real testando
+// com o PDF de 206 páginas da Fast Lube: esse relatório do Itaú vem com a
+// página internamente ROTACIONADA, então o que pdfjsLib chama de "x" no
+// transform de cada item é, na prática, a posição VERTICAL (linha) da
+// tabela, e "y" é a posição HORIZONTAL (coluna) — confirmado inspecionando
+// item por item (mesma linha real = mesmo x quase exato, ~364,00; linhas
+// vizinhas variam ~28 no x; dentro da linha, y cresce lendo da 1ª coluna
+// até a última). Sem essa troca de eixo, juntar content.items em ordem
+// original intercala texto de linhas diferentes e o regex vaza de um
+// registro pro outro (chegou a extrair só 43 de ~1800 liquidações).
+function _lancctbAgruparLinhasPorX(itens,tolerancia){
+  if(tolerancia===undefined) tolerancia=3;
+  const ordenado=[...itens].sort((a,b)=>a.x-b.x||a.y-b.y);
+  const linhas=[];
+  ordenado.forEach(it=>{
+    let linha=linhas.find(l=>Math.abs(l.x-it.x)<=tolerancia);
+    if(!linha){ linha={x:it.x,itens:[]}; linhas.push(linha); }
+    linha.itens.push(it);
+  });
+  linhas.forEach(l=>l.itens.sort((a,b)=>a.y-b.y));
+  return linhas;
+}
+async function _lancctbParsearItauCobrancaPdf(pdf){
+  const itens1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const texto1=itens1.map(it=>it.str).join(' ');
+  if(!/extrato de movimenta[cç][aã]o de boletos/i.test(texto1)) return null;
+
+  const padraoData=/movimenta[cç][aã]o detalhada\s*\((\d{2}\/\d{2}\/\d{4})\)/i;
+  const padraoLinha=/^\d+\s+(.+?)\s+boleto\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{2}\/\d{2}\/\d{4})\s+(\S+)\s+([\d.,]+)\s+(liquida[cç][aã]o|entrada)\s+-\s+([\d.,]+)/i;
+  const registros=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const textoPagina=itens.map(it=>it.str).join(' ');
+    const mData=textoPagina.match(padraoData);
+    if(!mData) continue;
+    const dataPagina=_lancctbFluxoParseData(mData[1]);
+    const linhas=_lancctbAgruparLinhasPorX(itens);
+    for(const linha of linhas){
+      const textoLinha=linha.itens.map(it=>it.str).join(' ').trim();
+      const m=textoLinha.match(padraoLinha);
+      if(!m) continue;
+      if(!/liquida[cç][aã]o/i.test(m[8])) continue; // ignora "entrada" (boleto ainda não pago)
+      registros.push({
+        data_pagamento: dataPagina,
+        cliente_fornecedor_nome: m[1].trim(),
+        cnpj_cpf: '',
+        documento_numero: _lancctbDocumentoDeSeuNumero(m[4],m[2]),
+        data_vencimento: _lancctbFluxoParseData(m[5]),
+        valor_documento: _lancctbFluxoParseValorCel(m[7]),
+        valor_pago: _lancctbFluxoParseValorCel(m[9]),
+        juros:0, multa:0, desconto:0, observacao:'',
+      });
+    }
+  }
+  return registros;
+}
+// Dispatcher: tenta os formatos dedicados de recebimento primeiro (rápido,
+// grátis, sem IA); se não reconhecer o layout, cai pro caminho genérico
+// (Edge Function via IA) — mesmo comportamento de sempre pra pagamento e
+// pra qualquer PDF de recebimento que não seja um desses 2 bancos.
+async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
+  const ehExcel=/\.(xlsx?|csv)$/i.test(file.name);
+  const ehPdf=/\.pdf$/i.test(file.name);
+  const bucket=tipo==='recebimento'?'comprovantes-recebimento':'comprovantes';
+
+  if(tipo==='recebimento'&&ehExcel){
+    status.textContent=`"${file.name}" — lendo planilha…`;
+    const buf=await file.arrayBuffer();
+    const wb=XLSX.read(buf,{type:'array',cellDates:true});
+    const ws=wb.Sheets[wb.SheetNames[0]];
+    const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+    const registros=_lancctbParsearBBCobrancaExcel(matriz);
+    if(!registros||!registros.length) throw new Error('Planilha não reconhecida — esperava o formato "BoletosConsulta" do Banco do Brasil.');
+    const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+    const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
+    return registros.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:erroUpload?null:pathArquivo}));
+  }
+
+  if(tipo==='recebimento'&&ehPdf){
+    _convItauGarantirWorker();
+    const buf=await file.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    status.textContent=`"${file.name}" — tentando reconhecer layout (sem IA)…`;
+    const reconhecido=await _lancctbParsearItauCobrancaPdf(pdf);
+    if(reconhecido&&reconhecido.length){
+      const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+      const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
+      return reconhecido.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:erroUpload?null:pathArquivo}));
+    }
+    // layout não reconhecido — cai pro caminho genérico via IA abaixo
+  }
+
+  return _lancctbProcessarUmComprovantePdf(file,status);
 }
 // Chama uma Edge Function de extração (comprovante/extrato) uma vez, com o
 // corpo já pronto ({texto} ou {imagens}) — erro amigável se falhar.
@@ -18253,7 +18405,7 @@ async function processarLancctbUploadComprovante(){
   const files=Array.from(document.getElementById('lancctbComprovArquivo')?.files||[]);
   const status=document.getElementById('lancctbComprovStatus');
   const btn=document.getElementById('lancctbComprovProcessarBtn');
-  if(!files.length){ toast('Selecione ao menos um arquivo PDF','err'); return; }
+  if(!files.length){ toast('Selecione ao menos um arquivo','err'); return; }
   btn.disabled=true; btn.textContent='Extraindo…';
   const encontrados=[];
   const erros=[];
@@ -18261,7 +18413,7 @@ async function processarLancctbUploadComprovante(){
     const file=files[i];
     status.textContent=`Processando arquivo ${i+1} de ${files.length}: "${file.name}"…`;
     try{
-      const comprovantes=await _lancctbProcessarUmComprovantePdf(file,status);
+      const comprovantes=await _lancctbProcessarUmArquivoComprovante(file,status,_lancctbUploadComprovTipo);
       encontrados.push(...comprovantes);
     }catch(e){
       console.error('Falha ao processar '+file.name+':',e);
@@ -18392,7 +18544,7 @@ async function renderLancctbComprovantesReceb(){
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbComprovantesRecebExcel()">📊 Gerar Excel</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbComprovantesRecebConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes comprovantes</button>
-      <button class="btn bp bsm" onclick="abrirLancctbUploadComprovanteModal('recebimento')">⬆ Upload PDF de Recebimentos</button>
+      <button class="btn bp bsm" onclick="abrirLancctbUploadComprovanteModal('recebimento')">⬆ Upload de Recebimentos</button>
     </div>
   </div>
   <div style="overflow-x:auto">
