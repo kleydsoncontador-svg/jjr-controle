@@ -5408,6 +5408,7 @@ function refreshCurrentPage(){
   else if(currentPage==='declaracoes') renderDecl(currentDeclTab||'ecd');
   else if(currentPage==='tribAtraso') renderTribAtraso();
   else if(currentPage==='lucros') initLucros();
+  else if(currentPage==='lancctb') _lancctbSincronizarComFechamento();
 }
 
 // ─── Navigation ─────────────────────────────────────────────────────────────
@@ -16094,6 +16095,24 @@ function trocarLancctbAba(aba){
   renderLancctbAbas();
   renderLancctbConteudo();
 }
+// Sincroniza o mês de todas as abas com filtro de mês (Comprovantes de
+// Pagamento/Recebimento/Salários, Extrato Bancário, Fluxo de Caixa) com o
+// "Fechamento Atual" global (topo do site) — pedido do usuário (05/09/2026):
+// mudar o Fechamento Atual lá em cima deve levar essas telas pro mesmo mês
+// por padrão, mas sem travar a navegação livre (‹ › continuam funcionando
+// normal depois, é só o PONTO DE PARTIDA que muda). Só chamada de dentro de
+// refreshCurrentPage() (periodPrev/periodNext), nunca em renders normais —
+// senão resetaria a navegação manual do usuário toda hora sem necessidade.
+function _lancctbSincronizarComFechamento(){
+  const mes=S.fechAtual();
+  if(!mes) return;
+  _lancctbComprovMes=mes; _lancctbComprovPagina=0;
+  _lancctbComprovRecebMes=mes; _lancctbComprovRecebPagina=0;
+  _lancctbComprovSalMes=mes; _lancctbComprovSalPagina=0;
+  _lancctbExtratoMes=mes; _lancctbExtratoPagina=0;
+  _lancctbFluxoMes=mes; _lancctbFluxoPagina=0;
+  if(_lancctbEidAtual) renderLancctbConteudo();
+}
 function renderLancctbConteudo(){
   const el=document.getElementById('lancctbConteudoAba');
   const aba=LANCCTB_ABAS.find(a=>a.id===_lancctbAbaAtiva);
@@ -17369,22 +17388,22 @@ async function renderLancctbAgencias(){
   if(!agencias||!agencias.length){
     html+=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma Agência Bancária cadastrada ainda.</div>`;
   } else {
-    html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px">';
+    html+='<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:16px">';
     agencias.forEach(a=>{
       const contaVinc=a.plano_contas?`${esc(a.plano_contas.numero_conta)} / ${esc(a.plano_contas.classificacao)}`:'— sem vínculo —';
       const logoUrl=_lancctbBancoLogoUrl(a.banco_nome);
       const emblema=logoUrl
-        ? `<img src="${logoUrl}" style="width:20px;height:20px;border-radius:4px;object-fit:contain;vertical-align:middle" onerror="this.outerHTML='🏦'">`
+        ? `<img src="${logoUrl}" style="width:24px;height:24px;border-radius:5px;object-fit:contain;vertical-align:middle" onerror="this.outerHTML='🏦'">`
         : '🏦';
-      html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--white)">
-        <div style="font-weight:700;color:#1E3558;margin-bottom:8px">${emblema} ${esc(a.banco_nome||'')}</div>
-        <div style="font-size:12.5px;display:grid;grid-template-columns:auto 1fr;gap:4px 10px;color:var(--ink)">
+      html+=`<div style="border:1px solid var(--border);border-radius:10px;padding:20px;background:var(--white)">
+        <div style="font-weight:700;color:#1E3558;margin-bottom:12px;font-size:15px">${emblema} ${esc(a.banco_nome||'')}</div>
+        <div style="font-size:13.5px;display:grid;grid-template-columns:auto 1fr;gap:7px 12px;color:var(--ink)">
           <span style="color:var(--slate)">Agência</span><span>${esc(a.agencia||'')}</span>
           <span style="color:var(--slate)">Conta Corrente</span><span>${esc(a.conta_corrente||'')}${a.digito_cc?'-'+esc(a.digito_cc):''}</span>
           <span style="color:var(--slate)">Conta / Classificação</span><span>${contaVinc}</span>
           ${a.origem_extrato==='mister_contador'?'<span style="color:var(--slate)">Origem</span><span>🅼 Mister Contador</span>':''}
         </div>
-        <div style="display:flex;gap:8px;margin-top:10px;padding-top:10px;border-top:1px solid var(--border)">
+        <div style="display:flex;gap:10px;margin-top:14px;padding-top:14px;border-top:1px solid var(--border)">
           <button class="btn bo bsm" onclick="abrirLancctbAgenciaModal(${a.id})">✎ Editar</button>
           <button class="btn bo bsm" style="color:#dc2626" onclick="excluirLancctbAgencia(${a.id})">🗑️ Excluir</button>
         </div>
@@ -19475,6 +19494,68 @@ async function remarcarLancctbComprovVisaoGeral(contaId){
   const qtd=await _lancctbMarcarMesesComprovVisaoGeral(contaId,conta.doc_visao_geral_comprovantes_nome);
   toast(`${qtd} mês(es) marcado(s) no Visão Geral.`,'ok');
 }
+// Extrato Bancário × Visão Geral — reaproveita o MESMO campo já usado pela
+// Fase 13 (agencias_bancarias.doc_visao_geral_nome, hoje configurado só via
+// modal de Agência Bancária); isso só adiciona o seletor direto na tela do
+// Extrato, pedido do usuário (05/09/2026), e o "marcar retroativo" que
+// Comprovantes já tinha. Editar aqui ou no modal de Agência Bancária muda o
+// mesmo valor — não é um vínculo separado.
+async function _lancctbMarcarMesesExtratoVisaoGeral(contaId,nomeDoc){
+  if(!nomeDoc) return 0;
+  const { data: existentes } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    .select('data_pagamento').eq('conta_bancaria_id',contaId));
+  const meses=[...new Set((existentes||[]).map(r=>r.data_pagamento).filter(Boolean).map(d=>d.slice(0,7)))];
+  meses.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,nomeDoc,m));
+  return meses.length;
+}
+async function salvarLancctbExtratoDocVisaoGeral(contaId,nomeDoc){
+  const { error } = await _supaClient.from('agencias_bancarias').update({doc_visao_geral_nome:nomeDoc||null}).eq('id',contaId);
+  if(error){ toast('Erro ao salvar vínculo: '+error.message,'err'); return; }
+  const conta=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaId));
+  if(conta) conta.doc_visao_geral_nome=nomeDoc||null;
+  if(nomeDoc){
+    const qtd=await _lancctbMarcarMesesExtratoVisaoGeral(contaId,nomeDoc);
+    toast(`Vínculo salvo — ${qtd} mês(es) já enviado(s) marcado(s) no Visão Geral.`,'ok');
+    renderLancctbExtrato();
+    return;
+  }
+  toast('Vínculo salvo.','ok');
+}
+async function remarcarLancctbExtratoVisaoGeral(contaId){
+  const conta=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaId));
+  if(!conta?.doc_visao_geral_nome){ toast('Vincule a um item do Visão Geral primeiro.','err'); return; }
+  const qtd=await _lancctbMarcarMesesExtratoVisaoGeral(contaId,conta.doc_visao_geral_nome);
+  toast(`${qtd} mês(es) marcado(s) no Visão Geral.`,'ok');
+}
+// Fluxo de Caixa × Visão Geral — campo próprio (doc_visao_geral_fluxo_nome,
+// Fase 18), já que é um documento diferente do Extrato/Comprovantes.
+async function _lancctbMarcarMesesFluxoVisaoGeral(contaId,nomeDoc){
+  if(!nomeDoc) return 0;
+  const { data: existentes } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    .select('data').eq('conta_bancaria_id',contaId));
+  const meses=[...new Set((existentes||[]).map(r=>r.data).filter(Boolean).map(d=>d.slice(0,7)))];
+  meses.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,nomeDoc,m));
+  return meses.length;
+}
+async function salvarLancctbFluxoDocVisaoGeral(contaId,nomeDoc){
+  const { error } = await _supaClient.from('agencias_bancarias').update({doc_visao_geral_fluxo_nome:nomeDoc||null}).eq('id',contaId);
+  if(error){ toast('Erro ao salvar vínculo: '+error.message,'err'); return; }
+  const conta=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaId));
+  if(conta) conta.doc_visao_geral_fluxo_nome=nomeDoc||null;
+  if(nomeDoc){
+    const qtd=await _lancctbMarcarMesesFluxoVisaoGeral(contaId,nomeDoc);
+    toast(`Vínculo salvo — ${qtd} mês(es) já enviado(s) marcado(s) no Visão Geral.`,'ok');
+    renderLancctbFluxoCaixa();
+    return;
+  }
+  toast('Vínculo salvo.','ok');
+}
+async function remarcarLancctbFluxoVisaoGeral(contaId){
+  const conta=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaId));
+  if(!conta?.doc_visao_geral_fluxo_nome){ toast('Vincule a um item do Visão Geral primeiro.','err'); return; }
+  const qtd=await _lancctbMarcarMesesFluxoVisaoGeral(contaId,conta.doc_visao_geral_fluxo_nome);
+  toast(`${qtd} mês(es) marcado(s) no Visão Geral.`,'ok');
+}
 function exportarLancctbComprovantesExcel(){
   if(!_lancctbUltimoComprov.length){ toast('Nada para exportar nesta página.','err'); return; }
   const header=['Dt Pgto','Cliente/Fornecedor','CPF/CNPJ','Documento','Dt Vcto','Valor','Status'];
@@ -20263,7 +20344,7 @@ async function renderLancctbFluxoCaixa(){
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
 
-  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente,doc_visao_geral_fluxo_nome').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
   _lancctbUltimasAgencias=agencias||_lancctbUltimasAgencias;
   const agenciasPorId={}; (agencias||[]).forEach(a=>agenciasPorId[a.id]=a);
 
@@ -20285,6 +20366,16 @@ async function renderLancctbFluxoCaixa(){
 
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   let html=(agencias&&agencias.length)?_lancctbContaCardsHtml(agencias,_lancctbFluxoContaSel,'_lancctbFluxoSelecionarConta',true):'';
+  const contaFluxoSel=_lancctbFluxoContaSel?agenciasPorId[_lancctbFluxoContaSel]:null;
+  if(contaFluxoSel){
+    html+=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;flex-wrap:wrap">
+      <span style="color:var(--slate)">🔗 Vincular Fluxo de Caixa desta conta ao item do Visão Geral:</span>
+      <select id="lancctbFluxoDocVisaoGeral" class="si" style="min-width:320px;flex:1;max-width:480px" onchange="salvarLancctbFluxoDocVisaoGeral('${contaFluxoSel.id}',this.value)">
+        ${_lancctbOpcoesDocVisaoGeral(eid,contaFluxoSel.doc_visao_geral_fluxo_nome)}
+      </select>
+      ${contaFluxoSel.doc_visao_geral_fluxo_nome?`<button class="btn bo bsm" title="Marca de novo no Visão Geral todos os meses que já têm lançamento de fluxo de caixa nesta conta" onclick="remarcarLancctbFluxoVisaoGeral('${contaFluxoSel.id}')">🔄 Marcar meses já enviados</button>`:''}
+    </div>`;
+  }
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       ${_lancctbMesPickerHtml(_lancctbFluxoMes,'_lancctbFluxoMudarMes')}
@@ -20532,6 +20623,13 @@ async function confirmarLancctbFluxoImportPdf(){
   const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(registros);
   if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
   toast(`${registros.length} lançamento(s) de fluxo de caixa importado(s)`,'ok');
+  if(contaSel){
+    const contaVinculada=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaSel));
+    if(contaVinculada?.doc_visao_geral_fluxo_nome){
+      const meses=[...new Set(registros.map(r=>r.data).filter(Boolean).map(d=>d.slice(0,7)))];
+      meses.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,contaVinculada.doc_visao_geral_fluxo_nome,m));
+    }
+  }
   closeModal('mLancctbUpload');
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
@@ -20605,6 +20703,13 @@ async function confirmarLancctbFluxoImport(){
     if(status) status.textContent=`Importando… ${importados}/${registros.length}`;
   }
   toast(`${importados} lançamento(s) de fluxo de caixa importado(s)`,'ok');
+  if(contaSel){
+    const contaVinculada=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaSel));
+    if(contaVinculada?.doc_visao_geral_fluxo_nome){
+      const meses=[...new Set(registros.map(r=>r.data).filter(Boolean).map(d=>d.slice(0,7)))];
+      meses.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,contaVinculada.doc_visao_geral_fluxo_nome,m));
+    }
+  }
   closeModal('mLancctbUpload');
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
@@ -20728,7 +20833,8 @@ async function renderLancctbExtrato(){
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
 
-  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente,saldo_inicial').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente,saldo_inicial,doc_visao_geral_nome').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  _lancctbUltimasAgencias=agencias||_lancctbUltimasAgencias;
   if(!agencias||!agencias.length){
     el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Cadastre uma conta em "Agência Bancária" antes de importar o extrato — cada lançamento precisa estar vinculado a uma conta.</div>`;
     return;
@@ -20769,6 +20875,15 @@ async function renderLancctbExtrato(){
 
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   let html=_lancctbContaCardsHtml(agencias,_lancctbExtratoContaSel,'_lancctbExtratoSelecionarConta',false);
+  if(contaAtual){
+    html+=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;flex-wrap:wrap">
+      <span style="color:var(--slate)">🔗 Vincular Extrato desta conta ao item do Visão Geral:</span>
+      <select id="lancctbExtratoDocVisaoGeral" class="si" style="min-width:320px;flex:1;max-width:480px" onchange="salvarLancctbExtratoDocVisaoGeral('${contaAtual.id}',this.value)">
+        ${_lancctbOpcoesDocVisaoGeral(eid,contaAtual.doc_visao_geral_nome)}
+      </select>
+      ${contaAtual.doc_visao_geral_nome?`<button class="btn bo bsm" title="Marca de novo no Visão Geral todos os meses que já têm lançamento de extrato nesta conta" onclick="remarcarLancctbExtratoVisaoGeral('${contaAtual.id}')">🔄 Marcar meses já enviados</button>`:''}
+    </div>`;
+  }
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     ${_lancctbMesPickerHtml(_lancctbExtratoMes,'_lancctbExtratoMudarMes')}
     <div style="display:flex;align-items:center;gap:6px;font-size:12.5px">
