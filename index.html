@@ -21518,6 +21518,92 @@ async function _lancctbParsearExtratoItauMensal(pdf){
   if(!lancamentos.length) return null;
   return {lancamentos,saldoAnteriorDoc,saldoFinalDoc};
 }
+// "Extrato de conta corrente" do Banco do Brasil (Consultas do internet
+// banking, confirmado com arquivo real Fast Lube Ag 3050-3 CC 21568-6,
+// 07/2026, 90 páginas). Layout NÃO é tabela por posição X — é uma
+// sequência de tokens por linha: "Dt.balancete Dt.movimento Ag.origem Lote
+// Histórico [Documento] Valor D/C [Saldo D/C]". O 2º campo ("Dt.movimento")
+// normalmente vem "0000" mas às vezes traz outro código (ex: "3050",
+// achado real numa Transferência enviada) — não pode ser validado como
+// constante, só capturado e ignorado. Confirmado com o usuário: D = saída
+// (débito), C = entrada (crédito). O histórico às vezes quebra em uma 2ª
+// linha física (ex: "01/07 09:01 28237397000159 L N D INDU" sob um Pix, ou
+// "DUA ELETRONICO SEFAZ ES" sob um Imposto) — essa linha de continuação
+// NÃO começa com data completa DD/MM/AAAA, e é sempre anexada ao histórico
+// do lançamento anterior.
+function _lancctbBBPopParDC(tokens){
+  if(tokens.length>=2){
+    const dc=tokens[tokens.length-1];
+    const val=tokens[tokens.length-2];
+    if(/^[DC]$/.test(dc)&&/^-?[\d.]+,\d{2}$/.test(val)){
+      tokens.pop();tokens.pop();
+      return {valor:val,dc};
+    }
+  }
+  return null;
+}
+async function _lancctbParsearExtratoBBMensal(pdf){
+  const itens1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(!/extrato de conta corrente/i.test(textoPagina1)||!/dt\.\s*balancete/i.test(textoPagina1)) return null;
+  const mPeriodo=textoPagina1.match(/per[ií]odo do extrato\s*(\d{2})\s*\/\s*(\d{4})/i);
+
+  const IGNORAR=/^(consultas|extrato de conta corrente|cliente\s*-\s*conta atual|ag[eê]ncia\s|conta corrente\s|per[ií]odo do extrato|lan[cç]amentos$|dt\.\s*balancete|servi[cç]o de atendimento|para deficientes|transa[cç][aã]o efetuada|-{5,}|^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2}$|^[A-Z]\d{10,}$)/i;
+
+  const padraoInicio=/^(\d{2})\/(\d{2})\/(\d{4})\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$/;
+  const lancamentos=[];
+  let saldoAnteriorDoc=null, saldoFinalDoc=null, encerrado=false;
+
+  for(let p=1;p<=pdf.numPages&&!encerrado;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const textos=_lancctbAgruparLinhasPorY(itens).map(l=>l.itens.map(i=>i.str).join(' ').trim()).filter(t=>t);
+    for(const t of textos){
+      if(encerrado) break;
+      if(IGNORAR.test(t)) continue;
+      const mIni=t.match(padraoInicio);
+      if(!mIni){
+        // Linha de continuação do histórico — anexa ao último lançamento.
+        if(lancamentos.length) lancamentos[lancamentos.length-1].historico=(lancamentos[lancamentos.length-1].historico+' '+t).trim();
+        continue;
+      }
+      const [,dd,mm,aaaa,,,,resto]=mIni;
+      const tokens=resto.split(/\s+/).filter(Boolean);
+      const parA=_lancctbBBPopParDC(tokens);
+      const parB=_lancctbBBPopParDC(tokens);
+      const valorPar=parB||parA, saldoPar=parB?parA:null;
+      if(!valorPar) continue; // linha sem valor reconhecível — não arrisca gravar
+      let documento=null;
+      if(tokens.length&&/^[\d][\d.]*$/.test(tokens[tokens.length-1])) documento=tokens.pop();
+      let historico=tokens.join(' ').trim();
+      const historicoNorm=historico.replace(/^s\s+a\s+l\s+d\s+o$/i,'SALDO');
+
+      if(/^saldo anterior$/i.test(historico)){
+        const v=_lancctbParseValorBR(valorPar.valor);
+        saldoAnteriorDoc=valorPar.dc==='D'?-v:v;
+        continue;
+      }
+      if(/^saldo$/i.test(historicoNorm)){
+        const v=_lancctbParseValorBR(valorPar.valor);
+        saldoFinalDoc=valorPar.dc==='D'?-v:v;
+        encerrado=true;
+        continue;
+      }
+
+      const valorNum=_lancctbParseValorBR(valorPar.valor);
+      lancamentos.push({
+        data:`${aaaa}-${mm}-${dd}`,
+        historico:historico||'(sem histórico)',
+        valor_entrada:valorPar.dc==='C'?valorNum:0,
+        valor_saida:valorPar.dc==='D'?valorNum:0,
+        documento:documento||null,
+        _saldoLinha: saldoPar?(saldoPar.dc==='D'?-_lancctbParseValorBR(saldoPar.valor):_lancctbParseValorBR(saldoPar.valor)):null,
+      });
+    }
+  }
+  if(!lancamentos.length) return null;
+  lancamentos.forEach(l=>delete l._saldoLinha);
+  return {lancamentos,saldoAnteriorDoc,saldoFinalDoc,mesRef:mPeriodo?parseInt(mPeriodo[1],10):null,anoRef:mPeriodo?parseInt(mPeriodo[2],10):null};
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -21538,7 +21624,7 @@ async function processarLancctbUploadExtrato(forcarIA){
 
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
-        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoItauMensal(pdf));
+        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoItauMensal(pdf));
       })();
       if(reconhecido){
         origem='pdf_estruturado';
@@ -21553,7 +21639,7 @@ async function processarLancctbUploadExtrato(forcarIA){
             ? ' ✓ saldo final bate com o do extrato.'
             : ` ⚠ saldo final calculado (R$ ${_fmt(saldoCalculado)}) diverge do impresso no extrato (R$ ${_fmt(reconhecido.saldoFinalDoc)}) — confira antes de salvar.`;
         }
-        const nomeLayout=reconhecido.mesPt?'Mister Contador':'Itaú';
+        const nomeLayout=reconhecido.mesPt?'Mister Contador':(reconhecido.mesRef?'Banco do Brasil':'Itaú');
         status.textContent=`Layout reconhecido (${nomeLayout}, leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}`;
         _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
         renderLancctbExtratoPreview();
