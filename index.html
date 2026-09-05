@@ -15810,7 +15810,7 @@ const LANCCTB_ABAS=[
   {id:'nfe-saida',     label:'NF-e Saída',   tipoDoc:'nfe',  direcaoNf:'venda'},
   {id:'nfse-tomado',   label:'NFS-e Tomado', tipoDoc:'nfse', direcaoNf:'compra'},
   {id:'nfse-prestado', label:'NFS-e Prestado', tipoDoc:'nfse', direcaoNf:'venda'},
-  {id:'comprovantes', label:'Comprovantes'},
+  {id:'comprovantes', label:'Comprovantes de Pagamentos'},
   {id:'comprovantes-receb', label:'Comprovantes de Recebimento'},
   {id:'extrato', label:'Extrato Bancário'},
   {id:'fluxo-caixa', label:'Fluxo de Caixa'},
@@ -18471,6 +18471,14 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     // rígida (ver LANCCTB_MATCH_TOLERANCIA_VALOR_NF/JANELA_DIAS_NF).
     const nfCandidatas=parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
+      // Sem isso, uma saída sem CNPJ âncora (histórico genérico tipo "Tar/
+      // Custas Cobrança"/"Sispag Salários") podia casar por coincidência de
+      // valor+data contra uma NF de VENDA da própria empresa — aí
+      // nome_emitente é o nome da própria empresa, virando um "Pagamento a
+      // [nome da própria empresa]" sem sentido nenhum (bug real encontrado
+      // pelo usuário 05/09/2026, Fast Lube). Direção tem que bater sempre,
+      // com ou sem CNPJ âncora.
+      if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
       if(Math.abs(p.valor_parcela-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR_NF) return false;
       if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
       if(cnpjAncora){
@@ -18498,6 +18506,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     } else if(cnpjAncora){
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
+        if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
         const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
         return cnpjNf===cnpjAncora;
@@ -19279,7 +19288,8 @@ async function renderLancctbComprovantes(){
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
 
-  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente,doc_visao_geral_comprovantes_nome').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  _lancctbUltimasAgenciasComprov=agencias||[];
 
   const from=_lancctbComprovPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
@@ -19299,6 +19309,15 @@ async function renderLancctbComprovantes(){
 
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   let html=(agencias&&agencias.length)?_lancctbContaCardsHtml(agencias,_lancctbComprovContaSel,'_lancctbComprovSelecionarConta',true):'';
+  const contaComprovSel=(agencias||[]).find(a=>String(a.id)===String(_lancctbComprovContaSel));
+  if(contaComprovSel){
+    html+=`<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;font-size:12px;flex-wrap:wrap">
+      <span style="color:var(--slate)">🔗 Vincular Comprovantes desta conta ao item do Visão Geral:</span>
+      <select id="lancctbComprovDocVisaoGeral" class="si" style="max-width:280px" onchange="salvarLancctbComprovDocVisaoGeral('${contaComprovSel.id}',this.value)">
+        ${_lancctbOpcoesDocVisaoGeral(eid,contaComprovSel.doc_visao_geral_comprovantes_nome)}
+      </select>
+    </div>`;
+  }
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     ${_lancctbMesPickerHtml(_lancctbComprovMes,'_lancctbComprovMudarMes')}
     <div style="display:flex;gap:6px">
@@ -19349,6 +19368,17 @@ async function renderLancctbComprovantes(){
   el.innerHTML=html;
 }
 let _lancctbUltimoComprov=[];
+let _lancctbUltimasAgenciasComprov=[];
+// Vínculo Comprovantes de Pagamento × Visão Geral (Fase 16) — mesmo
+// mecanismo do Extrato/Aplicações Financeiras, campo próprio por ser um
+// documento diferente (ver comentário no schema da Fase 16).
+async function salvarLancctbComprovDocVisaoGeral(contaId,nomeDoc){
+  const { error } = await _supaClient.from('agencias_bancarias').update({doc_visao_geral_comprovantes_nome:nomeDoc||null}).eq('id',contaId);
+  if(error){ toast('Erro ao salvar vínculo: '+error.message,'err'); return; }
+  const conta=_lancctbUltimasAgenciasComprov.find(a=>String(a.id)===String(contaId));
+  if(conta) conta.doc_visao_geral_comprovantes_nome=nomeDoc||null;
+  toast('Vínculo salvo.','ok');
+}
 function exportarLancctbComprovantesExcel(){
   if(!_lancctbUltimoComprov.length){ toast('Nada para exportar nesta página.','err'); return; }
   const header=['Dt Pgto','Cliente/Fornecedor','CPF/CNPJ','Documento','Dt Vcto','Valor','Status'];
@@ -19722,6 +19752,15 @@ async function confirmarLancctbImportComprovantes(){
   const { error } = await _supaClient.from(ehReceb?'comprovantes_recebimento':'comprovantes_bancarios').insert(registros);
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
   toast(`${registros.length} comprovante(s) salvo(s) com sucesso`,'ok');
+  // Vínculo com o Visão Geral (Fase 16) — só Comprovantes de Pagamento por
+  // enquanto, pedido do usuário (05/09/2026); mesma ideia do Extrato/Aplicações.
+  if(!ehReceb){
+    const contaVinculada=_lancctbUltimasAgenciasComprov.find(a=>String(a.id)===String(_lancctbComprovContaSel));
+    if(contaVinculada?.doc_visao_geral_comprovantes_nome){
+      const meses=[...new Set(registros.map(r=>r.data_pagamento).filter(Boolean).map(d=>d.slice(0,7)))];
+      meses.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,contaVinculada.doc_visao_geral_comprovantes_nome,m));
+    }
+  }
   closeModal('mLancctbUpload');
   if(ehReceb){ _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb(); }
   else { _lancctbComprovPagina=0; renderLancctbComprovantes(); }
