@@ -3399,6 +3399,9 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   <div style="min-width:0;flex:1">
     <div id="lancctbActivityChipTitulo" style="font-size:12px;font-weight:700;margin-bottom:2px;color:#fff">Processando…</div>
     <div id="lancctbActivityChipStatusHost" style="font-size:11.5px;color:#cbd5e1"></div>
+    <div id="lancctbActivityChipBarTrack" style="display:none;height:4px;background:rgba(255,255,255,.18);border-radius:2px;margin-top:6px;overflow:hidden">
+      <div id="lancctbActivityChipBarFill" style="height:100%;width:0%;background:#22c55e;transition:width .25s"></div>
+    </div>
   </div>
   <span style="font-size:10.5px;opacity:.8;white-space:nowrap">clique p/ abrir</span>
 </div>
@@ -5438,6 +5441,9 @@ function goCompPage(page){
 
 function goPage(id){
   currentPage = id;
+  // Se tiver um upload/import do Lançamentos Contábeis rodando, minimiza
+  // ele sozinho (chip com progresso) em vez de só sumir sem aviso nenhum.
+  if(id!=='lancctb') _lancctbAutoMinimizarSeAberto();
   // Fechar todas as modais ao navegar
   document.querySelectorAll('.mb').forEach(m => m.style.display = 'none');
   document.getElementById('gEmpSel').style.display = '';
@@ -8123,22 +8129,41 @@ function closeModal(id){ const el=document.getElementById(id); if(el){el.classLi
 // novo. O modal em si só fica escondido (display:none) — como o "🗕" não
 // existe em modais de confirmação simples, isso só é usado nos que têm
 // processamento longo (upload, import).
-let _lancctbMinimizado=null; // {modalId, statusElId, corOriginal, origParent, origNext}
+let _lancctbMinimizado=null; // {modalId, statusElId, corOriginal, origParent, origNext, observer}
+// Extrai "N/M" (ou "N de M") do texto de status pra preencher a barrinha do
+// chip — funciona com qualquer mensagem já existente sem precisar mudar
+// nenhuma das funções de processamento (elas só continuam escrevendo texto
+// livre, tipo "Processando 3/26..."). Se não achar esse padrão, esconde a
+// barra e mostra só o texto (nem toda mensagem de status tem contagem).
+function _lancctbAtualizarBarraChip(statusEl){
+  const track=document.getElementById('lancctbActivityChipBarTrack');
+  const fill=document.getElementById('lancctbActivityChipBarFill');
+  if(!track||!fill) return;
+  const m=(statusEl.textContent||'').match(/(\d+)\s*(?:\/|de)\s*(\d+)/i);
+  if(!m||+m[2]<=0){ track.style.display='none'; return; }
+  const pct=Math.max(0,Math.min(100,Math.round((+m[1]/+m[2])*100)));
+  fill.style.width=pct+'%';
+  track.style.display='block';
+}
 function minimizarLancctbModal(modalId,statusElId,titulo){
   const modalEl=document.getElementById(modalId);
   const statusEl=statusElId?document.getElementById(statusElId):null;
   if(!modalEl||!statusEl) return;
-  _lancctbMinimizado={ modalId, statusElId, corOriginal:statusEl.style.color, origParent:statusEl.parentNode, origNext:statusEl.nextSibling };
+  const observer=new MutationObserver(()=>_lancctbAtualizarBarraChip(statusEl));
+  observer.observe(statusEl,{characterData:true,childList:true,subtree:true});
+  _lancctbMinimizado={ modalId, statusElId, corOriginal:statusEl.style.color, origParent:statusEl.parentNode, origNext:statusEl.nextSibling, observer };
   modalEl.classList.remove('open');
   modalEl.style.display='none';
   document.getElementById('lancctbActivityChipTitulo').textContent=titulo||'Processando…';
   statusEl.style.color='#e2e8f0';
   document.getElementById('lancctbActivityChipStatusHost').appendChild(statusEl);
+  _lancctbAtualizarBarraChip(statusEl);
   document.getElementById('lancctbActivityChip').style.display='flex';
 }
 function restaurarLancctbModal(){
   if(!_lancctbMinimizado) return;
-  const { modalId, statusElId, corOriginal, origParent, origNext } = _lancctbMinimizado;
+  const { modalId, statusElId, corOriginal, origParent, origNext, observer } = _lancctbMinimizado;
+  if(observer) observer.disconnect();
   const statusEl=document.getElementById(statusElId);
   if(statusEl){
     statusEl.style.color=corOriginal||'';
@@ -8148,8 +8173,33 @@ function restaurarLancctbModal(){
     }
   }
   document.getElementById('lancctbActivityChip').style.display='none';
+  document.getElementById('lancctbActivityChipBarTrack').style.display='none';
   _lancctbMinimizado=null;
   openModal(modalId);
+}
+// Auto-minimiza um modal de upload/import que esteja ABERTO na hora de
+// navegar pra outro módulo — pedido do usuário (05/09/2026): antes disso,
+// só dava pra continuar o processamento em segundo plano clicando no "🗕"
+// manualmente; trocar de módulo sem clicar nele escondia o modal (goPage já
+// fechava todo .mb) mas sem nenhum indicador visual de que ainda tava
+// rodando. Chamada no início de goPage(), antes do fechamento genérico de
+// modais. Não faz nada se já estiver minimizado ou se nenhum dos modais de
+// processamento conhecidos estiver aberto.
+function _lancctbAutoMinimizarSeAberto(){
+  if(_lancctbMinimizado) return;
+  const candidatos=[
+    {modalId:'mLancctbUpload', statusId:_lancctbUploadStatusAtualId, titulo:_lancctbUploadTituloAtual},
+    {modalId:'mLancctbImportXml', statusId:'lancctbImportXmlStatus', titulo:'Importando XMLs da pasta local'},
+    {modalId:'mLancctbImportMes', statusId:'lancctbImportMesStatus', titulo:'Importar mês (XMLs)'},
+    {modalId:'mLancctbImportPlano', statusId:'lancctbPlanoImportStatus', titulo:'Importando Plano de Contas'},
+  ];
+  for(const c of candidatos){
+    const modalEl=document.getElementById(c.modalId);
+    if(modalEl&&modalEl.classList.contains('open')&&c.statusId){
+      minimizarLancctbModal(c.modalId,c.statusId,c.titulo);
+      return;
+    }
+  }
 }
 function setupBackdropClose(){
   document.querySelectorAll('.mb').forEach(mb=>{
