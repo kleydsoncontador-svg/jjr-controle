@@ -10982,15 +10982,28 @@ function _convMpRemoverAcentos(s){return String(s||'').normalize('NFD').replace(
 function gerarTxtMisterContador(cnpj,linhas){
   const cnpjLimpo=String(cnpj||'').replace(/\D/g,'');
   const partes=['|0000|'+cnpjLimpo+'|'];
-  linhas.forEach(function(l){
-    partes.push('|6000|X||||');
-    const valorFmt=Math.abs(parseFloat(l.valor)||0).toFixed(2).replace('.',',');
+  function linha6100(data,debito,credito,valor,historicoRaw){
+    const valorFmt=Math.abs(parseFloat(valor)||0).toFixed(2).replace('.',',');
     // "|" e quebras de linha quebrariam a separação de campos — nunca podem
     // aparecer dentro do histórico. O sistema que importa esse TXT ainda não
     // aceita acentuação/cedilha (apesar do layout em si suportar) — continua
     // saindo sem acento até isso mudar.
-    const historico=_convMpRemoverAcentos(String(l.historico||'')).replace(/\|/g,' ').replace(/[\r\n]+/g,' ').trim();
-    partes.push('|6100|'+(l.data||'')+'|'+(l.debito||'')+'|'+(l.credito||'')+'|'+valorFmt+'||'+historico+'||||');
+    const historico=_convMpRemoverAcentos(String(historicoRaw||'')).replace(/\|/g,' ').replace(/[\r\n]+/g,' ').trim();
+    partes.push('|6100|'+(data||'')+'|'+(debito||'')+'|'+(credito||'')+'|'+valorFmt+'||'+historico+'||||');
+  }
+  linhas.forEach(function(l){
+    if(l.rateio&&l.rateio.length){
+      // Rateio (1 lado do banco : N linhas do outro lado, ex.: DARF com
+      // IRPJ+CSLL) — layout confirmado em export real do Mister Contador:
+      // "|6000|C||||" (marcador de lote com mais de 1 linha) seguido de N
+      // "|6100|...|" onde cada linha preenche SÓ débito OU SÓ crédito,
+      // nunca os dois — a soma de cada lado fecha o valor total do lote.
+      partes.push('|6000|C||||');
+      l.rateio.forEach(function(r){ linha6100(r.data||l.data,r.debito,r.credito,r.valor,r.historico); });
+    } else {
+      partes.push('|6000|X||||');
+      linha6100(l.data,l.debito,l.credito,l.valor,l.historico);
+    }
   });
   return partes.join('\r\n');
 }
@@ -18450,8 +18463,15 @@ async function renderLancctbRegistroContabil(){
     });
   }
 
+  // Total de pendências da CONTA INTEIRA (sem os filtros da tela) — é o que
+  // decide se o botão "Gerar TXT" fica habilitado (só depois de 100%
+  // conciliado, pedido do usuário — mesma regra já usada na automação
+  // externa do Mister Contador, ver project_mistercontador_export_txt_auto).
+  const { count: pendenciasTotaisConta } = await _supaClient.from('lancamentos_extrato')
+    .select('id',{count:'exact',head:true}).eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel).eq('status_conciliacao','pendente');
+
   _lancctbUltimoRegistro=linhas;
-  el.innerHTML=_lancctbRegistroHtml({agencias,contaAtual,linhas,count});
+  el.innerHTML=_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0});
 }
 
 function _lancctbRegistroLinhaHtml(item,contaAtual){
@@ -18531,7 +18551,7 @@ function abrirLancctbRegraModalDeExtratoId(extratoId){
   if(item) return abrirLancctbRegraModalDeLinha(item);
 }
 
-function _lancctbRegistroHtml({agencias,contaAtual,linhas,count}){
+function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta}){
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
@@ -18549,6 +18569,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count}){
       <button class="btn bo bsm" id="lancctbProcessarNfBtn" onclick="_lancctbProcessarFonteRegistro('notas_fiscais')" title="Roda o matching só pra pendências que batem direto com uma Nota Fiscal">🔄 Processar Notas Fiscais</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
+      <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) nesta conta — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis desta conta, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
     </div>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:14px">
@@ -18648,6 +18669,85 @@ function exportarLancctbRegistroExcel(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Registro Contábil');
   const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
   XLSX.writeFile(wb,`RegistroContabil_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+// Slug curto de banco pra nome de arquivo (reaproveita o mesmo mapeamento
+// nome→domínio já usado pro favicon do card da conta — ver LANCCTB_BANCO_DOMINIOS).
+function _lancctbBancoSlug(nomeBanco){
+  const norm=(nomeBanco||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+  const achado=LANCCTB_BANCO_DOMINIOS.find(([re])=>re.test(norm));
+  return achado?achado[1].split('.')[0]:(norm.replace(/[^a-z0-9]/g,'')||'banco');
+}
+// "Gerar TXT" do Registro Contábil — só fica habilitado com a conta 100%
+// conciliada (checado em renderLancctbRegistroContabil via pendenciasTotaisConta,
+// pedido do usuário 05/09/2026). Exporta TODOS os lançamentos contábeis não
+// estornados dessa conta (não só a página atual — por isso reconsulta do
+// zero em vez de reaproveitar _lancctbUltimoRegistro) no MESMO layout
+// |0000|/|6000|/|6100| já usado por todo TXT do site (gerarTxtMisterContador),
+// incluindo lotes de rateio (mais de 1 débito ou crédito por lote).
+async function exportarLancctbRegistroContabilTxt(){
+  const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
+  if(!eid||!contaId){ toast('Selecione uma empresa e uma conta.','err'); return; }
+
+  const { count: pendentes } = await _supaClient.from('lancamentos_extrato')
+    .select('id',{count:'exact',head:true}).eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente');
+  if(pendentes){ toast(`Ainda faltam ${pendentes} pendência(s) nesta conta — não dá pra gerar o TXT.`,'err'); return; }
+
+  const emp=S.emps().find(e=>String(e.eid)===String(eid));
+  const cnpjLimpo=(emp?.cnpj||'').replace(/\D/g,'');
+  if(!cnpjLimpo){ toast('Empresa sem CNPJ cadastrado — não é possível gerar o TXT.','err'); return; }
+
+  const { data: contaInfo } = await _supaClient.from('agencias_bancarias')
+    .select('banco_nome,agencia,conta_corrente').eq('id',contaId).single();
+
+  const { data: extratoIdsRows } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    .select('id').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).order('id'));
+  const extratoIds=(extratoIdsRows||[]).map(r=>r.id);
+  if(!extratoIds.length){ toast('Nenhum lançamento nesta conta.','err'); return; }
+
+  // .in() com milhares de ids estoura o limite de tamanho da URL do
+  // PostgREST (mesmo achado do _lancctbEmLotesDb, aqui do lado da leitura) —
+  // busca em lotes de 200 em vez de um .in() só com tudo.
+  let ctbLinhas=[];
+  for(let i=0;i<extratoIds.length;i+=200){
+    const lote=extratoIds.slice(i,i+200);
+    const { data, error } = await _supaClient.from('lancamentos_contabeis')
+      .select('id,lote_id,tipo,valor,historico,data,plano_contas(numero_conta)')
+      .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',lote).order('id',{ascending:true});
+    if(error){ toast('Erro ao buscar lançamentos: '+error.message,'err'); return; }
+    ctbLinhas=ctbLinhas.concat(data||[]);
+  }
+  if(!ctbLinhas.length){ toast('Nenhum lançamento contábil gerado ainda nesta conta.','err'); return; }
+
+  // Agrupa por lote_id preservando a ordem de inserção (id asc) — a linha do
+  // banco é sempre a 1ª de cada lote nesse módulo (ver salvarLancctbRegra/
+  // gerarLancamentoNF/_lancctbRodarMatching: o array "linhas" mandado pro RPC
+  // criar_lancamento_partida_dobrada sempre começa pela ponta do banco).
+  const lotesMap=new Map();
+  ctbLinhas.forEach(l=>{
+    if(!lotesMap.has(l.lote_id)) lotesMap.set(l.lote_id,[]);
+    lotesMap.get(l.lote_id).push(l);
+  });
+
+  const linhasTxt=[];
+  for(const linhasLote of lotesMap.values()){
+    const dataFmt=new Date(linhasLote[0].data+'T00:00:00').toLocaleDateString('pt-BR');
+    if(linhasLote.length===2){
+      const d=linhasLote.find(l=>l.tipo==='D'), c=linhasLote.find(l=>l.tipo==='C');
+      linhasTxt.push({ data:dataFmt, debito:d?.plano_contas?.numero_conta||'', credito:c?.plano_contas?.numero_conta||'', valor:d?.valor||c?.valor||0, historico:d?.historico||c?.historico||'' });
+    } else {
+      linhasTxt.push({ data:dataFmt, rateio:linhasLote.map(l=>({
+        debito:l.tipo==='D'?(l.plano_contas?.numero_conta||''):'',
+        credito:l.tipo==='C'?(l.plano_contas?.numero_conta||''):'',
+        valor:l.valor, historico:l.historico||'',
+      })) });
+    }
+  }
+
+  const nomeEmpSlug=(emp?.nome||eid).normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const bancoSlug=_lancctbBancoSlug(contaInfo?.banco_nome);
+  const agConta=`${contaInfo?.agencia||''}-${contaInfo?.conta_corrente||''}`;
+  baixarTxtMisterContador(cnpjLimpo,linhasTxt,`lancamento_${nomeEmpSlug}_${bancoSlug}_${agConta}.txt`);
+  toast(`TXT gerado com ${lotesMap.size} lançamento(s).`,'ok');
 }
 
 // ─── Comprovantes bancários (upload PDF → IA → preview → confirmar) ───────
