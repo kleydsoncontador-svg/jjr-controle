@@ -385,7 +385,7 @@ table.chk th.nm.cur{background:#D0EDE9}
 .lst-add{background:var(--white);border:0.5px solid var(--border);border-radius:var(--r2);padding:14px 16px;margin-bottom:16px}
 .lst-add h3{font-size:13px;font-weight:600;margin-bottom:10px;color:var(--slate)}
 .toast{position:fixed;bottom:90px;right:20px;background:var(--ink2);color:#fff;padding:10px 18px;border-radius:var(--r2);font-size:13px;font-weight:500;box-shadow:var(--shadow-md);opacity:0;transition:opacity .25s;z-index:999;pointer-events:none;max-width:360px}
-.toast.tok{background:#065F46}.toast.terr{background:var(--red)}
+.toast.tok{background:#065F46}.toast.terr{background:var(--red)}.toast.twarn{background:#D97706}
 @media(max-width:760px){.shell{grid-template-columns:1fr}aside{display:none}.cards{grid-template-columns:1fr 1fr}main{padding:14px}}
 
 
@@ -7269,6 +7269,75 @@ function _democAplicarFaturamento(eid, dadosResposta, arquivoNome){
   return {ok:true, incluidos:incluidos, jaExistiam:jaExistiam};
 }
 
+// ── Log de substituições automáticas ────────────────────────────────────────
+// Pedido do usuário (05/09/2026): quando o robô de pasta local (monitorando
+// Balancete/DRE/Livro Razão/Faturamento vindos da Domínio) substituir algo
+// sozinho, sem intervenção manual, precisa ficar registrado quem/quando —
+// só o Kleydson (isAdmin) pode editar ou excluir esse histórico, os outros
+// operadores só veem. Chamado por _democRegistrarSubstituicao() de dentro do
+// robô de importação automática (ver função de monitoramento da pasta).
+function democGetLogSubstituicoes(){ return _democVal(S.g('democ_log_substituicoes'), []); }
+function democSetLogSubstituicoes(arr){ S.s('democ_log_substituicoes', arr); }
+function _democRegistrarSubstituicao(empresaNome, tipoLabel){
+  var log=democGetLogSubstituicoes();
+  log.unshift({ empresa:empresaNome, tipo:tipoLabel, dataHora:new Date().toISOString() });
+  if(log.length>500) log=log.slice(0,500);
+  democSetLogSubstituicoes(log);
+}
+function _democFmtDataHora(iso){
+  var d=new Date(iso);
+  return d.toLocaleDateString('pt-BR')+' '+d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
+}
+function _democRenderLogSubstituicoes(){
+  var log=democGetLogSubstituicoes();
+  if(!log.length) return '';
+  var admin=isAdmin(currentUser);
+  var linhas=log.map(function(l,idx){
+    return '<tr>'
+      +'<td style="padding:6px 10px">'+esc(l.empresa)+'</td>'
+      +'<td style="padding:6px 10px">'+esc(l.tipo)+'</td>'
+      +'<td style="padding:6px 10px;font-family:var(--mono);font-size:11.5px">'+esc(_democFmtDataHora(l.dataHora))+'</td>'
+      +(admin?('<td style="padding:6px 10px;text-align:right;white-space:nowrap">'
+        +'<button class="btn bo bsm" style="font-size:10px;padding:3px 8px" onclick="democEditarLogSubstituicao('+idx+')">✎</button> '
+        +'<button class="btn bo bsm" style="font-size:10px;padding:3px 8px;border-color:var(--red);color:var(--red)" onclick="democExcluirLogSubstituicao('+idx+')">🗑</button>'
+        +'</td>'):'')
+      +'</tr>';
+  }).join('');
+  return '<details class="hide-in-print" style="margin-bottom:14px">'
+    +'<summary style="cursor:pointer;font-size:12px;font-weight:700;color:var(--slate)">📋 Histórico de atualizações automáticas ('+log.length+')</summary>'
+    +'<div style="overflow-x:auto;margin-top:8px;border:1px solid var(--border);border-radius:6px">'
+    +'<table style="width:100%;border-collapse:collapse;font-size:12.5px">'
+    +'<thead><tr style="background:var(--ink2);color:#fff;text-align:left">'
+    +'<th style="padding:6px 10px">Empresa</th><th style="padding:6px 10px">Demonstrativo</th><th style="padding:6px 10px">Data/Hora</th>'
+    +(admin?'<th style="padding:6px 10px"></th>':'')
+    +'</tr></thead><tbody>'+linhas+'</tbody></table></div></details>';
+}
+function democEditarLogSubstituicao(idx){
+  if(!isAdmin(currentUser)){ toast('Apenas o Kleydson pode editar esse histórico.','err'); return; }
+  var log=democGetLogSubstituicoes();
+  var item=log[idx];
+  if(!item) return;
+  var novoTexto=window.prompt('Editar (formato: Empresa | Demonstrativo):', item.empresa+' | '+item.tipo);
+  if(novoTexto===null) return;
+  var partes=novoTexto.split('|');
+  if(partes.length<2){ toast('Formato inválido — use Empresa | Demonstrativo.','err'); return; }
+  item.empresa=partes[0].trim();
+  item.tipo=partes.slice(1).join('|').trim();
+  democSetLogSubstituicoes(log);
+  renderDemoc();
+  toast('Registro atualizado.','ok');
+}
+function democExcluirLogSubstituicao(idx){
+  if(!isAdmin(currentUser)){ toast('Apenas o Kleydson pode excluir esse histórico.','err'); return; }
+  var log=democGetLogSubstituicoes();
+  if(!log[idx]) return;
+  if(!confirm('Excluir este registro do histórico?')) return;
+  log.splice(idx,1);
+  democSetLogSubstituicoes(log);
+  renderDemoc();
+  toast('Registro excluído.','ok');
+}
+
 async function _democExtrairTextoEChamarIA(edgeFnNome, file){
   var texto=await _empExtrairTextoPDF(file,30);
   var resp=await fetch(SUPABASE_URL+'/functions/v1/'+edgeFnNome,{
@@ -7302,7 +7371,8 @@ function _renderDemocImpl(container){
     +'<label style="font-weight:600;color:#1E3558;display:block;margin-bottom:8px;font-size:12.5px">Anexar documentos:</label>'
     +'<div style="display:flex;flex-direction:column;gap:10px;align-items:flex-start">'
     +DEMOC_TIPOS_ORDEM.map(function(tipo){ return _democRenderBulkForm(tipo); }).join('')
-    +'</div></div>';
+    +'</div></div>'
+    +_democRenderLogSubstituicoes();
 
   if(!eids.length){
     html+='<div style="text-align:center;color:var(--slate);padding:30px 10px;font-size:13px">Nenhuma empresa com documento anexado ainda. Use um dos botões acima pra anexar o(s) primeiro(s) arquivo(s).</div>';
@@ -7915,7 +7985,7 @@ let _toastTimer=null;
 function toast(msg,type){
   const el=document.getElementById('toast');
   if(!el) return;
-  el.className='toast'+(type==='ok'?' tok':type==='err'?' terr':'');
+  el.className='toast'+(type==='ok'?' tok':type==='err'?' terr':type==='sub'?' twarn':'');
   el.textContent=msg;
   el.style.opacity='1';
   clearTimeout(_toastTimer);
