@@ -15811,6 +15811,7 @@ const LANCCTB_ABAS=[
   {id:'nfse-tomado',   label:'NFS-e Tomado', tipoDoc:'nfse', direcaoNf:'compra'},
   {id:'nfse-prestado', label:'NFS-e Prestado', tipoDoc:'nfse', direcaoNf:'venda'},
   {id:'comprovantes', label:'Comprovantes de Pagamentos'},
+  {id:'comprovantes-salarios', label:'Comprovantes Bancários de Pagamentos de Salários'},
   {id:'comprovantes-receb', label:'Comprovantes de Recebimento'},
   {id:'extrato', label:'Extrato Bancário'},
   {id:'fluxo-caixa', label:'Fluxo de Caixa'},
@@ -16036,6 +16037,7 @@ function renderLancctbConteudo(){
   if(_lancctbAbaAtiva==='agencias'){ renderLancctbAgencias(); return; }
   if(_lancctbAbaAtiva==='comprovantes'){ renderLancctbComprovantes(); return; }
   if(_lancctbAbaAtiva==='comprovantes-receb'){ renderLancctbComprovantesReceb(); return; }
+  if(_lancctbAbaAtiva==='comprovantes-salarios'){ renderLancctbComprovantesSalarios(); return; }
   if(_lancctbAbaAtiva==='extrato'){ renderLancctbExtrato(); return; }
   if(_lancctbAbaAtiva==='fluxo-caixa'){ renderLancctbFluxoCaixa(); return; }
   if(_lancctbAbaAtiva==='aplicacoes'){ renderLancctbAplicacoes(); return; }
@@ -19428,10 +19430,19 @@ function exportarLancctbComprovantesExcel(){
 // "comprovantes-recebimento") — modal e extração (Edge Function
 // lancctb-parse-comprovante) são os mesmos pros dois; só muda onde salva.
 let _lancctbUploadComprovTipo='pagamento';
+// Resolve bucket/tabela pelos 3 tipos de comprovante (pagamento/recebimento/
+// salários) num lugar só, em vez de repetir o ternário em cada função.
+function _lancctbComprovBucket(tipo){
+  return tipo==='recebimento'?'comprovantes-recebimento':tipo==='salarios'?'comprovantes-salarios':'comprovantes';
+}
+function _lancctbComprovTabela(tipo){
+  return tipo==='recebimento'?'comprovantes_recebimento':tipo==='salarios'?'comprovantes_salarios':'comprovantes_bancarios';
+}
 function abrirLancctbUploadComprovanteModal(tipo){
   _lancctbUploadComprovTipo=tipo||'pagamento';
   const ehReceb=_lancctbUploadComprovTipo==='recebimento';
-  document.getElementById('lancctbUploadTitulo').textContent=ehReceb?'Upload de Comprovantes de Recebimento':'Upload de Comprovantes (PDF)';
+  const ehSalarios=_lancctbUploadComprovTipo==='salarios';
+  document.getElementById('lancctbUploadTitulo').textContent=ehReceb?'Upload de Comprovantes de Recebimento':ehSalarios?'Upload de Comprovantes de Pagamentos de Salários':'Upload de Comprovantes (PDF)';
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
       ${ehReceb
@@ -19565,7 +19576,7 @@ async function _lancctbParsearItauCobrancaPdf(pdf){
 async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
   const ehExcel=/\.(xlsx?|csv)$/i.test(file.name);
   const ehPdf=/\.pdf$/i.test(file.name);
-  const bucket=tipo==='recebimento'?'comprovantes-recebimento':'comprovantes';
+  const bucket=_lancctbComprovBucket(tipo);
 
   if(tipo==='recebimento'&&ehExcel){
     status.textContent=`"${file.name}" — lendo planilha…`;
@@ -19637,7 +19648,7 @@ const LANCCTB_IMAGENS_POR_LOTE=15; // Edge Function aceita até 20/chamada; 15 d
 // apontam pro mesmo path, evidência de auditoria preservada sem
 // granularidade de página) e chama a Edge Function de extração em lotes.
 async function _lancctbProcessarUmComprovantePdf(file,status){
-  const bucket=_lancctbUploadComprovTipo==='recebimento'?'comprovantes-recebimento':'comprovantes';
+  const bucket=_lancctbComprovBucket(_lancctbUploadComprovTipo);
   const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
   const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
   const arquivoStoragePath = erroUpload ? null : pathArquivo;
@@ -19758,12 +19769,13 @@ function _lancctbComprovToggleTodos(marcar){
   renderLancctbComprovPreview();
 }
 async function confirmarLancctbImportComprovantes(){
-  const ehReceb=_lancctbUploadComprovTipo==='recebimento';
+  const tipo=_lancctbUploadComprovTipo;
+  const contaSel=tipo==='recebimento'?_lancctbComprovRecebContaSel:tipo==='salarios'?_lancctbComprovSalContaSel:_lancctbComprovContaSel;
   const selecionados=_lancctbComprovPreview.filter(c=>c._incluir);
   if(!selecionados.length){ toast('Nenhum comprovante selecionado','err'); return; }
   const registros=selecionados.map(c=>({
     empresa_eid: _lancctbEidAtual,
-    conta_bancaria_id: (ehReceb?_lancctbComprovRecebContaSel:_lancctbComprovContaSel)||null,
+    conta_bancaria_id: contaSel||null,
     data_pagamento: c.data_pagamento||null,
     cliente_fornecedor_nome: c.cliente_fornecedor_nome||null,
     cnpj_cpf: c.cnpj_cpf||null,
@@ -19777,20 +19789,21 @@ async function confirmarLancctbImportComprovantes(){
     observacao: c.observacao||null,
     arquivo_storage_path: c._arquivoStoragePath||null,
   }));
-  const { error } = await _supaClient.from(ehReceb?'comprovantes_recebimento':'comprovantes_bancarios').insert(registros);
+  const { error } = await _supaClient.from(_lancctbComprovTabela(tipo)).insert(registros);
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
   toast(`${registros.length} comprovante(s) salvo(s) com sucesso`,'ok');
   // Vínculo com o Visão Geral (Fase 16) — só Comprovantes de Pagamento por
   // enquanto, pedido do usuário (05/09/2026); mesma ideia do Extrato/Aplicações.
-  if(!ehReceb){
-    const contaVinculada=_lancctbUltimasAgenciasComprov.find(a=>String(a.id)===String(_lancctbComprovContaSel));
+  if(tipo==='pagamento'){
+    const contaVinculada=_lancctbUltimasAgenciasComprov.find(a=>String(a.id)===String(contaSel));
     if(contaVinculada?.doc_visao_geral_comprovantes_nome){
       const meses=[...new Set(registros.map(r=>r.data_pagamento).filter(Boolean).map(d=>d.slice(0,7)))];
       meses.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,contaVinculada.doc_visao_geral_comprovantes_nome,m));
     }
   }
   closeModal('mLancctbUpload');
-  if(ehReceb){ _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb(); }
+  if(tipo==='recebimento'){ _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb(); }
+  else if(tipo==='salarios'){ _lancctbComprovSalPagina=0; renderLancctbComprovantesSalarios(); }
   else { _lancctbComprovPagina=0; renderLancctbComprovantes(); }
 }
 
@@ -19944,6 +19957,161 @@ async function _lancctbExecutarExclusaoComprovantesReceb(){
   closeModal('mLancctbConfirmarExclusao');
   _lancctbComprovRecebPagina=0;
   renderLancctbComprovantesReceb();
+}
+
+// ─── Comprovantes Bancários de Pagamentos de Salários — aba própria (pedido
+// do usuário, 05/09/2026): alguns clientes mandam o comprovante do lote
+// SISPAG SALÁRIOS (pagamento de folha em lote) só pra a JJR ver que o
+// pagamento saiu — documento diferente de um Comprovante de Pagamento
+// normal (não é "1 fornecedor único"), por isso tabela/bucket próprios
+// (comprovantes_salarios / "comprovantes-salarios", ver Fase 17). Mesmo
+// layout/upload/Edge Function de Comprovantes — só aponta pra tabela e
+// bucket próprios (ver abrirLancctbUploadComprovanteModal/
+// _lancctbUploadComprovTipo). ─────────────────────────────────────────────
+let _lancctbComprovSalPagina=0;
+let _lancctbComprovSalContaSel='';
+let _lancctbComprovSalMes='';
+let _lancctbComprovSalPreview=[];
+let _lancctbUltimoComprovSal=[];
+function _lancctbComprovSalSelecionarConta(id){
+  _lancctbComprovSalContaSel=id; _lancctbComprovSalPagina=0; renderLancctbComprovantesSalarios();
+}
+function _lancctbComprovSalMudarMes(v){
+  _lancctbComprovSalMes=v; _lancctbComprovSalPagina=0; renderLancctbComprovantesSalarios();
+}
+async function renderLancctbComprovantesSalarios(){
+  const el=document.getElementById('lancctbConteudoAba');
+  const eid=_lancctbEidAtual;
+  if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
+  el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+
+  const { data: agencias } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+
+  const from=_lancctbComprovSalPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE-1;
+  let q=_supaClient.from('comprovantes_salarios')
+    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,documento_numero,data_vencimento,valor_pago,status_conciliacao',{count:'exact'})
+    .eq('empresa_eid',eid);
+  if(_lancctbComprovSalContaSel) q=q.eq('conta_bancaria_id',_lancctbComprovSalContaSel);
+  if(_lancctbComprovSalMes){
+    const [ano,mes]=_lancctbComprovSalMes.split('-').map(Number);
+    const ultimoDia=new Date(ano,mes,0).getDate();
+    q=q.gte('data_pagamento',`${_lancctbComprovSalMes}-01`).lte('data_pagamento',`${_lancctbComprovSalMes}-${String(ultimoDia).padStart(2,'0')}`);
+  }
+  const { data: comprovantes, error, count } = await q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to);
+
+  if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar comprovantes de salários: ${esc(error.message)}</div>`; return; }
+  _lancctbUltimoComprovSal=comprovantes||[];
+
+  const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
+  let html=(agencias&&agencias.length)?_lancctbContaCardsHtml(agencias,_lancctbComprovSalContaSel,'_lancctbComprovSalSelecionarConta',true):'';
+  html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+    ${_lancctbMesPickerHtml(_lancctbComprovSalMes,'_lancctbComprovSalMudarMes')}
+    <div style="display:flex;gap:6px">
+      <button class="action-btn action-btn-excel" onclick="exportarLancctbComprovantesSalariosExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbComprovantesSalariosConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes comprovantes</button>
+      <button class="btn bp bsm" onclick="abrirLancctbUploadComprovanteModal('salarios')">⬆ Upload de Comprovantes de Salários</button>
+    </div>
+  </div>
+  <div style="overflow-x:auto">
+  <table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <thead><tr style="background:var(--ink2);color:#fff">
+      <th style="padding:8px 10px;text-align:left">Dt Pgto</th>
+      <th style="padding:8px 10px;text-align:left">Funcionário</th>
+      <th style="padding:8px 10px;text-align:left">CPF</th>
+      <th style="padding:8px 10px;text-align:left">Documento</th>
+      <th style="padding:8px 10px;text-align:left">Dt Vcto</th>
+      <th style="padding:8px 10px;text-align:right">Valor</th>
+      <th style="padding:8px 10px;text-align:center">Status</th>
+    </tr></thead>
+    <tbody>`;
+  if(!comprovantes||!comprovantes.length){
+    html+=`<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--slate)">Nenhum comprovante de pagamento de salários importado ainda.</td></tr>`;
+  } else {
+    comprovantes.forEach(c=>{
+      const statusCor=c.status_conciliacao==='conciliado'?'var(--teal)':c.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
+      html+=`<tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:7px 10px">${c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px">${esc(c.cliente_fornecedor_nome||'')}</td>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(_fmtCnpjCpf(c.cnpj_cpf))}</td>
+        <td style="padding:7px 10px">${esc(c.documento_numero||'')}</td>
+        <td style="padding:7px 10px">${c.data_vencimento?new Date(c.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
+        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(c.status_conciliacao||'')}</span></td>
+      </tr>`;
+    });
+  }
+  html+=`</tbody></table></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;font-size:12.5px;color:var(--slate)">
+      <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
+      <div style="display:flex;gap:6px">
+        <button class="btn bo bsm" ${_lancctbComprovSalPagina===0?'disabled':''} onclick="_lancctbComprovSalPagina=0;renderLancctbComprovantesSalarios()">« Primeira</button>
+        <button class="btn bo bsm" ${_lancctbComprovSalPagina===0?'disabled':''} onclick="_lancctbComprovSalPagina--;renderLancctbComprovantesSalarios()">‹ Anterior</button>
+        <span style="padding:6px 10px">Página ${_lancctbComprovSalPagina+1} de ${totalPaginas}</span>
+        <button class="btn bo bsm" ${_lancctbComprovSalPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbComprovSalPagina++;renderLancctbComprovantesSalarios()">Próxima ›</button>
+        <button class="btn bo bsm" ${_lancctbComprovSalPagina>=totalPaginas-1?'disabled':''} onclick="_lancctbComprovSalPagina=${totalPaginas}-1;renderLancctbComprovantesSalarios()">Última »</button>
+      </div>
+    </div>`;
+  el.innerHTML=html;
+}
+function exportarLancctbComprovantesSalariosExcel(){
+  if(!_lancctbUltimoComprovSal.length){ toast('Nada para exportar nesta página.','err'); return; }
+  const header=['Dt Pgto','Funcionário','CPF','Documento','Dt Vcto','Valor','Status'];
+  const rows=_lancctbUltimoComprovSal.map(c=>[
+    c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    c.cliente_fornecedor_nome||'', _fmtCnpjCpf(c.cnpj_cpf), c.documento_numero||'',
+    c.data_vencimento?new Date(c.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    c.valor_pago||0, c.status_conciliacao||''
+  ]);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Comprovantes Salários');
+  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`Comprovantes_Salarios_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+let _lancctbExclusaoComprovSalQtd=0;
+function excluirLancctbComprovantesSalariosConta(qtd){
+  if(!qtd){ toast('Nenhum comprovante pra excluir com esse filtro.','err'); return; }
+  _lancctbExclusaoTipo='comprovantes-salarios';
+  _lancctbExclusaoComprovSalQtd=qtd;
+  const partesEscopo=[];
+  if(_lancctbComprovSalContaSel){
+    const conta=_lancctbUltimasAgencias?.find?.(a=>String(a.id)===String(_lancctbComprovSalContaSel));
+    partesEscopo.push(conta?`da conta <strong>${esc(conta.banco_nome)}</strong>`:'desta conta');
+  } else partesEscopo.push('de todas as contas');
+  if(_lancctbComprovSalMes) partesEscopo.push(`de <strong>${new Date(_lancctbComprovSalMes+'-01T00:00:00').toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</strong>`);
+  document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
+    `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> comprovante(s) de salários ${partesEscopo.join(' ')}. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
+  document.getElementById('lancctbConfirmarExclusaoInput').value='';
+  openModal('mLancctbConfirmarExclusao');
+}
+async function _lancctbExecutarExclusaoComprovantesSalarios(){
+  const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
+  if(digitado!==String(_lancctbExclusaoComprovSalQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
+  const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
+  btn.disabled=true; btn.textContent='Excluindo…';
+  let mesDe=null,mesAte=null;
+  if(_lancctbComprovSalMes){
+    const [ano,mes]=_lancctbComprovSalMes.split('-').map(Number);
+    const ultimoDia=new Date(ano,mes,0).getDate();
+    mesDe=`${_lancctbComprovSalMes}-01`; mesAte=`${_lancctbComprovSalMes}-${String(ultimoDia).padStart(2,'0')}`;
+  }
+  const { data: idsComprovRows } = await _lancctbFetchTudo(()=>{
+    let q=_supaClient.from('comprovantes_salarios').select('id').eq('empresa_eid',_lancctbEidAtual);
+    if(_lancctbComprovSalContaSel) q=q.eq('conta_bancaria_id',_lancctbComprovSalContaSel);
+    if(mesDe) q=q.gte('data_pagamento',mesDe).lte('data_pagamento',mesAte);
+    return q;
+  });
+  const ids=(idsComprovRows||[]).map(r=>r.id);
+  const { error } = ids.length
+    ? await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('comprovantes_salarios').delete().in('id',lote))
+    : { error:null };
+  btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast(`${_lancctbExclusaoComprovSalQtd} comprovante(s) excluído(s)`,'ok');
+  closeModal('mLancctbConfirmarExclusao');
+  _lancctbComprovSalPagina=0;
+  renderLancctbComprovantesSalarios();
 }
 
 // ─── Fluxo de Caixa — planilha própria do cliente (contas a pagar/receber já
@@ -20613,6 +20781,7 @@ function excluirLancctbExtratoConta(qtd){
 function _lancctbExecutarExclusaoGenerica(){
   if(_lancctbExclusaoTipo==='comprovantes') return _lancctbExecutarExclusaoComprovantes();
   if(_lancctbExclusaoTipo==='comprovantes-receb') return _lancctbExecutarExclusaoComprovantesReceb();
+  if(_lancctbExclusaoTipo==='comprovantes-salarios') return _lancctbExecutarExclusaoComprovantesSalarios();
   if(_lancctbExclusaoTipo==='fluxo') return _lancctbExecutarExclusaoFluxo();
   return _lancctbExecutarExclusaoExtrato();
 }
