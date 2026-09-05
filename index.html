@@ -17862,6 +17862,51 @@ async function excluirLancctbRegra(id){
 // regra: saída do extrato = banco Crédito, entrada = banco Débito).
 const LANCCTB_MATCH_TOLERANCIA_VALOR=2.00;
 const LANCCTB_MATCH_TOLERANCIA_DIAS=3;
+// Tolerância ESPECÍFICA do passo "Notas Fiscais" (mais rígida que a geral
+// acima, usada por Comprovante/Fluxo de Caixa) — pedido do usuário
+// (05/09/2026): valor tem que bater quase exato (2 centavos), e a parcela só
+// pode ter vencido ATÉ 60 dias ANTES do pagamento — nunca depois (não faz
+// sentido pagar hoje uma parcela que só vence no futuro) nem vencida há mais
+// de 60 dias (evita casar com NF antiga esquecida em aberto).
+const LANCCTB_MATCH_TOLERANCIA_VALOR_NF=0.02;
+const LANCCTB_MATCH_JANELA_DIAS_NF=60;
+function _lancctbNfDentroJanela(dataVencimento,dataPagamento){
+  const dv=new Date(dataVencimento+'T00:00:00'), dp=new Date(dataPagamento+'T00:00:00');
+  const diffDias=Math.round((dp-dv)/86400000);
+  return diffDias>=0&&diffDias<=LANCCTB_MATCH_JANELA_DIAS_NF;
+}
+// Sócio (módulo Lucro/Dividendos, lucSocGet) — pagamento/recebimento a
+// sócio tem conta fixa dentro de 1.2.9.x, convenção real confirmada na Fast
+// Lube ("1.2.9.01.100001 / Leonardo Horta da Silva", nome idêntico ao
+// cadastrado em Lucro/Dividendos). Identifica o sócio pelo CPF (mais
+// confiável, checado primeiro) ou pelo nome aparecendo literal no histórico
+// do banco — pedido do usuário (05/09/2026): "Nome do sócio no histórico e
+// CPF tbm no histórico, ai cruza com os dividendos".
+function _lancctbAcharSocioPorHistorico(socios,historicoBancario){
+  if(!socios||!socios.length) return null;
+  const histDigits=(historicoBancario||'').replace(/\D/g,'');
+  const histNorm=_convMpRemoverAcentos((historicoBancario||'').toUpperCase());
+  for(const s of socios){
+    let cpf=(s.doc||'').replace(/\D/g,'');
+    if(cpf.length>=9){
+      if(cpf.length<11) cpf=cpf.padStart(11,'0');
+      if(cpf.length===11&&histDigits.includes(cpf)) return s;
+    }
+  }
+  for(const s of socios){
+    const partes=_convMpRemoverAcentos((s.nome||'').toUpperCase()).trim().split(/\s+/).filter(Boolean);
+    if(!partes.length) continue;
+    const alvo=partes.slice(0,Math.min(2,partes.length)).join(' ');
+    if(alvo.length>=4&&histNorm.includes(alvo)) return s;
+  }
+  return null;
+}
+// Conta 1.2.9.x cuja Descrição contém o nome do sócio.
+function _lancctbContaDoSocio(contasSocios,socio){
+  const nomeNorm=_convMpRemoverAcentos((socio.nome||'').toUpperCase()).trim();
+  if(!nomeNorm) return null;
+  return (contasSocios||[]).find(c=>_convMpRemoverAcentos((c.descricao||'').toUpperCase()).includes(nomeNorm))||null;
+}
 
 // Manda um lançamento que caiu numa conta marcada (plano_contas.
 // enviar_pontos_atencao) pro módulo "Pontos de Atenção" — mesmo módulo já
@@ -18002,6 +18047,13 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
   const { data: contasAlertaRows } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas')
     .select('id,numero_conta,classificacao,descricao').eq('empresa_eid',eid).eq('enviar_pontos_atencao',true));
   const contasAlertaMap=new Map((contasAlertaRows||[]).map(c=>[String(c.id),c]));
+  // Sócios (Lucro/Dividendos) + contas 1.2.9.x — carregados 1x aqui e
+  // reaproveitados linha a linha no Passo 0 (ver _lancctbAcharSocioPorHistorico).
+  const socios=lucSocGet(eid);
+  const { data: contasSocios } = socios.length
+    ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
+        .eq('empresa_eid',eid).ilike('classificacao','1.2.9%').eq('ativo',true))
+    : { data:[] };
 
   if(!contaBancoInfo?.conta_contabil_id){
     return { erro:'A conta bancária selecionada não tem Conta Contábil vinculada — cadastre em "Agência Bancária" antes de rodar o matching.' };
@@ -18019,7 +18071,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
   }
 
   const comprovantesUsadosPag=new Set(), comprovantesUsadosReceb=new Set(), parcelasUsadas=new Set();
-  let resolvNF=0,resolvSubsetSum=0,resolvRegra=0,aindaPendente=0;
+  let resolvNF=0,resolvSubsetSum=0,resolvRegra=0,resolvSocio=0,aindaPendente=0;
   const erros=[];
 
   // Verifica as linhas recém-gravadas contra contasAlertaMap e manda pro
@@ -18071,16 +18123,47 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     log(`Processando ${i+1}/${lancamentos.length}…`);
     const valor=l.valor_saida||l.valor_entrada;
     const ehSaida=l.valor_saida>0;
+    // Botões separados de Comprovante de Pagamento/Recebimento (pedido do
+    // usuário 05/09/2026) — cada um só mexe no lado dele; o outro lado fica
+    // pendente pra rodar no botão certo.
+    if(modo==='comprovantes_pagamento'&&!ehSaida){ aindaPendente++; continue; }
+    if(modo==='comprovantes_recebimento'&&ehSaida){ aindaPendente++; continue; }
     const comprovantesFonte=ehSaida?comprovantesPag:comprovantesReceb;
     const comprovantesUsados=ehSaida?comprovantesUsadosPag:comprovantesUsadosReceb;
     const tabelaComprovante=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
     let resolvido=false;
 
-    // Passo 1: comprovante por valor+data (pulado no modo 'notas_fiscais' —
-    // não deve usar comprovante como âncora nesse modo). Saída usa
+    // Passo 0: sócio (Lucro/Dividendos) — checado ANTES de tudo, em
+    // qualquer modo: nome/CPF batendo literal no histórico do banco é mais
+    // certo que Comprovante/NF, e um pagamento a sócio nunca deve ser
+    // tentado contra NF (sócio não emite nota fiscal pra si mesmo).
+    const socioMatch=_lancctbAcharSocioPorHistorico(socios,l.historico_bancario);
+    if(socioMatch){
+      const contaSocio=_lancctbContaDoSocio(contasSocios,socioMatch);
+      if(contaSocio){
+        const bancoTipo=ehSaida?'C':'D', socioTipo=ehSaida?'D':'C';
+        const historicoSocio=`${ehSaida?'Pagamento a':'Recebimento de'} ${socioMatch.nome}`;
+        const linhasSocio=[
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoSocio, cliente_fornecedor_nome:socioMatch.nome, cnpj_cpf:socioMatch.doc||null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' },
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaSocio.classificacao, conta_contabil_id:contaSocio.id, tipo:socioTipo, valor, historico:historicoSocio, cliente_fornecedor_nome:socioMatch.nome, cnpj_cpf:socioMatch.doc||null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' },
+        ];
+        const { error:erroSocio } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasSocio });
+        if(erroSocio){
+          erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${erroSocio.message}`);
+        } else {
+          await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+          await checarAlertaAutomatico(linhasSocio,l,valor,historicoSocio,socioMatch.nome);
+          resolvSocio++;
+        }
+        continue;
+      }
+    }
+
+    // Passo 1: comprovante por valor+data (pulado nos modos 'notas_fiscais'
+    // e 'ia' — não devem usar comprovante como âncora). Saída usa
     // comprovantes_bancarios (Pagamento), entrada usa comprovantes_recebimento.
     let cnpjAncora=null,comprovanteMatch=null;
-    if(modo!=='notas_fiscais'){
+    if(modo!=='notas_fiscais'&&modo!=='ia'){
       for(const c of comprovantesFonte){
         if(comprovantesUsados.has(c.id)) continue;
         if(Math.abs(c.valor_pago-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR) continue;
@@ -18088,17 +18171,20 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
         comprovanteMatch=c; cnpjAncora=c.cnpj_cpf; break;
       }
     }
-    // Modo 'comprovantes': só segue se achou âncora — sem comprovante, nem
-    // tenta NF/Regra nessa passada (fica pendente pra próxima).
-    if(modo==='comprovantes'&&!cnpjAncora){ aindaPendente++; continue; }
+    // Modos 'comprovantes_pagamento'/'comprovantes_recebimento': só segue se
+    // achou âncora — sem comprovante, nem tenta NF/Regra nessa passada (fica
+    // pendente pra próxima, ou pro usuário pular direto pro próximo passo da
+    // ordem se não houver comprovante anexado no site).
+    if((modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento')&&!cnpjAncora){ aindaPendente++; continue; }
 
     // Passo 2: NF — 1:1 direto, ou subset-sum se tiver CNPJ âncora. Bateu →
     // gera o lançamento contábil na hora (conta fixa 10000/10001 ou Regra
-    // específica do CNPJ, ver gerarLancamentoNF).
+    // específica do CNPJ, ver gerarLancamentoNF). Tolerância própria e mais
+    // rígida (ver LANCCTB_MATCH_TOLERANCIA_VALOR_NF/JANELA_DIAS_NF).
     const nfCandidatas=parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
-      if(Math.abs(p.valor_parcela-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR) return false;
-      if(_lancctbDiffDias(p.data_vencimento,l.data_pagamento)>LANCCTB_MATCH_TOLERANCIA_DIAS) return false;
+      if(Math.abs(p.valor_parcela-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR_NF) return false;
+      if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
       if(cnpjAncora){
         const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
         if(cnpjNf!==cnpjAncora) return false;
@@ -18124,11 +18210,12 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     } else if(cnpjAncora){
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
+        if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
         const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
         return cnpjNf===cnpjAncora;
       }).slice(0,15);
       const alvoCentavos=Math.round(valor*100);
-      const subset=_lancctbSubsetSum(doCnpj.map(p=>Math.round(p.valor_parcela*100)),alvoCentavos,Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR*100));
+      const subset=_lancctbSubsetSum(doCnpj.map(p=>Math.round(p.valor_parcela*100)),alvoCentavos,Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR_NF*100));
       if(subset&&subset.length>1){
         const escolhidas=subset.map(idx=>doCnpj[idx]);
         const nf0=escolhidas[0].notas_fiscais;
@@ -18215,7 +18302,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     if(!resolvido) aindaPendente++;
   }
 
-  return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, aindaPendente, erros };
+  return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, resolvSocio, aindaPendente, erros };
 }
 async function _lancctbReprocessarPendencias(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -18230,17 +18317,30 @@ async function _lancctbReprocessarPendencias(){
   if(resultado.resolvNF) partes.push(`${resultado.resolvNF} por NF`);
   if(resultado.resolvSubsetSum) partes.push(`${resultado.resolvSubsetSum} por soma de NFs`);
   if(resultado.resolvRegra) partes.push(`${resultado.resolvRegra} por regra`);
+  if(resultado.resolvSocio) partes.push(`${resultado.resolvSocio} por sócio`);
   const resumo=partes.length?partes.join(', '):'nenhum';
   toast(`Matching concluído: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
   if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
   renderLancctbExtrato();
 }
-// Botões "Processar Comprovantes"/"Processar Notas Fiscais" do Registro
-// Contábil — mesmo motor, mas isolando cada fonte (ver comentário do modo
-// em _lancctbRodarMatching).
+// Botões "Processar Comprovantes"/"Processar Comprovantes de Recebimento"/
+// "Processar Notas Fiscais" do Registro Contábil — mesmo motor, mas
+// isolando cada fonte (ver comentário do modo em _lancctbRodarMatching).
+// Ordem recomendada pro usuário clicar (pedido 05/09/2026): Comprovantes de
+// Pagamento → Comprovantes de Recebimento → Tributos (botão separado, ver
+// _lancctbProcessarTributos) → Notas Fiscais → Processar via IA (último
+// recurso, ver _lancctbProcessarViaIA). Se não houver comprovante anexado
+// no site pra uma pendência, ela só fica "ainda pendente" nesse passo e
+// segue pro próximo botão normalmente — não trava o fluxo.
+const LANCCTB_MODO_INFO={
+  comprovantes_pagamento:{btn:'lancctbProcessarComprovBtn',label:'Comprovantes'},
+  comprovantes_recebimento:{btn:'lancctbProcessarComprovRecebBtn',label:'Comprovantes de Recebimento'},
+  notas_fiscais:{btn:'lancctbProcessarNfBtn',label:'Notas Fiscais'},
+};
 async function _lancctbProcessarFonteRegistro(modo){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
-  const btn=document.getElementById(modo==='comprovantes'?'lancctbProcessarComprovBtn':'lancctbProcessarNfBtn');
+  const info=LANCCTB_MODO_INFO[modo];
+  const btn=document.getElementById(info.btn);
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn) btn.disabled=true;
   const resultado=await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,(msg)=>{ if(statusEl) statusEl.textContent=msg; },modo);
@@ -18250,8 +18350,9 @@ async function _lancctbProcessarFonteRegistro(modo){
   const partes=[];
   if(resultado.resolvNF) partes.push(`${resultado.resolvNF} por NF`);
   if(resultado.resolvSubsetSum) partes.push(`${resultado.resolvSubsetSum} por soma de NFs`);
+  if(resultado.resolvSocio) partes.push(`${resultado.resolvSocio} por sócio`);
   const resumo=partes.length?partes.join(', '):'nenhum';
-  toast(`${modo==='comprovantes'?'Comprovantes':'Notas Fiscais'}: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
+  toast(`${info.label}: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
   if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
   renderLancctbRegistroContabil();
 }
@@ -18350,6 +18451,112 @@ async function _lancctbProcessarTributos(){
   renderLancctbRegistroContabil();
 }
 
+// Botão "🤖 Processar via IA" (último recurso, pedido do usuário
+// 05/09/2026) — só depois que Comprovantes/Comprovantes de Recebimento/
+// Tributos/Notas Fiscais (determinístico) já rodaram e sobrou pendência. Só
+// tenta amarrar Pagamento/Recebimento × Nota Fiscal (nunca Comprovante, nunca
+// Tributo — isso é trabalho dos outros botões). Manda um LOTE de pendências
+// + suas NFs candidatas pra Edge Function lancctb-ia-matching (Groq/Gemini,
+// mesmo padrão do resto do módulo); a IA responde no máximo 1 candidata por
+// pendência + uma explicação curta, que fica gravada em
+// lancamentos_contabeis.informacao_extra (coluna "IA" no Registro Contábil)
+// pro contador conferir/desfazer — a IA nunca decide "no escuro": é melhor
+// ela dizer "sem match confiável" do que arriscar casar errado.
+async function _lancctbProcessarViaIA(){
+  if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
+  const btn=document.getElementById('lancctbProcessarIaBtn');
+  const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
+  if(btn) btn.disabled=true;
+  try{
+    if(statusEl) statusEl.textContent='Carregando pendências…';
+    const { data: pendentes } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+      .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
+      .order('data_pagamento',{ascending:true}));
+    if(!pendentes||!pendentes.length){ toast('Nenhuma pendência nesta conta.','ok'); return; }
+    const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
+      .select('id,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero)')
+      .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+    const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
+      .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
+    if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+    const contaBanco={ id:contaBancoInfo.conta_contabil_id, classificacao:contaBancoInfo.plano_contas.classificacao };
+    const { data: contasFixasNF } = await _supaClient.from('plano_contas')
+      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['10000','10001']);
+    const contaEntradaNF=(contasFixasNF||[]).find(c=>c.numero_conta==='10000');
+    const contaSaidaNF=(contasFixasNF||[]).find(c=>c.numero_conta==='10001');
+    if(!contaEntradaNF||!contaSaidaNF){ toast('Cadastre as contas 10000/10001 no Plano de Contas antes de usar a IA.','err'); return; }
+
+    const parcelasUsadas=new Set();
+    let resolvIa=0, aindaPendente=0;
+    const erros=[];
+    const TAM_LOTE=15, MAX_CANDIDATOS=12;
+
+    for(let i=0;i<pendentes.length;i+=TAM_LOTE){
+      const grupo=pendentes.slice(i,i+TAM_LOTE);
+      if(statusEl) statusEl.textContent=`Consultando IA (${Math.min(i+TAM_LOTE,pendentes.length)}/${pendentes.length})…`;
+      const lote=grupo.map(l=>{
+        const ehSaida=l.valor_saida>0;
+        const valor=l.valor_saida||l.valor_entrada;
+        const candidatas=parcelas.filter(p=>{
+          if(parcelasUsadas.has(p.id)) return false;
+          const nf=p.notas_fiscais;
+          if(!nf) return false;
+          return ehSaida?nf.direcao==='compra':nf.direcao==='venda';
+        }).sort((a,b)=>Math.abs(a.valor_parcela-valor)-Math.abs(b.valor_parcela-valor)).slice(0,MAX_CANDIDATOS);
+        return {
+          lancamento_id:l.id, data:l.data_pagamento, valor, tipo:ehSaida?'pagamento':'recebimento',
+          historico_bancario:l.historico_bancario||'',
+          candidatas:candidatas.map(p=>({ parcela_id:p.id, nf_numero:p.notas_fiscais?.numero||'', nome:ehSaida?p.notas_fiscais?.nome_emitente:p.notas_fiscais?.nome_destinatario, valor_parcela:p.valor_parcela, data_vencimento:p.data_vencimento })),
+        };
+      }).filter(l=>l.candidatas.length);
+      if(!lote.length){ aindaPendente+=grupo.length; continue; }
+
+      let resp;
+      try{
+        resp=await _lancctbChamarEdgeExtracao('lancctb-ia-matching',{lote});
+      }catch(e){
+        erros.push(`Lote ${i+1}-${i+grupo.length}: ${e.message}`);
+        aindaPendente+=grupo.length;
+        continue;
+      }
+      const porLancId=new Map((resp.resultados||[]).map(r=>[r.lancamento_id,r]));
+      for(const l of grupo){
+        const r=porLancId.get(l.id);
+        if(!r||r.parcela_id==null){ aindaPendente++; continue; }
+        const parcela=parcelas.find(p=>p.id===r.parcela_id);
+        if(!parcela||parcelasUsadas.has(parcela.id)){ aindaPendente++; continue; }
+        const ehSaida=l.valor_saida>0;
+        const valor=l.valor_saida||l.valor_entrada;
+        const nf=parcela.notas_fiscais;
+        const cnpjTerceiro=ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario;
+        const nomeTerceiro=ehSaida?nf?.nome_emitente:nf?.nome_destinatario;
+        const contaContrapartida=ehSaida?contaSaidaNF:contaEntradaNF;
+        const bancoTipo=ehSaida?'C':'D', contrapartidaTipo=ehSaida?'D':'C';
+        const historicoUtilizado=`${ehSaida?'Pagamento a':'Recebimento de'} ${nomeTerceiro||cnpjTerceiro||''}${nf?.numero?' - NF '+nf.numero:''}`.trim();
+        const linhas=[
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:l.id, origem_match:'ia' },
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaContrapartida.classificacao, conta_contabil_id:contaContrapartida.id, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:l.id, origem_match:'ia' },
+        ];
+        const { data:loteId, error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+        if(error){ erros.push(`Lançamento de ${l.data_pagamento}: ${error.message}`); aindaPendente++; continue; }
+        if(r.explicacao) await _supaClient.from('lancamentos_contabeis').update({informacao_extra:r.explicacao}).eq('lote_id',loteId);
+        parcelasUsadas.add(parcela.id);
+        await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',parcela.id);
+        await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+        resolvIa++;
+      }
+    }
+    toast(`Processar via IA: ${resolvIa} resolvido(s) de ${pendentes.length} pendente(s). ${aindaPendente} continuam pendentes.`,resolvIa?'ok':'err');
+    if(erros.length) console.warn('Erros no Processar via IA:',erros);
+    renderLancctbRegistroContabil();
+  } finally {
+    if(btn) btn.disabled=false;
+    if(statusEl) statusEl.textContent='';
+  }
+}
+
 // ─── Registro Contábil: todos os lançamentos do extrato + classificação ───
 // Ao contrário do Mister (1 linha por D e outra por C empilhadas), aqui cada
 // lançamento aparece numa linha só com D e C lado a lado — só cai pra várias
@@ -18433,7 +18640,7 @@ async function renderLancctbRegistroContabil(){
   let ctbPorExtrato={};
   if(idsExtrato.length){
     const { data: ctbLinhas } = await _supaClient.from('lancamentos_contabeis')
-      .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,plano_contas(numero_conta,descricao)')
+      .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,origem_match,informacao_extra,plano_contas(numero_conta,descricao)')
       .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true});
     (ctbLinhas||[]).forEach(l=>{ (ctbPorExtrato[l.lancamento_extrato_id]=ctbPorExtrato[l.lancamento_extrato_id]||[]).push(l); });
   }
@@ -18487,6 +18694,12 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   const ehAplicacao=r.origem_importacao==='aplicacao_financeira';
   const trStyleBase=`border-bottom:1px solid var(--border);cursor:pointer;${ehAplicacao?'background:#FEF9C3;':''}`;
   const tituloTr=ehAplicacao?'Lançamento de Aplicação Financeira — clique pra associar uma regra':'Clique pra associar uma regra a este lançamento';
+  // Explicação da IA (Processar via IA) — só existe quando origem_match='ia'.
+  const iaCelHtml=(linha)=>{
+    if(!linha||linha.origem_match!=='ia'||!linha.informacao_extra) return `<td style="padding:7px 10px;color:var(--slate)">—</td>`;
+    const ellip='white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
+    return `<td style="padding:7px 10px;font-size:11px;font-style:italic;${ellip}" title="${esc(linha.informacao_extra)}">🤖 ${esc(linha.informacao_extra)}</td>`;
+  };
 
   if(item.ctb.length&&ds.length===1&&cs.length===1){
     const d=ds[0], c=cs[0];
@@ -18504,6 +18717,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px" onclick="event.stopPropagation()"><input class="si" style="width:100%;min-width:160px" value="${esc(d.historico||'')}" data-lote="${d.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
       <td style="padding:7px 10px">${esc(d.cliente_fornecedor_nome||'')}</td>
       <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
+      ${iaCelHtml(d.origem_match==='ia'?d:c)}
     </tr>`;
   }
   if(item.ctb.length){
@@ -18524,6 +18738,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px" onclick="event.stopPropagation()"><input class="si" style="width:100%;min-width:160px" value="${esc(l.historico||'')}" data-lote="${l.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td style="padding:7px 10px">${esc(l.cliente_fornecedor_nome||'')}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
+        ${iaCelHtml(l)}
       </tr>`;
     }).join('');
   }
@@ -18544,6 +18759,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;color:var(--slate)">—</td>
     <td style="padding:7px 10px;${ellip}" title="${item.comprovanteSugerido?'Sugestão via comprovante (ainda não conciliado): '+esc(item.comprovanteSugerido.cliente_fornecedor_nome||''):''}">${item.comprovanteSugerido?`<span style="font-style:italic;color:var(--slate)">${esc(item.comprovanteSugerido.cliente_fornecedor_nome||'')} ?</span>`:'—'}</td>
     <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
+    <td style="padding:7px 10px;color:var(--slate)">—</td>
   </tr>`;
 }
 function abrirLancctbRegraModalDeExtratoId(extratoId){
@@ -18565,9 +18781,11 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <select class="si" onchange="_lancctbRegistroStatus=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesStatus}</select>
     <div style="display:flex;align-items:center;gap:6px">
       <span id="lancctbRegistroProcessarStatus" style="font-size:11.5px;color:var(--slate)"></span>
-      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes')" title="Roda o matching só pra pendências que batem com um Comprovante">🔄 Processar Comprovantes</button>
-      <button class="btn bo bsm" id="lancctbProcessarNfBtn" onclick="_lancctbProcessarFonteRegistro('notas_fiscais')" title="Roda o matching só pra pendências que batem direto com uma Nota Fiscal">🔄 Processar Notas Fiscais</button>
+      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching só pra pendências de PAGAMENTO (saída) que batem com um Comprovante — sem comprovante anexado, pula pro próximo passo">🔄 Processar Comprovantes</button>
+      <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching só pra pendências de RECEBIMENTO (entrada) que batem com um Comprovante de Recebimento — sem comprovante anexado, pula pro próximo passo">🔄 Processar Comprov. Recebimento</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
+      <button class="btn bo bsm" id="lancctbProcessarNfBtn" onclick="_lancctbProcessarFonteRegistro('notas_fiscais')" title="Roda o matching só pra pendências que batem direto com uma Nota Fiscal (parcela vencida em até 60 dias antes do pagamento, valor com no máximo R$0,02 de diferença)">🔄 Processar Notas Fiscais</button>
+      <button class="btn bsm" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" style="background:#F59E0B;color:#fff;border:none" title="Último recurso — usa IA (Groq/Gemini) pra tentar amarrar Pagamento/Recebimento × Nota Fiscal quando os passos acima não resolveram sozinhos. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) nesta conta — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis desta conta, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
     </div>
@@ -18581,11 +18799,12 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <input class="si" type="date" value="${_lancctbRegistroDataAte}" onchange="_lancctbRegistroDataAte=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data final">
   </div>
   <div style="overflow-x:auto">
-  <table style="width:100%;min-width:1150px;border-collapse:collapse;font-size:12.5px;table-layout:fixed">
+  <table style="width:100%;min-width:1320px;border-collapse:collapse;font-size:12.5px;table-layout:fixed">
     <colgroup>
-      <col style="width:6.5%"><col style="width:5.5%"><col style="width:7%"><col style="width:10%">
-      <col style="width:5.5%"><col style="width:7%"><col style="width:10%"><col style="width:7%">
-      <col style="width:12%"><col style="width:12%"><col style="width:10%"><col style="width:7%">
+      <col style="width:6%"><col style="width:5%"><col style="width:6%"><col style="width:9%">
+      <col style="width:5%"><col style="width:6%"><col style="width:9%"><col style="width:6.5%">
+      <col style="width:10%"><col style="width:10%"><col style="width:9%"><col style="width:6%">
+      <col style="width:12.5%">
     </colgroup>
     <thead><tr style="background:var(--ink2);color:#fff">
       <th style="padding:8px 10px;text-align:left">Data</th>
@@ -18600,10 +18819,11 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <th style="padding:8px 10px;text-align:left">Histórico Utilizado</th>
       <th style="padding:8px 10px;text-align:left">Cliente/Fornecedor</th>
       <th style="padding:8px 10px;text-align:center">Status</th>
+      <th style="padding:8px 10px;text-align:left;font-size:11px">🤖 Explicação da IA</th>
     </tr></thead>
     <tbody>`;
   if(!linhas.length){
-    html+=`<tr><td colspan="12" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
+    html+=`<tr><td colspan="13" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
   } else {
     linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,contaAtual); });
   }
