@@ -2082,6 +2082,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <input type="hidden" id="lancctbRegraId">
       <div id="lancctbRegraOrigemInfo" style="display:none;background:#EEF2FF;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
       <div id="lancctbRegraSugestaoCnpj" style="display:none;background:#FEF3C7;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
+      <div id="lancctbRegraTributosArea"></div>
       <div class="fg">
         <div class="fl">Descrição *</div>
         <input class="fi" id="lancctbRegraDescricao" placeholder="Ex: Tarifas bancárias Itaú">
@@ -16156,6 +16157,176 @@ async function _lancctbResolverPastaXml(handleRaiz){
   try { return await handleRaiz.getDirectoryHandle('XML'); }
   catch { return handleRaiz; }
 }
+
+// ─── Fase 12: Tributos do Mês — busca de PDFs de impostos na pasta local
+// (mesma File System Access API acima, só que apontada pra outra raiz) pra
+// sugerir/preencher Histórico e valores na Regra, e pro botão "Processar
+// Tributos" tentar resolver pendências sozinho. Pasta real confirmada:
+// X:\03 - CONTABIL\Documentação Suporte para Conciliação\Tributos do Mês\
+// Tributos do Mês_AAAA-MM\{EMPRESA} ({eid}) - {imposto} - vencimento
+// {DD-MM-AAAA} ({categoria}).pdf — usuário concede acesso na pasta
+// "Tributos do Mês" (a pai de "Tributos do Mês_AAAA-MM"), 1x só, igual à
+// pasta do SIEG (chave própria no mesmo IndexedDB, 'raizTributos').
+async function _lancctbSalvarHandleTributos(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readwrite');
+    tx.objectStore('handles').put(handle,'raizTributos');
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function _lancctbCarregarHandleTributos(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readonly');
+    const req=tx.objectStore('handles').get('raizTributos');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _lancctbTemAcessoPastaTributos(){
+  if(!window.showDirectoryPicker) return false;
+  try{
+    const handle=await _lancctbCarregarHandleTributos();
+    if(!handle) return false;
+    return (await handle.queryPermission({mode:'read'}))==='granted';
+  } catch { return false; }
+}
+async function _lancctbConcederAcessoPastaTributos(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    await _lancctbSalvarHandleTributos(handle);
+    toast('Acesso à pasta "Tributos do Mês" concedido!','ok');
+    if(_lancctbRegraExtratoAlvo) _lancctbAtualizarSugestoesTributos();
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+// Busca os PDFs da pasta "Tributos do Mês_{anoMes}" cujo nome bata com a
+// empresa (pelo "(eid)" — padrão confirmado com dado real). Devolve []
+// tanto se a pasta do mês ainda não existir quanto se não tiver acesso
+// concedido — nunca é erro fatal, é só "sem sugestão pra esse mês".
+async function _lancctbBuscarPdfsTributosDoMes(eid,anoMes){
+  const handleRaiz=await _lancctbCarregarHandleTributos();
+  if(!handleRaiz) return [];
+  const perm=await handleRaiz.queryPermission({mode:'read'});
+  if(perm!=='granted') return [];
+  try{
+    const dirMes=await handleRaiz.getDirectoryHandle('Tributos do Mês_'+anoMes);
+    const encontrados=[];
+    for await (const [nome,fh] of dirMes.entries()){
+      if(fh.kind==='file'&&nome.toLowerCase().endsWith('.pdf')&&nome.includes(`(${eid})`)){
+        encontrados.push({ nome, fileHandle:fh });
+      }
+    }
+    return encontrados;
+  } catch { return []; }
+}
+// "{EMPRESA} ({eid}) - {descrição do imposto} - vencimento {DD-MM-AAAA}
+// ({categoria}).pdf" — confirmado com nomes reais da pasta (Fast Lube,
+// jul/2026: "GNRE 06.2026", "GuiaPagamento_2º Trim. 2026_IRPJ_CSLL"...).
+function _lancctbParsearNomeArquivoTributo(nome){
+  const m=nome.match(/^(.*?)\s*\((\d+)\)\s*-\s*(.*?)\s*-\s*vencimento\s*(\d{2})-(\d{2})-(\d{4})/i);
+  if(!m) return { descricao: nome.replace(/\.pdf$/i,''), vencimento:null };
+  return { empresaNome:m[1].trim(), eid:m[2], descricao:m[3].trim(), vencimento:`${m[6]}-${m[5]}-${m[4]}` };
+}
+function _lancctbParseValorBR2(s){
+  return parseFloat(String(s||'').trim().replace(/\./g,'').replace(',','.'))||0;
+}
+// DARF federal (IRPJ/CSLL/PIS/COFINS/IPI...) tem uma tabela "Composição do
+// Documento de Arrecadação" com 1 linha por código de receita — a forma
+// mais confiável de achar o valor de CADA imposto quando um Guia junta
+// vários numa PDF só (confirmado com Guia real IRPJ+CSLL e PIS+COFINS+IPI
+// da Fast Lube — inclusive repete o mesmo código quando o Guia junta
+// matriz+filial, por isso soma tudo que bater a mesma denominação em vez
+// de assumir 1 ocorrência só). Retorna null se não for esse formato (ex:
+// GNRE, DAS, FGTS — aí quem chama cai pro extrator genérico).
+async function _lancctbExtrairComposicaoDarf(pdf){
+  const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const texto=itens.map(it=>it.str).join(' ');
+  if(!/composi[cç][aã]o do documento de arrecada[cç][aã]o/i.test(texto)) return null;
+  const linhas=_lancctbAgruparLinhasPorY(itens);
+  const itensComp=[];
+  for(const linha of linhas){
+    const t=linha.itens.map(i=>i.str).join(' ').trim();
+    const m=t.match(/^(\d{4})\s+([A-ZÀ-Ü][A-ZÀ-Ü0-9\s\-\/\.]*?)\s+((?:[\d.,]+\s*)+)$/);
+    if(!m) continue;
+    const numeros=m[3].trim().split(/\s+/);
+    itensComp.push({ codigo:m[1], denominacao:m[2].trim(), valor:_lancctbParseValorBR2(numeros[numeros.length-1]) });
+  }
+  if(!itensComp.length) return null;
+  const mTotal=texto.match(/valor total do documento\D{0,10}([\d.,]+)/i);
+  return { itens:itensComp, valorTotal: mTotal?_lancctbParseValorBR2(mTotal[1]):itensComp.reduce((s,i)=>s+i.valor,0) };
+}
+// Fallback genérico (GNRE, DAS, FGTS, ISS...) — procura rótulos comuns de
+// "total" em guias brasileiras. Best-effort: se não achar rótulo nenhum,
+// devolve null (nunca inventa um valor sem fonte clara).
+async function _lancctbExtrairValorTotalGenerico(pdf){
+  const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const texto=itens.map(it=>it.str).join(' ');
+  const m=texto.match(/(?:total a recolher|valor total(?: do documento)?|total geral|valor a pagar)\D{0,20}?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
+  return m?_lancctbParseValorBR2(m[1]):null;
+}
+// Ponto único de extração de valor de um PDF de tributo — tenta o DARF
+// estruturado primeiro (mais confiável e já vem com a composição por
+// imposto, útil pra regra multi-linha), senão cai pro rótulo genérico.
+async function _lancctbExtrairValorPdfTributo(pdf){
+  const darf=await _lancctbExtrairComposicaoDarf(pdf);
+  if(darf) return { valor:darf.valorTotal, composicao:darf.itens };
+  const generico=await _lancctbExtrairValorTotalGenerico(pdf);
+  return generico!=null?{ valor:generico, composicao:null }:null;
+}
+function _lancctbExtrairCompetenciaDoNome(descricao){
+  const m=String(descricao||'').match(/(\d{2}[\.\/]\d{4}|\d[ºª]\s*Trim\.?\s*\d{4})/i);
+  return m?m[1]:null;
+}
+// Sugestões de PDF pra regra que está sendo criada a partir de um
+// lançamento concreto (ver _lancctbRegraExtratoAlvo) — busca pelo mês do
+// próprio lançamento. Não bloqueia o resto do modal (roda em paralelo,
+// sem await no chamador).
+let _lancctbTributosSugeridosAtual=[];
+async function _lancctbAtualizarSugestoesTributos(){
+  const area=document.getElementById('lancctbRegraTributosArea');
+  if(!area||!_lancctbRegraExtratoAlvo) return;
+  const temAcesso=await _lancctbTemAcessoPastaTributos();
+  if(!temAcesso){
+    area.innerHTML=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">📁 <a href="#" onclick="_lancctbConcederAcessoPastaTributos();return false;">Conceder acesso à pasta "Tributos do Mês"</a> pra ver sugestões de PDF de imposto pra este lançamento.</div>`;
+    return;
+  }
+  const anoMes=_lancctbRegraExtratoAlvo.data_pagamento.slice(0,7);
+  area.innerHTML='<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Buscando PDFs de Tributos do Mês…</div>';
+  const encontrados=await _lancctbBuscarPdfsTributosDoMes(_lancctbEidAtual,anoMes);
+  _lancctbTributosSugeridosAtual=encontrados;
+  if(!encontrados.length){ area.innerHTML=''; return; }
+  let html=`<div style="background:#EEF2FF;border-radius:4px;padding:10px;margin-bottom:10px;font-size:12px">
+    <strong>📄 Tributos do Mês encontrados (${esc(anoMes)}):</strong>
+    <div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px">`;
+  encontrados.forEach((f,i)=>{
+    const info=_lancctbParsearNomeArquivoTributo(f.nome);
+    html+=`<button class="btn bo bsm" onclick="_lancctbUsarSugestaoTributo(${i})" title="${esc(f.nome)}">${esc(info.descricao)}</button>`;
+  });
+  html+='</div></div>';
+  area.innerHTML=html;
+}
+// Clicar numa sugestão preenche a Descrição/Histórico gatilho (regra
+// simples) ou a 1ª linha de histórico ainda vazia do rateio (Fase 11).
+async function _lancctbUsarSugestaoTributo(idx){
+  const f=_lancctbTributosSugeridosAtual[idx];
+  if(!f) return;
+  const info=_lancctbParsearNomeArquivoTributo(f.nome);
+  const competencia=_lancctbExtrairCompetenciaDoNome(info.descricao);
+  const textoHist=`Pagamento ${info.descricao}${competencia?' ref. '+competencia:''}`.trim();
+  if(_lancctbRateioAtivo&&_lancctbRateioRowIds.length){
+    const rowIdVazia=_lancctbRateioRowIds.find(id=>!document.getElementById('lancctbRateioHistorico_'+id)?.value);
+    const rowId=rowIdVazia!==undefined?rowIdVazia:_lancctbRateioRowIds[0];
+    const hist=document.getElementById('lancctbRateioHistorico_'+rowId);
+    if(hist) hist.value=textoHist;
+  } else {
+    document.getElementById('lancctbRegraDescricao').value=textoHist;
+    document.getElementById('lancctbRegraHistoricoGatilho').value=textoHist;
+  }
+  toast('Sugestão aplicada — confira e complete se precisar.','ok');
+}
 async function abrirLancctbImportarMesModal(){
   const handle=await _lancctbCarregarHandlePasta();
   if(!handle){ toast('Conceda acesso à pasta primeiro.','err'); return; }
@@ -16993,6 +17164,7 @@ async function abrirLancctbRegraModal(id){
   _lancctbRateioProximoId=0;
   document.getElementById('lancctbRegraOrigemInfo').style.display='none';
   document.getElementById('lancctbRegraSugestaoCnpj').style.display='none';
+  document.getElementById('lancctbRegraTributosArea').innerHTML='';
   document.getElementById('lancctbRegraAprenderWrap').style.display='none';
   document.getElementById('lancctbRegraAprenderCheckbox').checked=true;
   document.getElementById('lancctbRegraRateioCheckbox').checked=false;
@@ -17105,6 +17277,7 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
   _lancctbRegraContexto='registro';
   _lancctbRegraExtratoAlvo=r;
   _lancctbRegraValorOrigem=valor;
+  _lancctbAtualizarSugestoesTributos(); // roda em paralelo, não bloqueia o resto do modal
   const hist=(opts.historico||r.historico_bancario||'').trim();
   document.getElementById('lancctbRegraDescricao').value=hist;
   document.getElementById('lancctbRegraHistoricoGatilho').value=hist;
@@ -17719,6 +17892,100 @@ async function _lancctbProcessarFonteRegistro(modo){
   if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
   renderLancctbRegistroContabil();
 }
+// Botão "🔄 Processar Tributos" (Fase 12): pra cada pendência (só saída —
+// imposto nunca é entrada), procura na pasta local "Tributos do Mês" (mês
+// do próprio lançamento) um PDF da empresa cujo valor extraído bata. Achou
+// PDF + já existe Regra (simples ou multi-linha) cujo gatilho combina com o
+// nome do imposto no arquivo → resolve sozinho, com os valores exatos da
+// composição do DARF quando disponíveis (regra multi-linha) ou o valor
+// cheio (regra simples). Achou PDF mas ainda não tem Regra → só conta como
+// "com sugestão" no resumo (o usuário resolve manual, e o painel do modal
+// de Regra já mostra esse mesmo PDF como sugestão clicável).
+async function _lancctbProcessarTributos(){
+  if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  const temAcesso=await _lancctbTemAcessoPastaTributos();
+  if(!temAcesso){ toast('Conceda acesso à pasta "Tributos do Mês" primeiro — clique num lançamento pendente pra ver o link, ou já grava depois de conceder.','err'); return; }
+  const btn=document.getElementById('lancctbProcessarTributosBtn');
+  const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
+  if(btn) btn.disabled=true;
+  const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
+
+  const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    .select('id,data_pagamento,valor_saida,valor_entrada')
+    .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0));
+  const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
+    .select('id,descricao,tipo_regra,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
+    .eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico'));
+  const { data: linhasRateioRows } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching_linhas')
+    .select('regra_id,ordem,conta_contabil_id,dc,descricao_imposto,plano_contas(classificacao)')
+    .in('regra_id',(regras||[]).map(r=>r.id).length?(regras||[]).map(r=>r.id):[-1]).order('ordem'));
+  const linhasRateioPorRegra={};
+  (linhasRateioRows||[]).forEach(l=>{ (linhasRateioPorRegra[l.regra_id]=linhasRateioPorRegra[l.regra_id]||[]).push(l); });
+  const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
+    .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
+  if(!contaBancoInfo?.conta_contabil_id){ if(btn) btn.disabled=false; toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+
+  const cachePorMes={};
+  let resolvidos=0, comSugestao=0, semAchado=0;
+  for(let i=0;i<pendencias.length;i++){
+    const l=pendencias[i];
+    if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length}…`;
+    const valor=l.valor_saida;
+    const anoMes=l.data_pagamento.slice(0,7);
+    if(!cachePorMes[anoMes]) cachePorMes[anoMes]=await _lancctbBuscarPdfsTributosDoMes(eid,anoMes);
+    const candidatos=cachePorMes[anoMes];
+    let achou=null;
+    for(const f of candidatos){
+      let extraido;
+      try{
+        const arquivo=await f.fileHandle.getFile();
+        const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
+        extraido=await _lancctbExtrairValorPdfTributo(pdfDoc);
+      }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); continue; }
+      if(extraido&&Math.abs(extraido.valor-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR){ achou={f,extraido}; break; }
+    }
+    if(!achou){ semAchado++; continue; }
+    const info=_lancctbParsearNomeArquivoTributo(achou.f.nome);
+    const regra=regras.find(r=>{
+      if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
+      return r.historico_gatilho&&info.descricao.toLowerCase().includes(r.historico_gatilho.toLowerCase());
+    });
+    if(!regra){ comSugestao++; continue; }
+
+    const filhas=linhasRateioPorRegra[regra.id]||[];
+    let linhas;
+    if(filhas.length&&achou.extraido.composicao){
+      const composicao=achou.extraido.composicao;
+      const valoresFilhas=filhas.map(f=>{
+        const bateram=composicao.filter(c=>f.descricao_imposto&&c.denominacao.toLowerCase().includes(f.descricao_imposto.toLowerCase()));
+        return bateram.length?bateram.reduce((s,c)=>s+c.valor,0):null;
+      });
+      if(valoresFilhas.some(v=>v==null)){ comSugestao++; continue; } // não deu pra casar todas as linhas com confiança — não arrisca
+      const somaFilhas=valoresFilhas.reduce((s,v)=>s+v,0);
+      linhas=[
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor:valor-somaFilhas, historico:regra.descricao, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+      ];
+      filhas.forEach((f,idx)=>{
+        linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:f.plano_contas?.classificacao||'', conta_contabil_id:f.conta_contabil_id, tipo:f.dc, valor:valoresFilhas[idx], historico:f.descricao_imposto||regra.descricao, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' });
+      });
+    } else {
+      const historicoUtilizado=regra.descricao||info.descricao;
+      linhas=[
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+      ];
+    }
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(error){ console.error('Erro ao gerar lançamento de tributo:',error); comSugestao++; continue; }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+    resolvidos++;
+  }
+  if(btn) btn.disabled=false;
+  if(statusEl) statusEl.textContent='';
+  toast(`Tributos: ${resolvidos} resolvido(s) sozinho(s), ${comSugestao} com PDF encontrado (falta Regra ou confirmação), ${semAchado} sem PDF correspondente no mês.`,'ok');
+  renderLancctbRegistroContabil();
+}
 
 // ─── Registro Contábil: todos os lançamentos do extrato + classificação ───
 // Ao contrário do Mister (1 linha por D e outra por C empilhadas), aqui cada
@@ -17925,6 +18192,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count}){
       <span id="lancctbRegistroProcessarStatus" style="font-size:11.5px;color:var(--slate)"></span>
       <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes')" title="Roda o matching só pra pendências que batem com um Comprovante">🔄 Processar Comprovantes</button>
       <button class="btn bo bsm" id="lancctbProcessarNfBtn" onclick="_lancctbProcessarFonteRegistro('notas_fiscais')" title="Roda o matching só pra pendências que batem direto com uma Nota Fiscal">🔄 Processar Notas Fiscais</button>
+      <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
     </div>
   </div>
