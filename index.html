@@ -19940,84 +19940,89 @@ function _lancctbDocumentoDeSeuNumero(str,fallback){
   return r.parcela?`${r.nf}-${r.parcela}`:r.nf;
 }
 
-// Parser determinístico Itaú Comprovantes — tenta extrair do PDF sem IA
-// Estratégia: procura por padrões de seção (blocos delimitados por "Dados da conta debitada")
-// e extrai campos por posição, como fazemos com Extratos de verdade
+// Parser determinístico Itaú Comprovantes — extrai de forma estruturada
+// Padrão Itaú: seções começam com tipo de operação (Transferência, Pagamento com código de barras, etc.)
+// seguidas por "Dados da conta debitada:" e "Dados do pagamento:"
 async function _lancctbParsearITauComprovantePDF(pdf){
   if(!pdfjsLib) return null;
 
   const comprovantes=[];
 
-  // Processa até 50 páginas (ou menos se o PDF tiver menos)
   for(let pNum=1;pNum<=Math.min(pdf.numPages,50);pNum++){
     const page=await pdf.getPage(pNum);
     const content=await page.getTextContent();
 
-    // Extrai todos os itens com posição X,Y
     const itens=content.items.map(it=>({
-      str:it.str,
+      str:it.str.trim(),
       x:it.transform[4],
       y:it.transform[5]
-    })).filter(it=>it.str.trim()!=='');
+    })).filter(it=>it.str!=='');
 
-    if(!itens.length) continue;
-
-    // Agrupa itens por Y (mesma linha horizontal)
+    // Agrupa por Y (linhas)
     const linhas=[];
     const ysUnicos=new Set(itens.map(it=>Math.round(it.y)));
     for(const y of [...ysUnicos].sort((a,b)=>b-a)){
       const itensDaLinha=itens.filter(it=>Math.abs(it.y-y)<3).sort((a,b)=>a.x-b.x);
-      linhas.push({
-        y,
-        texto:itensDaLinha.map(it=>it.str).join(' '),
-        itens:itensDaLinha
-      });
+      linhas.push(itensDaLinha.map(it=>it.str).join(' '));
     }
 
-    // Procura por padrão: "Dados da conta debitada" marca início de novo comprovante
+    // Identifica seções de comprovante (começam com tipo de operação)
     for(let i=0;i<linhas.length;i++){
       const linha=linhas[i];
 
-      // Se achou "Dados da conta debitada" ou similar, próximas linhas têm os dados
-      if(/Dados da conta debitada|Agência|Conta Corrente/i.test(linha.texto)){
-        // Próximas 15 linhas podem ter: nome beneficiário, valor, data
-        let nomeB='', valor=0, data='';
+      // Detecta tipo de operação (Transferência, Pagamento, PIX, etc.)
+      const tipoMatch=linha.match(/(Transferência|Pagamento|PIX|Tributo)/i);
+      if(!tipoMatch) continue;
 
-        for(let j=i+1;j<Math.min(i+15,linhas.length);j++){
-          const L=linhas[j].texto;
+      const tipoOp=tipoMatch[1];
+      let nomeB='', valor=0, data='', beneficiario='';
 
-          // Tenta achar data DD/MM/YYYY
-          if(!data){
-            const mData=L.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-            if(mData) data=`${mData[3]}-${mData[2]}-${mData[1]}`;
-          }
+      // Procura nos próximos 25 linhas pelos dados
+      for(let j=i;j<Math.min(i+25,linhas.length);j++){
+        const L=linhas[j];
 
-          // Tenta achar valor R$ X.XXX,XX
-          if(valor===0){
-            const mVal=L.match(/R\s*\$\s*([\d.,]+)/);
-            if(mVal) valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
-          }
-
-          // Nome beneficiário (primeira linha que não tem "/" nem "R$" nem números puros)
-          if(!nomeB&&L.length>5&&!L.match(/^\d+$/)){
-            if(!L.includes('/')&&!L.includes('R$')&&!L.match(/^\s*\d+\s*$/)){
-              nomeB=L.trim();
+        // Dados da conta creditada/beneficiário: "Name: ..."
+        if(/^\s*Nome:\s+(.+?)(\s+Agência:|\s+$)/i.test(L)){
+          const m=L.match(/Nome:\s+(.+?)(?:\s+Agência:|$)/i);
+          if(m&&m[1]){
+            beneficiario=m[1].trim();
+            if(beneficiario&&!beneficiario.match(/^Dados/) && beneficiario.length>2){
+              nomeB=beneficiario;
             }
           }
         }
 
-        if(data&&valor>0){
-          comprovantes.push({
-            data_pagamento:data,
-            cliente_fornecedor_nome:nomeB,
-            cnpj_cpf:'',
-            documento_numero:'',
-            data_vencimento:'',
-            valor_pago:valor,
-            _incluir:true,
-            _ja_extraido_deterministico:true
-          });
+        // Se houver "Dados do pagamento:" procura valor logo depois
+        if(/Dados do pagamento:|Valor:/i.test(L)){
+          // Valor pode estar na mesma linha ou próximas
+          if(valor===0){
+            const mVal=L.match(/Valor:\s*R\$\s*([\d.,]+)/i) || L.match(/R\$\s*([\d.,]+)/);
+            if(mVal){
+              valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
+            }
+          }
         }
+
+        // Data: "efetuada em DD/MM/YYYY"
+        if(!data){
+          const mData=L.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+          if(mData) data=`${mData[3]}-${mData[2]}-${mData[1]}`;
+        }
+      }
+
+      // Se encontrou os mínimos necessários, adiciona
+      if(data&&valor>0){
+        comprovantes.push({
+          data_pagamento:data,
+          cliente_fornecedor_nome:nomeB||'',
+          cnpj_cpf:'',
+          documento_numero:'',
+          data_vencimento:'',
+          valor_pago:valor,
+          observacao:tipoOp,
+          _incluir:true,
+          _ja_extraido_deterministico:true
+        });
       }
     }
   }
@@ -20322,7 +20327,6 @@ function renderLancctbComprovPreview(){
         <th style="padding:6px 8px"><input type="checkbox" checked onclick="_lancctbComprovToggleTodos(this.checked)"></th>
         <th style="padding:6px 8px;text-align:left">Data</th>
         <th style="padding:6px 8px;text-align:left">Cliente/Fornecedor</th>
-        <th style="padding:6px 8px;text-align:left">Documento</th>
         <th style="padding:6px 8px;text-align:right">Valor</th>
         <th style="padding:6px 8px;text-align:left">Observação</th>
         <th style="padding:6px 8px;text-align:left">Arquivo</th>
@@ -20332,7 +20336,6 @@ function renderLancctbComprovPreview(){
       <td style="padding:5px 8px"><input type="checkbox" ${c._incluir?'checked':''} onclick="_lancctbComprovPreview[${i}]._incluir=this.checked;renderLancctbComprovPreview()"></td>
       <td style="padding:5px 8px">${c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
       <td style="padding:5px 8px">${esc(c.cliente_fornecedor_nome||'')}</td>
-      <td style="padding:5px 8px">${esc(c.documento_numero||'')}</td>
       <td style="padding:5px 8px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
       <td style="padding:5px 8px;color:var(--slate)">${esc(c.observacao||'')}</td>
       <td style="padding:5px 8px;color:var(--slate);font-size:11px">${esc(c._arquivoNome||'')}</td>
