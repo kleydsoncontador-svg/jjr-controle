@@ -19939,6 +19939,59 @@ function _lancctbDocumentoDeSeuNumero(str,fallback){
   if(!r||!r.nf) return fallback||'';
   return r.parcela?`${r.nf}-${r.parcela}`:r.nf;
 }
+
+// Parser determinístico Itaú Comprovantes — tenta extrair do PDF sem IA
+// quando o usuário clica "Upload (padrão)"
+async function _lancctbParsearITauComprovantePDF(pdf){
+  let todoTexto='';
+  for(let p=1;p<=Math.min(pdf.numPages,50);p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const texto=content.items.map(it=>it.str).join(' ');
+    todoTexto+='\n'+texto;
+  }
+
+  // Padrão Itaú: procura por marcadores típicos
+  if(!todoTexto.includes('Sispag')&&!todoTexto.includes('Agência')) return null;
+
+  const comprovantes=[];
+  const linhas=todoTexto.split('\n').filter(l=>l.trim());
+
+  // Tenta encontrar padrão de comprovante (data + valor)
+  for(let i=0;i<linhas.length;i++){
+    const linha=linhas[i];
+    const matchData=linha.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    const matchValor=linha.match(/R\s*\$\s*([\d.,]+)/);
+
+    if(matchData&&matchValor){
+      const [,dia,mes,ano]=matchData;
+      const data=`${ano}-${mes}-${dia}`;
+      const valor=parseFloat(matchValor[1].replace(/\./g,'').replace(',','.'));
+
+      let nomeCliforn='';
+      for(let j=i-1;j>=Math.max(0,i-3);j--){
+        const candidato=linhas[j].trim();
+        if(candidato.length>3&&!candidato.includes('/')&&!candidato.match(/R\$/)){
+          nomeCliforn=candidato;
+          break;
+        }
+      }
+
+      comprovantes.push({
+        data_pagamento:data,
+        cliente_fornecedor_nome:nomeCliforn,
+        cnpj_cpf:'',
+        documento_numero:'',
+        data_vencimento:'',
+        valor_pago:valor||0,
+        _incluir:true,
+        _ja_extraido_deterministico:true
+      });
+    }
+  }
+
+  return comprovantes.length>0?comprovantes:null;
+}
 // Banco do Brasil — planilha "BoletosConsulta". Só entram linhas com
 // Situação = Liquidado (as demais ainda não foram pagas pelo cliente).
 // Retorna null se o cabeçalho não bater com esse formato, sinal pro
@@ -20037,6 +20090,32 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
   const ehExcel=/\.(xlsx?|csv)$/i.test(file.name);
   const ehPdf=/\.pdf$/i.test(file.name);
   const bucket=_lancctbComprovBucket(tipo);
+
+  // Modo padrão (sem IA) para Comprovantes de Pagamento: tenta parser Itaú
+  if(_lancctbComprovanteSemIA&&tipo==='pagamento'&&ehPdf){
+    _convItauGarantirWorker();
+    const buf=await file.arrayBuffer();
+    const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    status.textContent=`"${file.name}" — tentando reconhecer padrão Itaú…`;
+    const reconhecido=await _lancctbParsearITauComprovantePDF(pdf);
+    if(reconhecido&&reconhecido.length){
+      const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+      const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
+      return reconhecido.map(c=>({...c,_arquivoStoragePath:erroUpload?null:pathArquivo}));
+    }
+    // Padrão não reconhecido — deixa vazio pra preenchimento manual
+    return [{
+      data_pagamento:new Date().toISOString().split('T')[0],
+      cliente_fornecedor_nome:'',
+      cnpj_cpf:'',
+      documento_numero:'',
+      data_vencimento:'',
+      valor_pago:0,
+      _incluir:true,
+      _arquivoNome:file.name,
+      _arquivoStoragePath:''
+    }];
+  }
 
   if(tipo==='recebimento'&&ehExcel){
     status.textContent=`"${file.name}" — lendo planilha…`;
@@ -20176,31 +20255,7 @@ async function processarLancctbUploadComprovante(){
   const btn=document.getElementById('lancctbComprovProcessarBtn');
   if(!files.length){ toast('Selecione ao menos um arquivo','err'); return; }
 
-  // Modo sem IA: redireciona pra formulário manual ao invés de extrair automaticamente
-  if(_lancctbComprovanteSemIA){
-    const encontrados=[];
-    for(let i=0;i<files.length;i++){
-      const file=files[i];
-      // Gera um stub vazio pra cada arquivo — o usuário vai preencher os dados manualmente
-      encontrados.push({
-        data_pagamento:new Date().toISOString().split('T')[0],
-        cliente_fornecedor_nome:'',
-        cnpj_cpf:'',
-        documento_numero:'',
-        data_vencimento:'',
-        valor_pago:0,
-        _incluir:true,
-        _arquivoNome:file.name,
-        _arquivoStoragePath:''
-      });
-    }
-    _lancctbComprovPreview=encontrados;
-    status.textContent=`${encontrados.length} arquivo(s) selecionado(s) — preencha os dados abaixo:`;
-    renderLancctbComprovPreview();
-    return;
-  }
-
-  btn.disabled=true; btn.textContent='Extraindo…';
+  btn.disabled=true; btn.textContent=_lancctbComprovanteSemIA?'Processando…':'Extraindo…';
   const encontrados=[];
   const erros=[];
   for(let i=0;i<files.length;i++){
