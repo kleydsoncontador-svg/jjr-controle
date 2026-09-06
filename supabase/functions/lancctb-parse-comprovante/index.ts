@@ -212,7 +212,18 @@ Deno.serve(async (req: Request) => {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
     });
   } catch (e) {
-    return new Response(JSON.stringify({ error: e instanceof Error ? e.message : String(e) }), {
+    const errorMsg = e instanceof Error ? e.message : String(e);
+    const errorStack = e instanceof Error ? e.stack : '';
+    console.error('[lancctb-parse-comprovante] Erro na extração:', errorMsg, errorStack);
+    return new Response(JSON.stringify({
+      error: errorMsg,
+      tipo_erro: e instanceof Error ? e.constructor.name : 'Erro desconhecido',
+      debug_info: errorMsg.includes('JSON') ? 'Possível erro ao parsear JSON da IA' :
+                  errorMsg.includes('413') ? 'Arquivo muito grande (413 Groq)' :
+                  errorMsg.includes('429') ? 'Rate limit atingido (429)' :
+                  errorMsg.includes('503') ? 'Serviço indisponível (503)' :
+                  'Erro na API ou processamento'
+    }), {
       status: 500,
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
     });
