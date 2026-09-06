@@ -19940,90 +19940,68 @@ function _lancctbDocumentoDeSeuNumero(str,fallback){
   return r.parcela?`${r.nf}-${r.parcela}`:r.nf;
 }
 
-// Parser determinístico Itaú Comprovantes — extrai de forma estruturada
-// Padrão Itaú: seções começam com tipo de operação (Transferência, Pagamento com código de barras, etc.)
-// seguidas por "Dados da conta debitada:" e "Dados do pagamento:"
+// Parser determinístico Itaú Comprovantes — usa "Autenticação:" como marcador de fim
+// Estratégia: cada comprovante Itaú termina com "Autenticação:" + hash
+// Processa blocos entre "Banco Itaú" e "Autenticação:" como uma unidade
 async function _lancctbParsearITauComprovantePDF(pdf){
   if(!pdfjsLib) return null;
 
   const comprovantes=[];
+  let textoCompleto='';
 
+  // Lê TODAS as páginas em texto corrido
   for(let pNum=1;pNum<=Math.min(pdf.numPages,50);pNum++){
     const page=await pdf.getPage(pNum);
     const content=await page.getTextContent();
+    const texto=content.items.map(it=>it.str).join(' ');
+    textoCompleto+='\n'+texto;
+  }
 
-    const itens=content.items.map(it=>({
-      str:it.str.trim(),
-      x:it.transform[4],
-      y:it.transform[5]
-    })).filter(it=>it.str!=='');
+  // Procura por padrão Itaú (tem "Banco Itaú" + "Autenticação:")
+  if(!textoCompleto.includes('Banco Itaú')||!textoCompleto.includes('Autenticação')) return null;
 
-    // Agrupa por Y (linhas)
-    const linhas=[];
-    const ysUnicos=new Set(itens.map(it=>Math.round(it.y)));
-    for(const y of [...ysUnicos].sort((a,b)=>b-a)){
-      const itensDaLinha=itens.filter(it=>Math.abs(it.y-y)<3).sort((a,b)=>a.x-b.x);
-      linhas.push(itensDaLinha.map(it=>it.str).join(' '));
+  // Divide por "Autenticação:" — cada comprovante termina ali
+  const secoes=textoCompleto.split(/Autenticação:/i);
+
+  for(let s=0;s<secoes.length-1;s++){ // -1 porque última seção é lixo após o último hash
+    const seção=secoes[s];
+
+    // Cada seção tem: tipo, "Dados da conta debitada/creditada", "Valor", "Data"
+    let valor=0, data='', nomeB='', tipoOp='';
+
+    // Tipo de operação (primeira palavra após "Banco Itaú -")
+    const mTipo=seção.match(/Banco Itaú\s*-\s*(Transferência|Pagamento|PIX|Tributo)/i);
+    if(mTipo) tipoOp=mTipo[1];
+
+    // Valor: "Valor: R$ X.XXX,XX" ou "R$ X.XXX,XX"
+    const mVal=seção.match(/Valor:\s*R\$\s*([\d.,]+)|R\$\s*([\d.,]+)/i);
+    if(mVal){
+      const valStr=mVal[1]||mVal[2];
+      valor=parseFloat(valStr.replace(/\./g,'').replace(',','.'));
     }
 
-    // Identifica seções de comprovante (começam com tipo de operação)
-    for(let i=0;i<linhas.length;i++){
-      const linha=linhas[i];
+    // Data: "DD/MM/YYYY"
+    const mData=seção.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    if(mData) data=`${mData[3]}-${mData[2]}-${mData[1]}`;
 
-      // Detecta tipo de operação (Transferência, Pagamento, PIX, etc.)
-      const tipoMatch=linha.match(/(Transferência|Pagamento|PIX|Tributo)/i);
-      if(!tipoMatch) continue;
+    // Nome beneficiário: "Nome: XXXXX" (depois de "Dados da conta creditada:")
+    // Nunca usar "Dados da conta debitada" — é a empresa própria
+    const mNome=seção.match(/Dados da conta creditada:\s*Nome:\s*([^\n]+)/i);
+    if(mNome) nomeB=mNome[1].trim();
 
-      const tipoOp=tipoMatch[1];
-      let nomeB='', valor=0, data='', beneficiario='';
-
-      // Procura nos próximos 25 linhas pelos dados
-      for(let j=i;j<Math.min(i+25,linhas.length);j++){
-        const L=linhas[j];
-
-        // Dados da conta creditada/beneficiário: "Name: ..."
-        if(/^\s*Nome:\s+(.+?)(\s+Agência:|\s+$)/i.test(L)){
-          const m=L.match(/Nome:\s+(.+?)(?:\s+Agência:|$)/i);
-          if(m&&m[1]){
-            beneficiario=m[1].trim();
-            if(beneficiario&&!beneficiario.match(/^Dados/) && beneficiario.length>2){
-              nomeB=beneficiario;
-            }
-          }
-        }
-
-        // Se houver "Dados do pagamento:" procura valor logo depois
-        if(/Dados do pagamento:|Valor:/i.test(L)){
-          // Valor pode estar na mesma linha ou próximas
-          if(valor===0){
-            const mVal=L.match(/Valor:\s*R\$\s*([\d.,]+)/i) || L.match(/R\$\s*([\d.,]+)/);
-            if(mVal){
-              valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
-            }
-          }
-        }
-
-        // Data: "efetuada em DD/MM/YYYY"
-        if(!data){
-          const mData=L.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-          if(mData) data=`${mData[3]}-${mData[2]}-${mData[1]}`;
-        }
-      }
-
-      // Se encontrou os mínimos necessários, adiciona
-      if(data&&valor>0){
-        comprovantes.push({
-          data_pagamento:data,
-          cliente_fornecedor_nome:nomeB||'',
-          cnpj_cpf:'',
-          documento_numero:'',
-          data_vencimento:'',
-          valor_pago:valor,
-          observacao:tipoOp,
-          _incluir:true,
-          _ja_extraido_deterministico:true
-        });
-      }
+    // Valida: precisa ter data e valor
+    if(data&&valor>0){
+      comprovantes.push({
+        data_pagamento:data,
+        cliente_fornecedor_nome:nomeB,
+        cnpj_cpf:'',
+        documento_numero:'',
+        data_vencimento:'',
+        valor_pago:valor,
+        observacao:tipoOp||'',
+        _incluir:true,
+        _ja_extraido_deterministico:true
+      });
     }
   }
 
