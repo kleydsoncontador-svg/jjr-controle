@@ -19941,52 +19941,84 @@ function _lancctbDocumentoDeSeuNumero(str,fallback){
 }
 
 // Parser determinístico Itaú Comprovantes — tenta extrair do PDF sem IA
-// quando o usuário clica "Upload (padrão)"
+// Estratégia: procura por padrões de seção (blocos delimitados por "Dados da conta debitada")
+// e extrai campos por posição, como fazemos com Extratos de verdade
 async function _lancctbParsearITauComprovantePDF(pdf){
-  let todoTexto='';
-  for(let p=1;p<=Math.min(pdf.numPages,50);p++){
-    const page=await pdf.getPage(p);
-    const content=await page.getTextContent();
-    const texto=content.items.map(it=>it.str).join(' ');
-    todoTexto+='\n'+texto;
-  }
-
-  // Padrão Itaú: procura por marcadores típicos
-  if(!todoTexto.includes('Sispag')&&!todoTexto.includes('Agência')) return null;
+  if(!pdfjsLib) return null;
 
   const comprovantes=[];
-  const linhas=todoTexto.split('\n').filter(l=>l.trim());
 
-  // Tenta encontrar padrão de comprovante (data + valor)
-  for(let i=0;i<linhas.length;i++){
-    const linha=linhas[i];
-    const matchData=linha.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-    const matchValor=linha.match(/R\s*\$\s*([\d.,]+)/);
+  // Processa até 50 páginas (ou menos se o PDF tiver menos)
+  for(let pNum=1;pNum<=Math.min(pdf.numPages,50);pNum++){
+    const page=await pdf.getPage(pNum);
+    const content=await page.getTextContent();
 
-    if(matchData&&matchValor){
-      const [,dia,mes,ano]=matchData;
-      const data=`${ano}-${mes}-${dia}`;
-      const valor=parseFloat(matchValor[1].replace(/\./g,'').replace(',','.'));
+    // Extrai todos os itens com posição X,Y
+    const itens=content.items.map(it=>({
+      str:it.str,
+      x:it.transform[4],
+      y:it.transform[5]
+    })).filter(it=>it.str.trim()!=='');
 
-      let nomeCliforn='';
-      for(let j=i-1;j>=Math.max(0,i-3);j--){
-        const candidato=linhas[j].trim();
-        if(candidato.length>3&&!candidato.includes('/')&&!candidato.match(/R\$/)){
-          nomeCliforn=candidato;
-          break;
+    if(!itens.length) continue;
+
+    // Agrupa itens por Y (mesma linha horizontal)
+    const linhas=[];
+    const ysUnicos=new Set(itens.map(it=>Math.round(it.y)));
+    for(const y of [...ysUnicos].sort((a,b)=>b-a)){
+      const itensDaLinha=itens.filter(it=>Math.abs(it.y-y)<3).sort((a,b)=>a.x-b.x);
+      linhas.push({
+        y,
+        texto:itensDaLinha.map(it=>it.str).join(' '),
+        itens:itensDaLinha
+      });
+    }
+
+    // Procura por padrão: "Dados da conta debitada" marca início de novo comprovante
+    for(let i=0;i<linhas.length;i++){
+      const linha=linhas[i];
+
+      // Se achou "Dados da conta debitada" ou similar, próximas linhas têm os dados
+      if(/Dados da conta debitada|Agência|Conta Corrente/i.test(linha.texto)){
+        // Próximas 15 linhas podem ter: nome beneficiário, valor, data
+        let nomeB='', valor=0, data='';
+
+        for(let j=i+1;j<Math.min(i+15,linhas.length);j++){
+          const L=linhas[j].texto;
+
+          // Tenta achar data DD/MM/YYYY
+          if(!data){
+            const mData=L.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+            if(mData) data=`${mData[3]}-${mData[2]}-${mData[1]}`;
+          }
+
+          // Tenta achar valor R$ X.XXX,XX
+          if(valor===0){
+            const mVal=L.match(/R\s*\$\s*([\d.,]+)/);
+            if(mVal) valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
+          }
+
+          // Nome beneficiário (primeira linha que não tem "/" nem "R$" nem números puros)
+          if(!nomeB&&L.length>5&&!L.match(/^\d+$/)){
+            if(!L.includes('/')&&!L.includes('R$')&&!L.match(/^\s*\d+\s*$/)){
+              nomeB=L.trim();
+            }
+          }
+        }
+
+        if(data&&valor>0){
+          comprovantes.push({
+            data_pagamento:data,
+            cliente_fornecedor_nome:nomeB,
+            cnpj_cpf:'',
+            documento_numero:'',
+            data_vencimento:'',
+            valor_pago:valor,
+            _incluir:true,
+            _ja_extraido_deterministico:true
+          });
         }
       }
-
-      comprovantes.push({
-        data_pagamento:data,
-        cliente_fornecedor_nome:nomeCliforn,
-        cnpj_cpf:'',
-        documento_numero:'',
-        data_vencimento:'',
-        valor_pago:valor||0,
-        _incluir:true,
-        _ja_extraido_deterministico:true
-      });
     }
   }
 
