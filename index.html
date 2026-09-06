@@ -19942,7 +19942,76 @@ function _lancctbDocumentoDeSeuNumero(str,fallback){
 
 // Parser determinístico Itaú Comprovantes — usa "Autenticação:" como marcador de fim
 // Estratégia: cada comprovante Itaú termina com "Autenticação:" + hash
-// Processa blocos entre "Banco Itaú" e "Autenticação:" como uma unidade
+function _lancctbDetectarTipoComprovante(texto){
+  // Detecção em ordem de especificidade — primeiro os padrões únicos, depois os genéricos
+  if(/consulta de pagamentos/i.test(texto)&&/período:/i.test(texto)) return 'consulta';
+  if(/PIX QR CODE/i.test(texto)&&/identificador do QR Code:/i.test(texto)) return 'pix_qrcode';
+  if(/PAG\.\s*TIT\.\s*BANCO/i.test(texto)||/Títulos Outros Bancos/i.test(texto)) return 'titulo';
+  if(/TEF\s*-\s*transferencia entre contas Itaú/i.test(texto)) return 'tef';
+  if(/Itaú Empresas na Internet/i.test(texto)&&/PIX\s*-\s*pagamento instantâneo/i.test(texto)) return 'pix_web';
+  if(/tipo de pagamento:\s*PIX TRANSFERENCIA/i.test(texto)) return 'pix_transferencia';
+  if(/Comprovante de pagamento de boleto/i.test(texto)||/código de barras:/i.test(texto)) return 'boleto';
+  return 'generico';
+}
+
+function _lancctbParsearObservacao(seção){
+  // Prioridade: Informações fornecidas → mensagem ao recebedor → identificação comprovante → identificação extrato
+  let obs='';
+  const patterns=[
+    /Informações fornecidas pelo\s+pagador:\s*([^\n]+)/i,
+    /mensagem ao recebedor:\s*([^\n]+)/i,
+    /identificação no comprovante:\s*([^\n]+)/i,
+    /identificação no extrato:\s*([^\n]+)/i,
+  ];
+  for(const p of patterns){
+    const m=seção.match(p);
+    if(m&&m[1].trim()) { obs=m[1].trim(); break; }
+  }
+  return obs;
+}
+
+function _lancctbParsearNomeBeneficiario(seção){
+  const patterns=[
+    /Dados da conta creditada:\s*Nome:\s*([A-Z][^\d\n]*)/i,
+    /nome do recebedor:\s*([A-Z][^\d\n]*)/i,
+    /nome do beneficiário:\s*([A-Z][^\d\n]*)/i,
+    /Beneficiário:\s*([A-Z][^\d\n]*)/i,
+  ];
+  for(const p of patterns){
+    const m=seção.match(p);
+    if(m&&m[1]){
+      let nome=m[1].trim().replace(/\s+(Agência|Conta|Ag\.|Cc\.|Ag|CPF|CNPJ|chave|instituição|Dados).*$/i,'').trim();
+      if(nome) return nome;
+    }
+  }
+  return '';
+}
+
+function _lancctbParsearData(seção){
+  // Tenta DD/MM/YYYY primeiro (maioria dos tipos)
+  let m=seção.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if(m) return `${m[3]}-${m[2]}-${m[1]}`;
+  // Tenta DD.MM.YYYY (tipo Título)
+  m=seção.match(/(\d{2})\.(\d{2})\.(\d{4})/);
+  if(m) return `${m[3]}-${m[2]}-${m[1]}`;
+  return '';
+}
+
+function _lancctbParsearValor(seção){
+  // Tenta em ordem de preferência
+  const patterns=[
+    /Valor do pagamento \(R\$\):\s*([\d.,]+)/i,
+    /Valor pago:\s*R\$\s*([\d.,]+)/i,
+    /valor:\s*R\$\s*([\d.,]+)/i,
+    /R\$\s*([\d.,]+)/,
+  ];
+  for(const p of patterns){
+    const m=seção.match(p);
+    if(m) return parseFloat(m[1].replace(/\./g,'').replace(',','.'));
+  }
+  return 0;
+}
+
 async function _lancctbParsearITauComprovantePDF(pdf){
   if(!pdfjsLib) return null;
 
@@ -19957,81 +20026,52 @@ async function _lancctbParsearITauComprovantePDF(pdf){
     textoCompleto+='\n'+texto;
   }
 
-  // Procura por padrão Itaú (tem "Banco Itaú" + "Autenticação:")
-  if(!textoCompleto.includes('Banco Itaú')||!textoCompleto.includes('Autenticação')) return null;
+  // Procura por padrão Itaú
+  if(!textoCompleto.includes('Banco Itaú')&&!textoCompleto.includes('Itaú Empresas na Internet')) return null;
 
-  // Divide por "Autenticação:" — cada comprovante termina ali
+  // Detecta tipo de operação
+  const tipoComprovante=_lancctbDetectarTipoComprovante(textoCompleto);
+
+  if(tipoComprovante==='consulta'){
+    // Tipo Consulta Agrupada: múltiplos registros em tabela
+    // Extrai linhas e transforma em array de comprovantes
+    const linhas=textoCompleto.split('\n').filter(l=>l.trim());
+    const comprovantes=[];
+    for(const linha of linhas){
+      // Padrão: Nome CNPJ Tipo Referência Data Valor Status
+      const m=linha.match(/^([A-Z\s]+?)\s+(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})\s+(Boleto|DARF código de barras|Conta Corrente)\s+([\s\-\w]*?)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.]+,\d{2})\s+(efetuado)/i);
+      if(m){
+        const [,nome,cnpj,tipo,ref,data,valor,status]=m;
+        const dataParsed=data.replace(/(\d{2})\/(\d{2})\/(\d{4})/,'$3-$2-$1');
+        const valorParsed=parseFloat(valor.replace(/\./g,'').replace(',','.'));
+        comprovantes.push({
+          data_pagamento:dataParsed,
+          cliente_fornecedor_nome:nome.trim(),
+          cnpj_cpf:cnpj,
+          documento_numero:'',
+          data_vencimento:'',
+          valor_pago:valorParsed,
+          observacao:`${tipo}${ref?(' ref: '+ref):''}`,
+          _incluir:true,
+          _ja_extraido_deterministico:true
+        });
+      }
+    }
+    return comprovantes.length>0?comprovantes:null;
+  }
+
+  // Para outros tipos: divide por "Autenticação:" — cada comprovante termina ali
   const secoes=textoCompleto.split(/Autenticação:/i);
 
   // Começa de s=1 porque s=0 é tudo antes do primeiro Autenticação (lixo/cabeçalho)
-  for(let s=1;s<secoes.length;s++){ // processa todas as seções com comprovantes
+  for(let s=1;s<secoes.length;s++){
     const seção=secoes[s];
+    if(!seção.trim()) continue;
 
-    let valor=0, data='', nomeB='';
-
-    // Observação: tenta múltiplos campos em ordem de preferência
-    let obs='';
-
-    // 1ª: "Informações fornecidas pelo pagador:"
-    let mObs=seção.match(/Informações fornecidas pelo\s+pagador:\s*([^\n]+)/i);
-    if(mObs&&mObs[1].trim()) obs=mObs[1].trim();
-
-    // 2ª: "mensagem ao recebedor:"
-    if(!obs){
-      mObs=seção.match(/mensagem ao recebedor:\s*([^\n]+)/i);
-      if(mObs&&mObs[1].trim()) obs=mObs[1].trim();
-    }
-
-    // 3ª: "identificação no comprovante:"
-    if(!obs){
-      mObs=seção.match(/identificação no comprovante:\s*([^\n]+)/i);
-      if(mObs&&mObs[1].trim()) obs=mObs[1].trim();
-    }
-
-    // 4ª: "identificação no extrato:"
-    if(!obs){
-      mObs=seção.match(/identificação no extrato:\s*([^\n]+)/i);
-      if(mObs&&mObs[1].trim()) obs=mObs[1].trim();
-    }
-
-    // Valor: tenta múltiplos padrões
-    // 1ª: "Valor: R$ X.XXX,XX"
-    let mVal=seção.match(/Valor:\s*R\$\s*([\d.,]+)/i);
-    if(mVal){
-      valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
-    }
-    // 2ª: "valor: R$ X.XXX,XX" (lowercase)
-    if(!valor){
-      mVal=seção.match(/valor:\s*R\$\s*([\d.,]+)/i);
-      if(mVal) valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
-    }
-    // 3ª: Apenas "R$ X.XXX,XX" (genérico, pega primeiro valor)
-    if(!valor){
-      mVal=seção.match(/R\$\s*([\d.,]+)/);
-      if(mVal) valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
-    }
-
-    // Data: "DD/MM/YYYY"
-    const mData=seção.match(/(\d{2})\/(\d{2})\/(\d{4})/);
-    if(mData) data=`${mData[3]}-${mData[2]}-${mData[1]}`;
-
-    // Nome beneficiário: tenta múltiplos padrões
-
-    // 1ª: "Nome:" após "Dados da conta creditada:"
-    let mNome=seção.match(/Dados da conta creditada:\s*Nome:\s*([A-Z][^\d\n]*)/i);
-    if(mNome) nomeB=mNome[1].trim().replace(/\s+(Agência|Conta|Ag\.|Cc\.|Ag).*$/i,'').trim();
-
-    // 2ª: "nome do recebedor:" (PIX e variações)
-    if(!nomeB){
-      mNome=seção.match(/nome do recebedor:\s*([A-Z][^\d\n]*)/i);
-      if(mNome) nomeB=mNome[1].trim().replace(/\s+(CPF|CNPJ|chave|instituição).*$/i,'').trim();
-    }
-
-    // 3ª: "nome do beneficiário:"
-    if(!nomeB){
-      mNome=seção.match(/nome do beneficiário:\s*([A-Z][^\d\n]*)/i);
-      if(mNome) nomeB=mNome[1].trim().replace(/\s+(Agência|Conta|CPF|CNPJ).*$/i,'').trim();
-    }
+    const data=_lancctbParsearData(seção);
+    const valor=_lancctbParsearValor(seção);
+    const nomeB=_lancctbParsearNomeBeneficiario(seção);
+    const obs=_lancctbParsearObservacao(seção);
 
     // Valida: precisa ter data e valor
     if(data&&valor>0){
