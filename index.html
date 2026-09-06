@@ -19705,7 +19705,8 @@ async function renderLancctbComprovantes(){
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbComprovantesExcel()">📊 Gerar Excel</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbComprovantesConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes comprovantes</button>
-      <button class="btn bp bsm" onclick="abrirLancctbUploadComprovanteModal()">⬆ Upload PDF de Comprovantes</button>
+      <button class="action-btn action-btn-txt" onclick="abrirLancctbUploadComprovanteModal('pagamento',true)" title="Preencher manualmente — para formatos que o sistema não reconhece">⬆ Upload (padrão)</button>
+      <button class="btn bp bsm" onclick="abrirLancctbUploadComprovanteModal('pagamento',false)">⬆ Upload (IA)</button>
     </div>
   </div>
   <div style="overflow-x:auto">
@@ -19871,6 +19872,9 @@ function exportarLancctbComprovantesExcel(){
 // "comprovantes-recebimento") — modal e extração (Edge Function
 // lancctb-parse-comprovante) são os mesmos pros dois; só muda onde salva.
 let _lancctbUploadComprovTipo='pagamento';
+// Flag pra desabilitar IA: quando true, processarLancctbUploadComprovante()
+// não chama a Edge Function e deixa em branco pra usuário preencher manualmente.
+let _lancctbComprovanteSemIA=false;
 // Rastreiam qual status/título está ativo no modal COMPARTILHADO
 // mLancctbUpload agora (Comprovantes de Pagamento/Recebimento/Salários,
 // Fluxo de Caixa e Extrato Bancário todos reaproveitam o mesmo modal, só
@@ -19886,26 +19890,31 @@ function _lancctbComprovBucket(tipo){
 function _lancctbComprovTabela(tipo){
   return tipo==='recebimento'?'comprovantes_recebimento':tipo==='salarios'?'comprovantes_salarios':'comprovantes_bancarios';
 }
-function abrirLancctbUploadComprovanteModal(tipo){
+function abrirLancctbUploadComprovanteModal(tipo,semIA){
   _lancctbUploadComprovTipo=tipo||'pagamento';
+  _lancctbComprovanteSemIA=semIA||false;
   const ehReceb=_lancctbUploadComprovTipo==='recebimento';
   const ehSalarios=_lancctbUploadComprovTipo==='salarios';
   const tituloModal=ehReceb?'Upload de Comprovantes de Recebimento':ehSalarios?'Upload de Comprovantes de Pagamentos de Salários':'Upload de Comprovantes (PDF)';
   document.getElementById('lancctbUploadTitulo').textContent=tituloModal;
   _lancctbUploadStatusAtualId='lancctbComprovStatus';
   _lancctbUploadTituloAtual=tituloModal;
+  const avisoIA=_lancctbComprovanteSemIA?'⚠ Extração manual: você preenche os dados de cada comprovante. Útil pra formatos que o sistema não reconhece automaticamente.':'Extração automática via IA — reconhece comprovantes de vários formatos.';
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-      ${ehReceb
-        ? 'Pode subir o relatório de cobrança pronto do banco — Itaú ("Extrato de movimentação de boletos", PDF) ou Banco do Brasil ("Movimentações de Cobrança"/BoletosConsulta, Excel) são reconhecidos automaticamente (só entram os boletos já liquidados). Qualquer outro PDF cai na extração por IA, igual comprovante avulso.'
-        : 'Pode selecionar vários PDFs de uma vez (segure Ctrl ou Shift na janela de seleção) — e cada PDF ainda pode trazer vários comprovantes empilhados (um por página). Tudo é extraído junto e você confere/desmarca antes de salvar.'}
+      ${_lancctbComprovanteSemIA
+        ? 'Modo padrão: você entra com os dados. '+avisoIA
+        : (ehReceb
+          ? 'Modo IA: relatórios prontos de cobrança (Itaú/Banco do Brasil) e comprovantes avulsos. Qual for reconhecido, entra sozinho; os demais vão pra IA.'
+          : 'Modo IA: comprovantes de vários formatos. Pode selecionar vários PDFs de uma vez (Ctrl+Shift) — cada PDF pode ter vários comprovantes por página.')
+      }
     </div>
-    <input class="fi" id="lancctbComprovArquivo" type="file" accept="${ehReceb?'.pdf,.xls,.xlsx':'.pdf'}" multiple>
+    <input class="fi" id="lancctbComprovArquivo" type="file" accept="${ehReceb?'.pdf,.xls,.xlsx':'.pdf'}" ${_lancctbComprovanteSemIA?'':'multiple'}>
     <div id="lancctbComprovStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
     <div id="lancctbComprovPreviewArea" style="margin-top:14px"></div>
     <div class="ma">
       <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
-      <button class="btn bp" id="lancctbComprovProcessarBtn" onclick="processarLancctbUploadComprovante()">▶ Extrair</button>
+      <button class="btn bp" id="lancctbComprovProcessarBtn" onclick="processarLancctbUploadComprovante()">▶ ${_lancctbComprovanteSemIA?'Preencher':'Extrair'}</button>
     </div>`;
   openModal('mLancctbUpload');
 }
@@ -20166,6 +20175,31 @@ async function processarLancctbUploadComprovante(){
   const status=document.getElementById('lancctbComprovStatus');
   const btn=document.getElementById('lancctbComprovProcessarBtn');
   if(!files.length){ toast('Selecione ao menos um arquivo','err'); return; }
+
+  // Modo sem IA: redireciona pra formulário manual ao invés de extrair automaticamente
+  if(_lancctbComprovanteSemIA){
+    const encontrados=[];
+    for(let i=0;i<files.length;i++){
+      const file=files[i];
+      // Gera um stub vazio pra cada arquivo — o usuário vai preencher os dados manualmente
+      encontrados.push({
+        data_pagamento:new Date().toISOString().split('T')[0],
+        cliente_fornecedor_nome:'',
+        cnpj_cpf:'',
+        documento_numero:'',
+        data_vencimento:'',
+        valor_pago:0,
+        _incluir:true,
+        _arquivoNome:file.name,
+        _arquivoStoragePath:''
+      });
+    }
+    _lancctbComprovPreview=encontrados;
+    status.textContent=`${encontrados.length} arquivo(s) selecionado(s) — preencha os dados abaixo:`;
+    renderLancctbComprovPreview();
+    return;
+  }
+
   btn.disabled=true; btn.textContent='Extraindo…';
   const encontrados=[];
   const erros=[];
@@ -21219,7 +21253,8 @@ async function renderLancctbExtrato(){
       <button class="action-btn action-btn-excel" onclick="exportarLancctbExtratoExcel()">📊 Gerar Excel</button>
       <button class="btn bo bsm" id="lancctbReprocessarBtn" onclick="_lancctbReprocessarPendencias()" title="Roda o cruzamento automático Extrato × Comprovante × NF × Regras nos lançamentos pendentes desta conta">🔄 Reprocessar pendências</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbExtratoConta(${count})" ${count?'':'disabled'}>🗑️ Excluir tudo desta conta</button>
-      <button class="btn bp bsm" onclick="abrirLancctbUploadExtratoModal()">⬆ Upload Extrato</button>
+      <button class="action-btn action-btn-txt" onclick="abrirLancctbUploadExtratoModal(false)" title="Reconhece formatos de Itaú/Banco do Brasil/Safra; tenta IA se não reconhecer">⬆ Upload (padrão)</button>
+      <button class="btn bp bsm" onclick="abrirLancctbUploadExtratoModal(true)">⬆ Upload (IA)</button>
     </div>
   </div>
   <div style="overflow-x:auto">
@@ -21436,21 +21471,21 @@ function exportarLancctbExtratoExcel(){
   const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
   XLSX.writeFile(wb,`Extrato_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
 }
-function abrirLancctbUploadExtratoModal(){
+function abrirLancctbUploadExtratoModal(forceIA){
   document.getElementById('lancctbUploadTitulo').textContent='Upload de Extrato Bancário';
   _lancctbUploadStatusAtualId='lancctbExtratoStatus';
   _lancctbUploadTituloAtual='Importando Extrato Bancário';
+  const avisoIA=forceIA?'Extração via IA — força o uso de inteligência artificial (mais robusto pra extratos de outros bancos ou em imagem).':'Extração padrão — reconhece layouts de Itaú, Banco do Brasil, Safra, Sicoob. Se não reconhecer, tenta com IA como alternativa.';
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-      Aceita Excel/CSV (lido direto) ou PDF — se o layout do PDF for reconhecido (ex: extrato mensal Itaú), lê direto pela posição das colunas, sem IA. Se não reconhecer, tenta com IA como alternativa.
+      Aceita Excel/CSV (lido direto) ou PDF. ${avisoIA}
     </div>
     <input class="fi" id="lancctbExtratoArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
     <div id="lancctbExtratoStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
     <div id="lancctbExtratoPreviewArea" style="margin-top:14px"></div>
     <div class="ma">
       <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
-      <button class="btn bo" id="lancctbExtratoProcessarIaBtn" onclick="processarLancctbUploadExtrato(true)" title="Pula a tentativa de leitura direta e manda direto pra IA — use se já souber que o layout não é reconhecido (ex: extrato escaneado ou de outro banco)">🤖 Extrair via IA</button>
-      <button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(false)">▶ Extrair</button>
+      ${forceIA?`<button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(true)">🤖 Extrair via IA</button>`:`<button class="action-btn action-btn-txt" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(false)" title="Tenta reconhecimento automático primeiro, depois IA se necessário">▶ Extrair (padrão)</button>`}
     </div>`;
   openModal('mLancctbUpload');
 }
