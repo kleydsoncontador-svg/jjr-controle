@@ -20851,8 +20851,10 @@ async function _lancctbExecutarExclusaoComprovantesSalarios(){
 let _lancctbFluxoContaSel='';
 let _lancctbFluxoMes='';
 let _lancctbFluxoStatus=''; // ''|'associado'|'nao_associado'
+let _lancctbFluxoPortNegocioFiltro=''; // filtro por PORT/NEGÓCIO
 let _lancctbFluxoPagina=0;
 let _lancctbUltimoFluxo=[];
+let _lancctbFluxoSelecionados=new Set(); // IDs selecionados em lote
 let _lancctbFluxoImportTipo='saida'; // 'saida'(Pagamentos)|'entrada'(Recebimentos)
 let _lancctbFluxoImportLinhas=null; // matriz crua (header:1) entre os 2 estágios do modal
 let _lancctbFluxoImportNomeArquivo='';
@@ -20949,9 +20951,17 @@ async function renderLancctbFluxoCaixa(){
       ${contaFluxoSel.doc_visao_geral_fluxo_nome?`<button class="btn bo bsm" title="Marca de novo no Visão Geral todos os meses que já têm lançamento de fluxo de caixa nesta conta" onclick="remarcarLancctbFluxoVisaoGeral('${contaFluxoSel.id}')">🔄 Marcar meses já enviados</button>`:''}
     </div>`;
   }
+  // Extrai valores únicos de PORT/NEGÓCIO para o filtro
+  const portNegocios=new Set((linhas||[]).map(l=>l.port_nom).filter(Boolean));
+  const portNegociosArray=[...portNegocios].sort();
+
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
       ${_lancctbMesPickerHtml(_lancctbFluxoMes,'_lancctbFluxoMudarMes')}
+      <select class="si" style="min-width:180px" onchange="_lancctbFluxoPortNegocioFiltro=this.value;_lancctbFluxoPagina=0;renderLancctbFluxoCaixa()">
+        <option value="">PORT/Negócio: Todos</option>
+        ${portNegociosArray.map(pn=>`<option value="${esc(pn)}" ${_lancctbFluxoPortNegocioFiltro===pn?'selected':''}>${esc(pn)}</option>`).join('')}
+      </select>
       <select class="si" onchange="_lancctbFluxoStatus=this.value;_lancctbFluxoPagina=0;renderLancctbFluxoCaixa()">
         <option value="" ${!_lancctbFluxoStatus?'selected':''}>Todos</option>
         <option value="nao_associado" ${_lancctbFluxoStatus==='nao_associado'?'selected':''}>Não associados</option>
@@ -20964,6 +20974,17 @@ async function renderLancctbFluxoCaixa(){
       <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Excel</button>
     </div>
   </div>
+  ${_lancctbFluxoSelecionados.size>0?`
+  <div style="background:#e0f2fe;border:1px solid #0284c7;border-radius:6px;padding:12px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    <span style="color:#0c4a6e;font-weight:600">${_lancctbFluxoSelecionados.size} lançamento(s) selecionado(s)</span>
+    <select id="lancctbFluxoAssociacaoContaId" class="si" style="min-width:260px">
+      <option value="">— Selecione a conta —</option>
+      ${(agencias||[]).map(a=>`<option value="${a.id}">${esc(a.banco_nome)} Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('')}
+    </select>
+    <button class="btn bp bsm" onclick="associarLancctbFluxoEmLote()">✓ Associar selecionados</button>
+    <button class="btn bo bsm" onclick="_lancctbFluxoSelecionados.clear();renderLancctbFluxoCaixa()">✕ Limpar seleção</button>
+  </div>
+  `:''}
   <div style="overflow-x:auto">
   <table style="width:100%;border-collapse:collapse;font-size:12.5px">
     <thead><tr style="background:var(--ink2);color:#fff">
@@ -20978,7 +20999,7 @@ async function renderLancctbFluxoCaixa(){
       <th style="padding:8px 10px;text-align:left">Conta</th>
       <th style="padding:8px 10px;text-align:right">Valor</th>
       <th style="padding:8px 10px;text-align:center">Status</th>
-      <th style="padding:8px 10px;text-align:center">&nbsp;</th>
+      <th style="padding:8px 10px;text-align:center">☑</th>
     </tr></thead>
     <tbody>`;
   if(!linhas||!linhas.length){
@@ -20988,7 +21009,8 @@ async function renderLancctbFluxoCaixa(){
       const valor=l.valor_saida||l.valor_entrada;
       const contaNome=l.conta_bancaria_id?(agenciasPorId[l.conta_bancaria_id]?.banco_nome||'—'):'Qualquer conta';
       const associado=l.status_associado==='associado';
-      html+=`<tr style="border-bottom:1px solid var(--border)">
+      const selecionado=_lancctbFluxoSelecionados.has(l.id);
+      html+=`<tr style="border-bottom:1px solid var(--border);background:${selecionado?'rgba(16, 185, 129, 0.1)':''}">
         <td style="padding:7px 10px">${l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
         <td style="padding:7px 10px;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(l.descricao||'')}">${esc(l.descricao||'')}</td>
         <td style="padding:7px 10px">${esc(l.cliente_fornecedor_nome||'')}</td>
@@ -21000,7 +21022,7 @@ async function renderLancctbFluxoCaixa(){
         <td style="padding:7px 10px;color:${l.conta_bancaria_id?'inherit':'var(--slate)'}">${esc(contaNome)}</td>
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(valor)}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${associado?'var(--teal)':'#D97706'};font-weight:600;font-size:11px">${associado?'associado':'não associado'}</span></td>
-        <td style="padding:7px 10px;text-align:center">${associado?'':`<button class="btn bo bsm" onclick="abrirLancctbFluxoAssociarModal(${l.id})">🔗 Associar</button>`}</td>
+        <td style="padding:7px 10px;text-align:center"><input type="checkbox" ${selecionado?'checked':''} onchange="${selecionado?'_lancctbFluxoSelecionados.delete':'_lancctbFluxoSelecionados.add'}(${l.id});renderLancctbFluxoCaixa()" style="cursor:pointer;width:18px;height:18px"></td>
       </tr>`;
     });
   }
@@ -21016,6 +21038,33 @@ async function renderLancctbFluxoCaixa(){
       </div>
     </div>`;
   el.innerHTML=html;
+}
+async function associarLancctbFluxoEmLote(){
+  const contaId=document.getElementById('lancctbFluxoAssociacaoContaId')?.value;
+  if(!contaId){ toast('Selecione uma conta.','err'); return; }
+  if(_lancctbFluxoSelecionados.size===0){ toast('Nenhum lançamento selecionado.','err'); return; }
+
+  const ids=[..._lancctbFluxoSelecionados];
+  const { error } = await _supaClient.from('fluxo_caixa_lancamentos')
+    .update({conta_bancaria_id:contaId,status_associado:'associado'})
+    .in('id',ids);
+
+  if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
+
+  // Criar regra automática para esse PORT/NEGÓCIO
+  const primeiroLancamento=_lancctbUltimoFluxo.find(l=>ids.includes(l.id));
+  if(primeiroLancamento?.port_nom){
+    const nomeRegra=`PORT: ${primeiroLancamento.port_nom} → ${_lancctbUltimasAgencias?.find(a=>String(a.id)===String(contaId))?.banco_nome||''}`;
+    const { error: erroRegra } = await _supaClient.from('fluxo_caixa_regras')
+      .upsert({empresa_eid:_lancctbEidAtual,port_negocio:primeiroLancamento.port_nom,conta_bancaria_id:contaId,nome_regra:nomeRegra},{onConflict:'empresa_eid,port_negocio'});
+    if(!erroRegra) toast(`${ids.length} lançamento(s) associado(s) — regra criada para ${primeiroLancamento.port_nom}`,'ok');
+    else toast(`${ids.length} lançamento(s) associado(s)`,'ok');
+  } else {
+    toast(`${ids.length} lançamento(s) associado(s)`,'ok');
+  }
+
+  _lancctbFluxoSelecionados.clear();
+  renderLancctbFluxoCaixa();
 }
 function exportarLancctbFluxoExcel(){
   if(!_lancctbUltimoFluxo.length){ toast('Nada para exportar nesta página.','err'); return; }
