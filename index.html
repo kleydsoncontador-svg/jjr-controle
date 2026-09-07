@@ -20046,63 +20046,22 @@ async function _lancctbParsearITauComprovantePDF(pdf){
   if(!pdfjsLib) return null;
 
   const comprovantes=[];
-  let textoCompleto='';
 
-  // Lê TODAS as páginas em texto corrido
-  for(let pNum=1;pNum<=Math.min(pdf.numPages,50);pNum++){
+  // Processa página por página — cada página é potencialmente um comprovante
+  for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
     const page=await pdf.getPage(pNum);
     const content=await page.getTextContent();
-    const texto=content.items.map(it=>it.str).join(' ');
-    textoCompleto+='\n'+texto;
-  }
+    const textoPagina=content.items.map(it=>it.str).join(' ');
 
-  // Procura por padrão Itaú
-  if(!textoCompleto.includes('Banco Itaú')&&!textoCompleto.includes('Itaú Empresas na Internet')) return null;
+    // Valida se é página Itaú
+    if(!textoPagina.includes('Banco Itaú')&&!textoPagina.includes('Itaú Empresas')&&!textoPagina.includes('Comprovante')) continue;
 
-  // Detecta tipo de operação
-  const tipoComprovante=_lancctbDetectarTipoComprovante(textoCompleto);
-
-  if(tipoComprovante==='consulta'){
-    // Tipo Consulta Agrupada: múltiplos registros em tabela
-    // Extrai linhas e transforma em array de comprovantes
-    const linhas=textoCompleto.split('\n').filter(l=>l.trim());
-    const comprovantes=[];
-    for(const linha of linhas){
-      // Padrão: Nome CNPJ Tipo Referência Data Valor Status
-      const m=linha.match(/^([A-Z\s]+?)\s+(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})\s+(Boleto|DARF código de barras|Conta Corrente)\s+([\s\-\w]*?)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.]+,\d{2})\s+(efetuado)/i);
-      if(m){
-        const [,nome,cnpj,tipo,ref,data,valor,status]=m;
-        const dataParsed=data.replace(/(\d{2})\/(\d{2})\/(\d{4})/,'$3-$2-$1');
-        const valorParsed=parseFloat(valor.replace(/\./g,'').replace(',','.'));
-        comprovantes.push({
-          data_pagamento:dataParsed,
-          cliente_fornecedor_nome:nome.trim(),
-          cnpj_cpf:cnpj,
-          documento_numero:'',
-          data_vencimento:'',
-          valor_pago:valorParsed,
-          observacao:`${tipo}${ref?(' ref: '+ref):''}`,
-          _incluir:true,
-          _ja_extraido_deterministico:true
-        });
-      }
-    }
-    return comprovantes.length>0?comprovantes:null;
-  }
-
-  // Para outros tipos: divide por "Autenticação:" ou "autenticação" — cada comprovante termina ali
-  const secoes=textoCompleto.split(/[Aa]utentica[çc][ã]o[\s\S]*?:/);  // Match "Autenticação:" ou "autenticação no comprovante:" etc
-
-  // Processa todas as seções — o validate (data && valor > 0) filtra lixo automaticamente
-  for(let s=0;s<secoes.length;s++){
-    const seção=secoes[s];
-    if(!seção.trim()) continue;
-
-    const data=_lancctbParsearData(seção);
-    const valor=_lancctbParsearValor(seção);
-    const nomeB=_lancctbParsearNomeBeneficiario(seção);
-    const cpfCnpj=_lancctbParsearCpfCnpj(seção);
-    const obs=_lancctbParsearObservacao(seção);
+    // Extrai dados da página
+    const data=_lancctbParsearData(textoPagina);
+    const valor=_lancctbParsearValor(textoPagina);
+    const nomeB=_lancctbParsearNomeBeneficiario(textoPagina);
+    const cpfCnpj=_lancctbParsearCpfCnpj(textoPagina);
+    const obs=_lancctbParsearObservacao(textoPagina);
 
     // Valida: precisa ter data e valor
     if(data&&valor>0){
@@ -20117,6 +20076,45 @@ async function _lancctbParsearITauComprovantePDF(pdf){
         _incluir:true,
         _ja_extraido_deterministico:true
       });
+    }
+  }
+
+  // Se não achou nada com abordagem página-por-página, tenta split por autenticação (fallback)
+  if(comprovantes.length===0){
+    let textoCompleto='';
+    for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
+      const page=await pdf.getPage(pNum);
+      const content=await page.getTextContent();
+      const texto=content.items.map(it=>it.str).join(' ');
+      textoCompleto+='\n'+texto;
+    }
+
+    if(!textoCompleto.includes('Banco Itaú')&&!textoCompleto.includes('Itaú Empresas na Internet')) return null;
+
+    const tipoComprovante=_lancctbDetectarTipoComprovante(textoCompleto);
+
+    if(tipoComprovante==='consulta'){
+      // Tipo Consulta Agrupada: múltiplos registros em tabela
+      const linhas=textoCompleto.split('\n').filter(l=>l.trim());
+      for(const linha of linhas){
+        const m=linha.match(/^([A-Z\s]+?)\s+(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})\s+(Boleto|DARF código de barras|Conta Corrente)\s+([\s\-\w]*?)\s+(\d{2}\/\d{2}\/\d{4})\s+([\d.]+,\d{2})\s+(efetuado)/i);
+        if(m){
+          const [,nome,cnpj,tipo,ref,data,valor,status]=m;
+          const dataParsed=data.replace(/(\d{2})\/(\d{2})\/(\d{4})/,'$3-$2-$1');
+          const valorParsed=parseFloat(valor.replace(/\./g,'').replace(',','.'));
+          comprovantes.push({
+            data_pagamento:dataParsed,
+            cliente_fornecedor_nome:nome.trim(),
+            cnpj_cpf:cnpj,
+            documento_numero:'',
+            data_vencimento:'',
+            valor_pago:valorParsed,
+            observacao:`${tipo}${ref?(' ref: '+ref):''}`,
+            _incluir:true,
+            _ja_extraido_deterministico:true
+          });
+        }
+      }
     }
   }
 
