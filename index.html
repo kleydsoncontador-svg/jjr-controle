@@ -20855,6 +20855,7 @@ let _lancctbFluxoPortNegocioFiltro=''; // filtro por PORT/NEGÓCIO
 let _lancctbFluxoPagina=0;
 let _lancctbUltimoFluxo=[];
 let _lancctbFluxoSelecionados=new Set(); // IDs selecionados em lote
+let _lancctbFluxoSelecionarTodosMode=false; // modo "selecionar todos com filtros atuais"
 let _lancctbFluxoImportTipo='saida'; // 'saida'(Pagamentos)|'entrada'(Recebimentos)
 let _lancctbFluxoImportLinhas=null; // matriz crua (header:1) entre os 2 estágios do modal
 let _lancctbFluxoImportNomeArquivo='';
@@ -20914,8 +20915,10 @@ function _lancctbFluxoSelecionarConta(id){ _lancctbFluxoContaSel=id; _lancctbFlu
 function _lancctbFluxoMudarMes(v){ _lancctbFluxoMes=v; _lancctbFluxoPagina=0; renderLancctbFluxoCaixa(); }
 function _lancctbFluxoSelecionarTodosChecked(checked){
   if(checked){
-    (_lancctbUltimoFluxo||[]).forEach(l=>_lancctbFluxoSelecionados.add(l.id));
+    _lancctbFluxoSelecionarTodosMode=true;
+    _lancctbFluxoSelecionados.clear();
   } else {
+    _lancctbFluxoSelecionarTodosMode=false;
     _lancctbFluxoSelecionados.clear();
   }
   renderLancctbFluxoCaixa();
@@ -20983,15 +20986,15 @@ async function renderLancctbFluxoCaixa(){
       <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Excel</button>
     </div>
   </div>
-  ${_lancctbFluxoSelecionados.size>0?`
+  ${(_lancctbFluxoSelecionados.size>0 || _lancctbFluxoSelecionarTodosMode)?`
   <div style="background:#e0f2fe;border:1px solid #0284c7;border-radius:6px;padding:12px;margin-bottom:14px;display:flex;align-items:center;gap:12px;flex-wrap:wrap">
-    <span style="color:#0c4a6e;font-weight:600">${_lancctbFluxoSelecionados.size} lançamento(s) selecionado(s)</span>
+    <span style="color:#0c4a6e;font-weight:600">${_lancctbFluxoSelecionarTodosMode?'⚡ TODOS os lançamentos deste filtro':_lancctbFluxoSelecionados.size+' lançamento(s) selecionado(s)'}</span>
     <select id="lancctbFluxoAssociacaoContaId" class="si" style="min-width:260px">
       <option value="">— Selecione a conta —</option>
       ${(agencias||[]).map(a=>`<option value="${a.id}">${esc(a.banco_nome)} Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('')}
     </select>
-    <button class="btn bp bsm" onclick="associarLancctbFluxoEmLote()">✓ Associar selecionados</button>
-    <button class="btn bo bsm" onclick="_lancctbFluxoSelecionados.clear();renderLancctbFluxoCaixa()">✕ Limpar seleção</button>
+    <button class="btn bp bsm" onclick="associarLancctbFluxoEmLote()">✓ Associar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'}</button>
+    <button class="btn bo bsm" onclick="_lancctbFluxoSelecionarTodosMode=false;_lancctbFluxoSelecionados.clear();renderLancctbFluxoCaixa()">✕ Limpar seleção</button>
   </div>
   `:''}
   <div style="overflow-x:auto">
@@ -21051,9 +21054,36 @@ async function renderLancctbFluxoCaixa(){
 async function associarLancctbFluxoEmLote(){
   const contaId=document.getElementById('lancctbFluxoAssociacaoContaId')?.value;
   if(!contaId){ toast('Selecione uma conta.','err'); return; }
-  if(_lancctbFluxoSelecionados.size===0){ toast('Nenhum lançamento selecionado.','err'); return; }
 
-  const ids=[..._lancctbFluxoSelecionados];
+  let ids=[];
+  let primeiroLancamento=null;
+
+  if(_lancctbFluxoSelecionarTodosMode){
+    // Buscar TODOS os registros com os filtros atuais
+    const eid=_lancctbEidAtual;
+    let q=_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,port_nom')
+      .eq('empresa_eid',eid);
+    if(_lancctbFluxoContaSel) q=q.or(`conta_bancaria_id.eq.${parseInt(_lancctbFluxoContaSel)},conta_bancaria_id.is.null`);
+    if(_lancctbFluxoPortNegocioFiltro) q=q.eq('port_nom',_lancctbFluxoPortNegocioFiltro);
+    if(_lancctbFluxoStatus) q=q.eq('status_associado',_lancctbFluxoStatus);
+    if(_lancctbFluxoMes){
+      const [ano,mes]=_lancctbFluxoMes.split('-').map(Number);
+      const ultimoDia=new Date(ano,mes,0).getDate();
+      q=q.gte('data',`${_lancctbFluxoMes}-01`).lte('data',`${_lancctbFluxoMes}-${String(ultimoDia).padStart(2,'0')}`);
+    }
+    const { data: todasAsLinhas, error: erroQuery } = await q;
+    if(erroQuery){ toast('Erro ao buscar lançamentos: '+erroQuery.message,'err'); return; }
+    ids=todasAsLinhas.map(l=>l.id);
+    primeiroLancamento=todasAsLinhas[0];
+  } else {
+    if(_lancctbFluxoSelecionados.size===0){ toast('Nenhum lançamento selecionado.','err'); return; }
+    ids=[..._lancctbFluxoSelecionados];
+    primeiroLancamento=_lancctbUltimoFluxo.find(l=>ids.includes(l.id));
+  }
+
+  if(ids.length===0){ toast('Nenhum lançamento para associar.','err'); return; }
+
   const { error } = await _supaClient.from('fluxo_caixa_lancamentos')
     .update({conta_bancaria_id:contaId,status_associado:'associado'})
     .in('id',ids);
@@ -21061,7 +21091,6 @@ async function associarLancctbFluxoEmLote(){
   if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
 
   // Criar regra automática para esse PORT/NEGÓCIO
-  const primeiroLancamento=_lancctbUltimoFluxo.find(l=>ids.includes(l.id));
   if(primeiroLancamento?.port_nom){
     const nomeRegra=`PORT: ${primeiroLancamento.port_nom} → ${_lancctbUltimasAgencias?.find(a=>String(a.id)===String(contaId))?.banco_nome||''}`;
     const { error: erroRegra } = await _supaClient.from('fluxo_caixa_regras')
@@ -21072,6 +21101,7 @@ async function associarLancctbFluxoEmLote(){
     toast(`${ids.length} lançamento(s) associado(s)`,'ok');
   }
 
+  _lancctbFluxoSelecionarTodosMode=false;
   _lancctbFluxoSelecionados.clear();
   renderLancctbFluxoCaixa();
 }
