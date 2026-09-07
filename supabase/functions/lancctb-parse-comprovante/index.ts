@@ -134,7 +134,10 @@ async function extrairViaGeminiTexto(texto: string): Promise<unknown> {
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
-    return new Response('ok', { headers: CORS_HEADERS });
+    return new Response(null, {
+      status: 200,
+      headers: CORS_HEADERS
+    });
   }
 
   try {
