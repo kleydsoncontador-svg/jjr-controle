@@ -20223,35 +20223,31 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
   const ehPdf=/\.pdf$/i.test(file.name);
   const bucket=_lancctbComprovBucket(tipo);
 
-  // Modo Gemini: extrai comprovantes direto com IA
+  // Modo IA (Gemini): extrai comprovantes via Edge Function
   if(tipo==='pagamento'&&ehPdf){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-    status.textContent=`"${file.name}" — extraindo com Gemini (${pdf.numPages} páginas)…`;
 
-    // Extrai cada página em base64
-    const pdfPages=[];
+    // Extrai texto de todas as páginas
+    const paginasTexto=[];
     for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
       const page=await pdf.getPage(pNum);
-      const viewport=page.getViewport({scale:2});
-      const canvas=document.createElement('canvas');
-      canvas.width=viewport.width;
-      canvas.height=viewport.height;
-      const ctx=canvas.getContext('2d');
-      await page.render({canvasContext:ctx,viewport}).promise;
-      const base64=canvas.toDataURL('image/jpeg',0.85).split(',')[1]; // remove "data:image/jpeg;base64,"
-      pdfPages.push(base64);
+      const content=await page.getTextContent();
+      const texto=content.items.map(it=>it.str).join(' ');
+      paginasTexto.push(texto);
     }
 
-    // Chama Edge Function do Gemini
-    const response=await fetch(`${SUPABASE_URL}/functions/v1/lancctb-extrair-comprovante-gemini`,{
+    status.textContent=`"${file.name}" — enviando para IA (${pdf.numPages} páginas)…`;
+
+    // Chama Edge Function lancctb-parse-comprovante que já funciona com Gemini
+    const response=await fetch(`${SUPABASE_URL}/functions/v1/lancctb-parse-comprovante`,{
       method:'POST',
       headers:{'Content-Type':'application/json','Authorization':`Bearer ${SUPABASE_ANON_KEY}`},
-      body:JSON.stringify({pdfPages})
+      body:JSON.stringify({texto:paginasTexto.join('\n')})
     });
 
-    if(!response.ok) throw new Error(`Erro ao chamar Gemini: ${response.statusText}`);
+    if(!response.ok) throw new Error(`Erro na IA: ${response.statusText}`);
     const resultado=await response.json();
 
     if(!resultado.comprovantes||!resultado.comprovantes.length){
@@ -20264,15 +20260,9 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
 
     return resultado.comprovantes.map(c=>({
       ...c,
-      documento_numero:'',
-      data_vencimento:'',
-      juros:0,
-      multa:0,
-      desconto:0,
       _incluir:true,
       _arquivoNome:file.name,
-      _arquivoStoragePath:erroUpload?null:pathArquivo,
-      _ja_extraido_com_gemini:true
+      _arquivoStoragePath:erroUpload?null:pathArquivo
     }));
   }
 
