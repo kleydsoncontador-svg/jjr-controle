@@ -20309,6 +20309,8 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+
+    // Tentar reconhecer layout sem IA
     status.textContent=`"${file.name}" — tentando reconhecer layout (sem IA)…`;
     const reconhecido=await _lancctbParsearItauCobrancaPdf(pdf);
     if(reconhecido&&reconhecido.length){
@@ -20316,7 +20318,61 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
       const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
       return reconhecido.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:erroUpload?null:pathArquivo}));
     }
-    // layout não reconhecido — cai pro caminho genérico via IA abaixo
+
+    // Layout não reconhecido — usar Gemini via Edge Function lancctb-parse-extrato-cobranca
+    status.textContent=`"${file.name}" — enviando para IA (${pdf.numPages} páginas)…`;
+    const paginasTexto=[];
+    for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
+      const page=await pdf.getPage(pNum);
+      const content=await page.getTextContent();
+      const texto=content.items.map(it=>it.str).join(' ');
+      paginasTexto.push(texto);
+    }
+
+    const response=await fetch(`${SUPABASE_URL}/functions/v1/lancctb-parse-extrato-cobranca`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':`Bearer ${SUPABASE_ANON_KEY}`},
+      body:JSON.stringify({texto:paginasTexto.join('\n')})
+    });
+
+    if(!response.ok){
+      try{
+        const errData=await response.json();
+        const errMsg=errData.error||errData.debug_info||response.statusText;
+        throw new Error(`Erro na IA (${response.status}): ${errMsg}`);
+      }catch(e){
+        if(e instanceof Error) throw e;
+        throw new Error(`Erro na IA: ${response.statusText}`);
+      }
+    }
+    const resultado=await response.json();
+
+    if(!resultado.recebimentos||!resultado.recebimentos.length){
+      throw new Error('Nenhum recebimento encontrado no PDF.');
+    }
+
+    const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+    const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
+
+    // Mapear resultado da IA para o formato esperado
+    return resultado.recebimentos.map(r=>({
+      data_pagamento:r.data_pagamento,
+      cliente_fornecedor_nome:r.pagador_nome,
+      cnpj_cpf:null,
+      documento_numero:r.seu_numero,
+      data_vencimento:r.data_vencimento,
+      valor_pago:r.credito_debito,
+      observacao:`Recebimento - ${r.descricao_operacao} - Carteira ${r.carteira}`,
+      _incluir:true,
+      _arquivoNome:file.name,
+      _arquivoStoragePath:erroUpload?null:pathArquivo,
+      // Campos extras de cobrança pra reference
+      _carteira:r.carteira,
+      _nosso_numero:r.nosso_numero,
+      _agencia_receptora:r.agencia_receptora,
+      _tipo_operacao:r.descricao_operacao,
+      _numero_parcela:r.numero_parcela
+    }));
   }
 
   return _lancctbProcessarUmComprovantePdf(file,status);
