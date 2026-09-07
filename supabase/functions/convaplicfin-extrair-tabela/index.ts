@@ -4,43 +4,11 @@
 // Usada pelo Conversor de Aplicações Financeiras em index.html quando o
 // parser fixo (Invest Fácil Bradesco) não reconhece o modelo do PDF.
 //
-// Aceita `texto` (extraído via pdfjsLib no client, processado via Groq) OU
 // `imagens` (array de data URIs base64, usado quando o PDF é uma imagem
 // escaneada sem texto selecionável — ex: "Aplic. Aut Mais Itaú" — processado
-// via Gemini, que tem tier gratuito com suporte a visão; a conta Groq deste
 // projeto não tem nenhum modelo de visão disponível).
 //
-// Deploy: Supabase Dashboard → Edge Functions → Deploy a new function → Via Editor
-// → nome "convaplicfin-extrair-tabela" → colar este código → Deploy function.
-// Secrets usados: GROQ_API_KEY (texto) e GEMINI_API_KEY (imagem), ambos já
-// configurados no projeto (secrets de Edge Functions são por projeto, não
-// por função — não precisa cadastrar de novo).
-
-const CORS_HEADERS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-};
-
-// llama-3.3-70b-versatile foi descontinuado pelo Groq em 17/06/2026 —
-// migrado para o substituto recomendado pela própria Groq.
-const GROQ_MODEL_TEXTO = 'openai/gpt-oss-120b';
-// gemini-2.0-flash foi descontinuado — migrado para o substituto indicado
-// pela própria API do Google no erro 404 (18/08/2026).
-const GEMINI_MODEL = 'gemini-3.6-flash';
-
-const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo a tabela de movimentação de um extrato de aplicação financeira (CDB, fundo, aplicação automática, etc.) para lançamento contábil. O extrato pode ser de qualquer banco — não assuma um modelo específico, leia exatamente as colunas que aparecem no cabeçalho da tabela de movimentação/resgates do documento.
-
-Responda SOMENTE com um JSON válido, exatamente neste formato:
-
-{
-  "colunas": ["Data", "Nome da 2ª coluna exatamente como no cabeçalho", "Nome da 3ª coluna", ...],
-  "linhas": [
-    { "Data": "DD/MM/AAAA", "Nome da 2ª coluna": número ou null, "Nome da 3ª coluna": número ou null, ... }
-  ],
-  "observacoes": "1-2 frases em português caso haja ambiguidade, colunas que não ficaram claras, ou linhas de total/acumulado que você excluiu"
-}
-
+// Deploy: Supabase Dashboard → Edge Functions → Deploy a new 
 Regras:
 - "Data" é sempre a primeira coluna e é obrigatória em toda linha — nunca null.
 - Cada chave dentro de "colunas" deve aparecer, com o mesmo nome exato, em toda linha de "linhas" (use null quando aquela linha não tiver valor naquela coluna).
@@ -52,29 +20,6 @@ function limparJson(raw: string): string {
   return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
 }
 
-async function extrairViaGroq(texto: string): Promise<unknown> {
-  const apiKey = Deno.env.get('GROQ_API_KEY');
-  if (!apiKey) throw new Error('GROQ_API_KEY não configurada nos secrets da function');
-
-  const textoLimitado = texto.slice(0, 24000);
-  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
-    body: JSON.stringify({
-      model: GROQ_MODEL_TEXTO,
-      messages: [{ role: 'user', content: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + textoLimitado + '\n"""' }],
-      response_format: { type: 'json_object' },
-      temperature: 0.1,
-    }),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error('Erro na API da IA (Groq, ' + resp.status + '): ' + errText.slice(0, 300));
-  }
-  const data = await resp.json();
-  const raw = data?.choices?.[0]?.message?.content || '';
-  return JSON.parse(limparJson(raw));
-}
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -146,8 +91,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Prefere texto (Groq, mais barato/rápido) quando disponível; só usa
-    // imagem (Gemini) quando o PDF não tem texto selecionável.
+        // imagem (Gemini) quando o PDF não tem texto selecionável.
     const dados = temTexto ? await extrairViaGroq(texto) : await extrairViaGemini(imagens);
 
     return new Response(JSON.stringify(dados), {
