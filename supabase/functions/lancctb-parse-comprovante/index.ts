@@ -40,7 +40,9 @@ const CORS_HEADERS = {
 
 const GEMINI_MODEL = 'gemini-2.0-flash';
 
-const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo dados de comprovantes bancários (PDF) para conciliação contábil. Um único documento pode conter VÁRIOS comprovantes diferentes (um por página ou mais), de tipos diferentes: transferência entre contas (TED), PIX, pagamento de boleto, pagamento de concessionária (só código de barras), DARF (imposto federal), guia SEFAZ/DARE (imposto estadual), entre outros. Extraia CADA comprovante como um item separado da lista, mesmo que sejam do mesmo tipo repetido várias vezes.
+const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo TODOS os dados de comprovantes bancários (PDF) para conciliação contábil. Um único documento pode conter VÁRIOS comprovantes diferentes (um por página ou mais), de tipos diferentes: transferência entre contas (TED), PIX, pagamento de boleto, pagamento de concessionária (só código de barras), DARF (imposto federal), guia SEFAZ/DARE (imposto estadual), entre outros. Extraia CADA comprovante como um item separado da lista.
+
+IMPORTANTE: Se um boleto tiver múltiplas operações (ex: liquidação + tarifa de cobrança), crie um item separado para CADA operação com o MESMO cliente/beneficiário.
 
 Responda SOMENTE com um JSON válido, exatamente neste formato:
 
@@ -50,24 +52,28 @@ Responda SOMENTE com um JSON válido, exatamente neste formato:
       "data_pagamento": "AAAA-MM-DD",
       "cliente_fornecedor_nome": "nome do recebedor/beneficiário (use o 'Beneficiário Final' quando ele existir e for diferente do 'Beneficiário' — é o fornecedor real numa operação de factoring/cessão; senão use o nome do recebedor/beneficiário comum)",
       "cnpj_cpf": "CNPJ ou CPF do recebedor, só dígitos, ou null se não houver (ex: pagamento de concessionária só com código de barras)",
-      "documento_numero": "número/identificação do documento se houver (linha digitável resumida, número do DARF/DARE, ou o texto de 'identificação no comprovante' quando trouxer algo tipo 'NF 216' — priorize esse campo quando existir, é o dado mais valioso pra conciliar com a nota fiscal)",
+      "documento_numero": "número/identificação do documento se houver (linha digitável resumida, número DARF/DARE, 'Seu número' ou similar — o identificador ÚNICO do boleto/documento)",
+      "numero_parcela": número ou null (número da parcela/sequência se for um pagamento em parcelas do mesmo cliente — ex: 1, 2, 3... use 1 como padrão se houver só um),
+      "agencia_recebedora": "código numérico ou null (a agência recebedora do banco, se estiver no comprovante)",
       "data_vencimento": "AAAA-MM-DD ou null se o comprovante não tiver data de vencimento distinta da data de pagamento (ex: PIX, TED)",
-      "valor_documento": número ou null (valor original do boleto antes de desconto/juros/multa; para PIX/TED, use o mesmo valor pago),
-      "valor_pago": número (valor efetivamente pago/transferido — sempre presente),
+      "valor_documento": número ou null (valor original do boleto antes de desconto/juros/multa; para PIX/TED/tarifa, use o valor da operação),
+      "valor_pago": número (valor efetivamente pago/transferido nesta operação — sempre presente),
       "juros": número ou 0,
       "multa": número ou 0,
       "desconto": número ou 0,
-      "observacao": "1 frase curta com o tipo de operação e qualquer detalhe relevante (ex: 'PIX Transferência', 'DARF', 'Boleto pago via factoring - beneficiário original: X', 'Pagamento de concessionária VIVO-SP')"
+      "tipo_operacao": "liquidação|tarifa_cobranca|juros|multa|desconto|outro (tipo específico desta operação)",
+      "observacao": "1 frase com o tipo de operação e detalhes (ex: 'Boleto liquidação', 'Tarifa de cobrança', 'Juros', 'PIX Transferência', 'DARF', 'Pagamento concessionária VIVO-SP')"
     }
   ]
 }
 
 Regras:
-- Cada página/bloco do documento que representar um pagamento distinto vira um item separado — não agrupe nem resuma.
+- Cada operação distinta vira um item separado — não agrupe (ex: boleto R$ 500 + tarifa R$ 1,50 = 2 items com o MESMO cliente).
 - Valores monetários sempre em número puro (sem "R$", sem separador de milhar, ponto decimal — ex: 3994.10).
 - Datas sempre em formato AAAA-MM-DD (converta de DD/MM/AAAA).
-- CNPJ/CPF sempre só dígitos (remova pontuação); se estiver mascarado (ex: *****368821-**) ou ausente, use null.
-- Nunca invente dados que não estão no documento — use null quando a informação genuinamente não aparece.`;
+- CNPJ/CPF sempre só dígitos (remova pontuação); se estiver mascarado ou ausente, use null.
+- Nunca invente dados que não estão no documento — use null quando a informação genuinamente não aparece.
+- Extraia TODAS as colunas e informações visíveis no PDF, incluindo agência recebedora, número de parcela, etc.`;
 
 function limparJson(raw: string): string {
   return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
