@@ -20224,30 +20224,57 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
   const ehPdf=/\.pdf$/i.test(file.name);
   const bucket=_lancctbComprovBucket(tipo);
 
-  // Modo padrão (sem IA) para Comprovantes de Pagamento: tenta parser Itaú
-  if(_lancctbComprovanteSemIA&&tipo==='pagamento'&&ehPdf){
+  // Modo Gemini: extrai comprovantes direto com IA
+  if(tipo==='pagamento'&&ehPdf){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-    status.textContent=`"${file.name}" — tentando reconhecer padrão Itaú…`;
-    const reconhecido=await _lancctbParsearITauComprovantePDF(pdf);
-    if(reconhecido&&reconhecido.length){
-      const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
-      const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
-      return reconhecido.map(c=>({...c,_arquivoStoragePath:erroUpload?null:pathArquivo}));
+    status.textContent=`"${file.name}" — extraindo com Gemini (${pdf.numPages} páginas)…`;
+
+    // Extrai cada página em base64
+    const pdfPages=[];
+    for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
+      const page=await pdf.getPage(pNum);
+      const viewport=page.getViewport({scale:2});
+      const canvas=document.createElement('canvas');
+      canvas.width=viewport.width;
+      canvas.height=viewport.height;
+      const ctx=canvas.getContext('2d');
+      await page.render({canvasContext:ctx,viewport}).promise;
+      const base64=canvas.toDataURL('image/jpeg',0.85).split(',')[1]; // remove "data:image/jpeg;base64,"
+      pdfPages.push(base64);
     }
-    // Padrão não reconhecido — deixa vazio pra preenchimento manual
-    return [{
-      data_pagamento:new Date().toISOString().split('T')[0],
-      cliente_fornecedor_nome:'',
-      cnpj_cpf:'',
+
+    // Chama Edge Function do Gemini
+    const response=await fetch(`${_SUPABASE_URL}/functions/v1/lancctb-extrair-comprovante-gemini`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':`Bearer ${_SUPABASE_ANON_KEY}`},
+      body:JSON.stringify({pdfPages})
+    });
+
+    if(!response.ok) throw new Error(`Erro ao chamar Gemini: ${response.statusText}`);
+    const resultado=await response.json();
+
+    if(!resultado.comprovantes||!resultado.comprovantes.length){
+      throw new Error('Nenhum comprovante encontrado no PDF.');
+    }
+
+    // Upload do arquivo
+    const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
+    const { error: erroUpload } = await _supaClient.storage.from(bucket).upload(pathArquivo,file);
+
+    return resultado.comprovantes.map(c=>({
+      ...c,
       documento_numero:'',
       data_vencimento:'',
-      valor_pago:0,
+      juros:0,
+      multa:0,
+      desconto:0,
       _incluir:true,
       _arquivoNome:file.name,
-      _arquivoStoragePath:''
-    }];
+      _arquivoStoragePath:erroUpload?null:pathArquivo,
+      _ja_extraido_com_gemini:true
+    }));
   }
 
   if(tipo==='recebimento'&&ehExcel){
