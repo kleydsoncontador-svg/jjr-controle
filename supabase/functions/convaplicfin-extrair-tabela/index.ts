@@ -2,48 +2,65 @@
 // aplicação financeira via IA — não assume nenhum banco/modelo específico,
 // extrai as colunas e linhas exatamente como aparecem no extrato.
 // Usada pelo Conversor de Aplicações Financeiras em index.html quando o
-// parser fixo (Invest Fácil Bradesco) não reconhece o modelo do PDF.
+// parser fixo (Invest Fácil Bradesco) não reconhece o modelo do PDF, e
+// também pela importação em massa de Aplicações/Resgates via PDF na aba
+// "Aplicações Financeiras" do módulo Lançamentos Contábeis (Fase 14).
 //
-// `imagens` (array de data URIs base64, usado quando o PDF é uma imagem
-// escaneada sem texto selecionável — ex: "Aplic. Aut Mais Itaú" — processado
-// projeto não tem nenhum modelo de visão disponível).
+// Aceita `texto` (via pdfjsLib no client) OU `imagens` (array de data URIs
+// base64, usado quando o PDF é uma imagem escaneada sem texto selecionável).
 //
-// Deploy: Supabase Dashboard → Edge Functions → Deploy a new 
+// Usa SEMPRE Gemini (chave paga) — pedido do usuário 08/09/2026: nenhum
+// campo do site deve depender do Groq (free-tier com rate limit agressivo).
+// BUG CORRIGIDO 08/09/2026: esta function ficou com um `extrairViaGroq`
+// nunca definido (ReferenceError → sempre HTTP 500 pra PDF com texto
+// selecionável, o caso mais comum) — sobrou de uma migração incompleta
+// Groq→Gemini numa sessão anterior. Reescrita seguindo o mesmo padrão já
+// usado em lancctb-parse-extrato (texto E imagens via Gemini).
+//
+// Deploy: Supabase Dashboard → Edge Functions → Deploy a new function → Via
+// Editor → nome "convaplicfin-extrair-tabela" → colar este código → Deploy.
+// Secrets: GEMINI_API_KEY (já configurada no projeto).
+
+const CORS_HEADERS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Allow-Methods': 'POST, OPTIONS',
+};
+
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
+const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo a tabela de movimentação de um extrato de aplicação financeira (PDF de banco — Bradesco, Itaú, Safra, etc., cada um com um layout de colunas diferente) para conciliação bancária. Extraia a tabela EXATAMENTE como aparece no documento, sem tentar adivinhar ou normalizar o significado de cada coluna — isso é feito depois, pelo usuário, mapeando cada coluna manualmente.
+
+Responda SOMENTE com um JSON válido, exatamente neste formato:
+
+{
+  "colunas": ["nome da 1ª coluna", "nome da 2ª coluna", "..."],
+  "linhas": [
+    { "nome da 1ª coluna": "valor", "nome da 2ª coluna": "valor", "...": "..." }
+  ],
+  "observacoes": "1-2 frases em português caso haja ambiguidade, seções que não ficaram claras, ou linhas de total que você excluiu"
+}
+
 Regras:
-- "Data" é sempre a primeira coluna e é obrigatória em toda linha — nunca null.
+- "Data" é sempre a primeira coluna e é obrigatória em toda linha — nunca null. Se o documento tiver mais de uma coluna de data (ex: "Dt. Aplicação", "Dt. Vencto", "Dt. Resgate"), inclua TODAS como colunas separadas, na ordem em que aparecem — a primeira coluna do JSON continua sendo a que representa a data efetiva daquele movimento (data da aplicação numa linha de aplicação; data do resgate numa linha de resgate).
 - Cada chave dentro de "colunas" deve aparecer, com o mesmo nome exato, em toda linha de "linhas" (use null quando aquela linha não tiver valor naquela coluna).
-- NÃO inclua a linha de "Total"/"Acumulado do Mês" como uma linha de movimentação — ela é só a soma; mencione isso em "observacoes" se houver.
+- Se o documento tiver mais de uma seção/tabela (ex: "Aplicações" e "Resgates/Vencimentos", cada uma com colunas diferentes), combine tudo numa única lista de "linhas" usando a UNIÃO de todas as colunas encontradas em qualquer seção — uma linha de "Aplicações" só preenche as colunas daquela seção e usa null nas colunas exclusivas de "Resgates/Vencimentos", e vice-versa.
+- NÃO inclua a linha de "Total"/"Acumulado do Mês"/"Saldo Anterior" como uma linha de movimentação — ela é só a soma ou o saldo de abertura; mencione isso em "observacoes" se houver.
 - Valores monetários sempre em número puro (sem "R$", sem separador de milhar, com ponto decimal — ex: 3994.10). Células vazias na tabela original viram null.
-- Preserve os nomes de coluna exatamente como aparecem no documento (incluindo acentos), pois eles serão usados depois para o usuário mapear cada coluna para uma conta contábil.`;
+- Preserve os nomes de coluna exatamente como aparecem no documento (incluindo acentos e abreviações, ex: "Vlr Princ. (R$)", "Dt. Resgate / Carência"), pois eles serão usados depois para o usuário mapear cada coluna manualmente.`;
 
 function limparJson(raw: string): string {
   return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
 }
 
-
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function extrairViaGemini(imagens: string[]): Promise<unknown> {
+async function chamarGemini(parts: unknown[]): Promise<unknown> {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
 
-  // No máximo 5 imagens por request — mais que suficiente pra um extrato de
-  // aplicação financeira (raramente passa de 1-2 páginas).
-  const imgs = imagens.slice(0, 5);
-  const parts: unknown[] = [{ text: PROMPT }];
-  for (const img of imgs) {
-    const m = img.match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
-    if (!m) continue;
-    parts.push({ inlineData: { mimeType: m[1], data: m[2] } });
-  }
-
-  // O tier gratuito do Gemini retorna 503 "model is currently experiencing
-  // high demand" com frequência (sobrecarga temporária do lado do Google,
-  // não um erro real) — descoberto testando com o PDF real do Itaú em
-  // 18/08/2026. Tenta de novo automaticamente em vez de fazer o usuário
-  // clicar "Processar" manualmente várias vezes.
   const MAX_TENTATIVAS = 3;
   let ultimoErro = '';
   for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
@@ -73,6 +90,32 @@ async function extrairViaGemini(imagens: string[]): Promise<unknown> {
   throw new Error(ultimoErro);
 }
 
+async function extrairViaGeminiImagens(imagens: string[]): Promise<unknown> {
+  // No máximo 5 imagens por request — mais que suficiente pra um extrato de
+  // aplicação financeira (raramente passa de 1-2 páginas).
+  const imgs = imagens.slice(0, 5);
+  const parts: unknown[] = [{ text: PROMPT }];
+  for (const img of imgs) {
+    // Evita regex com barra escapada aqui de propósito (já causou um bug
+    // real de transmissão via browser automation ao colar o código no
+    // editor do Supabase — a barra escapada \/ virava / sem querer,
+    // quebrando o regex e derrubando o deploy). Parse manual, mais robusto.
+    if (!img.startsWith('data:')) continue;
+    const idxBase64 = img.indexOf(';base64,');
+    if (idxBase64 < 0) continue;
+    const mimeType = img.slice('data:'.length, idxBase64);
+    const data = img.slice(idxBase64 + ';base64,'.length);
+    if (!mimeType || !data) continue;
+    parts.push({ inlineData: { mimeType, data } });
+  }
+  return chamarGemini(parts);
+}
+
+async function extrairViaGeminiTexto(texto: string): Promise<unknown> {
+  const textoLimitado = texto.slice(0, 400000);
+  return chamarGemini([{ text: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + textoLimitado + '\n"""' }]);
+}
+
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
     return new Response('ok', { headers: CORS_HEADERS });
@@ -91,8 +134,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-        // imagem (Gemini) quando o PDF não tem texto selecionável.
-    const dados = temTexto ? await extrairViaGroq(texto) : await extrairViaGemini(imagens);
+    const dados = temImagens ? await extrairViaGeminiImagens(imagens) : await extrairViaGeminiTexto(texto);
 
     return new Response(JSON.stringify(dados), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
