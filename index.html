@@ -20604,12 +20604,17 @@ async function renderLancctbRegistroContabil(){
     });
   }
 
-  // Total de pendências da CONTA INTEIRA (sem os filtros da tela) — é o que
-  // decide se o botão "Gerar TXT" fica habilitado (só depois de 100%
-  // conciliado, pedido do usuário — mesma regra já usada na automação
-  // externa do Mister Contador, ver project_mistercontador_export_txt_auto).
-  const { count: pendenciasTotaisConta } = await _supaClient.from('lancamentos_extrato')
-    .select('id',{count:'exact',head:true}).eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel).eq('status_conciliacao','pendente');
+  // Pendências do PERÍODO filtrado na tela (Data De/Até) — é o que decide
+  // se o botão "Gerar TXT" fica habilitado. Antes contava a conta INTEIRA
+  // (todo o histórico), então uma pendência de um mês anterior travava o
+  // TXT de um mês já fechado e 100% conciliado (bug real relatado pelo
+  // usuário 08/09/2026: pendência de 07/2026 impedia gerar o TXT de
+  // 08/2026, mesmo os dois meses sendo períodos independentes de fechamento).
+  let qPendencias=_supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true})
+    .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel).eq('status_conciliacao','pendente');
+  if(_lancctbRegistroDataDe) qPendencias=qPendencias.gte('data_pagamento',_lancctbRegistroDataDe);
+  if(_lancctbRegistroDataAte) qPendencias=qPendencias.lte('data_pagamento',_lancctbRegistroDataAte);
+  const { count: pendenciasTotaisConta } = await qPendencias;
 
   _lancctbUltimoRegistro=linhas;
   _lancctbSetConteudo(el,_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0}));
@@ -20739,7 +20744,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       <button class="btn bsm" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" style="background:#F59E0B;color:#fff;border:none" title="Último recurso — usa IA (Groq/Gemini) pra tentar amarrar Pagamento/Recebimento × Nota Fiscal, e depois tenta casar pelo Fluxo de Caixa (se a empresa tiver) com uma Regra por histórico. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA + Fluxo</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
-      <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) nesta conta — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis desta conta, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
+      <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) no período filtrado — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis deste período, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
   </div>
   <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:8px;align-items:center">
     <span style="font-size:11.5px;color:var(--slate)">Filtrar por período:</span>
@@ -20909,20 +20914,26 @@ function _lancctbBancoSlug(nomeBanco){
   const achado=LANCCTB_BANCO_DOMINIOS.find(([re])=>re.test(norm));
   return achado?achado[1].split('.')[0]:(norm.replace(/[^a-z0-9]/g,'')||'banco');
 }
-// "Gerar TXT" do Registro Contábil — só fica habilitado com a conta 100%
-// conciliada (checado em renderLancctbRegistroContabil via pendenciasTotaisConta,
-// pedido do usuário 05/09/2026). Exporta TODOS os lançamentos contábeis não
-// estornados dessa conta (não só a página atual — por isso reconsulta do
-// zero em vez de reaproveitar _lancctbUltimoRegistro) no MESMO layout
-// |0000|/|6000|/|6100| já usado por todo TXT do site (gerarTxtMisterContador),
-// incluindo lotes de rateio (mais de 1 débito ou crédito por lote).
+// "Gerar TXT" do Registro Contábil — só fica habilitado com o PERÍODO
+// filtrado na tela (Data De/Até, normalmente um mês de fechamento) 100%
+// conciliado — pedido do usuário 08/09/2026: antes exigia a conta INTEIRA
+// (todo o histórico) 100% conciliada, o que travava o TXT de um mês já
+// fechado por causa de uma pendência de outro mês, meses sendo períodos de
+// fechamento independentes entre si. Exporta só os lançamentos contábeis
+// não estornados DENTRO desse período (não a conta inteira, não só a
+// página atual) no MESMO layout |0000|/|6000|/|6100| já usado por todo TXT
+// do site (gerarTxtMisterContador), incluindo lotes de rateio (mais de 1
+// débito ou crédito por lote).
 async function exportarLancctbRegistroContabilTxt(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!eid||!contaId){ toast('Selecione uma empresa e uma conta.','err'); return; }
 
-  const { count: pendentes } = await _supaClient.from('lancamentos_extrato')
-    .select('id',{count:'exact',head:true}).eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente');
-  if(pendentes){ toast(`Ainda faltam ${pendentes} pendência(s) nesta conta — não dá pra gerar o TXT.`,'err'); return; }
+  let qPendentes=_supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true})
+    .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente');
+  if(_lancctbRegistroDataDe) qPendentes=qPendentes.gte('data_pagamento',_lancctbRegistroDataDe);
+  if(_lancctbRegistroDataAte) qPendentes=qPendentes.lte('data_pagamento',_lancctbRegistroDataAte);
+  const { count: pendentes } = await qPendentes;
+  if(pendentes){ toast(`Ainda faltam ${pendentes} pendência(s) neste período — não dá pra gerar o TXT.`,'err'); return; }
 
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   const cnpjLimpo=(emp?.cnpj||'').replace(/\D/g,'');
@@ -20931,8 +20942,10 @@ async function exportarLancctbRegistroContabilTxt(){
   const { data: contaInfo } = await _supaClient.from('agencias_bancarias')
     .select('banco_nome,agencia,conta_corrente').eq('id',contaId).single();
 
-  const { data: extratoIdsRows } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
-    .select('id').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).order('id'));
+  let qExtratoIds=_supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).order('id');
+  if(_lancctbRegistroDataDe) qExtratoIds=qExtratoIds.gte('data_pagamento',_lancctbRegistroDataDe);
+  if(_lancctbRegistroDataAte) qExtratoIds=qExtratoIds.lte('data_pagamento',_lancctbRegistroDataAte);
+  const { data: extratoIdsRows } = await _lancctbFetchTudo(()=>qExtratoIds);
   const extratoIds=(extratoIdsRows||[]).map(r=>r.id);
   if(!extratoIds.length){ toast('Nenhum lançamento nesta conta.','err'); return; }
 
