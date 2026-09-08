@@ -19857,6 +19857,7 @@ let _lancctbRegistroValor='';
 let _lancctbRegistroDataDe='';
 let _lancctbRegistroDataAte='';
 let _lancctbRegistroStatus='';
+let _lancctbRegistroMesBate=''; // ''|'sim'|'nao' — mês da parcela da NF bate com o mês do pagamento
 let _lancctbRegistroMes='';
 let _lancctbUltimoRegistro=[];
 // Atalho de mês (mesmo componente ‹ mês › + "Todos os meses" já usado em
@@ -19913,14 +19914,32 @@ async function renderLancctbRegistroContabil(){
       .eq('empresa_eid',eid).eq('estornado',false).ilike(campo,`%${t}%`).not('lancamento_extrato_id','is',null));
     return [...new Set((linhasAlvo||[]).map(l=>l.lancamento_extrato_id))];
   }
-  let idsPorContaD=null, idsPorContaC=null, idsPorHistUsado=null, idsPorCliente=null, idsPorCnpj=null;
+  // Filtro "Mês da Parcela bate com Mês de Pagamento?": só considera linhas
+  // com NF amarrada (nf_parcela_id preenchido) — embute data_vencimento da
+  // parcela e data_pagamento do próprio extrato pra comparar mês/ano dos
+  // dois direto no banco, sem precisar buscar tudo em memória.
+  async function idsPorMesBate(alvo){
+    const { data: linhasComParcela } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
+      .select('lancamento_extrato_id,notas_fiscais_parcelas(data_vencimento),lancamentos_extrato(data_pagamento)')
+      .eq('empresa_eid',eid).eq('estornado',false).not('nf_parcela_id','is',null).not('lancamento_extrato_id','is',null));
+    const ids=new Set();
+    (linhasComParcela||[]).forEach(l=>{
+      const dv=l.notas_fiscais_parcelas?.data_vencimento, dp=l.lancamentos_extrato?.data_pagamento;
+      if(!dv||!dp) return;
+      const bate=dv.slice(0,7)===dp.slice(0,7);
+      if((alvo==='sim'&&bate)||(alvo==='nao'&&!bate)) ids.add(l.lancamento_extrato_id);
+    });
+    return [...ids];
+  }
+  let idsPorContaD=null, idsPorContaC=null, idsPorHistUsado=null, idsPorCliente=null, idsPorCnpj=null, idsPorMes2=null;
   if(_lancctbRegistroContaDBusca.trim()) idsPorContaD=await idsPorConta(_lancctbRegistroContaDBusca,'D');
   if(_lancctbRegistroContaCBusca.trim()) idsPorContaC=await idsPorConta(_lancctbRegistroContaCBusca,'C');
   if(_lancctbRegistroHistoricoUsadoBusca.trim()) idsPorHistUsado=await idsPorCampoCtb(_lancctbRegistroHistoricoUsadoBusca,'historico');
   if(_lancctbRegistroClienteBusca.trim()) idsPorCliente=await idsPorCampoCtb(_lancctbRegistroClienteBusca,'cliente_fornecedor_nome');
   if(_lancctbRegistroCnpjBusca.trim()) idsPorCnpj=await idsPorCampoCtb(_lancctbRegistroCnpjBusca,'cnpj_cpf');
+  if(_lancctbRegistroMesBate) idsPorMes2=await idsPorMesBate(_lancctbRegistroMesBate);
   let idsInterseccao=null;
-  [idsPorContaD,idsPorContaC,idsPorHistUsado,idsPorCliente,idsPorCnpj].forEach(lista=>{
+  [idsPorContaD,idsPorContaC,idsPorHistUsado,idsPorCliente,idsPorCnpj,idsPorMes2].forEach(lista=>{
     if(!lista) return;
     idsInterseccao=idsInterseccao===null?lista:idsInterseccao.filter(id=>lista.includes(id));
   });
@@ -19954,7 +19973,7 @@ async function renderLancctbRegistroContabil(){
   let ctbPorExtrato={};
   if(idsExtrato.length){
     const { data: ctbLinhas } = await _supaClient.from('lancamentos_contabeis')
-      .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,origem_match,informacao_extra,plano_contas(numero_conta,descricao)')
+      .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,informacao_extra,nf_parcela_id,notas_fiscais_parcelas(data_vencimento),plano_contas(numero_conta,descricao)')
       .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true});
     (ctbLinhas||[]).forEach(l=>{ (ctbPorExtrato[l.lancamento_extrato_id]=ctbPorExtrato[l.lancamento_extrato_id]||[]).push(l); });
   }
@@ -20014,6 +20033,17 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     const ellip='white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     return `<td style="padding:7px 10px;font-size:11px;font-style:italic;${ellip}" title="${esc(linha.informacao_extra)}">🤖 ${esc(linha.informacao_extra)}</td>`;
   };
+  // Data da Parcela (da NF amarrada a esta linha, se houver) + se o MÊS
+  // dessa data bate com o mês do pagamento — pedido do usuário 08/09/2026:
+  // "vc matou a NF 960996... quero uma coluna que traga a data da parcela e
+  // uma que indica se o mês bate, sim ou não".
+  const parcelaCelsHtml=(linha)=>{
+    const dv=linha?.notas_fiscais_parcelas?.data_vencimento;
+    if(!dv) return `<td style="padding:7px 10px;color:var(--slate)">—</td><td style="padding:7px 10px;color:var(--slate);text-align:center">—</td>`;
+    const dataParcFmt=new Date(dv+'T00:00:00').toLocaleDateString('pt-BR');
+    const bate=dv.slice(0,7)===(r.data_pagamento||'').slice(0,7);
+    return `<td style="padding:7px 10px;font-family:var(--mono)">${dataParcFmt}</td><td style="padding:7px 10px;text-align:center"><span style="font-weight:600;color:${bate?'var(--teal)':'var(--red)'}">${bate?'Sim':'Não'}</span></td>`;
+  };
 
   if(item.ctb.length&&ds.length===1&&cs.length===1){
     const d=ds[0], c=cs[0];
@@ -20031,6 +20061,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px" onclick="event.stopPropagation()"><input class="si" style="width:100%;min-width:160px" value="${esc(d.historico||'')}" data-lote="${d.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
       <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(d.cliente_fornecedor_nome||'')}">${esc(d.cliente_fornecedor_nome||'')}</td>
       <td style="padding:7px 10px;font-size:11px;font-family:var(--mono)">${esc(_fmtCnpjCpf(d.cnpj_cpf))}</td>
+      ${parcelaCelsHtml(d.nf_parcela_id?d:(c.nf_parcela_id?c:null))}
       <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
       ${iaCelHtml(d.origem_match==='ia'?d:c)}
     </tr>`;
@@ -20053,6 +20084,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px" onclick="event.stopPropagation()"><input class="si" style="width:100%;min-width:160px" value="${esc(l.historico||'')}" data-lote="${l.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(l.cliente_fornecedor_nome||'')}">${esc(l.cliente_fornecedor_nome||'')}</td>
         <td style="padding:7px 10px;font-size:11px;font-family:var(--mono)">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
+        ${parcelaCelsHtml(l)}
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
         ${iaCelHtml(l)}
       </tr>`;
@@ -20075,6 +20107,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;color:var(--slate)">—</td>
     <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${item.comprovanteSugerido?'Sugestão via comprovante (ainda não conciliado): '+esc(item.comprovanteSugerido.cliente_fornecedor_nome||''):''}">${item.comprovanteSugerido?`<span style="font-style:italic;color:var(--slate)">${esc(item.comprovanteSugerido.cliente_fornecedor_nome||'')} ?</span>`:'—'}</td>
     <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);color:var(--slate)">${item.comprovanteSugerido?esc(_fmtCnpjCpf(item.comprovanteSugerido.cnpj_cpf)):'—'}</td>
+    <td style="padding:7px 10px;color:var(--slate)">—</td><td style="padding:7px 10px;color:var(--slate);text-align:center">—</td>
     <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
     <td style="padding:7px 10px;color:var(--slate)">—</td>
   </tr>`;
@@ -20133,8 +20166,8 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   // pequenas (5-6%) e o título ("Classificação", "Descrição da conta"
   // etc.) ficava sobrepondo/cortado. Aqui cada uma tem ch suficiente pro
   // próprio título caber por inteiro.
-  const CH_DATA=9,CH_CONTA=8,CH_CLASSIF=16,CH_DESCR=21,CH_VALOR=10,CH_CLIENTE=18,CH_CNPJ=12,CH_STATUS=9,CH_IA=18;
-  const somaChFixo=CH_DATA+CH_CONTA*2+CH_CLASSIF*2+CH_DESCR*2+CH_VALOR+CH_CLIENTE+CH_CNPJ+CH_STATUS+CH_IA;
+  const CH_DATA=9,CH_CONTA=8,CH_CLASSIF=16,CH_DESCR=21,CH_VALOR=10,CH_CLIENTE=18,CH_CNPJ=12,CH_DTPARC=11,CH_MESBATE=9,CH_STATUS=9,CH_IA=18;
+  const somaChFixo=CH_DATA+CH_CONTA*2+CH_CLASSIF*2+CH_DESCR*2+CH_VALOR+CH_CLIENTE+CH_CNPJ+CH_DTPARC+CH_MESBATE+CH_STATUS+CH_IA;
   const minWidthTabela=Math.max(1320,(somaChFixo+chHistBanc+chHistUsado)*7.4);
   html+=`
   <table style="width:100%;min-width:${minWidthTabela}px;border-collapse:collapse;font-size:12.5px;table-layout:fixed">
@@ -20142,7 +20175,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <col style="width:${CH_DATA}ch"><col style="width:${CH_CONTA}ch"><col style="width:${CH_CLASSIF}ch"><col style="width:${CH_DESCR}ch">
       <col style="width:${CH_CONTA}ch"><col style="width:${CH_CLASSIF}ch"><col style="width:${CH_DESCR}ch"><col style="width:${CH_VALOR}ch">
       <col style="width:${chHistBanc}ch"><col style="width:${chHistUsado}ch"><col style="width:${CH_CLIENTE}ch"><col style="width:${CH_CNPJ}ch">
-      <col style="width:${CH_STATUS}ch"><col style="width:${CH_IA}ch">
+      <col style="width:${CH_DTPARC}ch"><col style="width:${CH_MESBATE}ch"><col style="width:${CH_STATUS}ch"><col style="width:${CH_IA}ch">
     </colgroup>
     <thead><tr style="background:var(--ink2);color:#fff">
       <th style="padding:8px 10px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Data</th>
@@ -20157,6 +20190,8 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <th style="padding:8px 10px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Histórico Utilizado">Histórico Utilizado</th>
       <th style="padding:8px 10px;text-align:left;min-width:170px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Cliente/Fornecedor">Cliente/Fornecedor</th>
       <th style="padding:8px 10px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">CPF/CNPJ</th>
+      <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Data da Parcela (da NF amarrada a este lançamento)">Data Parcela</th>
+      <th style="padding:8px 10px;text-align:center;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Mês da Parcela bate com o mês do pagamento?">Mês Bate?</th>
       <th style="padding:8px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Status</th>
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="🤖 Explicação da IA">🤖 Explicação da IA</th>
     </tr>
@@ -20172,11 +20207,17 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <th style="padding:4px 6px"><input class="si" data-filtro="registro-cliente" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbRegistroClienteBusca)}" oninput="_lancctbRegistroCampoDebounced('cliente',this.value)"></th>
       <th style="padding:4px 6px"><input class="si" data-filtro="registro-cnpj" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbRegistroCnpjBusca)}" oninput="_lancctbRegistroCampoDebounced('cnpj',this.value)"></th>
       <th style="padding:4px 6px"></th>
+      <th style="padding:4px 6px"><select class="si" data-filtro="registro-mes-bate" style="width:100%;font-size:11px" onchange="_lancctbRegistroMesBate=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">
+        <option value="" ${!_lancctbRegistroMesBate?'selected':''}>Todos</option>
+        <option value="sim" ${_lancctbRegistroMesBate==='sim'?'selected':''}>Sim</option>
+        <option value="nao" ${_lancctbRegistroMesBate==='nao'?'selected':''}>Não</option>
+      </select></th>
+      <th style="padding:4px 6px"></th>
       <th style="padding:4px 6px"></th>
     </tr></thead>
     <tbody>`;
   if(!linhas.length){
-    html+=`<tr><td colspan="13" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
+    html+=`<tr><td colspan="16" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
   } else {
     linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,contaAtual); });
   }
