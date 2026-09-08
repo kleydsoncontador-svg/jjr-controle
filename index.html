@@ -21661,6 +21661,7 @@ function exportarLancctbFluxoExcel(){
 // ─── Upload/mapeamento de colunas (reaproveita o modal genérico mLancctbUpload) ─
 async function abrirLancctbFluxoImportModal(){
   _lancctbFluxoImportLinhas=null;
+  _lancctbFluxoWbTemp=null;
   document.getElementById('lancctbUploadTitulo').textContent='Importar Fluxo de Caixa (Excel)';
   _lancctbUploadStatusAtualId='lancctbFluxoImportStatus';
   _lancctbUploadTituloAtual='Importando Fluxo de Caixa';
@@ -21698,6 +21699,7 @@ async function abrirLancctbFluxoImportModal(){
   });
   openModal('mLancctbUpload');
 }
+let _lancctbFluxoWbTemp=null; // workbook em espera enquanto o usuário escolhe a(s) aba(s)
 async function _lancctbFluxoLerArquivo(){
   const file=document.getElementById('lancctbFluxoImportArquivo')?.files[0];
   const status=document.getElementById('lancctbFluxoImportStatus');
@@ -21710,19 +21712,61 @@ async function _lancctbFluxoLerArquivo(){
   try{
     const buf=await file.arrayBuffer();
     const wb=XLSX.read(buf,{type:'array',cellDates:true});
-    const ws=wb.Sheets[wb.SheetNames[0]];
-    const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
-    if(!matriz.length){ status.textContent='Arquivo vazio.'; return; }
-    _lancctbFluxoImportLinhas=matriz;
-    const headers=matriz[0].map(h=>String(h||'').trim());
-    const mapa=_lancctbFluxoAutoDetectar(headers);
-    status.textContent=`${matriz.length-1} linha(s) encontrada(s). Confira o mapeamento de colunas abaixo antes de importar.`;
-    document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoMappingHtml(headers,mapa);
-    document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+    if(wb.SheetNames.length>1){
+      // Pedido do usuário 08/09/2026: Excel com mais de 1 aba (ex: uma aba
+      // por conta bancária) não deve assumir a 1ª sozinho — pergunta quais
+      // abas importar (pode marcar mais de uma; todas somam na mesma
+      // importação, pulando o cabeçalho repetido de cada aba extra).
+      _lancctbFluxoWbTemp=wb;
+      status.textContent=`${wb.SheetNames.length} abas encontradas neste arquivo — escolha quais importar.`;
+      document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoSelecaoAbasHtml(wb.SheetNames);
+      document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+      return;
+    }
+    _lancctbFluxoProcessarAbas(wb,[wb.SheetNames[0]]);
   }catch(e){
     console.error(e);
     status.textContent='Erro ao ler arquivo: '+e.message;
   }
+}
+function _lancctbFluxoSelecaoAbasHtml(nomes){
+  let html=`<div style="font-size:12.5px;font-weight:600;margin-bottom:6px">Quais abas importar?</div>
+    <div style="display:grid;gap:4px;margin-bottom:10px">`;
+  nomes.forEach((n,i)=>{
+    html+=`<label style="display:flex;align-items:center;gap:6px;font-size:12.5px"><input type="checkbox" id="lancctbFluxoAba_${i}" checked> ${esc(n)}</label>`;
+  });
+  html+=`</div>
+    <button class="btn bp bsm" onclick="_lancctbFluxoConfirmarAbas()">▶ Continuar</button>`;
+  return html;
+}
+function _lancctbFluxoConfirmarAbas(){
+  const wb=_lancctbFluxoWbTemp;
+  if(!wb){ toast('Selecione o arquivo de novo.','err'); return; }
+  const escolhidas=wb.SheetNames.filter((n,i)=>document.getElementById('lancctbFluxoAba_'+i)?.checked);
+  if(!escolhidas.length){ toast('Marque ao menos uma aba.','err'); return; }
+  _lancctbFluxoProcessarAbas(wb,escolhidas);
+}
+function _lancctbFluxoProcessarAbas(wb,nomesAbas){
+  const status=document.getElementById('lancctbFluxoImportStatus');
+  // Concatena as linhas de todas as abas escolhidas — assume que todas
+  // seguem o mesmo layout de colunas (mesmo cabeçalho na 1ª linha); o
+  // cabeçalho de cada aba ALÉM da primeira é descartado, só os dados somam.
+  let matrizTotal=null;
+  nomesAbas.forEach(nome=>{
+    const ws=wb.Sheets[nome];
+    const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+    if(!matriz.length) return;
+    if(!matrizTotal) matrizTotal=[matriz[0],...matriz.slice(1)];
+    else matrizTotal.push(...matriz.slice(1));
+  });
+  if(!matrizTotal||!matrizTotal.length){ status.textContent='Arquivo vazio.'; return; }
+  _lancctbFluxoImportLinhas=matrizTotal;
+  const headers=matrizTotal[0].map(h=>String(h||'').trim());
+  const mapa=_lancctbFluxoAutoDetectar(headers);
+  const qtdAbas=nomesAbas.length>1?` (${nomesAbas.length} abas)`:'';
+  status.textContent=`${matrizTotal.length-1} linha(s) encontrada(s)${qtdAbas}. Confira o mapeamento de colunas abaixo antes de importar.`;
+  document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoMappingHtml(headers,mapa);
+  document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
 }
 // PDF: reaproveita a MESMA Edge Function de extração do Extrato Bancário
 // (lancctb-parse-extrato) — o formato de saída (data/histórico/valor_saída/
