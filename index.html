@@ -2256,6 +2256,40 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
 <!-- Modal: upload de Comprovantes ou Extrato bancário (PDF/Excel/CSV) —
      conteúdo montado via JS em abrirLancctbUploadModal(), pois o preview
      da lista extraída é dinâmico. -->
+<div class="mb" id="mLancctbConta" style="display:none">
+  <div class="modal" style="max-width:480px">
+    <div class="mt">
+      <h3 id="lancctbContaModalTitulo">Nova Conta</h3>
+      <button onclick="closeModal('mLancctbConta')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <label style="display:block;font-size:12px;color:var(--slate);margin-bottom:3px">Número da conta</label>
+      <input class="si" id="lancctbContaNumero" style="width:100%;margin-bottom:10px" placeholder="Ex: 3.1.10.001">
+      <label style="display:block;font-size:12px;color:var(--slate);margin-bottom:3px">Classificação (define a ordem na árvore)</label>
+      <input class="si" id="lancctbContaClassificacao" style="width:100%;margin-bottom:10px" placeholder="Ex: 3.1.10.001">
+      <label style="display:block;font-size:12px;color:var(--slate);margin-bottom:3px">Descrição</label>
+      <input class="si" id="lancctbContaDescricao" style="width:100%;margin-bottom:10px" placeholder="Ex: Despesas com energia elétrica">
+      <div style="display:flex;gap:10px">
+        <div style="flex:1">
+          <label style="display:block;font-size:12px;color:var(--slate);margin-bottom:3px">Tipo</label>
+          <select class="si" id="lancctbContaTipo" style="width:100%;margin-bottom:10px">
+            <option value="S">Sintética (S)</option>
+            <option value="A">Analítica (A)</option>
+          </select>
+        </div>
+        <div style="flex:1">
+          <label style="display:block;font-size:12px;color:var(--slate);margin-bottom:3px">Grau</label>
+          <input class="si" id="lancctbContaGrau" type="number" min="1" max="9" style="width:100%;margin-bottom:10px">
+        </div>
+      </div>
+      <div class="ma">
+        <button class="btn bo" onclick="closeModal('mLancctbConta')">Cancelar</button>
+        <button class="btn bp" onclick="salvarLancctbConta()">💾 Salvar</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <div class="mb" id="mLancctbUpload" style="display:none">
   <div class="modal" style="max-width:720px">
     <div class="mt">
@@ -17069,7 +17103,13 @@ async function renderLancctbNotas(aba){
   let q=_supaClient
     .from('notas_fiscais_parcelas')
     .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor)', { count: 'exact' })
-    .eq('notas_fiscais.empresa_eid', eid)
+    // Filtra pela coluna PRÓPRIA de notas_fiscais_parcelas (duplicada,
+    // indexada em idx_nfp_empresa_emissao) em vez de notas_fiscais.empresa_eid
+    // (via join !inner) — filtrar pelo lado relacionado ignora esse índice e
+    // força o Postgres a materializar o join inteiro antes de filtrar,
+    // causando "canceling statement due to statement timeout" em empresas
+    // com muitas NFs (bug real, MD 2 Comércio #53, 08/09/2026).
+    .eq('empresa_eid', eid)
     .eq('notas_fiscais.tipo', aba.tipoDoc)
     .eq('notas_fiscais.direcao', aba.direcaoNf);
   if(_lancctbNfeBuscaNome.trim()) q=q.ilike(campoNomeTerc,`%${_lancctbNfeBuscaNome.trim().replace(/[%_]/g,'')}%`);
@@ -17213,6 +17253,24 @@ let _lancctbPlanoBusca='';
 let _lancctbPlanoPagina=0;
 let _lancctbUltimoPlano=[];
 let _lancctbPlanoFiltroIgnoradas='todas'; // 'todas'|'ativas'|'ignoradas'
+let _lancctbPlanoEditandoId=null;
+// classificacao é TEXT (ex: "1.1.10.001") — comparar como string colocaria
+// "1.10" antes de "1.2". Compara segmento por segmento como número, pra
+// uma conta recém-incluída aparecer na posição hierárquica correta.
+function _lancctbCompararClassificacao(a,b){
+  const segA=String(a||'').split('.');
+  const segB=String(b||'').split('.');
+  const n=Math.max(segA.length,segB.length);
+  for(let i=0;i<n;i++){
+    const va=segA[i], vb=segB[i];
+    if(va===undefined) return -1;
+    if(vb===undefined) return 1;
+    const na=Number(va), nb=Number(vb);
+    if(!isNaN(na)&&!isNaN(nb)&&na!==nb) return na-nb;
+    if(va!==vb) return va<vb?-1:1;
+  }
+  return 0;
+}
 
 async function renderLancctbPlanoContas(){
   const el=document.getElementById('lancctbConteudoAba');
@@ -17220,34 +17278,38 @@ async function renderLancctbPlanoContas(){
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
 
-  const from=_lancctbPlanoPagina*LANCCTB_PAGE_SIZE;
-  const to=from+LANCCTB_PAGE_SIZE-1;
-
-  let q=_supaClient.from('plano_contas').select('id,numero_conta,classificacao,tipo,descricao,grau,ignorada_em_regras,enviar_pontos_atencao',{count:'exact'}).eq('empresa_eid',eid);
-  if(_lancctbPlanoBusca.trim()){
-    const t=_lancctbPlanoBusca.trim().replace(/[%_]/g,'');
-    q=q.or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`);
-  }
-  if(_lancctbPlanoFiltroIgnoradas==='ativas') q=q.eq('ignorada_em_regras',false);
-  if(_lancctbPlanoFiltroIgnoradas==='ignoradas') q=q.eq('ignorada_em_regras',true);
-  const { data: contas, error, count } = await q.order('classificacao',{ascending:true}).range(from,to);
-
+  // Busca TODAS as contas da empresa numa leitura só (plano raramente passa
+  // de poucos milhares de linhas — mesma premissa já usada abaixo pra
+  // contagem de classificações compartilhadas) e ordena/pagina no CLIENTE.
+  // Necessário porque classificacao é TEXT: um ORDER BY do Postgres é
+  // alfabético ("1.10" viria antes de "1.2"), o que colocaria uma conta
+  // recém-incluída fora da posição hierárquica correta — a comparação
+  // numérica por segmento (_lancctbCompararClassificacao) só é viável tendo
+  // a lista inteira em mãos.
+  const { data: todasContas, error } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,tipo,descricao,grau,ignorada_em_regras,enviar_pontos_atencao').eq('empresa_eid',eid));
   if(error){
     el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar plano de contas: ${esc(error.message)}</div>`;
     return;
   }
-  _lancctbUltimoPlano=contas||[];
-
-  // Classificações compartilhadas entre matriz e filial (mesma linha do
-  // plano, números de conta diferentes) — destacadas em amarelo pra não
-  // confundir com duplicidade errada. Busca só a coluna classificacao de
-  // toda a empresa (cabe numa leitura só, plano raramente passa de poucos
-  // milhares de linhas) pra contar ocorrências além da página atual.
-  const { data: todasClassif } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('classificacao').eq('empresa_eid',eid));
   const contagemClassif={};
-  (todasClassif||[]).forEach(r=>{ contagemClassif[r.classificacao]=(contagemClassif[r.classificacao]||0)+1; });
+  (todasContas||[]).forEach(r=>{ contagemClassif[r.classificacao]=(contagemClassif[r.classificacao]||0)+1; });
 
-  const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
+  let contasFiltradas=todasContas||[];
+  if(_lancctbPlanoBusca.trim()){
+    const t=_lancctbPlanoBusca.trim().toLowerCase();
+    contasFiltradas=contasFiltradas.filter(c=>(c.numero_conta||'').toLowerCase().includes(t)||(c.classificacao||'').toLowerCase().includes(t)||(c.descricao||'').toLowerCase().includes(t));
+  }
+  if(_lancctbPlanoFiltroIgnoradas==='ativas') contasFiltradas=contasFiltradas.filter(c=>!c.ignorada_em_regras);
+  if(_lancctbPlanoFiltroIgnoradas==='ignoradas') contasFiltradas=contasFiltradas.filter(c=>c.ignorada_em_regras);
+  contasFiltradas=[...contasFiltradas].sort((a,b)=>_lancctbCompararClassificacao(a.classificacao,b.classificacao));
+
+  const count=contasFiltradas.length;
+  const from=_lancctbPlanoPagina*LANCCTB_PAGE_SIZE;
+  const to=from+LANCCTB_PAGE_SIZE;
+  const contas=contasFiltradas.slice(from,to);
+  _lancctbUltimoPlano=contas;
+
+  const totalPaginas=Math.max(1,Math.ceil(count/LANCCTB_PAGE_SIZE));
   const temBusca=!!_lancctbPlanoBusca.trim();
   let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
     <input class="si" id="lancctbPlanoBuscaInput" placeholder="🔍 Pesquisar conta, classificação ou descrição..." value="${esc(_lancctbPlanoBusca)}" style="flex:1;min-width:220px" oninput="_lancctbPlanoBuscaDebounced(this.value)">
@@ -17257,6 +17319,7 @@ async function renderLancctbPlanoContas(){
       <option value="ignoradas" ${_lancctbPlanoFiltroIgnoradas==='ignoradas'?'selected':''}>Só ignoradas</option>
     </select>
     <div style="display:flex;gap:6px">
+      <button class="btn bp bsm" onclick="abrirLancctbContaModal()">➕ Nova Conta</button>
       <button class="btn bo bsm" onclick="abrirLancctbImportPlanoModal()">⬆ Importar Excel</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbPlanoExcel()">📊 Gerar Excel</button>
     </div>
@@ -17315,7 +17378,10 @@ async function renderLancctbPlanoContas(){
         <td style="padding:7px 10px;text-align:center">
           <button class="icon-btn" onclick="_lancctbAlternarPontosAtencaoConta(${c.id},${!alertaAuto})" title="${alertaAuto?'Não enviar mais lançamentos desta conta pro Pontos de Atenção':'Toda vez que essa conta for debitada/creditada, envia o lançamento pro Pontos de Atenção'}" style="padding:2px 8px;border-radius:10px;border:1px solid ${alertaAuto?'#D97706':'#9ca3af'};background:none;cursor:pointer;font-size:11px;color:${alertaAuto?'#D97706':(cor==='#ffffff'?'#d1d5db':'#6b7280')}">${alertaAuto?'🔔 Envia':'🔕 Não envia'}</button>
         </td>
-        <td style="padding:7px 10px;text-align:center"><button class="icon-btn" onclick="excluirLancctbConta(${c.id})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:${cor==='#ffffff'?'#fca5a5':'#dc2626'}">🗑️</button></td>
+        <td style="padding:7px 10px;text-align:center;white-space:nowrap">
+          <button class="icon-btn" onclick='abrirLancctbContaModal(${esc(JSON.stringify(c)).replace(/'/g,'&#39;')})' title="Editar" style="padding:4px;background:none;border:none;cursor:pointer;color:${cor==='#ffffff'?'#93c5fd':'#2563eb'}">✏️</button>
+          <button class="icon-btn" onclick="excluirLancctbConta(${c.id})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:${cor==='#ffffff'?'#fca5a5':'#dc2626'}">🗑️</button>
+        </td>
       </tr>`;
     });
   }
@@ -17336,6 +17402,39 @@ function _lancctbPlanoBuscaDebounced(v){
   _lancctbPlanoPagina=0;
   clearTimeout(_lancctbPlanoBuscaTimer);
   _lancctbPlanoBuscaTimer=setTimeout(renderLancctbPlanoContas,350);
+}
+// conta: objeto da linha (edição) ou undefined (nova conta).
+function abrirLancctbContaModal(conta){
+  _lancctbPlanoEditandoId=conta?conta.id:null;
+  document.getElementById('lancctbContaModalTitulo').textContent=conta?'Editar Conta':'Nova Conta';
+  setV('lancctbContaNumero',conta?.numero_conta||'');
+  setV('lancctbContaClassificacao',conta?.classificacao||'');
+  setV('lancctbContaDescricao',conta?.descricao||'');
+  document.getElementById('lancctbContaTipo').value=conta?.tipo||'A';
+  setV('lancctbContaGrau',conta?.grau||'');
+  openModal('mLancctbConta');
+}
+async function salvarLancctbConta(){
+  const numero_conta=getV('lancctbContaNumero');
+  const classificacao=getV('lancctbContaClassificacao');
+  const descricao=getV('lancctbContaDescricao');
+  const tipo=document.getElementById('lancctbContaTipo').value;
+  const grauStr=getV('lancctbContaGrau');
+  if(!numero_conta||!classificacao||!descricao){ toast('Preencha número, classificação e descrição','err'); return; }
+  const dados={
+    numero_conta, classificacao, descricao, tipo,
+    grau: grauStr?parseInt(grauStr,10):null,
+  };
+  let error;
+  if(_lancctbPlanoEditandoId){
+    ({ error } = await _supaClient.from('plano_contas').update(dados).eq('id',_lancctbPlanoEditandoId));
+  } else {
+    ({ error } = await _supaClient.from('plano_contas').insert({...dados, empresa_eid:_lancctbEidAtual}));
+  }
+  if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+  toast(_lancctbPlanoEditandoId?'Conta atualizada':'Conta incluída','ok');
+  closeModal('mLancctbConta');
+  renderLancctbPlanoContas();
 }
 async function excluirLancctbConta(id){
   if(!confirm('Excluir esta conta do plano? Contas já usadas em regras/agências podem ficar sem vínculo.'))return;
