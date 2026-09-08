@@ -26610,7 +26610,7 @@ function _renderGanhoMapeamentoForm(ganho,extraido,mapSalvo){
       <tbody>${amostra.map(l=>`<tr style="border-top:1px solid var(--border)">${colunas.map(c=>`<td style="padding:4px 6px;white-space:nowrap">${l[c]!=null?esc(String(l[c])):'—'}</td>`).join('')}</tr>`).join('')}</tbody>
     </table>
   </div>
-  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">O valor de cada coluna mapeada é somado por mês (mais de uma linha do mesmo mês — ex: mais de uma operação no período — soma na mesma célula). A coluna de data é usada só pra identificar o mês, não precisa mapear.</div>
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">O valor de cada coluna mapeada é somado por mês (mais de uma linha do mesmo mês — ex: mais de uma operação no período — soma na mesma célula). A coluna de data é usada só pra identificar o mês, não precisa mapear.<br>Se esse extrato NÃO tiver uma coluna pronta de "Rendimento do Mês", mapeie a coluna de <b>Saldo Bruto</b> (posição/saldo corrido do dia) como "Saldo Bruto do Extrato" — o rendimento é calculado sozinho pela diferença para o saldo do mês anterior.</div>
   <div style="display:grid;gap:8px">`;
   colunasMapeaveis.forEach((col,i)=>{
     const atual=mapAtual[col]||'';
@@ -26619,6 +26619,7 @@ function _renderGanhoMapeamentoForm(ganho,extraido,mapSalvo){
       <select class="si" id="ganhoMapCol_${i}" data-coluna="${esc(col)}" style="min-width:240px">
         <option value="">— Ignorar —</option>
         ${colsAlvo.map(c=>`<option value="${esc(c.id)}" ${atual===c.id?'selected':''}>${esc(c.nome)}</option>`).join('')}
+        <option value="saldoBrutoExtrato" ${atual==='saldoBrutoExtrato'?'selected':''}>Saldo Bruto do Extrato (calcula Rendimento do Mês pela diferença)</option>
       </select>
     </div>`;
   });
@@ -26664,20 +26665,51 @@ function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
   extraido.linhas.forEach(linha=>{
     const mk=chaveData?_ganhoParseDataParaMk(linha[chaveData]):null;
     if(!mk) return;
-    if(!somasPorMes[mk]) somasPorMes[mk]={};
     Object.keys(mapeamento).forEach(col=>{
       const colId=mapeamento[col];
       if(!colId) return;
-      somasPorMes[mk][colId]=(somasPorMes[mk][colId]||0)+(Number(linha[col])||0);
+      // Célula vazia/null (ex: linha de "Saldo Anterior"/posição de abertura,
+      // datada do último dia do mês anterior, sem valores de movimentação
+      // nessas colunas) não deve criar/zerar entrada nenhuma — só soma
+      // quando o extrato realmente trouxe um valor pra essa célula. BUG
+      // REAL 08/09/2026: `Number(null)||0` virava 0 e sobrescrevia dados já
+      // salvos do mês anterior ao subir o extrato do mês seguinte (ex: Aplic.
+      // Aut Mais Itaú da Rufato — a linha 30/06 zerou Bruto/IOF/IRRF de 06/2026).
+      if(linha[col]==null||linha[col]==='') return;
+      if(!somasPorMes[mk]) somasPorMes[mk]={};
+      if(colId==='saldoBrutoExtrato'){
+        // Não é um valor de movimentação pra somar — é a posição/saldo
+        // corrido do dia. Fica valendo o ÚLTIMO valor do mês (fecha o mês),
+        // assumindo que as linhas do extrato vêm em ordem cronológica.
+        somasPorMes[mk][colId]=Number(linha[col])||0;
+      }else{
+        somasPorMes[mk][colId]=(somasPorMes[mk][colId]||0)+(Number(linha[col])||0);
+      }
     });
   });
   const ganhos=getGanhos(eid),ganho=ganhos[pid];
+  // Se o extrato só trouxe o Saldo Bruto corrido (sem coluna pronta de
+  // Rendimento do Mês), calcula o rendimento de cada mês pela diferença
+  // entre esse saldo e o saldo do mês anterior — usando o saldo do mês
+  // anterior desta mesma extração quando presente, senão o já salvo de uma
+  // extração anterior (persistido em ganho.dados[mk].saldoBrutoExtrato).
+  // Pedido do usuário 08/09/2026. Só calcula quando o mapeamento NÃO deu um
+  // "Rendimento do Mês" direto pra aquele mês (as duas formas são alternativas).
+  Object.keys(somasPorMes).forEach(mk=>{
+    const soma=somasPorMes[mk];
+    if(soma.saldoBrutoExtrato==null||soma.rendMes!=null) return;
+    const[mm,aaaa]=mk.split('/');
+    const mkAnt=(mm==='01'?'12/'+(Number(aaaa)-1):String(Number(mm)-1).padStart(2,'0')+'/'+aaaa);
+    const saldoAnt=somasPorMes[mkAnt]?.saldoBrutoExtrato??ganho.dados?.[mkAnt]?.saldoBrutoExtrato;
+    if(saldoAnt==null) return; // sem base de comparação — não dá pra calcular ainda
+    soma.rendMes=soma.saldoBrutoExtrato-saldoAnt;
+  });
   // Se o mapeamento usou alguma coluna de detalhe (Valor Principal, Bruto,
   // IOF, IRRF, Líquido…) mas essa aplicação ainda está no layout simples
   // (só "Rendimento do Mês"), promove pro layout completo automaticamente
   // — senão os valores ficam gravados mas nunca aparecem na tabela.
   const idsUsados=new Set();
-  Object.values(somasPorMes).forEach(obj=>Object.keys(obj).forEach(id=>idsUsados.add(id)));
+  Object.values(somasPorMes).forEach(obj=>Object.keys(obj).forEach(id=>{ if(id!=='saldoBrutoExtrato') idsUsados.add(id); }));
   const jaTemColunasDetalhadas=(ganho.cols||[]).some(c=>c.id!=='rendMes');
   if(!jaTemColunasDetalhadas&&[...idsUsados].some(id=>id!=='rendMes')){
     ganho.cols=JSON.parse(JSON.stringify(COLS_RF_DEFAULT));
