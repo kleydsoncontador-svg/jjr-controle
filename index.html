@@ -18403,12 +18403,23 @@ async function _lancctbAplicUploadExtrair(){
 // — Bruto/Líquido são opcionais (nem todo extrato de Aplicações tem os 3).
 function _lancctbAplicDetectarMapeamentoAutomatico(colunas){
   const norm=s=>String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
-  const colData=colunas.find(c=>norm(c)==='data');
+  // Data: NUNCA depende só da IA ter sintetizado uma coluna "Data" (é IA,
+  // não é garantido toda vez — bug real relatado pelo usuário 08/09/2026,
+  // mesma extração que antes trazia "Data" numa hora não trouxe na outra).
+  // Detecta direto das colunas reais do documento: "Dt. Aplicação"/"Emissão"
+  // é a data de quando aplicou; "Dt. Resgate"/"Pagamento" é a data de
+  // quando resgatou — linhas de aplicação só têm a 1ª preenchida, linhas de
+  // resgate têm as duas (a 2ª é a que vale como data efetiva do movimento).
+  const colDataAplicacao=colunas.find(c=>{ const n=norm(c); return n==='emissao'||/^dt\.?\s*aplica/.test(n); });
+  const colDataResgate=colunas.find(c=>{ const n=norm(c); return n==='pagamento'||/^dt\.?\s*resgat/.test(n); });
+  // Se não achou nenhuma das duas de um jeito reconhecível, tenta a coluna
+  // sintética "Data" da IA como último recurso.
+  const colData=colDataAplicacao||colunas.find(c=>norm(c)==='data');
   // Nunca considera coluna de DATA como candidata a valor (evita "Dt.
   // Resgate / Carência" sendo confundida com a coluna "Resgate" de valor
-  // — modelo novo do Invest Fácil, pedido do usuário 08/09/2026, tem as
-  // duas: uma data de pagamento E uma coluna de valor chamada só "Resgate").
-  const candidatosValor=colunas.filter(c=>{ const n=norm(c); return n!=='data'&&!n.startsWith('dt')&&!n.includes('data'); });
+  // — modelo novo do Invest Fácil tem as duas: uma data de pagamento E uma
+  // coluna de valor chamada só "Resgate").
+  const candidatosValor=colunas.filter(c=>{ const n=norm(c); return n!=='data'&&n!=='emissao'&&n!=='pagamento'&&!n.startsWith('dt')&&!n.includes('data'); });
   const colPrincipal=candidatosValor.find(c=>/princ/.test(norm(c)));
   // "Bruto" no sentido genérico do sistema = valor cheio recebido antes do
   // IR (inclui rendimento) — no modelo "Emissão/Pagamento" do Invest Fácil
@@ -18419,6 +18430,11 @@ function _lancctbAplicDetectarMapeamentoAutomatico(colunas){
   const colLiquido=candidatosValor.find(c=>/liquid/.test(norm(c)))||candidatosValor.find(c=>/credit/.test(norm(c)));
   if(!colData||!colPrincipal) return null;
   const mapeamento={ [colData]:'data', [colPrincipal]:'principal' };
+  // Se a data de resgate é uma coluna DIFERENTE da de aplicação (caso
+  // normal), mapeia separado — _lancctbAplicUploadAplicar usa essa data em
+  // vez da de aplicação quando ela vier preenchida na linha (linha de
+  // resgate).
+  if(colDataResgate&&colDataResgate!==colData) mapeamento[colDataResgate]='data_resgate';
   if(colBruto) mapeamento[colBruto]='bruto';
   if(colLiquido) mapeamento[colLiquido]='liquido';
   return mapeamento;
@@ -18541,7 +18557,7 @@ async function _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapeamento,valorU
   // coluna-do-PDF → alvo).
   const colPorAlvo={};
   Object.keys(mapeamento).forEach(col=>{ colPorAlvo[mapeamento[col]]=col; });
-  const colData=colPorAlvo['data'], colPrincipal=colPorAlvo['principal'], colBruto=colPorAlvo['bruto'], colLiquido=colPorAlvo['liquido'];
+  const colData=colPorAlvo['data'], colDataResgate=colPorAlvo['data_resgate'], colPrincipal=colPorAlvo['principal'], colBruto=colPorAlvo['bruto'], colLiquido=colPorAlvo['liquido'];
 
   // Dedup: não relança um movimento já existente (mesmo tipo+data+valor
   // bruto) — permite reimportar o mesmo PDF sem duplicar.
@@ -18552,7 +18568,11 @@ async function _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapeamento,valorU
   let lancAplic=0, lancResgate=0, pulados=0, duplicados=0;
   const erros=[];
   for(const linha of extraido.linhas){
-    const dataRaw=colData?linha[colData]:null;
+    // Linha de resgate: usa a data de resgate/pagamento quando vier
+    // preenchida nessa linha (a de aplicação/emissão também vem preenchida
+    // ali, só de referência) — senão usa a data de aplicação normalmente.
+    const dataResgateRaw=colDataResgate?linha[colDataResgate]:null;
+    const dataRaw=(dataResgateRaw!=null&&dataResgateRaw!=='')?dataResgateRaw:(colData?linha[colData]:null);
     const data=dataRaw?_lancctbFluxoParseData(dataRaw):null;
     const principal=colPrincipal&&linha[colPrincipal]!=null&&linha[colPrincipal]!==''?Number(linha[colPrincipal])||null:null;
     const bruto=colBruto&&linha[colBruto]!=null&&linha[colBruto]!==''?Number(linha[colBruto])||null:null;
