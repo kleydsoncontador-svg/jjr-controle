@@ -30,7 +30,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 function montarPrompt(lote: any[]): string {
   return `Você é um assistente de conciliação bancária de um escritório de contabilidade brasileiro. Pra cada LANÇAMENTO de extrato bancário abaixo (um pagamento feito ou um recebimento recebido pela empresa), veja a lista de NOTAS FISCAIS candidatas dela e diga qual (se alguma) provavelmente corresponde àquele lançamento — comparando o nome do fornecedor/cliente contra o histórico bancário (que costuma vir abreviado, sem acento, ou com sigla do sistema de pagamento do banco) e o valor/data.

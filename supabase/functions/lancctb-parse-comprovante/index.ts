@@ -38,7 +38,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo TODOS os dados de comprovantes bancários (PDF) para conciliação contábil. Um único documento pode conter VÁRIOS comprovantes diferentes (um por página ou mais), de tipos diferentes: transferência entre contas (TED), PIX, pagamento de boleto, pagamento de concessionária (só código de barras), DARF (imposto federal), guia SEFAZ/DARE (imposto estadual), entre outros. Extraia CADA comprovante como um item separado da lista.
 

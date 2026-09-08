@@ -19,7 +19,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo TODOS os dados de extratos de movimentação de cobrança (recebimentos de boletos via banco).
 

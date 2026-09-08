@@ -27,7 +27,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GEMINI_MODEL = 'gemini-2.0-flash';
+const GEMINI_MODEL = 'gemini-3.6-flash';
 
 const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo a tabela de movimentação de um extrato de aplicação financeira (PDF de banco — Bradesco, Itaú, Safra, etc., cada um com um layout de colunas diferente) para conciliação bancária. Extraia a tabela EXATAMENTE como aparece no documento, sem tentar adivinhar ou normalizar o significado de cada coluna — isso é feito depois, pelo usuário, mapeando cada coluna manualmente.
 
