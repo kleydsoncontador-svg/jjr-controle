@@ -18699,10 +18699,10 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: comprovantesReceb } = await _lancctbFetchTudo(()=>_supaClient.from('comprovantes_recebimento')
-    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago')
+    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
-    .select('id,nf_id,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero)')
+    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero)')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
@@ -18847,6 +18847,67 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       }
     }
 
+    // Passo 0.5: grupo de operações do Comprovante de Recebimento (Itaú
+    // "Extrato de movimentação de boletos" — valor_boleto/liquidação/tarifa/
+    // juros do MESMO documento) — pedido do usuário 08/09/2026, exemplo real
+    // D.R. Goi Importação: banco recebeu 889,34 (liquidação), mas a NF vale
+    // 874,78 (valor_boleto) + 16,06 de juros, com 1,50 de tarifa descontada.
+    // Gera partida dobrada de N linhas: Débito Banco (liquidação) + Débito
+    // tarifa/desconto (valor negativo, é despesa) + Crédito NF/valor_boleto
+    // (tenta achar a Nota Fiscal pelo número embutido no documento_numero,
+    // "NF-parcela"; sem achar, usa a mesma conta fixa 10000 mesmo assim) +
+    // Crédito juros/multa (receita, via Regra por histórico_gatilho — texto
+    // igual ao rótulo da operação, ex: "Receita de Juros"). Só roda pra
+    // entrada (recebimento) nos modos 'completo' e 'comprovantes_recebimento'
+    // — nunca é acionado por "Processar Notas Fiscais"/"...via IA" isolados.
+    if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')){
+      const HISTORICO_LABEL_OP={liquidacao:'Recebimento',valor_boleto:'Liquidação',tarifa_cobranca:'Tarifa de Cobrança',juros:'Receita de Juros',multa:'Receita de Multa',desconto:'Desconto Concedido'};
+      const ancoraLiquidacao=comprovantesReceb.find(c=>
+        !comprovantesUsadosReceb.has(c.id)&&c.tipo_operacao==='liquidacao'&&c.documento_numero
+        &&Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR
+        &&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+      if(ancoraLiquidacao){
+        const grupo=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.documento_numero===ancoraLiquidacao.documento_numero&&c.cliente_fornecedor_nome===ancoraLiquidacao.cliente_fornecedor_nome);
+        const [nfNum,parcelaNum]=String(ancoraLiquidacao.documento_numero).split('-');
+        const refTexto=nfNum?` ref. NF ${nfNum}${parcelaNum?` (parcela ${parcelaNum})`:''} de ${ancoraLiquidacao.cliente_fornecedor_nome||''}`.trim():'';
+        // Tenta achar a NF real (empresa emitiu, direção=venda) pelo número —
+        // não achando, segue mesmo assim com a conta fixa 10000 (usuário:
+        // "eu não sei de qual mês é e se fiz upload" — não bloqueia o lançamento).
+        const parcelaNf=nfNum?parcelas.find(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao==='venda'&&String(p.notas_fiscais?.numero)===String(nfNum)&&(!parcelaNum||String(p.numero_parcela)===String(parcelaNum))):null;
+        const regraClienteNF=parcelaNf&&regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&r.cnpj_cpf_gatilho===parcelaNf.notas_fiscais?.cnpj_destinatario);
+        const contaNF=regraClienteNF?{id:regraClienteNF.conta_contabil_id,classificacao:regraClienteNF.plano_contas.classificacao}:{id:contaEntradaNF.id,classificacao:contaEntradaNF.classificacao};
+
+        let todasResolvidas=true;
+        const linhasGrupoOp=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:'D', valor:ancoraLiquidacao.valor_pago, historico:`${HISTORICO_LABEL_OP.liquidacao}${refTexto}`, cliente_fornecedor_nome:ancoraLiquidacao.cliente_fornecedor_nome||null, cnpj_cpf:ancoraLiquidacao.cnpj_cpf||null, comprovante_id:ancoraLiquidacao.id, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' }];
+        for(const c of grupo){
+          if(c.tipo_operacao==='liquidacao') continue;
+          if(c.tipo_operacao==='valor_boleto'){
+            linhasGrupoOp.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:contaNF.classificacao, conta_contabil_id:contaNF.id, tipo:'C', valor:c.valor_pago, historico:`${HISTORICO_LABEL_OP.valor_boleto}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:l.id, regra_matching_id:regraClienteNF?.id||null, origem_match:'automatico_triangular' });
+            continue;
+          }
+          const rotulo=HISTORICO_LABEL_OP[c.tipo_operacao];
+          const regraOp=rotulo&&regras.find(r=>r.tipo_regra==='historico'&&r.historico_gatilho&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&rotulo.toLowerCase().includes(r.historico_gatilho.toLowerCase()));
+          if(!regraOp){ todasResolvidas=false; break; }
+          linhasGrupoOp.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:regraOp.plano_contas.classificacao, conta_contabil_id:regraOp.conta_contabil_id, tipo:regraOp.dc, valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:l.id, regra_matching_id:regraOp.id, origem_match:'regra' });
+        }
+        if(todasResolvidas){
+          const { error:erroGrupoOp } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasGrupoOp });
+          if(erroGrupoOp){
+            erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${erroGrupoOp.message}`);
+          } else {
+            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+            const idsGrupo=grupo.map(c=>c.id);
+            idsGrupo.forEach(id=>comprovantesUsadosReceb.add(id));
+            await _lancctbEmLotesDb(idsGrupo,200,lote=>_supaClient.from('comprovantes_recebimento').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',lote));
+            if(parcelaNf){ parcelasUsadas.add(parcelaNf.id); await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',parcelaNf.id); }
+            await checarAlertaAutomatico(linhasGrupoOp,l,valor,HISTORICO_LABEL_OP.liquidacao+refTexto,ancoraLiquidacao.cliente_fornecedor_nome);
+            resolvRegra++; resolvido=true;
+          }
+        }
+      }
+    }
+    if(resolvido) continue;
+
     // Passo 1: comprovante por valor+data (pulado nos modos 'notas_fiscais'
     // e 'ia' — não devem usar comprovante como âncora). Saída usa
     // comprovantes_bancarios (Pagamento), entrada usa comprovantes_recebimento.
@@ -18872,11 +18933,10 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       const subsetGrupo=_lancctbSubsetSum(candidatosGrupo.map(c=>Math.round(c.valor_pago*100)),alvoCentavosGrupo,Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR*100));
       if(subsetGrupo&&subsetGrupo.length>1) gruposComprovantes=subsetGrupo.map(idx=>candidatosGrupo[idx]);
     }
-    // Modos 'comprovantes_pagamento'/'comprovantes_recebimento': só segue se
-    // achou âncora (única ou em grupo) — sem comprovante, nem tenta NF/Regra
-    // nessa passada (fica pendente pra próxima, ou pro usuário pular direto
-    // pro próximo passo da ordem se não houver comprovante anexado no site).
-    if((modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento')&&!cnpjAncora&&!gruposComprovantes){ aindaPendente++; continue; }
+    // "Processar Pagamentos"/"Processar Recebimentos" fundem Comprovante+NF
+    // num botão só (pedido do usuário 08/09/2026 — "Processar Notas Fiscais"
+    // deixou de ser botão separado): sem comprovante-âncora, cai direto pro
+    // Passo 2 (NF) mais abaixo, que já roda sem exigir CNPJ âncora nenhum.
 
     // Passo 1c: grupo de comprovantes resolvido via Regra por CNPJ de CADA
     // um (nunca via NF — um lote "Sispag" normalmente não tem NF associada).
@@ -19089,9 +19149,8 @@ async function _lancctbReprocessarPendencias(){
 // no site pra uma pendência, ela só fica "ainda pendente" nesse passo e
 // segue pro próximo botão normalmente — não trava o fluxo.
 const LANCCTB_MODO_INFO={
-  comprovantes_pagamento:{btn:'lancctbProcessarComprovBtn',label:'Comprovantes'},
-  comprovantes_recebimento:{btn:'lancctbProcessarComprovRecebBtn',label:'Comprovantes de Recebimentos'},
-  notas_fiscais:{btn:'lancctbProcessarNfBtn',label:'Notas Fiscais'},
+  comprovantes_pagamento:{btn:'lancctbProcessarComprovBtn',label:'Pagamentos'},
+  comprovantes_recebimento:{btn:'lancctbProcessarComprovRecebBtn',label:'Recebimentos'},
 };
 async function _lancctbProcessarFonteRegistro(modo){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -19558,10 +19617,9 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   </div>
   <div class="action-bar-sticky">
       <span id="lancctbRegistroProcessarStatus" style="font-size:11.5px;color:var(--slate)"></span>
-      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching só pra pendências de PAGAMENTO (saída) que batem com um Comprovante — sem comprovante anexado, pula pro próximo passo">🔄 Processar Comprovantes</button>
-      <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching só pra pendências de RECEBIMENTO (entrada) que batem com um Comprovante de Recebimento — sem comprovante anexado, pula pro próximo passo">🔄 Processar Comprov. Recebimento</button>
+      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal">🔄 Processar Pagamentos</button>
+      <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
-      <button class="btn bo bsm" id="lancctbProcessarNfBtn" onclick="_lancctbProcessarFonteRegistro('notas_fiscais')" title="Roda o matching só pra pendências que batem direto com uma Nota Fiscal (parcela vencida em até 60 dias antes do pagamento, valor com no máximo R$0,02 de diferença)">🔄 Processar Notas Fiscais</button>
       <button class="btn bsm" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" style="background:#F59E0B;color:#fff;border:none" title="Último recurso — usa IA (Groq/Gemini) pra tentar amarrar Pagamento/Recebimento × Nota Fiscal quando os passos acima não resolveram sozinhos. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) nesta conta — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis desta conta, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
