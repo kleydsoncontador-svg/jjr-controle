@@ -2176,6 +2176,15 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <input type="hidden" id="lancctbRegraId">
       <div id="lancctbRegraOrigemInfo" style="display:none;background:#EEF2FF;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
       <div id="lancctbRegraSugestaoCnpj" style="display:none;background:#FEF3C7;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
+      <div id="lancctbRegraBuscaNfWrap" style="display:none;background:#F0FDF4;border:1px solid #86EFAC;border-radius:6px;padding:10px;margin-bottom:12px">
+        <div style="font-weight:600;font-size:12.5px;color:var(--ink);margin-bottom:6px">🔎 Amarrar manualmente a uma Nota Fiscal pendente</div>
+        <div style="font-size:11.5px;color:var(--slate);margin-bottom:8px">Busca em NF-e/NF-e Saída/NFS-e ainda não conciliadas desta empresa, por nome do fornecedor/cliente, número da NF, valor ou data da parcela.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <input class="fi" id="lancctbRegraBuscaNfTermo" placeholder="Nome, CNPJ ou número da NF…" style="flex:1;min-width:180px" oninput="_lancctbBuscarNfProLancamentoDebounced()">
+          <input class="fi" id="lancctbRegraBuscaNfValor" type="number" step="0.01" placeholder="Valor (opcional)" style="width:130px" oninput="_lancctbBuscarNfProLancamentoDebounced()">
+        </div>
+        <div id="lancctbRegraBuscaNfResultado" style="margin-top:8px;max-height:220px;overflow-y:auto"></div>
+      </div>
       <div id="lancctbRegraTributosArea"></div>
       <div class="fg">
         <div class="fl">Descrição *</div>
@@ -18425,6 +18434,10 @@ async function abrirLancctbRegraModal(id){
   _lancctbRateioProximoId=0;
   document.getElementById('lancctbRegraOrigemInfo').style.display='none';
   document.getElementById('lancctbRegraSugestaoCnpj').style.display='none';
+  document.getElementById('lancctbRegraBuscaNfWrap').style.display='none';
+  document.getElementById('lancctbRegraBuscaNfTermo').value='';
+  document.getElementById('lancctbRegraBuscaNfValor').value='';
+  document.getElementById('lancctbRegraBuscaNfResultado').innerHTML='';
   document.getElementById('lancctbRegraTributosArea').innerHTML='';
   document.getElementById('lancctbRegraAprenderWrap').style.display='none';
   document.getElementById('lancctbRegraAprenderCheckbox').checked=true;
@@ -18564,6 +18577,18 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
   origemInfo.style.display='';
   origemInfo.innerHTML=`Lançamento: <strong>${dataFmt}</strong> — R$ ${_fmt(valor)} — ${esc((r.historico_bancario||'').trim())}`;
 
+  // Busca manual de NF pendente (pedido do usuário 08/09/2026): só faz
+  // sentido pra lançamento ainda PENDENTE — um já conciliado (item.ctb
+  // preenchido) reabre este modal só pra revisar/criar Regra a partir dele.
+  const buscaNfWrap=document.getElementById('lancctbRegraBuscaNfWrap');
+  if(!item.ctb.length){
+    buscaNfWrap.style.display='';
+    document.getElementById('lancctbRegraBuscaNfValor').value=valor;
+    _lancctbBuscarNfProLancamento();
+  } else {
+    buscaNfWrap.style.display='none';
+  }
+
   let cnpjSugerido=opts.cnpjSugerido||null, nomeSugerido=opts.nomeSugerido||null;
   if(!cnpjSugerido){
     if(item.ctb.length){
@@ -18584,6 +18609,113 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
     sugestao.innerHTML=`Terceiro identificado: <strong>${esc(nomeSugerido||'')}</strong> (${esc(_fmtCnpjCpf(cnpjSugerido))}) — <a href="#" onclick="document.getElementById('lancctbRegraTipo').value='cliente_fornecedor';document.getElementById('lancctbRegraCnpjGatilho').value='${esc(cnpjSugerido)}';_lancctbAtualizarCamposRegra();return false;">usar CNPJ como gatilho em vez do histórico</a>`;
   } else {
     sugestao.style.display='none';
+  }
+}
+let _lancctbBuscarNfTimer=null;
+function _lancctbBuscarNfProLancamentoDebounced(){
+  clearTimeout(_lancctbBuscarNfTimer);
+  _lancctbBuscarNfTimer=setTimeout(_lancctbBuscarNfProLancamento,350);
+}
+// Busca notas_fiscais_parcelas ainda pendentes (empresa toda, qualquer aba
+// de NF-e/NFS-e) que possam ser a NF real por trás deste lançamento sem
+// match automático — pedido do usuário 08/09/2026: "preciso que nessa
+// telinha tenha um campo que busque notas fiscais não conciliadas... pra
+// que eu possa amarrar manualmente". Filtra por direção (compra/venda,
+// batendo com saída/entrada do lançamento) e por nome/CNPJ/número da NF
+// digitado, ordena pelas mais prováveis (valor e data mais próximos).
+async function _lancctbBuscarNfProLancamento(){
+  const resEl=document.getElementById('lancctbRegraBuscaNfResultado');
+  const r=_lancctbRegraExtratoAlvo;
+  if(!r){ resEl.innerHTML=''; return; }
+  const ehSaida=r.valor_saida>0;
+  const direcao=ehSaida?'compra':'venda';
+  const termo=(document.getElementById('lancctbRegraBuscaNfTermo').value||'').trim().toLowerCase();
+  const valorAlvo=parseFloat(document.getElementById('lancctbRegraBuscaNfValor').value)||(r.valor_saida||r.valor_entrada);
+  resEl.innerHTML=`<div style="color:var(--slate);font-size:12px;padding:6px 0">Buscando…</div>`;
+  const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
+    .select('id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(id,numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao)')
+    .eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente'));
+  let candidatas=(parcelas||[]).filter(p=>p.notas_fiscais?.direcao===direcao);
+  if(termo){
+    candidatas=candidatas.filter(p=>{
+      const nf=p.notas_fiscais;
+      const nome=(ehSaida?nf?.nome_emitente:nf?.nome_destinatario)||'';
+      const cnpj=(ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario)||'';
+      return nome.toLowerCase().includes(termo)||cnpj.toLowerCase().includes(termo)||(nf?.numero||'').toLowerCase().includes(termo);
+    });
+  }
+  candidatas.sort((a,b)=>{
+    const diffValor=Math.abs(a.valor_parcela-valorAlvo)-Math.abs(b.valor_parcela-valorAlvo);
+    if(Math.abs(diffValor)>0.005) return diffValor;
+    return _lancctbDiffDias(a.data_vencimento,r.data_pagamento)-_lancctbDiffDias(b.data_vencimento,r.data_pagamento);
+  });
+  candidatas=candidatas.slice(0,25);
+  if(!candidatas.length){ resEl.innerHTML=`<div style="color:var(--slate);font-size:12px;padding:6px 0">Nenhuma NF pendente encontrada com esse filtro.</div>`; return; }
+  resEl.innerHTML=candidatas.map(p=>{
+    const nf=p.notas_fiscais;
+    const nome=(ehSaida?nf?.nome_emitente:nf?.nome_destinatario)||'(sem nome)';
+    const cnpj=_fmtCnpjCpf(ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario);
+    const dataFmt=p.data_vencimento?new Date(p.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'';
+    const bateValor=Math.abs(p.valor_parcela-valorAlvo)<=LANCCTB_MATCH_TOLERANCIA_VALOR_NF;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">
+      <div>
+        <strong>${esc(nome)}</strong> (${esc(cnpj)}) — NF ${esc(nf?.numero||'')} — parcela ${p.numero_parcela}<br>
+        <span style="color:var(--slate)">Vencimento ${dataFmt} — <span style="color:${bateValor?'var(--teal)':'var(--red)'}">R$ ${_fmt(p.valor_parcela)}</span></span>
+      </div>
+      <button class="btn bp bsm" type="button" onclick="_lancctbAssociarNfManual(${p.id},this)">✓ Usar esta</button>
+    </div>`;
+  }).join('');
+}
+// Amarra manualmente o lançamento de extrato aberto no modal (_lancctbRegraExtratoAlvo)
+// a UMA parcela de NF escolhida na busca acima — mesmo cálculo de conta
+// contrapartida/Regra por CNPJ do matching automático (gerarLancamentoNF em
+// _lancctbRodarMatching), mas disparado direto pelo clique do usuário.
+async function _lancctbAssociarNfManual(parcelaId,btn){
+  const r=_lancctbRegraExtratoAlvo;
+  if(!r){ toast('Lançamento de origem não encontrado — feche e reabra o modal.','err'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='Associando…'; }
+  try{
+    const eid=_lancctbEidAtual;
+    const ehSaida=r.valor_saida>0;
+    const valor=r.valor_saida||r.valor_entrada;
+    const { data: parcela } = await _supaClient.from('notas_fiscais_parcelas')
+      .select('id,numero_parcela,notas_fiscais(numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario)')
+      .eq('id',parcelaId).single();
+    if(!parcela){ toast('Parcela não encontrada — pode já ter sido usada por outro lançamento.','err'); return; }
+    const nf=parcela.notas_fiscais;
+    const cnpjTerceiro=ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario;
+    const nomeTerceiro=ehSaida?nf?.nome_emitente:nf?.nome_destinatario;
+
+    const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
+      .select('conta_contabil_id,plano_contas(classificacao)').eq('id',r.conta_bancaria_id).single();
+    if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+    const { data: contasFixasNF } = await _supaClient.from('plano_contas')
+      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['10000','10001']);
+    const contaEntradaNF=(contasFixasNF||[]).find(c=>c.numero_conta==='10000');
+    const contaSaidaNF=(contasFixasNF||[]).find(c=>c.numero_conta==='10001');
+    if(!contaEntradaNF||!contaSaidaNF){ toast('Cadastre as contas 10000/10001 no Plano de Contas antes de associar manualmente.','err'); return; }
+
+    const { data: regraOverride } = await _supaClient.from('regras_matching')
+      .select('conta_contabil_id,plano_contas(classificacao)').eq('empresa_eid',eid).eq('ativo',true)
+      .eq('tipo_regra','cliente_fornecedor').eq('cnpj_cpf_gatilho',cnpjTerceiro||'__nenhum__').maybeSingle();
+
+    const bancoTipo=ehSaida?'C':'D', contrapartidaTipo=ehSaida?'D':'C';
+    const contaContrapartidaId=regraOverride?regraOverride.conta_contabil_id:(ehSaida?contaSaidaNF.id:contaEntradaNF.id);
+    const classifContrapartida=regraOverride?regraOverride.plano_contas.classificacao:(ehSaida?contaSaidaNF.classificacao:contaEntradaNF.classificacao);
+    const historicoUtilizado=`${ehSaida?'Pagamento a':'Recebimento de'} ${nomeTerceiro||cnpjTerceiro||''} - NF ${nf?.numero||''} - parcela ${parcela.numero_parcela}`.trim();
+    const linhas=[
+      { empresa_eid:eid, data:r.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:r.id, origem_match:'manual' },
+      { empresa_eid:eid, data:r.data_pagamento, classificacao:classifContrapartida, conta_contabil_id:contaContrapartidaId, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:r.id, origem_match:'manual' },
+    ];
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(error){ toast('Erro ao gravar o lançamento: '+error.message,'err'); return; }
+    await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:r.id}).eq('id',parcelaId);
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',r.id);
+    toast('Lançamento amarrado à NF '+(nf?.numero||'')+' com sucesso.','ok');
+    closeModal('mLancctbRegra');
+    if(typeof renderLancctbRegistroContabil==='function') renderLancctbRegistroContabil();
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent='✓ Usar esta'; }
   }
 }
 // Chamado pelo botão "🔗 Associar" da aba Fluxo de Caixa (Fase 10): o
