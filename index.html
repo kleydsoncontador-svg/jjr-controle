@@ -19305,6 +19305,7 @@ async function _lancctbProcessarViaIA(){
 
     const parcelasUsadas=new Set();
     let resolvIa=0, aindaPendente=0;
+    const pendentesRestantes=[]; // alimenta o passo extra de Fluxo de Caixa, abaixo
     const erros=[];
     const TAM_LOTE=15, MAX_CANDIDATOS=12;
 
@@ -19326,7 +19327,7 @@ async function _lancctbProcessarViaIA(){
           candidatas:candidatas.map(p=>({ parcela_id:p.id, nf_numero:p.notas_fiscais?.numero||'', nome:ehSaida?p.notas_fiscais?.nome_emitente:p.notas_fiscais?.nome_destinatario, valor_parcela:p.valor_parcela, data_vencimento:p.data_vencimento })),
         };
       }).filter(l=>l.candidatas.length);
-      if(!lote.length){ aindaPendente+=grupo.length; continue; }
+      if(!lote.length){ aindaPendente+=grupo.length; pendentesRestantes.push(...grupo); continue; }
 
       let resp;
       try{
@@ -19334,14 +19335,15 @@ async function _lancctbProcessarViaIA(){
       }catch(e){
         erros.push(`Lote ${i+1}-${i+grupo.length}: ${e.message}`);
         aindaPendente+=grupo.length;
+        pendentesRestantes.push(...grupo);
         continue;
       }
       const porLancId=new Map((resp.resultados||[]).map(r=>[r.lancamento_id,r]));
       for(const l of grupo){
         const r=porLancId.get(l.id);
-        if(!r||r.parcela_id==null){ aindaPendente++; continue; }
+        if(!r||r.parcela_id==null){ aindaPendente++; pendentesRestantes.push(l); continue; }
         const parcela=parcelas.find(p=>p.id===r.parcela_id);
-        if(!parcela||parcelasUsadas.has(parcela.id)){ aindaPendente++; continue; }
+        if(!parcela||parcelasUsadas.has(parcela.id)){ aindaPendente++; pendentesRestantes.push(l); continue; }
         const ehSaida=l.valor_saida>0;
         const valor=l.valor_saida||l.valor_entrada;
         const nf=parcela.notas_fiscais;
@@ -19355,7 +19357,7 @@ async function _lancctbProcessarViaIA(){
           { empresa_eid:eid, data:l.data_pagamento, classificacao:contaContrapartida.classificacao, conta_contabil_id:contaContrapartida.id, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:l.id, origem_match:'ia' },
         ];
         const { data:loteId, error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
-        if(error){ erros.push(`Lançamento de ${l.data_pagamento}: ${error.message}`); aindaPendente++; continue; }
+        if(error){ erros.push(`Lançamento de ${l.data_pagamento}: ${error.message}`); aindaPendente++; pendentesRestantes.push(l); continue; }
         if(r.explicacao) await _supaClient.from('lancamentos_contabeis').update({informacao_extra:r.explicacao}).eq('lote_id',loteId);
         parcelasUsadas.add(parcela.id);
         await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',parcela.id);
@@ -19363,8 +19365,55 @@ async function _lancctbProcessarViaIA(){
         resolvIa++;
       }
     }
-    toast(`Processar via IA: ${resolvIa} resolvido(s) de ${pendentes.length} pendente(s). ${aindaPendente} continuam pendentes.`,resolvIa?'ok':'err');
-    if(erros.length) console.warn('Erros no Processar via IA:',erros);
+
+    // Passo extra "+ Fluxo" (pedido do usuário 08/09/2026): pro que a IA não
+    // resolveu via NF, tenta achar um lançamento de Fluxo de Caixa do
+    // cliente (Excel/PDF próprio, mais rico que o histórico cru do banco)
+    // batendo valor+data, e uma Regra por histórico cujo gatilho apareça na
+    // descrição do fluxo — só resolve sozinho achando os dois; sem Regra,
+    // fica pendente (nunca inventa conta contábil).
+    let resolvFluxo=0;
+    if(pendentesRestantes.length){
+      if(statusEl) statusEl.textContent='Tentando casar pelo Fluxo de Caixa…';
+      const { data: fluxoCaixa } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+        .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id')
+        .eq('empresa_eid',eid).eq('status_associado','nao_associado'));
+      const { data: regrasHist } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
+        .select('id,historico_fixo,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
+        .eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico'));
+      const aindaSemFluxo=[];
+      for(const l of pendentesRestantes){
+        const ehSaida=l.valor_saida>0;
+        const valor=l.valor_saida||l.valor_entrada;
+        const fluxoMatch=(fluxoCaixa||[]).find(f=>{
+          if(f.conta_bancaria_id&&String(f.conta_bancaria_id)!==String(contaId)) return false;
+          const v=f.valor_saida||f.valor_entrada;
+          const mesmaDirecao=ehSaida?f.valor_saida>0:f.valor_entrada>0;
+          return mesmaDirecao&&Math.abs(v-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
+        });
+        const regra=fluxoMatch&&(regrasHist||[]).find(r=>{
+          if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
+          if(!r.historico_gatilho) return false;
+          return (fluxoMatch.descricao||'').toLowerCase().includes(r.historico_gatilho.toLowerCase());
+        });
+        if(!fluxoMatch||!regra){ aindaSemFluxo.push(l); continue; }
+        const bancoTipo=ehSaida?'C':'D';
+        const historicoUtilizado=regra.historico_fixo||fluxoMatch.descricao||l.historico_bancario||'';
+        const linhas=[
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:fluxoMatch.cliente_fornecedor_nome||null, cnpj_cpf:fluxoMatch.cnpj_cpf||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:historicoUtilizado, cliente_fornecedor_nome:fluxoMatch.cliente_fornecedor_nome||null, cnpj_cpf:fluxoMatch.cnpj_cpf||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+        ];
+        const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+        if(error){ erros.push(`Lançamento de ${l.data_pagamento}: ${error.message}`); aindaSemFluxo.push(l); continue; }
+        await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxoMatch.id);
+        await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+        resolvFluxo++;
+      }
+      aindaPendente=pendentes.length-resolvIa-resolvFluxo;
+    }
+
+    toast(`Processar via IA + Fluxo: ${resolvIa} via NF, ${resolvFluxo} via Fluxo de Caixa, de ${pendentes.length} pendente(s). ${aindaPendente} continuam pendentes.`,(resolvIa||resolvFluxo)?'ok':'err');
+    if(erros.length) console.warn('Erros no Processar via IA + Fluxo:',erros);
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
@@ -19620,7 +19669,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
-      <button class="btn bsm" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" style="background:#F59E0B;color:#fff;border:none" title="Último recurso — usa IA (Groq/Gemini) pra tentar amarrar Pagamento/Recebimento × Nota Fiscal quando os passos acima não resolveram sozinhos. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA</button>
+      <button class="btn bsm" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" style="background:#F59E0B;color:#fff;border:none" title="Último recurso — usa IA (Groq/Gemini) pra tentar amarrar Pagamento/Recebimento × Nota Fiscal, e depois tenta casar pelo Fluxo de Caixa (se a empresa tiver) com uma Regra por histórico. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA + Fluxo</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) nesta conta — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis desta conta, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
   </div>
@@ -21238,8 +21287,7 @@ const LANCCTB_FLUXO_CAMPOS=[
   {key:'descricao', label:'Descrição / Histórico', obrigatorio:false, candidatos:['historico','histórico','descricao','descrição']},
   {key:'cliente_fornecedor_nome', label:'Cliente/Fornecedor (Razão social)', obrigatorio:false, candidatos:['razao social','razão social','raz social']},
   {key:'cnpj_cpf', label:'CNPJ/CPF', obrigatorio:false, candidatos:['cnpj/cpf do parceiro comercial','cnpj/cpf','cnpj','cpf']},
-  {key:'documento_numero', label:'Nº Documento/Título', obrigatorio:false, candidatos:['numero','número','titulo','título','numero doc','num doc']},
-  {key:'numero', label:'Número', obrigatorio:false, candidatos:['numero','número','no.','nº','nr']},
+  {key:'documento_numero', label:'Nº Documento/Título', obrigatorio:false, candidatos:['numero','número','titulo','título','numero doc','num doc','no.','nº','nr']},
   {key:'parcela', label:'Parcela', obrigatorio:false, candidatos:['parcela','parc.','parc']},
   {key:'unidade', label:'Unidade', obrigatorio:false, candidatos:['unidade','un.','un']},
   {key:'port_nom', label:'PORT/Negócio', obrigatorio:false, candidatos:['port','negocio','negócio','port nom','port_nom']},
@@ -21315,7 +21363,7 @@ async function renderLancctbFluxoCaixa(){
   const from=_lancctbFluxoPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
   let q=_supaClient.from('fluxo_caixa_lancamentos')
-    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,status_associado,numero,parcela,unidade,port_nom',{count:'exact'})
+    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,status_associado,documento_numero,parcela,unidade,port_nom',{count:'exact'})
     .eq('empresa_eid',eid);
   if(_lancctbFluxoContaSel) q=q.eq('conta_bancaria_id',parseInt(_lancctbFluxoContaSel));
   if(_lancctbFluxoPortNegocioFiltro) q=q.eq('port_nom',_lancctbFluxoPortNegocioFiltro);
@@ -21405,7 +21453,7 @@ async function renderLancctbFluxoCaixa(){
         <td style="padding:7px 10px;max-width:260px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(l.descricao||'')}">${esc(l.descricao||'')}</td>
         <td style="padding:7px 10px">${esc(l.cliente_fornecedor_nome||'')}</td>
         <td style="padding:7px 10px;font-family:var(--mono)">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
-        <td style="padding:7px 10px;font-family:var(--mono);font-size:11px">${esc(l.numero||'—')}</td>
+        <td style="padding:7px 10px;font-family:var(--mono);font-size:11px">${esc(l.documento_numero||'—')}</td>
         <td style="padding:7px 10px;text-align:center;font-size:11px">${l.parcela?l.parcela:'—'}</td>
         <td style="padding:7px 10px;font-size:11px">${esc(l.unidade||'—')}</td>
         <td style="padding:7px 10px;font-size:11px" title="${esc(l.port_nom||'')}">${esc(l.port_nom||'—')}</td>
@@ -21724,7 +21772,6 @@ async function confirmarLancctbFluxoImport(){
     let descricao=pegar(row,'descricao');
     if(!descricao) descricao=[descontoOrigem,clienteNome,docNumero?'Doc '+docNumero:''].filter(Boolean).join(' — ');
     if(!descricao) descricao='(sem descrição)';
-    const numero=pegar(row,'numero')||null;
     const parcelaStr=pegar(row,'parcela');
     const parcela=parcelaStr?parseInt(parcelaStr):null;
     const unidade=pegar(row,'unidade')||null;
@@ -21739,7 +21786,7 @@ async function confirmarLancctbFluxoImport(){
       cliente_fornecedor_nome: clienteNome||null,
       cnpj_cpf: cnpjCpf,
       documento_numero: docNumero||null,
-      numero,
+      numero: docNumero||null,
       parcela,
       unidade,
       port_nom: portNom,
