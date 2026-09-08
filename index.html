@@ -19004,7 +19004,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     }
   }
 
-  async function gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,numerosNF,comprovanteMatch){
+  async function gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,numerosNF,comprovanteMatch,numeroParcela){
     const bancoTipo=ehSaida?'C':'D';
     const contrapartidaTipo=ehSaida?'D':'C';
     const regraOverride=regras.find(r=>{
@@ -19022,9 +19022,13 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       contaContrapartidaId=fixa.id; classifContrapartida=fixa.classificacao;
     }
     const nfTexto=numerosNF&&numerosNF.length?`NF ${numerosNF.join(', ')}`:'';
+    // Só anexa "- parcela N" quando dá pra identificar uma única parcela
+    // (1 NF só, casada 1:1) — num subset-sum de várias NFs numeroParcela
+    // fica undefined de propósito, porque não haveria uma parcela "a" pra citar.
+    const parcelaTexto=(numeroParcela&&numerosNF&&numerosNF.length===1)?` - parcela ${numeroParcela}`:'';
     const historicoUtilizado=(regraOverride&&regraOverride.descricao)
       ? regraOverride.descricao
-      : `${ehSaida?'Pagamento a':'Recebimento de'} ${nomeTerceiro||cnpjTerceiro||''}${nfTexto?' - '+nfTexto:''}`.trim();
+      : `${ehSaida?'Pagamento a':'Recebimento de'} ${nomeTerceiro||cnpjTerceiro||''}${nfTexto?' - '+nfTexto:''}${parcelaTexto}`.trim();
     const linhas=[
       { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regraUsadaId, origem_match:'automatico_triangular' },
       { empresa_eid:eid, data:l.data_pagamento, classificacao:classifContrapartida, conta_contabil_id:contaContrapartidaId, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regraUsadaId, origem_match:'automatico_triangular' },
@@ -19230,12 +19234,21 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     if(gruposComprovantes){
       // já tratado no Passo 1c acima — não tenta NF pra grupo.
     } else if(nfCandidatas.length>=1){
-      nfCandidatas.sort((a,b)=>Math.abs(a.valor_parcela-valor)-Math.abs(b.valor_parcela-valor));
+      // Entre parcelas empatadas em valor (ex.: NF com 3 parcelas de valor
+      // igual/quase igual), desempata pela DATA DE VENCIMENTO mais próxima
+      // da data de pagamento — não pela ordem em que vieram do banco (bug
+      // real: parcela 1 vencendo em 30/07 sendo escolhida em vez da parcela
+      // 2, que vencia em 29/08, bem mais perto do pagamento em 31/08).
+      nfCandidatas.sort((a,b)=>{
+        const diffValor=Math.abs(a.valor_parcela-valor)-Math.abs(b.valor_parcela-valor);
+        if(Math.abs(diffValor)>0.005) return diffValor;
+        return _lancctbDiffDias(a.data_vencimento,l.data_pagamento)-_lancctbDiffDias(b.data_vencimento,l.data_pagamento);
+      });
       const escolhida=nfCandidatas[0];
       const nf=escolhida.notas_fiscais;
       const cnpjTerceiro=cnpjAncora||(ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario);
       const nomeTerceiro=comprovanteMatch?.cliente_fornecedor_nome||(ehSaida?nf?.nome_emitente:nf?.nome_destinatario);
-      const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch);
+      const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch,escolhida.numero_parcela);
       if(error){
         erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
       } else {
