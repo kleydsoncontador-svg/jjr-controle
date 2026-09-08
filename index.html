@@ -20180,36 +20180,115 @@ function _lancctbAgruparLinhasPorX(itens,tolerancia){
   linhas.forEach(l=>l.itens.sort((a,b)=>a.y-b.y));
   return linhas;
 }
+// Extrai carteira/pagador/nosso número/vencimento/ag.receptora/valor boleto +
+// 1ª operação (liquidação/entrada). Cada boleto pode ter linhas de CONTINUAÇÃO
+// logo depois (tarifa de cobrança, juros, multa, desconto) que não repetem os
+// dados do boleto — cada uma vira um item separado com numero_parcela
+// incrementado (pedido do usuário, caso real "Amanda Ramos Marques": boleto
+// com liquidação + tarifa de cobrança na mesma linha da tabela).
+function _lancctbNormalizarTipoOperacaoItau(s){
+  const k=String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+  if(k.includes('tarifa')) return 'tarifa_cobranca';
+  if(k.includes('liquida')) return 'liquidacao';
+  if(k.includes('entrada')) return 'entrada';
+  if(k.includes('juros')) return 'juros';
+  if(k.includes('multa')) return 'multa';
+  if(k.includes('desconto')) return 'desconto';
+  return 'outro';
+}
 async function _lancctbParsearItauCobrancaPdf(pdf){
   const itens1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
   const texto1=itens1.map(it=>it.str).join(' ');
   if(!/extrato de movimenta[cç][aã]o de boletos/i.test(texto1)) return null;
 
-  const padraoData=/movimenta[cç][aã]o detalhada\s*\((\d{2}\/\d{2}\/\d{4})\)/i;
-  const padraoLinha=/^\d+\s+(.+?)\s+boleto\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{2}\/\d{2}\/\d{4})\s+(\S+)\s+([\d.,]+)\s+(liquida[cç][aã]o|entrada)\s+-\s+([\d.,]+)/i;
-  const registros=[];
+  // Concatena TODAS as páginas num texto único — um boleto pode ter a
+  // liquidação no fim de uma página e a tarifa/juros no topo da seguinte.
+  let textoCompleto='';
   for(let p=1;p<=pdf.numPages;p++){
     const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
-    const textoPagina=itens.map(it=>it.str).join(' ');
-    const mData=textoPagina.match(padraoData);
-    if(!mData) continue;
-    const dataPagina=_lancctbFluxoParseData(mData[1]);
-    const linhas=_lancctbAgruparLinhasPorX(itens);
-    for(const linha of linhas){
-      const textoLinha=linha.itens.map(it=>it.str).join(' ').trim();
-      const m=textoLinha.match(padraoLinha);
-      if(!m) continue;
-      if(!/liquida[cç][aã]o/i.test(m[8])) continue; // ignora "entrada" (boleto ainda não pago)
+    textoCompleto+=' '+itens.map(it=>it.str).join(' ');
+  }
+
+  const padraoData=/movimenta[cç][aã]o detalhada\s*\((\d{2}\/\d{2}\/\d{4})\)/gi;
+  const padraoFimSecao=/movimenta[cç][aã]o resumida de cobran[cç]a/gi;
+  const marcasDataBruto=[...textoCompleto.matchAll(padraoData)];
+  if(!marcasDataBruto.length) return null;
+  // O cabeçalho "Movimentação detalhada (data)" se repete em CADA página
+  // enquanto a tabela do mesmo dia continuar — mantém só a 1ª ocorrência de
+  // cada mudança de data, senão o dia inteiro seria reprocessado 1x por página.
+  const marcasData=[];
+  let _ultimaDataVista=null;
+  for(const md of marcasDataBruto){
+    if(md[1]!==_ultimaDataVista){ marcasData.push(md); _ultimaDataVista=md[1]; }
+  }
+  const marcasFim=[...textoCompleto.matchAll(padraoFimSecao)];
+  const acharFimSecao=(inicioIdx)=>{
+    for(const mf of marcasFim){ if(mf.index>inicioIdx) return mf.index; }
+    return textoCompleto.length;
+  };
+
+  // Lookbehind evita que a carteira "vaze" pra dentro de um valor decimal
+  // da operação extra do boleto anterior (ex: carteira nunca é precedida de
+  // dígito/vírgula/ponto — senão bateria no "50" de uma tarifa "-1,50").
+  // Nome do pagador limitado a 60 caracteres — sem isso o ".+?" não-guloso
+  // pode "vazar" através de rodapé/cabeçalho até achar a palavra "boleto"
+  // mais adiante no texto, criando um registro fantasma (bug real encontrado
+  // em teste: capturou rodapé inteiro como se fosse nome de pagador).
+  const padraoInicioBoleto=/(?<![\d,.])(\d+)\s+(.{2,60}?)\s+boleto\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{2}\/\d{2}\/\d{4})\s+(\S+)\s+([\d.,]+)\s+(liquida[cç][aã]o|entrada)\s+-\s+(-?[\d.,]+)/gi;
+  const padraoOperacaoExtra=/(tarifa de cobran[cç]a|juros|multa|desconto)\s+(-?[\d.,]+)/gi;
+
+  const registros=[];
+  for(let i=0;i<marcasData.length;i++){
+    const dataPagina=_lancctbFluxoParseData(marcasData[i][1]);
+    const inicioSecao=marcasData[i].index+marcasData[i][0].length;
+    const fimSecao=acharFimSecao(inicioSecao);
+    const trechoSecao=textoCompleto.slice(inicioSecao,fimSecao);
+
+    const matches=[...trechoSecao.matchAll(padraoInicioBoleto)];
+    for(let j=0;j<matches.length;j++){
+      const m=matches[j];
+      if(!/liquida[cç][aã]o/i.test(m[9])) continue; // ignora "entrada" (boleto ainda não pago)
+      const fimBloco=m.index+m[0].length;
+      const inicioProximo=j+1<matches.length?matches[j+1].index:trechoSecao.length;
+      const trechoExtra=trechoSecao.slice(fimBloco,inicioProximo);
+
+      const carteira=m[1];
+      const nomePagador=m[2].trim();
+      const nossoNumero=m[3];
+      const chaveDoc=_lancctbDocumentoDeSeuNumero(m[5],nossoNumero);
+      const vencimento=_lancctbFluxoParseData(m[6]);
+      const agRec=m[7];
+      const valorBoleto=_lancctbFluxoParseValorCel(m[8]);
+
+      let numeroParcela=1;
       registros.push({
         data_pagamento: dataPagina,
-        cliente_fornecedor_nome: m[1].trim(),
+        cliente_fornecedor_nome: nomePagador,
         cnpj_cpf: '',
-        documento_numero: _lancctbDocumentoDeSeuNumero(m[4],m[2]),
-        data_vencimento: _lancctbFluxoParseData(m[5]),
-        valor_documento: _lancctbFluxoParseValorCel(m[7]),
-        valor_pago: _lancctbFluxoParseValorCel(m[9]),
+        documento_numero: chaveDoc,
+        data_vencimento: vencimento,
+        valor_documento: valorBoleto,
+        valor_pago: _lancctbFluxoParseValorCel(m[10]),
         juros:0, multa:0, desconto:0, observacao:'',
+        carteira, nosso_numero: nossoNumero, agencia_receptora: agRec,
+        tipo_operacao: 'liquidacao', numero_parcela: numeroParcela++,
       });
+
+      const opsExtras=[...trechoExtra.matchAll(padraoOperacaoExtra)];
+      for(const op of opsExtras){
+        registros.push({
+          data_pagamento: dataPagina,
+          cliente_fornecedor_nome: nomePagador,
+          cnpj_cpf: '',
+          documento_numero: chaveDoc,
+          data_vencimento: vencimento,
+          valor_documento: valorBoleto,
+          valor_pago: _lancctbParseValorInput(op[2]),
+          juros:0, multa:0, desconto:0, observacao:'',
+          carteira, nosso_numero: nossoNumero, agencia_receptora: agRec,
+          tipo_operacao: _lancctbNormalizarTipoOperacaoItau(op[1]), numero_parcela: numeroParcela++,
+        });
+      }
     }
   }
   return registros;
@@ -20565,6 +20644,13 @@ async function confirmarLancctbImportComprovantes(){
     desconto: c.desconto||0,
     observacao: c.observacao||null,
     arquivo_storage_path: c._arquivoStoragePath||null,
+    ...(tipo==='recebimento'?{
+      carteira: c.carteira||null,
+      nosso_numero: c.nosso_numero||null,
+      agencia_receptora: c.agencia_receptora||null,
+      tipo_operacao: c.tipo_operacao||null,
+      numero_parcela: c.numero_parcela||1,
+    }:{}),
   }));
   const { error } = await _supaClient.from(_lancctbComprovTabela(tipo)).insert(registros);
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
@@ -20612,7 +20698,7 @@ async function renderLancctbComprovantesReceb(){
   const from=_lancctbComprovRecebPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
   let q=_supaClient.from('comprovantes_recebimento')
-    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,documento_numero,data_vencimento,valor_pago,status_conciliacao',{count:'exact'})
+    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,documento_numero,data_vencimento,valor_pago,status_conciliacao,carteira,nosso_numero,agencia_receptora,tipo_operacao,numero_parcela',{count:'exact'})
     .eq('empresa_eid',eid);
   if(_lancctbComprovRecebContaSel) q=q.eq('conta_bancaria_id',_lancctbComprovRecebContaSel);
   if(_lancctbComprovRecebMes){
@@ -20653,13 +20739,19 @@ async function renderLancctbComprovantesReceb(){
       <th style="padding:8px 10px;text-align:left">CPF/CNPJ</th>
       <th style="padding:8px 10px;text-align:left">Documento</th>
       <th style="padding:8px 10px;text-align:left">Dt Vcto</th>
+      <th style="padding:8px 10px;text-align:left">Carteira</th>
+      <th style="padding:8px 10px;text-align:left">Nosso Nº</th>
+      <th style="padding:8px 10px;text-align:left">Ag. Receptora</th>
+      <th style="padding:8px 10px;text-align:left">Operação</th>
+      <th style="padding:8px 10px;text-align:center">Parcela</th>
       <th style="padding:8px 10px;text-align:right">Valor</th>
       <th style="padding:8px 10px;text-align:center">Status</th>
     </tr></thead>
     <tbody>`;
   if(!comprovantes||!comprovantes.length){
-    html+=`<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--slate)">Nenhum comprovante de recebimento importado ainda.</td></tr>`;
+    html+=`<tr><td colspan="12" style="padding:30px;text-align:center;color:var(--slate)">Nenhum comprovante de recebimento importado ainda.</td></tr>`;
   } else {
+    const OP_LABEL={liquidacao:'Liquidação',tarifa_cobranca:'Tarifa cobrança',juros:'Juros',multa:'Multa',desconto:'Desconto',entrada:'Entrada',outro:'Outro'};
     comprovantes.forEach(c=>{
       const statusCor=c.status_conciliacao==='conciliado'?'var(--teal)':c.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
       html+=`<tr style="border-bottom:1px solid var(--border)">
@@ -20668,6 +20760,11 @@ async function renderLancctbComprovantesReceb(){
         <td style="padding:7px 10px;font-family:var(--mono)">${esc(_fmtCnpjCpf(c.cnpj_cpf))}</td>
         <td style="padding:7px 10px">${esc(c.documento_numero||'')}</td>
         <td style="padding:7px 10px">${c.data_vencimento?new Date(c.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+        <td style="padding:7px 10px">${esc(c.carteira||'')}</td>
+        <td style="padding:7px 10px;font-family:var(--mono)">${esc(c.nosso_numero||'')}</td>
+        <td style="padding:7px 10px">${esc(c.agencia_receptora||'')}</td>
+        <td style="padding:7px 10px">${esc(OP_LABEL[c.tipo_operacao]||c.tipo_operacao||'')}</td>
+        <td style="padding:7px 10px;text-align:center">${c.numero_parcela||1}</td>
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(c.status_conciliacao||'')}</span></td>
       </tr>`;
@@ -20688,11 +20785,12 @@ async function renderLancctbComprovantesReceb(){
 }
 function exportarLancctbComprovantesRecebExcel(){
   if(!_lancctbUltimoComprovReceb.length){ toast('Nada para exportar nesta página.','err'); return; }
-  const header=['Dt Pgto','Cliente/Fornecedor','CPF/CNPJ','Documento','Dt Vcto','Valor','Status'];
+  const header=['Dt Pgto','Cliente/Fornecedor','CPF/CNPJ','Documento','Dt Vcto','Carteira','Nosso Nº','Ag. Receptora','Operação','Parcela','Valor','Status'];
   const rows=_lancctbUltimoComprovReceb.map(c=>[
     c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'',
     c.cliente_fornecedor_nome||'', _fmtCnpjCpf(c.cnpj_cpf), c.documento_numero||'',
     c.data_vencimento?new Date(c.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'',
+    c.carteira||'', c.nosso_numero||'', c.agencia_receptora||'', c.tipo_operacao||'', c.numero_parcela||1,
     c.valor_pago||0, c.status_conciliacao||''
   ]);
   const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
