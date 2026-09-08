@@ -2253,6 +2253,29 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: upload de extrato de Ganhos/Rendimentos via IA — lê o PDF, extrai
+     uma tabela genérica e deixa o usuário mapear cada coluna do PDF pra uma
+     coluna da aplicação (Rendimento Bruto, IOF, IRRF etc.); o mapeamento
+     fica salvo por aplicação, então o próximo extrato do mesmo padrão
+     aplica sozinho sem perguntar de novo (pedido do usuário 08/09/2026). -->
+<div class="mb" id="mGanhoUploadIA" style="display:none">
+  <div class="modal" style="max-width:680px">
+    <div class="mt">
+      <h3>Upload de Extrato (IA)</h3>
+      <button onclick="closeModal('mGanhoUploadIA')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <input class="fi" type="file" id="ganhoUploadIAArquivo" accept=".pdf">
+      <div id="ganhoUploadIAStatus" style="font-size:12px;color:var(--slate);margin-top:8px"></div>
+      <div id="ganhoUploadIABody" style="margin-top:10px"></div>
+      <div class="ma" id="ganhoUploadIAAcoes">
+        <button class="btn bo" onclick="closeModal('mGanhoUploadIA')">Cancelar</button>
+        <button class="btn bp" id="ganhoUploadIABtnExtrair" onclick="_ganhoUploadIAExtrair()">▶ Extrair</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Modal: upload de Comprovantes ou Extrato bancário (PDF/Excel/CSV) —
      conteúdo montado via JS em abrirLancctbUploadModal(), pois o preview
      da lista extraída é dinâmico. -->
@@ -25237,6 +25260,156 @@ function fecharGanhoDetalhe(){
   if(container)container.style.display='none';
 }
 
+// ─── Upload de Extrato de Ganhos/Rendimentos via IA ────────────────────────
+// Reaproveita o mesmo motor de extração genérica já usado em Aplicações
+// Financeiras (_convAplicFinExtrairGenerico, Edge Function
+// convaplicfin-extrair-tabela) — extrai {colunas,linhas} de qualquer PDF via
+// IA. A diferença aqui é o DESTINO do mapeamento: em vez de gerar
+// lançamentos débito/crédito, cada coluna do PDF é mapeada pra uma coluna
+// da própria tabela de Ganhos (Rendimento Bruto, IOF, IRRF...), e o valor é
+// SOMADO por mês (um extrato real pode ter mais de uma linha pro mesmo mês —
+// ex: mais de uma aplicação/resgate no período, cada um com IR/IOF próprio).
+// O mapeamento fica salvo em ganho.mapeamentoColunasIA; upload seguinte do
+// mesmo padrão de extrato aplica sozinho, sem abrir o formulário de novo.
+let _ganhoUploadIAContexto=null; // {eid,pid}
+let _ganhoUploadIAExtraido=null; // {colunas,linhas,observacoes}
+function abrirGanhoUploadIAModal(eid,pid){
+  _ganhoUploadIAContexto={eid,pid};
+  _ganhoUploadIAExtraido=null;
+  document.getElementById('ganhoUploadIAArquivo').value='';
+  document.getElementById('ganhoUploadIAStatus').textContent='';
+  document.getElementById('ganhoUploadIABody').innerHTML='';
+  const btn=document.getElementById('ganhoUploadIABtnExtrair');
+  btn.style.display='';
+  btn.disabled=false;
+  btn.textContent='▶ Extrair';
+  document.getElementById('ganhoUploadIABtnSalvar')?.remove();
+  openModal('mGanhoUploadIA');
+}
+function _ganhoParseDataParaMk(v){
+  const s=String(v||'').trim();
+  let m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); if(m) return m[2]+'/'+m[3]; // dd/mm/aaaa
+  m=s.match(/^(\d{4})-(\d{2})-(\d{2})$/); if(m) return m[2]+'/'+m[1]; // aaaa-mm-dd
+  m=s.match(/^(\d{2})\/(\d{4})$/); if(m) return m[1]+'/'+m[2]; // mm/aaaa
+  m=s.match(/^(\d{4})-(\d{2})$/); if(m) return m[2]+'/'+m[1]; // aaaa-mm
+  return null;
+}
+async function _ganhoUploadIAExtrair(){
+  const {eid,pid}=_ganhoUploadIAContexto;
+  const file=document.getElementById('ganhoUploadIAArquivo').files[0];
+  if(!file){ toast('Selecione um arquivo','err'); return; }
+  const statusEl=document.getElementById('ganhoUploadIAStatus');
+  const btn=document.getElementById('ganhoUploadIABtnExtrair');
+  btn.disabled=true;
+  statusEl.textContent='Lendo arquivo (pode levar alguns segundos)…';
+  try{
+    const extraido=await _convAplicFinExtrairGenerico(file);
+    _ganhoUploadIAExtraido=extraido;
+    const ganhos=getGanhos(eid),ganho=ganhos[pid];
+    const colunasMapeaveis=extraido.colunas.filter(c=>!_ehColunaData(c));
+    const mapSalvo=ganho.mapeamentoColunasIA;
+    const cobreTudo=mapSalvo&&colunasMapeaveis.every(c=>c in mapSalvo);
+    statusEl.textContent='';
+    if(cobreTudo){
+      const qtdMeses=_ganhoAplicarMapeamento(eid,pid,extraido,mapSalvo);
+      toast(`Extrato processado — ${qtdMeses} mês(es) atualizado(s).`,'ok');
+      closeModal('mGanhoUploadIA');
+      return;
+    }
+    document.getElementById('ganhoUploadIABody').innerHTML=_renderGanhoMapeamentoForm(ganho,extraido,mapSalvo);
+    btn.style.display='none';
+  }catch(e){
+    statusEl.textContent='Erro: '+e.message;
+    toast('Erro ao extrair: '+e.message,'err');
+    btn.disabled=false;
+  }
+}
+function _renderGanhoMapeamentoForm(ganho,extraido,mapSalvo){
+  const colsAlvo=(ganho.cols&&ganho.cols.length?ganho.cols:COLS_RF_DEFAULT).filter(c=>c.id!=='trib'&&c.id!=='aliq');
+  const{colunas,linhas,observacoes}=extraido;
+  const colunasMapeaveis=colunas.filter(c=>!_ehColunaData(c));
+  const amostra=linhas.slice(0,3);
+  const mapAtual=mapSalvo||{};
+  let html=`<div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:6px">Modelo não reconhecido automaticamente — mapeie as colunas encontradas</div>`;
+  if(observacoes) html+=`<div style="font-size:11px;color:var(--slate);margin-bottom:8px">${esc(observacoes)}</div>`;
+  html+=`<div style="margin-bottom:10px;max-height:140px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;font-size:10.5px;border-collapse:collapse">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">${colunas.map(c=>`<th style="padding:4px 6px;text-align:left;white-space:nowrap">${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${amostra.map(l=>`<tr style="border-top:1px solid var(--border)">${colunas.map(c=>`<td style="padding:4px 6px;white-space:nowrap">${l[c]!=null?esc(String(l[c])):'—'}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table>
+  </div>
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">O valor de cada coluna mapeada é somado por mês (mais de uma linha do mesmo mês — ex: mais de uma operação no período — soma na mesma célula). A coluna de data é usada só pra identificar o mês, não precisa mapear.</div>
+  <div style="display:grid;gap:8px">`;
+  colunasMapeaveis.forEach((col,i)=>{
+    const atual=mapAtual[col]||'';
+    html+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px;background:var(--bg);border-radius:4px">
+      <b style="font-size:11.5px;min-width:220px">${esc(col)}</b>
+      <select class="si" id="ganhoMapCol_${i}" data-coluna="${esc(col)}" style="min-width:240px">
+        <option value="">— Ignorar —</option>
+        ${colsAlvo.map(c=>`<option value="${esc(c.id)}" ${atual===c.id?'selected':''}>${esc(c.nome)}</option>`).join('')}
+      </select>
+    </div>`;
+  });
+  html+=`</div>`;
+  // Botão "Salvar mapeamento" entra no MESMO container de ações estático do
+  // modal (ao lado de "Cancelar"), em vez de criar uma 2ª barra — assim
+  // abrirGanhoUploadIAModal() só precisa remover ESSE botão ao reabrir,
+  // sem destruir a barra de ações original (bug real: removê-la inteira
+  // quebrava o "Extrair" na 2ª vez que o modal era aberto).
+  setTimeout(()=>{
+    const acoes=document.getElementById('ganhoUploadIAAcoes');
+    if(acoes&&!document.getElementById('ganhoUploadIABtnSalvar')){
+      const btnSalvar=document.createElement('button');
+      btnSalvar.className='btn bp'; btnSalvar.id='ganhoUploadIABtnSalvar';
+      btnSalvar.textContent='✓ Salvar mapeamento e aplicar';
+      btnSalvar.onclick=_ganhoUploadIASalvarMapeamento;
+      acoes.appendChild(btnSalvar);
+    }
+  },0);
+  return html;
+}
+function _ganhoUploadIASalvarMapeamento(){
+  const {eid,pid}=_ganhoUploadIAContexto;
+  const extraido=_ganhoUploadIAExtraido;
+  if(!extraido){ toast('Extração não encontrada — tente novamente.','err'); return; }
+  const colunasMapeaveis=extraido.colunas.filter(c=>!_ehColunaData(c));
+  const mapeamento={};
+  colunasMapeaveis.forEach((col,i)=>{
+    const v=document.getElementById('ganhoMapCol_'+i)?.value||'';
+    if(v) mapeamento[col]=v;
+  });
+  if(!Object.keys(mapeamento).length){ toast('Mapeie ao menos uma coluna.','err'); return; }
+  const ganhos=getGanhos(eid),ganho=ganhos[pid];
+  ganho.mapeamentoColunasIA=mapeamento;
+  setGanhos(eid,ganhos);
+  const qtdMeses=_ganhoAplicarMapeamento(eid,pid,extraido,mapeamento);
+  toast(`Mapeamento salvo — ${qtdMeses} mês(es) atualizado(s). Da próxima vez que anexar um extrato desse mesmo padrão, entra sozinho.`,'ok');
+  closeModal('mGanhoUploadIA');
+}
+function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
+  const chaveData=extraido.colunas.find(c=>_ehColunaData(c));
+  const somasPorMes={};
+  extraido.linhas.forEach(linha=>{
+    const mk=chaveData?_ganhoParseDataParaMk(linha[chaveData]):null;
+    if(!mk) return;
+    if(!somasPorMes[mk]) somasPorMes[mk]={};
+    Object.keys(mapeamento).forEach(col=>{
+      const colId=mapeamento[col];
+      if(!colId) return;
+      somasPorMes[mk][colId]=(somasPorMes[mk][colId]||0)+(Number(linha[col])||0);
+    });
+  });
+  const ganhos=getGanhos(eid),ganho=ganhos[pid];
+  if(!ganho.dados)ganho.dados={};
+  Object.keys(somasPorMes).forEach(mk=>{
+    if(!ganho.dados[mk])ganho.dados[mk]={};
+    Object.keys(somasPorMes[mk]).forEach(colId=>{ ganho.dados[mk][colId]=somasPorMes[mk][colId]; });
+  });
+  setGanhos(eid,ganhos);
+  if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
+  return Object.keys(somasPorMes).length;
+}
+
 var COLS_RF_DEFAULT=[
   {id:'bruto',nome:'Rendimento Bruto s/ Resgates',op:'+',tipo:'num'},
   {id:'iof',nome:'(-) IOF',op:'-',tipo:'num'},
@@ -25340,6 +25513,7 @@ function renderGanhoTrimestral(eid,id,ganho){
     <button class="action-btn action-btn-excel" onclick="exportarGanhoExcel('${eid2}','${pid}')">📊 Gerar Excel</button>
     <button class="btn bo bsm" onclick="adicionarAnoGanho('${eid2}','${pid}')">+ Ano</button>
     <button class="btn bo bsm" onclick="adicionarColGanho('${eid2}','${pid}')">+ Coluna</button>
+    <button class="btn bp bsm" onclick="abrirGanhoUploadIAModal('${eid2}','${pid}')" title="Lê um PDF de extrato via IA e preenche os meses automaticamente — na primeira vez pede pra mapear as colunas, depois entra sozinho">⬆ Upload PDF (IA)</button>
     <button class="btn bo bsm" onclick="fecharGanhoDetalhe()">← Voltar aos Ganhos/Rendimentos</button>
   </div>
   <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:14px;padding:12px;background:var(--bg);border-radius:6px;align-items:flex-end">
