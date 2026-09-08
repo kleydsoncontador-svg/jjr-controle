@@ -20655,28 +20655,40 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
       paginasTexto.push(texto);
     }
 
-    status.textContent=`"${file.name}" — enviando para IA (${pdf.numPages} páginas)…`;
+    // Manda em LOTES de páginas, não tudo de uma vez — bug real encontrado
+    // (MD 2 #53, 08/09/2026): um PDF de 50 comprovantes (1 por página)
+    // mandado inteiro numa chamada só voltava "Nenhum comprovante
+    // encontrado", provavelmente estourando algum limite do modelo. Mesmo
+    // tamanho de lote já usado em _lancctbProcessarUmComprovantePdf.
+    const lotesPaginas=_lancctbEmLotes(paginasTexto,LANCCTB_COMPROV_PAGINAS_POR_LOTE);
+    const todosComprovantes=[];
+    for(let li=0;li<lotesPaginas.length;li++){
+      status.textContent=lotesPaginas.length>1
+        ? `"${file.name}" — enviando para IA, lote ${li+1}/${lotesPaginas.length} (páginas ${li*LANCCTB_COMPROV_PAGINAS_POR_LOTE+1}-${Math.min((li+1)*LANCCTB_COMPROV_PAGINAS_POR_LOTE,pdf.numPages)})…`
+        : `"${file.name}" — enviando para IA (${pdf.numPages} páginas)…`;
 
-    // Chama Edge Function lancctb-parse-comprovante que já funciona com Gemini
-    const response=await fetch(`${SUPABASE_URL}/functions/v1/lancctb-parse-comprovante`,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':`Bearer ${SUPABASE_ANON_KEY}`},
-      body:JSON.stringify({texto:paginasTexto.join('\n')})
-    });
+      // Chama Edge Function lancctb-parse-comprovante que já funciona com Gemini
+      const response=await fetch(`${SUPABASE_URL}/functions/v1/lancctb-parse-comprovante`,{
+        method:'POST',
+        headers:{'Content-Type':'application/json','Authorization':`Bearer ${SUPABASE_ANON_KEY}`},
+        body:JSON.stringify({texto:lotesPaginas[li].join('\n')})
+      });
 
-    if(!response.ok){
-      try{
-        const errData=await response.json();
-        const errMsg=errData.error||errData.debug_info||response.statusText;
-        throw new Error(`Erro na IA (${response.status}): ${errMsg}`);
-      }catch(e){
-        if(e instanceof Error) throw e;
-        throw new Error(`Erro na IA: ${response.statusText}`);
+      if(!response.ok){
+        try{
+          const errData=await response.json();
+          const errMsg=errData.error||errData.debug_info||response.statusText;
+          throw new Error(`Erro na IA (${response.status}), lote ${li+1}/${lotesPaginas.length}: ${errMsg}`);
+        }catch(e){
+          if(e instanceof Error) throw e;
+          throw new Error(`Erro na IA (lote ${li+1}/${lotesPaginas.length}): ${response.statusText}`);
+        }
       }
+      const resultadoLote=await response.json();
+      if(Array.isArray(resultadoLote.comprovantes)) todosComprovantes.push(...resultadoLote.comprovantes);
     }
-    const resultado=await response.json();
 
-    if(!resultado.comprovantes||!resultado.comprovantes.length){
+    if(!todosComprovantes.length){
       throw new Error('Nenhum comprovante encontrado no PDF.');
     }
 
@@ -20686,7 +20698,7 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
 
     // Agrupar por cliente para incrementar numero_parcela quando há múltiplas operações
     const porCliente={};
-    resultado.comprovantes.forEach(c=>{
+    todosComprovantes.forEach(c=>{
       const chave=`${c.cliente_fornecedor_nome}|${c.data_pagamento}`;
       if(!porCliente[chave]) porCliente[chave]=[];
       porCliente[chave].push(c);
