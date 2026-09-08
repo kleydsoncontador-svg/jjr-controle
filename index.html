@@ -17089,7 +17089,19 @@ async function _lancctbExtrairComposicaoDarf(pdf){
   }
   if(!itensComp.length) return null;
   const mTotal=texto.match(/valor total do documento\D{0,10}([\d.,]+)/i);
-  return { itens:itensComp, valorTotal: mTotal?_lancctbParseValorBR2(mTotal[1]):itensComp.reduce((s,i)=>s+i.valor,0) };
+  // Competência (Período de Apuração) direto do PDF — mais confiável que
+  // tentar adivinhar pelo nome do arquivo (pedido do usuário 08/09/2026:
+  // "a data da competência tem que vir de forma automática"). Formatos reais
+  // de DARF: "Período de Apuração 31/07/2026" (dia/mês/ano, usa só mês/ano)
+  // ou já direto "07/2026".
+  let competencia=null;
+  const mPeriodoData=texto.match(/per[ií]odo de apura[cç][aã]o\D{0,10}(\d{2})\/(\d{2})\/(\d{4})/i);
+  if(mPeriodoData) competencia=`${mPeriodoData[2]}/${mPeriodoData[3]}`;
+  else {
+    const mPeriodoMes=texto.match(/per[ií]odo de apura[cç][aã]o\D{0,10}(\d{2})\/(\d{4})/i);
+    if(mPeriodoMes) competencia=`${mPeriodoMes[1]}/${mPeriodoMes[2]}`;
+  }
+  return { itens:itensComp, valorTotal: mTotal?_lancctbParseValorBR2(mTotal[1]):itensComp.reduce((s,i)=>s+i.valor,0), competencia };
 }
 // Fallback genérico (GNRE, DAS, FGTS, ISS...) — procura rótulos comuns de
 // "total" em guias brasileiras. Best-effort: se não achar rótulo nenhum,
@@ -17143,17 +17155,72 @@ async function _lancctbAtualizarSugestoesTributos(){
 }
 // Clicar numa sugestão preenche a Descrição/Histórico gatilho (regra
 // simples) ou a 1ª linha de histórico ainda vazia do rateio (Fase 11).
+// Pedido do usuário 08/09/2026: "processei o tributo e ele achou, porém na
+// mesma GUIA de pagamento tem mais de um imposto... preciso que já aplique
+// de forma automática o ratear, e traga pra nós por linha o código e nome
+// de cada tributo... o histórico e a data da competência de vir de forma
+// automática... e o valor de cada imposto também, pra fechar com o valor
+// total da saída." — abre o PDF de verdade (não só o nome do arquivo) e usa
+// a composição do DARF (_lancctbExtrairComposicaoDarf, já lê código+
+// denominação+valor por imposto) pra ligar o rateio sozinho quando o Guia
+// junta 2+ impostos — o usuário só precisa escolher a Conta Contábil de
+// cada linha, o resto já vem pronto e fechado.
 async function _lancctbUsarSugestaoTributo(idx){
   const f=_lancctbTributosSugeridosAtual[idx];
   if(!f) return;
   const info=_lancctbParsearNomeArquivoTributo(f.nome);
-  const competencia=_lancctbExtrairCompetenciaDoNome(info.descricao);
-  const textoHist=`Pagamento ${info.descricao}${competencia?' ref. '+competencia:''}`.trim();
+  let darf=null;
+  try{
+    const arquivo=await f.fileHandle.getFile();
+    const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
+    darf=await _lancctbExtrairComposicaoDarf(pdfDoc);
+  }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); }
+
+  const competenciaPdf=darf?.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao);
+  const textoHistoricoTributo=(nome,codigo)=>{
+    const partes=[`Pagamento ref. ${nome}`];
+    if(codigo) partes.push(`código ${codigo}`);
+    if(competenciaPdf) partes.push(`- competência ${competenciaPdf}`);
+    return partes.join(' ');
+  };
+
+  if(darf&&darf.itens.length>1){
+    // Guia com 2+ impostos: liga o rateio e recria as linhas do zero (uma
+    // por imposto encontrado), já com histórico e valor preenchidos — só
+    // falta o usuário escolher a Conta Contábil de cada um.
+    _lancctbRateioAtivo=true;
+    document.getElementById('lancctbRegraRateioCheckbox').checked=true;
+    document.getElementById('lancctbRegraContaUnicaWrap').style.display='none';
+    document.getElementById('lancctbRegraRateioWrap').style.display='';
+    _lancctbRateioRowIds=[];
+    darf.itens.forEach(()=>{ _lancctbRateioRowIds.push(_lancctbRateioProximoId++); });
+    _lancctbRateioRenderLinhas();
+    darf.itens.forEach((item,i)=>{
+      const rowId=_lancctbRateioRowIds[i];
+      const hist=document.getElementById('lancctbRateioHistorico_'+rowId);
+      if(hist) hist.value=textoHistoricoTributo(item.denominacao,item.codigo);
+      const val=document.getElementById('lancctbRateioValor_'+rowId);
+      if(val) val.value=String(item.valor).replace('.',',');
+    });
+    _lancctbRateioAtualizarTotal();
+    document.getElementById('lancctbRegraDescricao').value=`Tributos${competenciaPdf?' '+competenciaPdf:''} - ${darf.itens.map(i=>i.denominacao).join('/')}`;
+    toast(`${darf.itens.length} impostos encontrados no PDF — histórico e valor já preenchidos. Escolha a Conta Contábil de cada linha.`,'ok');
+    return;
+  }
+
+  // 1 imposto só (ou PDF não é DARF estruturado — GNRE/DAS/FGTS etc, cai
+  // pro texto baseado no nome do arquivo como antes).
+  const textoHist=darf&&darf.itens.length===1
+    ? textoHistoricoTributo(darf.itens[0].denominacao,darf.itens[0].codigo)
+    : `Pagamento ${info.descricao}${competenciaPdf?' ref. '+competenciaPdf:''}`.trim();
   if(_lancctbRateioAtivo&&_lancctbRateioRowIds.length){
     const rowIdVazia=_lancctbRateioRowIds.find(id=>!document.getElementById('lancctbRateioHistorico_'+id)?.value);
     const rowId=rowIdVazia!==undefined?rowIdVazia:_lancctbRateioRowIds[0];
     const hist=document.getElementById('lancctbRateioHistorico_'+rowId);
     if(hist) hist.value=textoHist;
+    const val=document.getElementById('lancctbRateioValor_'+rowId);
+    if(val&&darf&&darf.itens.length===1) val.value=String(darf.itens[0].valor).replace('.',',');
+    _lancctbRateioAtualizarTotal();
   } else {
     document.getElementById('lancctbRegraDescricao').value=textoHist;
     document.getElementById('lancctbRegraHistoricoGatilho').value=textoHist;
