@@ -2364,10 +2364,14 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     </div>
     <div class="mc">
       <div class="fg">
-        <div class="fl">Mês/Ano</div>
+        <div class="fl">Mês/Ano (de)</div>
         <input class="fi" id="lancctbImportMesInput" type="month">
       </div>
-      <div style="font-size:11.5px;color:var(--slate);margin-top:4px">Busca sozinho em NF-e e NFS-e, Entrada/Saída (ou Tomado/Prestado), na matriz e em todas as filiais.</div>
+      <div class="fg">
+        <div class="fl">Mês/Ano (até) — opcional, pra importar vários meses de uma vez</div>
+        <input class="fi" id="lancctbImportMesAteInput" type="month">
+      </div>
+      <div style="font-size:11.5px;color:var(--slate);margin-top:4px">Busca sozinho em NF-e e NFS-e, Entrada/Saída (ou Tomado/Prestado), na matriz e em todas as filiais. Deixando "até" em branco, importa só o mês "de".</div>
       <div id="lancctbImportMesStatus" style="font-size:12px;color:var(--slate);margin-top:10px"></div>
       <div class="ma">
         <button class="btn bo" onclick="closeModal('mLancctbImportMes')">Cancelar</button>
@@ -17012,14 +17016,34 @@ async function abrirLancctbImportarMesModal(){
   const perm=await handle.requestPermission({mode:'read'});
   if(perm!=='granted'){ toast('Acesso à pasta não concedido.','err'); return; }
   document.getElementById('lancctbImportMesInput').value='';
+  document.getElementById('lancctbImportMesAteInput').value='';
   document.getElementById('lancctbImportMesStatus').textContent='';
   openModal('mLancctbImportMes');
 }
+// Gera a lista de {ano,mesNum} entre mesDe e mesAte (ambos "AAAA-MM"),
+// inclusive nas duas pontas — usado pra "Importar mês" aceitar um
+// intervalo (pedido do usuário 08/09/2026: subir 2+ meses de uma vez em
+// vez de repetir o modal mês a mês).
+function _lancctbGerarIntervaloMeses(mesDe,mesAte){
+  const [anoDe,numDe]=mesDe.split('-').map(Number);
+  const [anoAte,numAte]=mesAte.split('-').map(Number);
+  const lista=[];
+  let ano=anoDe,mesNum=numDe;
+  while(ano<anoAte||(ano===anoAte&&mesNum<=numAte)){
+    lista.push({ano,mesNum});
+    mesNum++;
+    if(mesNum>12){mesNum=1;ano++;}
+    if(lista.length>60) break; // trava de segurança — nunca importaria mais de 5 anos de uma vez
+  }
+  return lista;
+}
 async function confirmarLancctbImportarMes(){
-  const anoMes=document.getElementById('lancctbImportMesInput').value;
-  if(!anoMes){ toast('Escolha o mês.','err'); return; }
-  const [ano,mesNum]=anoMes.split('-').map(Number);
-  const mesNome=LANCCTB_MESES_PASTA[mesNum-1];
+  const mesDe=document.getElementById('lancctbImportMesInput').value;
+  const mesAteInput=document.getElementById('lancctbImportMesAteInput').value;
+  if(!mesDe){ toast('Escolha o mês.','err'); return; }
+  const mesAte=mesAteInput||mesDe;
+  if(mesAte<mesDe){ toast('O mês "até" precisa ser igual ou depois do mês "de".','err'); return; }
+  const meses=_lancctbGerarIntervaloMeses(mesDe,mesAte);
   const eid=_lancctbEidAtual;
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   if(!emp){ toast('Empresa não encontrada em Cadastro de Empresas.','err'); return; }
@@ -17039,77 +17063,78 @@ async function confirmarLancctbImportarMes(){
   // atalho (o nome do arquivo na pasta da SIEG não é a chave), só NF-e.
   statusEl.textContent='Carregando chaves já importadas…';
   const chavesConhecidas=await _lancctbChavesConhecidas(eid);
-  let puladasPorNome=0;
-
-  const alvos=[];
-  cnpjs.forEach(cnpj=>{
-    alvos.push({tipoPasta:'NF-es',papelPasta:'Entrada',direcao:'compra',cnpj});
-    alvos.push({tipoPasta:'NF-es',papelPasta:'Saida',direcao:'venda',cnpj});
-    alvos.push({tipoPasta:'NFS-es',papelPasta:'Servico Tomado',direcao:'compra',cnpj});
-    alvos.push({tipoPasta:'NFS-es',papelPasta:'Servico Prestado',direcao:'venda',cnpj});
-  });
-
-  const arquivos=[]; // {file, direcao}
-  for(const alvo of alvos){
-    try{
-      const dirMes=await dirXml.getDirectoryHandle(alvo.tipoPasta)
-        .then(d=>d.getDirectoryHandle(alvo.cnpj)).then(d=>d.getDirectoryHandle(alvo.papelPasta))
-        .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
-      for await (const [nome,fh] of dirMes.entries()){
-        if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
-        if(alvo.tipoPasta==='NF-es'&&chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
-        arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
-      }
-    } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
-  }
-
-  // 2ª fonte: NFS-e do Portal de Gestão (Contribuinte) — complementa o que
-  // a SIEG não capturou (pedido do usuário 05/09/2026). Só entra se o
-  // usuário já concedeu acesso à pasta raiz E configurou os nomes de pasta
-  // desta empresa (mapeamento manual — ver _lancctbNfsePortalPainelHtml);
-  // sem isso, é pulada em silêncio, igual à pasta de Tributos do Mês.
   const handleRaizNfse=await _lancctbCarregarHandleNfsePortal();
   const pastasNfse=_lancctbPastasNfsePortalGet(eid);
-  if(handleRaizNfse&&pastasNfse.length){
-    const mesNumStr=String(mesNum).padStart(2,'0');
-    for(const nomePasta of pastasNfse){
-      for(const [subpasta,direcao] of [['Recebidas','compra'],['Emitidas','venda']]){
-        try{
-          const dirMes=await handleRaizNfse.getDirectoryHandle(nomePasta)
-            .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNumStr)).then(d=>d.getDirectoryHandle(subpasta));
-          for await (const [nome,fh] of dirMes.entries()){
-            if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')){
-              arquivos.push({ file:await fh.getFile(), direcao });
+
+  let puladasPorNome=0;
+  const contagemTotal={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
+  const resumoPorMes=[];
+
+  for(const {ano,mesNum} of meses){
+    const mesNome=LANCCTB_MESES_PASTA[mesNum-1];
+    const alvos=[];
+    cnpjs.forEach(cnpj=>{
+      alvos.push({tipoPasta:'NF-es',papelPasta:'Entrada',direcao:'compra',cnpj});
+      alvos.push({tipoPasta:'NF-es',papelPasta:'Saida',direcao:'venda',cnpj});
+      alvos.push({tipoPasta:'NFS-es',papelPasta:'Servico Tomado',direcao:'compra',cnpj});
+      alvos.push({tipoPasta:'NFS-es',papelPasta:'Servico Prestado',direcao:'venda',cnpj});
+    });
+
+    const arquivos=[]; // {file, direcao}
+    for(const alvo of alvos){
+      try{
+        const dirMes=await dirXml.getDirectoryHandle(alvo.tipoPasta)
+          .then(d=>d.getDirectoryHandle(alvo.cnpj)).then(d=>d.getDirectoryHandle(alvo.papelPasta))
+          .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+        for await (const [nome,fh] of dirMes.entries()){
+          if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
+          if(alvo.tipoPasta==='NF-es'&&chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
+          arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
+        }
+      } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
+    }
+
+    // 2ª fonte: NFS-e do Portal de Gestão (Contribuinte) — complementa o que
+    // a SIEG não capturou (pedido do usuário 05/09/2026). Só entra se o
+    // usuário já concedeu acesso à pasta raiz E configurou os nomes de
+    // pasta desta empresa; sem isso, é pulada em silêncio.
+    if(handleRaizNfse&&pastasNfse.length){
+      const mesNumStr=String(mesNum).padStart(2,'0');
+      for(const nomePasta of pastasNfse){
+        for(const [subpasta,direcao] of [['Recebidas','compra'],['Emitidas','venda']]){
+          try{
+            const dirMesNfse=await handleRaizNfse.getDirectoryHandle(nomePasta)
+              .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNumStr)).then(d=>d.getDirectoryHandle(subpasta));
+            for await (const [nome,fh] of dirMesNfse.entries()){
+              if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')){
+                arquivos.push({ file:await fh.getFile(), direcao });
+              }
             }
-          }
-        } catch(e){ /* pasta não existe pra essa empresa/mês/direção — ok, próximo */ }
+          } catch(e){ /* pasta não existe pra essa empresa/mês/direção — ok, próximo */ }
+        }
       }
     }
+
+    if(!arquivos.length) continue;
+    const contagemMes={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
+    for(let i=0;i<arquivos.length;i++){
+      statusEl.textContent=`${mesNome}/${ano} — processando ${i+1}/${arquivos.length}… (${contagemMes.importada} salvas)`;
+      const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas});
+      contagemMes[resultado]++;
+      contagemTotal[resultado]++;
+    }
+    resumoPorMes.push(`${mesNome}/${ano}: ${contagemMes.importada} salva(s)`);
   }
 
-  if(!arquivos.length&&!puladasPorNome){
-    btn.disabled=false;
-    toast('Nenhum XML encontrado pra esse mês (conferi matriz e filiais, Entrada/Saída e Tomado/Prestado, e o Portal NFS-e se configurado).','err');
-    return;
-  }
-  if(!arquivos.length){
-    btn.disabled=false;
-    closeModal('mLancctbImportMes');
-    toast(`${mesNome}/${ano}: nada novo — ${puladasPorNome} NF-e já importada(s) antes (puladas sem reler).`,'ok');
-    renderLancctbConteudo();
-    return;
-  }
-
-  const contagem={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
-  for(let i=0;i<arquivos.length;i++){
-    statusEl.textContent=`Processando ${i+1}/${arquivos.length}… (${contagem.importada} salvas)`;
-    const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas});
-    contagem[resultado]++;
-  }
   btn.disabled=false;
   closeModal('mLancctbImportMes');
-  const totalPuladas=puladasPorNome+contagem.jaExistente;
-  toast(`${mesNome}/${ano}: ${contagem.importada} nota(s) salva(s), ${totalPuladas} já existente(s) (pulada), ${contagem.naoReconhecido} não reconhecida(s), ${contagem.erro} erro(s).`, contagem.erro?'err':'ok');
+  const totalPuladas=puladasPorNome+contagemTotal.jaExistente;
+  if(!contagemTotal.importada&&!totalPuladas){
+    toast('Nenhum XML encontrado no período (conferi matriz e filiais, Entrada/Saída e Tomado/Prestado, e o Portal NFS-e se configurado).','err');
+    return;
+  }
+  const prefixo=meses.length>1?`${meses.length} mês(es) (${resumoPorMes.join(' · ')||'nada novo'}): `:'';
+  toast(`${prefixo}${contagemTotal.importada} nota(s) salva(s), ${totalPuladas} já existente(s) (pulada), ${contagemTotal.naoReconhecido} não reconhecida(s), ${contagemTotal.erro} erro(s).`, contagemTotal.erro?'err':'ok');
   renderLancctbConteudo();
 }
 // Aba "Importar XMLs" — pedido do usuário (05/09/2026): enquanto a API da
