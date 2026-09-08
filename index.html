@@ -16087,7 +16087,7 @@ const LANCCTB_ABAS=[
   {id:'nfse-prestado', label:'NFS-e Prestado', tipoDoc:'nfse', direcaoNf:'venda'},
   {id:'comprovantes', label:'Comprovantes de Pagamentos'},
   {id:'comprovantes-salarios', label:'Comprovantes de Pagamentos de Salários'},
-  {id:'comprovantes-receb', label:'Comprovantes de Recebimento'},
+  {id:'comprovantes-receb', label:'Comprovantes de Recebimentos'},
   {id:'extrato', label:'Extrato Bancário'},
   {id:'fluxo-caixa', label:'Fluxo de Caixa'},
   {id:'aplicacoes', label:'Aplicações Financeiras'},
@@ -19090,7 +19090,7 @@ async function _lancctbReprocessarPendencias(){
 // segue pro próximo botão normalmente — não trava o fluxo.
 const LANCCTB_MODO_INFO={
   comprovantes_pagamento:{btn:'lancctbProcessarComprovBtn',label:'Comprovantes'},
-  comprovantes_recebimento:{btn:'lancctbProcessarComprovRecebBtn',label:'Comprovantes de Recebimento'},
+  comprovantes_recebimento:{btn:'lancctbProcessarComprovRecebBtn',label:'Comprovantes de Recebimentos'},
   notas_fiscais:{btn:'lancctbProcessarNfBtn',label:'Notas Fiscais'},
 };
 async function _lancctbProcessarFonteRegistro(modo){
@@ -19754,7 +19754,14 @@ async function exportarLancctbRegistroContabilTxt(){
 let _lancctbComprovPagina=0;
 let _lancctbComprovContaSel='';
 let _lancctbComprovMes='';
+let _lancctbComprovBusca='';
 let _lancctbComprovPreview=[]; // [{...campo, _incluir:true, _arquivoNome, _arquivoStoragePath}]
+let _lancctbComprovBuscaTimer=null;
+function _lancctbComprovBuscaDebounced(v){
+  _lancctbComprovBusca=v; _lancctbComprovPagina=0;
+  clearTimeout(_lancctbComprovBuscaTimer);
+  _lancctbComprovBuscaTimer=setTimeout(renderLancctbComprovantes,350);
+}
 
 function _lancctbComprovSelecionarConta(id){
   _lancctbComprovContaSel=id; _lancctbComprovPagina=0; renderLancctbComprovantes();
@@ -19782,6 +19789,10 @@ async function renderLancctbComprovantes(){
     const ultimoDia=new Date(ano,mes,0).getDate();
     q=q.gte('data_pagamento',`${_lancctbComprovMes}-01`).lte('data_pagamento',`${_lancctbComprovMes}-${String(ultimoDia).padStart(2,'0')}`);
   }
+  if(_lancctbComprovBusca.trim()){
+    const t=_lancctbComprovBusca.trim().replace(/[%_]/g,'');
+    q=q.or(`cliente_fornecedor_nome.ilike.%${t}%,documento_numero.ilike.%${t}%,cnpj_cpf.ilike.%${t}%`);
+  }
   const { data: comprovantes, error, count } = await q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to);
 
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar comprovantes: ${esc(error.message)}</div>`; return; }
@@ -19799,7 +19810,10 @@ async function renderLancctbComprovantes(){
       ${contaComprovSel.doc_visao_geral_comprovantes_nome?`<button class="btn bo bsm" title="Marca de novo no Visão Geral todos os meses que já têm comprovante salvo nesta conta" onclick="remarcarLancctbComprovVisaoGeral('${contaComprovSel.id}')">🔄 Marcar meses já enviados</button>`:''}
     </div>`;
   }
-  html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+  html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+    <input class="si" placeholder="🔍 Cliente/Fornecedor, documento ou CNPJ/CPF..." value="${esc(_lancctbComprovBusca)}" style="flex:1;min-width:220px" oninput="_lancctbComprovBuscaDebounced(this.value)">
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     ${_lancctbMesPickerHtml(_lancctbComprovMes,'_lancctbComprovMudarMes')}
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbComprovantesExcel()">📊 Gerar Excel</button>
@@ -19993,7 +20007,7 @@ function abrirLancctbUploadComprovanteModal(tipo,semIA){
   _lancctbComprovanteSemIA=semIA||false;
   const ehReceb=_lancctbUploadComprovTipo==='recebimento';
   const ehSalarios=_lancctbUploadComprovTipo==='salarios';
-  const tituloModal=ehReceb?'Upload de Comprovantes de Recebimento':ehSalarios?'Upload de Comprovantes de Pagamentos de Salários':'Upload de Comprovantes (PDF)';
+  const tituloModal=ehReceb?'Upload de Comprovantes de Recebimentos':ehSalarios?'Upload de Comprovantes de Pagamentos de Salários':'Upload de Comprovantes (PDF)';
   document.getElementById('lancctbUploadTitulo').textContent=tituloModal;
   _lancctbUploadStatusAtualId='lancctbComprovStatus';
   _lancctbUploadTituloAtual=tituloModal;
@@ -20333,8 +20347,28 @@ async function _lancctbParsearItauCobrancaPdf(pdf){
   // pode "vazar" através de rodapé/cabeçalho até achar a palavra "boleto"
   // mais adiante no texto, criando um registro fantasma (bug real encontrado
   // em teste: capturou rodapé inteiro como se fosse nome de pagador).
-  const padraoInicioBoleto=/(?<![\d,.])(\d+)\s+(.{2,60}?)\s+boleto\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{2}\/\d{2}\/\d{4})\s+(\S+)\s+([\d.,]+)\s+(liquida[cç][aã]o|entrada)\s+-\s+(-?[\d.,]+)/gi;
-  const padraoOperacaoExtra=/(tarifa de cobran[cç]a|juros|multa|desconto)\s+(-?[\d.,]+)/gi;
+  // A alternância de descrição precisa cobrir TODAS as variações reais do
+  // PDF (levantadas com o arquivo completo da Fast Lube, 206 páginas) —
+  // "liquidação|entrada|baixa|baixa para acertos|entrada por acertos
+  // (reentrada)". Faltando alguma, o boleto inteiro não batia no regex e a
+  // tarifa/juros dos boletos SEGUINTES vazava pro trechoExtra do último
+  // boleto reconhecido antes — bug real: um boleto chegou a acumular 31
+  // "tarifas" que na verdade eram de outros 30 boletos.
+  //
+  // MUITO IMPORTANTE: a ordem do texto que o pdf.js extrai NÃO é a ordem
+  // visual da tabela. O "Crédito/Débito" (valor final do boleto) vem
+  // DEPOIS de todas as descrições+valores de operações extras, não logo
+  // após "liquidação -" como pareceria visualmente. Confirmado com dado
+  // real: "874,78 liquidação - tarifa de cobrança -1,50 juros 16,06
+  // 889,34" — 889,34 É o valor final, no fim de tudo, não 16,06. Por isso
+  // o regex de início para exatamente no traço "-" (sem capturar valor
+  // nenhum ali), e a leitura segue token a token: consome quantas
+  // operações extras (descrição+valor) vierem em seguida, e só o que
+  // sobrar depois delas (um número puro, sem descrição antes) é o valor
+  // final da liquidação.
+  const padraoInicioBoleto=/(?<![\d,.])(\d+)\s+(.{2,60}?)\s+boleto\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{2}\/\d{2}\/\d{4})\s+(\S+)\s+([\d.,]+)\s+(liquida[cç][aã]o|baixa para acertos|entrada por acertos\s*\(reentrada\)|baixa|entrada)\s+-\s+/gi;
+  const padraoOperacaoExtra=/(tarifa de cobran[cç]a|juros|multa|desconto)\s+(-?[\d.,]+)\s+/gi;
+  const padraoValorFinal=/^(-?[\d.,]+)/;
 
   const registros=[];
   for(let i=0;i<marcasData.length;i++){
@@ -20346,10 +20380,9 @@ async function _lancctbParsearItauCobrancaPdf(pdf){
     const matches=[...trechoSecao.matchAll(padraoInicioBoleto)];
     for(let j=0;j<matches.length;j++){
       const m=matches[j];
-      if(!/liquida[cç][aã]o/i.test(m[9])) continue; // ignora "entrada" (boleto ainda não pago)
-      const fimBloco=m.index+m[0].length;
-      const inicioProximo=j+1<matches.length?matches[j+1].index:trechoSecao.length;
-      const trechoExtra=trechoSecao.slice(fimBloco,inicioProximo);
+      // Só "liquidação" é recebimento de fato — baixa/entrada/entrada por
+      // acertos são só mudança de status do boleto, sem dinheiro creditado.
+      if(!/liquida[cç][aã]o/i.test(m[9])) continue;
 
       const carteira=m[1];
       const nomePagador=m[2].trim();
@@ -20358,35 +20391,34 @@ async function _lancctbParsearItauCobrancaPdf(pdf){
       const vencimento=_lancctbFluxoParseData(m[6]);
       const agRec=m[7];
       const valorBoleto=_lancctbFluxoParseValorCel(m[8]);
-
-      let numeroParcela=1;
-      registros.push({
-        data_pagamento: dataPagina,
-        cliente_fornecedor_nome: nomePagador,
-        cnpj_cpf: '',
-        documento_numero: chaveDoc,
-        data_vencimento: vencimento,
-        valor_documento: valorBoleto,
-        valor_pago: _lancctbFluxoParseValorCel(m[10]),
+      const base={
+        data_pagamento: dataPagina, cliente_fornecedor_nome: nomePagador, cnpj_cpf: '',
+        documento_numero: chaveDoc, data_vencimento: vencimento, valor_documento: valorBoleto,
         juros:0, multa:0, desconto:0, observacao:'',
         carteira, nosso_numero: nossoNumero, agencia_receptora: agRec,
-        tipo_operacao: 'liquidacao', numero_parcela: numeroParcela++,
-      });
+      };
 
-      const opsExtras=[...trechoExtra.matchAll(padraoOperacaoExtra)];
+      // Consome, a partir do fim do match (logo após o traço), a sequência
+      // de pares "descrição valor" — o que sobrar é o valor final.
+      let cursor=m.index+m[0].length;
+      const opsExtras=[];
+      while(true){
+        padraoOperacaoExtra.lastIndex=cursor;
+        const mOp=padraoOperacaoExtra.exec(trechoSecao);
+        if(mOp&&mOp.index===cursor){ opsExtras.push(mOp); cursor=mOp.index+mOp[0].length; }
+        else break;
+      }
+      const mFinal=trechoSecao.slice(cursor).match(padraoValorFinal);
+      const valorFinal=mFinal?mFinal[1]:'0';
+
+      let numeroParcela=1;
+      // Linha 1: Valor boleto (valor bruto/de face) — pedido do usuário pra
+      // não perder essa informação, já que a liquidação mostra o líquido.
+      registros.push({...base, valor_pago: valorBoleto, tipo_operacao:'valor_boleto', numero_parcela: numeroParcela++});
+      // Linha 2: Liquidação (valor líquido efetivamente creditado)
+      registros.push({...base, valor_pago: _lancctbFluxoParseValorCel(valorFinal), tipo_operacao:'liquidacao', numero_parcela: numeroParcela++});
       for(const op of opsExtras){
-        registros.push({
-          data_pagamento: dataPagina,
-          cliente_fornecedor_nome: nomePagador,
-          cnpj_cpf: '',
-          documento_numero: chaveDoc,
-          data_vencimento: vencimento,
-          valor_documento: valorBoleto,
-          valor_pago: _lancctbParseValorInput(op[2]),
-          juros:0, multa:0, desconto:0, observacao:'',
-          carteira, nosso_numero: nossoNumero, agencia_receptora: agRec,
-          tipo_operacao: _lancctbNormalizarTipoOperacaoItau(op[1]), numero_parcela: numeroParcela++,
-        });
+        registros.push({...base, valor_pago: _lancctbParseValorInput(op[2]), tipo_operacao: _lancctbNormalizarTipoOperacaoItau(op[1]), numero_parcela: numeroParcela++});
       }
     }
   }
@@ -20778,8 +20810,15 @@ async function confirmarLancctbImportComprovantes(){
 let _lancctbComprovRecebPagina=0;
 let _lancctbComprovRecebContaSel='';
 let _lancctbComprovRecebMes='';
+let _lancctbComprovRecebBusca='';
 let _lancctbComprovRecebPreview=[];
 let _lancctbUltimoComprovReceb=[];
+let _lancctbComprovRecebBuscaTimer=null;
+function _lancctbComprovRecebBuscaDebounced(v){
+  _lancctbComprovRecebBusca=v; _lancctbComprovRecebPagina=0;
+  clearTimeout(_lancctbComprovRecebBuscaTimer);
+  _lancctbComprovRecebBuscaTimer=setTimeout(renderLancctbComprovantesReceb,350);
+}
 function _lancctbComprovRecebSelecionarConta(id){
   _lancctbComprovRecebContaSel=id; _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb();
 }
@@ -20805,6 +20844,10 @@ async function renderLancctbComprovantesReceb(){
     const ultimoDia=new Date(ano,mes,0).getDate();
     q=q.gte('data_pagamento',`${_lancctbComprovRecebMes}-01`).lte('data_pagamento',`${_lancctbComprovRecebMes}-${String(ultimoDia).padStart(2,'0')}`);
   }
+  if(_lancctbComprovRecebBusca.trim()){
+    const t=_lancctbComprovRecebBusca.trim().replace(/[%_]/g,'');
+    q=q.or(`cliente_fornecedor_nome.ilike.%${t}%,documento_numero.ilike.%${t}%,cnpj_cpf.ilike.%${t}%,nosso_numero.ilike.%${t}%`);
+  }
   const { data: comprovantes, error, count } = await q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to);
 
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar comprovantes de recebimento: ${esc(error.message)}</div>`; return; }
@@ -20822,7 +20865,10 @@ async function renderLancctbComprovantesReceb(){
       ${contaComprovRecebSel.doc_visao_geral_comprovantes_nome?`<button class="btn bo bsm" title="Marca de novo no Visão Geral todos os meses que já têm comprovante salvo nesta conta" onclick="remarcarLancctbComprovVisaoGeral('${contaComprovRecebSel.id}')">🔄 Marcar meses já enviados</button>`:''}
     </div>`;
   }
-  html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+  html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+    <input class="si" placeholder="🔍 Cliente/Fornecedor, documento, CNPJ/CPF ou nosso número..." value="${esc(_lancctbComprovRecebBusca)}" style="flex:1;min-width:220px" oninput="_lancctbComprovRecebBuscaDebounced(this.value)">
+  </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
     ${_lancctbMesPickerHtml(_lancctbComprovRecebMes,'_lancctbComprovRecebMudarMes')}
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbComprovantesRecebExcel()">📊 Gerar Excel</button>
@@ -20850,7 +20896,7 @@ async function renderLancctbComprovantesReceb(){
   if(!comprovantes||!comprovantes.length){
     html+=`<tr><td colspan="12" style="padding:30px;text-align:center;color:var(--slate)">Nenhum comprovante de recebimento importado ainda.</td></tr>`;
   } else {
-    const OP_LABEL={liquidacao:'Liquidação',tarifa_cobranca:'Tarifa cobrança',juros:'Juros',multa:'Multa',desconto:'Desconto',entrada:'Entrada',outro:'Outro'};
+    const OP_LABEL={valor_boleto:'Valor boleto',liquidacao:'Liquidação',tarifa_cobranca:'Tarifa cobrança',juros:'Juros',multa:'Multa',desconto:'Desconto',entrada:'Entrada',outro:'Outro'};
     comprovantes.forEach(c=>{
       const statusCor=c.status_conciliacao==='conciliado'?'var(--teal)':c.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
       html+=`<tr style="border-bottom:1px solid var(--border)">
