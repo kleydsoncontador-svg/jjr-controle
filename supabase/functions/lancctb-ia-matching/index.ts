@@ -16,13 +16,13 @@
 // errado — dado contábil real de cliente pagante, sem review humano antes
 // de gravar.
 //
-// Mesmo padrão Groq→Gemini das outras Edge Functions do módulo
-// (lancctb-parse-comprovante/extrato): texto curto vai pro Groq (mais
-// rápido), lote grande ou erro de cota cai pro Gemini.
+// Usa SEMPRE Gemini (chave paga) — pedido do usuário 08/09/2026: nenhum
+// campo do site deve depender do Groq (free-tier com rate limit agressivo,
+// causa real de falhas intermitentes vistas em produção).
 //
 // Deploy: Supabase Dashboard → Edge Functions → Deploy a new function →
 // Via Editor → nome "lancctb-ia-matching" → colar este código → Deploy.
-// Secrets: GROQ_API_KEY e GEMINI_API_KEY (já configurados no projeto).
+// Secrets: GEMINI_API_KEY (já configurada no projeto).
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -30,12 +30,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GROQ_MODEL = 'openai/gpt-oss-120b';
-const GEMINI_MODEL = 'gemini-3.6-flash';
-// Acima disso (em caracteres do prompt montado) vai direto pro Gemini —
-// mesmo raciocínio de TEXTO_LIMITE_GROQ em lancctb-parse-comprovante (teto
-// de 8000 TPM da conta Groq, compartilhado com as outras functions).
-const PROMPT_LIMITE_GROQ = 6000;
+const GEMINI_MODEL = 'gemini-2.0-flash';
 
 function montarPrompt(lote: any[]): string {
   return `Você é um assistente de conciliação bancária de um escritório de contabilidade brasileiro. Pra cada LANÇAMENTO de extrato bancário abaixo (um pagamento feito ou um recebimento recebido pela empresa), veja a lista de NOTAS FISCAIS candidatas dela e diga qual (se alguma) provavelmente corresponde àquele lançamento — comparando o nome do fornecedor/cliente contra o histórico bancário (que costuma vir abreviado, sem acento, ou com sigla do sistema de pagamento do banco) e o valor/data.
@@ -60,29 +55,6 @@ ${JSON.stringify(lote)}`;
 
 function limparJson(raw: string): string {
   return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-}
-
-async function chamarGroq(prompt: string): Promise<unknown> {
-  const apiKey = Deno.env.get('GROQ_API_KEY');
-  if (!apiKey) throw new Error('GROQ_API_KEY não configurada nos secrets da function');
-
-  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [{ role: 'user', content: prompt }],
-      response_format: { type: 'json_object' },
-      temperature: 0.1,
-    }),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error('Erro na API da IA (Groq, ' + resp.status + '): ' + errText.slice(0, 300));
-  }
-  const data = await resp.json();
-  const raw = data?.choices?.[0]?.message?.content || '';
-  return JSON.parse(limparJson(raw));
 }
 
 function sleep(ms: number) {
@@ -137,21 +109,7 @@ Deno.serve(async (req: Request) => {
     }
 
     const prompt = montarPrompt(lote);
-    let dados: unknown;
-    if (prompt.length > PROMPT_LIMITE_GROQ) {
-      dados = await chamarGemini(prompt);
-    } else {
-      try {
-        dados = await chamarGroq(prompt);
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/Groq/.test(msg) && /(413|429)/.test(msg)) {
-          dados = await chamarGemini(prompt);
-        } else {
-          throw e;
-        }
-      }
-    }
+    const dados = await chamarGemini(prompt);
 
     return new Response(JSON.stringify(dados), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },

@@ -16,19 +16,14 @@
 // Aceita `texto` (via pdfjsLib no client) OU `imagens` (extrato escaneado).
 // Mesmo padrão das outras functions de extração deste projeto.
 //
-// Groq vs. Gemini: a conta usada em GROQ_API_KEY tem um teto de 8.000
-// tokens/minuto (tier "on_demand", compartilhado com as outras Edge
-// Functions do projeto) — um extrato consolidado de mês inteiro em PDF
-// facilmente passa disso (mesmo problema confirmado com o
-// lancctb-parse-comprovante em 04-05/09/2026, com os comprovantes reais da
-// Fast Lube). Gemini não tem esse teto apertado: texto pequeno → Groq
-// (mais rápido/barato); texto grande OU imagem → Gemini. Se mesmo assim o
-// Groq estourar (concorrência com outras functions pela mesma cota no
-// mesmo minuto), cai pro Gemini como fallback antes de desistir.
+// Usa SEMPRE Gemini (chave paga) — pedido do usuário 08/09/2026: nenhum
+// campo do site deve depender do Groq (free-tier com rate limit agressivo
+// de 8.000 tokens/minuto, causa real de falhas intermitentes vistas em
+// produção com PDFs grandes). Gemini não tem esse teto apertado.
 //
 // Deploy: Supabase Dashboard → Edge Functions → Deploy a new function → Via
 // Editor → nome "lancctb-parse-extrato" → colar este código → Deploy.
-// Secrets: GROQ_API_KEY e GEMINI_API_KEY (já configurados no projeto).
+// Secrets: GEMINI_API_KEY (já configurada no projeto).
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -36,12 +31,7 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-const GROQ_MODEL_TEXTO = 'openai/gpt-oss-120b';
-const GEMINI_MODEL = 'gemini-3.6-flash';
-// Acima disso (em caracteres) o texto vai direto pro Gemini — abaixo, tenta
-// Groq primeiro. ~8000 caracteres ≈ 3000 tokens, com folga sob o teto de
-// 8000 TPM da conta mesmo somando o prompt fixo (~700 tokens) e a resposta.
-const TEXTO_LIMITE_GROQ = 8000;
+const GEMINI_MODEL = 'gemini-2.0-flash';
 
 const PROMPT = `Você é um assistente de um escritório de contabilidade brasileiro, extraindo os lançamentos de um extrato de conta corrente (PDF) para conciliação bancária. O extrato pode ser de qualquer banco (Itaú, Santander, Sicoob, Safra, Banco do Brasil, Mercado Pago, etc.) — os formatos de coluna variam bastante entre bancos; normalize tudo para a mesma estrutura de saída abaixo, não tente preservar as colunas originais.
 
@@ -70,29 +60,6 @@ Regras:
 
 function limparJson(raw: string): string {
   return raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
-}
-
-async function extrairViaGroq(texto: string): Promise<unknown> {
-  const apiKey = Deno.env.get('GROQ_API_KEY');
-  if (!apiKey) throw new Error('GROQ_API_KEY não configurada nos secrets da function');
-
-  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + apiKey },
-    body: JSON.stringify({
-      model: GROQ_MODEL_TEXTO,
-      messages: [{ role: 'user', content: PROMPT + '\n\nTexto extraído do PDF:\n\n"""\n' + texto + '\n"""' }],
-      response_format: { type: 'json_object' },
-      temperature: 0.1,
-    }),
-  });
-  if (!resp.ok) {
-    const errText = await resp.text();
-    throw new Error('Erro na API da IA (Groq, ' + resp.status + '): ' + errText.slice(0, 300));
-  }
-  const data = await resp.json();
-  const raw = data?.choices?.[0]?.message?.content || '';
-  return JSON.parse(limparJson(raw));
 }
 
 function sleep(ms: number) {
@@ -168,27 +135,7 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    let dados: unknown;
-    if (temImagens) {
-      dados = await extrairViaGeminiImagens(imagens);
-    } else if (texto.length > TEXTO_LIMITE_GROQ) {
-      dados = await extrairViaGeminiTexto(texto);
-    } else {
-      try {
-        dados = await extrairViaGroq(texto);
-      } catch (e) {
-        // Groq pode estourar o TPM mesmo abaixo do nosso teto de tamanho —
-        // a cota é compartilhada com outras Edge Functions do projeto que
-        // podem estar consumindo no mesmo minuto. Cai pro Gemini antes de
-        // desistir.
-        const msg = e instanceof Error ? e.message : String(e);
-        if (/Groq/.test(msg) && /(413|429)/.test(msg)) {
-          dados = await extrairViaGeminiTexto(texto);
-        } else {
-          throw e;
-        }
-      }
-    }
+    const dados = temImagens ? await extrairViaGeminiImagens(imagens) : await extrairViaGeminiTexto(texto);
 
     return new Response(JSON.stringify(dados), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },

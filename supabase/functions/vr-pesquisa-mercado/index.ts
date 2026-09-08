@@ -1,10 +1,13 @@
-// Edge Function: pesquisa de mercado + obsolescência via IA (Groq)
+// Edge Function: pesquisa de mercado + obsolescência via IA (Gemini, chave paga)
 // Usada pelo botão "🔍 Pesquisar Mercado (IA)" em valor-residual.html
+//
+// Migrado de Groq pra Gemini (pedido do usuário 08/09/2026: nenhum campo do
+// site deve depender do Groq free-tier, rate limit agressivo e causa real
+// de falhas intermitentes vistas em produção).
 //
 // Deploy: Supabase Dashboard → Edge Functions → New Function → nome
 // "vr-pesquisa-mercado" → colar este código.
-// Secret necessário: GROQ_API_KEY (Project Settings → Edge Functions → Secrets)
-// Obtenha a chave GRÁTIS (sem cartão de crédito) em https://console.groq.com/keys
+// Secrets: GEMINI_API_KEY (já configurada no projeto).
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -12,12 +15,44 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-// Tenta em ordem — a Groq muda/aposenta modelos com alguma frequência, então
-// em vez de travar tudo quando UM nome de modelo para de existir, tenta o
-// próximo da lista automaticamente (só pula pro próximo se o erro for
-// especificamente "modelo não existe"; outros erros, ex: chave inválida ou
-// limite de uso, propagam na hora, sem ficar tentando à toa).
-const GROQ_MODELS = ['llama-3.3-70b-versatile', 'openai/gpt-oss-120b', 'llama-3.1-8b-instant'];
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function chamarGemini(prompt: string): Promise<string> {
+  const apiKey = Deno.env.get('GEMINI_API_KEY');
+  if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
+
+  const MAX_TENTATIVAS = 3;
+  let ultimoErro = '';
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.4 },
+        }),
+      }
+    );
+    if (resp.ok) {
+      const data = await resp.json();
+      const raw = data?.candidates?.[0]?.content?.parts?.find((p: any) => typeof p.text === 'string')?.text || '';
+      if (!raw) throw new Error('Gemini não retornou texto — resposta: ' + JSON.stringify(data).slice(0, 300));
+      return raw;
+    }
+    const errText = await resp.text();
+    ultimoErro = 'Erro na API da IA (Gemini, ' + resp.status + '): ' + errText.slice(0, 300);
+    const retentavel = resp.status === 503 || resp.status === 429;
+    if (!retentavel || tentativa === MAX_TENTATIVAS) throw new Error(ultimoErro);
+    await sleep(2000 * tentativa);
+  }
+  throw new Error(ultimoErro);
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -29,14 +64,6 @@ Deno.serve(async (req: Request) => {
     if (!descricao) {
       return new Response(JSON.stringify({ error: 'Descrição do ativo é obrigatória' }), {
         status: 400,
-        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-      });
-    }
-
-    const apiKey = Deno.env.get('GROQ_API_KEY');
-    if (!apiKey) {
-      return new Response(JSON.stringify({ error: 'GROQ_API_KEY não configurada nos secrets da function' }), {
-        status: 500,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
       });
     }
@@ -79,35 +106,7 @@ Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usa
 
 Use valores realistas para o mercado brasileiro — não invente números absurdos, e mantenha conservador_pct < realista_pct < otimista_pct.`;
 
-    let aiResp: Response | null = null;
-    let ultimoErro = '';
-    for (const model of GROQ_MODELS) {
-      const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': 'Bearer ' + apiKey,
-        },
-        body: JSON.stringify({
-          model,
-          messages: [{ role: 'user', content: prompt }],
-          response_format: { type: 'json_object' },
-          temperature: 0.4,
-        }),
-      });
-      if (resp.ok) { aiResp = resp; break; }
-      const errText = await resp.text();
-      ultimoErro = 'Erro na API da IA (modelo ' + model + ', status ' + resp.status + '): ' + errText.slice(0, 300);
-      // Só tenta o próximo modelo se o erro for especificamente "modelo não
-      // existe/sem acesso" — qualquer outro erro (chave inválida, limite de
-      // uso, etc.) afeta todos os modelos igualmente, então propaga direto.
-      if (!/model_not_found|does not exist/i.test(errText)) {
-        throw new Error(ultimoErro);
-      }
-    }
-    if (!aiResp) throw new Error(ultimoErro || 'Nenhum modelo da Groq respondeu.');
-    const aiData = await aiResp.json();
-    let raw: string = aiData?.choices?.[0]?.message?.content || '';
+    let raw = await chamarGemini(prompt);
     raw = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
     const dados = JSON.parse(raw);
 

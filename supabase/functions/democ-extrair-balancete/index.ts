@@ -1,13 +1,15 @@
 // Edge Function: extração de dados de um Balancete de Verificação (contas +
-// saldos) via IA (Groq), pro módulo "Demonstrativos Contábeis" em index.html.
-// Usada tanto pelo upload em lote (várias empresas de uma vez) quanto pelo
-// upload avulso (um único arquivo dentro da empresa).
+// saldos) via IA (Gemini, chave paga), pro módulo "Demonstrativos Contábeis"
+// em index.html. Usada tanto pelo upload em lote (várias empresas de uma
+// vez) quanto pelo upload avulso (um único arquivo dentro da empresa).
+//
+// Migrado de Groq pra Gemini (pedido do usuário 08/09/2026: nenhum campo do
+// site deve depender do Groq free-tier, rate limit agressivo e causa real
+// de falhas intermitentes vistas em produção).
 //
 // Deploy: Supabase Dashboard → Edge Functions → Deploy a new function → Via Editor
 // → nome "democ-extrair-balancete" → colar este código → Deploy function.
-// Usa o mesmo secret GROQ_API_KEY já configurado pras outras functions do projeto
-// (secrets de Edge Functions são por projeto, não por função — não precisa
-// cadastrar de novo).
+// Secrets: GEMINI_API_KEY (já configurada no projeto).
 
 const CORS_HEADERS = {
   'Access-Control-Allow-Origin': '*',
@@ -15,9 +17,44 @@ const CORS_HEADERS = {
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 };
 
-// llama-3.3-70b-versatile foi descontinuado pelo Groq em 17/06/2026 —
-// migrado para o substituto recomendado pela própria Groq.
-const GROQ_MODEL = 'openai/gpt-oss-120b';
+const GEMINI_MODEL = 'gemini-2.0-flash';
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function chamarGemini(prompt: string): Promise<string> {
+  const apiKey = Deno.env.get('GEMINI_API_KEY');
+  if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
+
+  const MAX_TENTATIVAS = 3;
+  let ultimoErro = '';
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
+        body: JSON.stringify({
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.1 },
+        }),
+      }
+    );
+    if (resp.ok) {
+      const data = await resp.json();
+      const raw = data?.candidates?.[0]?.content?.parts?.find((p: any) => typeof p.text === 'string')?.text || '';
+      if (!raw) throw new Error('Gemini não retornou texto — resposta: ' + JSON.stringify(data).slice(0, 300));
+      return raw;
+    }
+    const errText = await resp.text();
+    ultimoErro = 'Erro na API da IA (Gemini, ' + resp.status + '): ' + errText.slice(0, 300);
+    const retentavel = resp.status === 503 || resp.status === 429;
+    if (!retentavel || tentativa === MAX_TENTATIVAS) throw new Error(ultimoErro);
+    await sleep(2000 * tentativa);
+  }
+  throw new Error(ultimoErro);
+}
 
 Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') {
@@ -29,14 +66,6 @@ Deno.serve(async (req: Request) => {
     if (!texto || typeof texto !== 'string' || texto.trim().length < 20) {
       return new Response(JSON.stringify({ error: 'Texto do balancete vazio ou não reconhecido — confira se o PDF não é uma imagem escaneada sem texto selecionável.' }), {
         status: 400,
-        headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
-      });
-    }
-
-    const apiKey = Deno.env.get('GROQ_API_KEY');
-    if (!apiKey) {
-      return new Response(JSON.stringify({ error: 'GROQ_API_KEY não configurada nos secrets da function' }), {
-        status: 500,
         headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
       });
     }
@@ -73,26 +102,7 @@ Extraia os dados e responda SOMENTE com um JSON válido, exatamente neste format
 
 Inclua todas as contas analíticas (as que têm saldo, de qualquer nível/grupo — Ativo, Passivo, Patrimônio Líquido, Receitas, Custos, Despesas). Não inclua linhas de "Total Geral" nem subtotais de grupo (ex: "Total do Ativo Circulante") como se fossem uma conta — essas são apenas somatórios. Valores monetários sempre em número puro (sem "R$", sem separador de milhar, com ponto decimal — ex: 61150.00).`;
 
-    const aiResp = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': 'Bearer ' + apiKey,
-      },
-      body: JSON.stringify({
-        model: GROQ_MODEL,
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-        temperature: 0.1,
-      }),
-    });
-
-    if (!aiResp.ok) {
-      const errText = await aiResp.text();
-      throw new Error('Erro na API da IA (' + aiResp.status + '): ' + errText.slice(0, 300));
-    }
-    const aiData = await aiResp.json();
-    let raw: string = aiData?.choices?.[0]?.message?.content || '';
+    let raw = await chamarGemini(prompt);
     raw = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
     const dados = JSON.parse(raw);
 
