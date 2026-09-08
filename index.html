@@ -2096,8 +2096,9 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     <div class="mc">
       <input type="hidden" id="lancctbAplicacaoId">
       <div class="fg">
-        <div class="fl">Nome *</div>
-        <input class="fi" id="lancctbAplicacaoNome" placeholder="Ex: Aut Mais Itaú, CDB-DI, Fundos de Investimento...">
+        <div class="fl">Nome * <span style="font-weight:400;color:var(--slate)">— comece com "Aplic." pra usar o mesmo modelo de leitura de PDF já ensinado noutra empresa</span></div>
+        <input class="fi" id="lancctbAplicacaoNome" list="lancctbAplicacaoNomeSugestoes" placeholder="Ex: Aplic. Invest Fácil, Aplic. Aut Mais Itaú, CDB-DI...">
+        <datalist id="lancctbAplicacaoNomeSugestoes"></datalist>
       </div>
       <div class="fg">
         <div class="fl">Conta Corrente vinculada *</div>
@@ -18153,6 +18154,14 @@ async function abrirLancctbAplicacaoModal(id){
     selContabil.appendChild(o);
   });
 
+  // Sugestão de nome (pedido do usuário 08/09/2026): tudo que já começa com
+  // "Aplic." em QUALQUER empresa — é esse prefixo que reconhece o modelo de
+  // leitura de PDF automaticamente (ver _lancctbAplicDetectarMapeamentoAutomatico),
+  // então padronizar o nome evita reensinar o mapeamento empresa por empresa.
+  const dlSugestoes=document.getElementById('lancctbAplicacaoNomeSugestoes');
+  const { data: nomesExistentes } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras').select('nome').eq('ativo',true).ilike('nome','Aplic.%'));
+  dlSugestoes.innerHTML=[...new Set((nomesExistentes||[]).map(n=>n.nome))].sort().map(n=>`<option value="${esc(n)}">`).join('');
+
   const selDoc=document.getElementById('lancctbAplicacaoDocVisaoGeral');
   if(id){
     const a=_lancctbUltimasAplicacoes.find(x=>x.id===id);
@@ -18167,7 +18176,7 @@ async function abrirLancctbAplicacaoModal(id){
   } else {
     document.getElementById('lancctbAplicacaoNome').value='';
     document.getElementById('lancctbAplicacaoLevarExtrato').checked=true;
-    document.getElementById('lancctbAplicacaoValorUsar').value='bruto';
+    document.getElementById('lancctbAplicacaoValorUsar').value='principal';
     selDoc.innerHTML=_lancctbOpcoesDocVisaoGeral(_lancctbEidAtual,'');
   }
   openModal('mLancctbAplicacao');
@@ -18317,6 +18326,8 @@ function abrirLancctbAplicUploadModal(aplicacaoId){
   if(btnExtrair){ btnExtrair.style.display=''; btnExtrair.disabled=false; }
   const btnSalvar=document.getElementById('lancctbAplicUploadBtnSalvar');
   if(btnSalvar) btnSalvar.remove();
+  const btnConfirmarValor=document.getElementById('lancctbAplicUploadBtnConfirmarValor');
+  if(btnConfirmarValor) btnConfirmarValor.remove();
   openModal('mLancctbAplicUpload');
 }
 async function _lancctbAplicUploadExtrair(){
@@ -18332,10 +18343,44 @@ async function _lancctbAplicUploadExtrair(){
     _lancctbAplicUploadExtraido=extraido;
     const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
     const mapSalvo=a?.mapeamento_colunas_ia;
-    const cobreTudo=mapSalvo&&extraido.colunas.every(c=>c in mapSalvo);
+    // "Cobre tudo" não exige que TODA coluna extraída tenha mapeamento (só
+    // as relevantes: Data/Principal/Bruto/Líquido são mapeadas, o resto —
+    // Taxa, Dt. Vencto etc — fica sempre ignorado de propósito) — exige só
+    // que a Data e ao menos um valor já ensinados ainda existam neste arquivo.
+    const colunasComAlvo=(alvo)=>mapSalvo&&Object.entries(mapSalvo).some(([col,a2])=>a2===alvo&&extraido.colunas.includes(col));
+    const cobreTudo=colunasComAlvo('data')&&(colunasComAlvo('principal')||colunasComAlvo('bruto')||colunasComAlvo('liquido'));
     statusEl.textContent='';
     if(cobreTudo){
       await _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapSalvo,a.valor_usar_extrato||'bruto');
+      return;
+    }
+    // Reconhecimento automático (pedido do usuário 08/09/2026: "sem criação
+    // de parâmetros") — o padrão "Aplic. Invest Fácil" e a maioria dos
+    // extratos de aplicação em português usam nomes de coluna reconhecíveis
+    // (Data/Vlr Princ./Vlr Bruto/Vlr Líquido, com abreviações e acentos
+    // variando) — se der pra identificar com confiança, aplica direto, sem
+    // pedir pro usuário mapear nada.
+    const autoMap=_lancctbAplicDetectarMapeamentoAutomatico(extraido.colunas);
+    if(autoMap){
+      await _supaClient.from('aplicacoes_financeiras').update({mapeamento_colunas_ia:autoMap}).eq('id',aplicacaoId);
+      // Modelo novo aprendido AGORA: se existe uma escolha de verdade (mais
+      // de uma coluna de valor pro Resgate), pergunta uma vez qual delas vai
+      // pro Extrato — usando os nomes reais das colunas deste PDF (pedido do
+      // usuário 08/09/2026: "vc deve me perguntar se quero levar... Principal,
+      // Resgate ou Crédito, nesse modelo"). Da 2ª vez em diante (mapeamento
+      // já salvo, branch "cobreTudo" acima) não pergunta mais — só nessa
+      // 1ª vez que o padrão é reconhecido é que há algo genuinamente novo
+      // pra decidir.
+      const colBrutoNome=Object.keys(autoMap).find(c=>autoMap[c]==='bruto');
+      const colLiquidoNome=Object.keys(autoMap).find(c=>autoMap[c]==='liquido');
+      if(colBrutoNome||colLiquidoNome){
+        statusEl.textContent='';
+        document.getElementById('lancctbAplicUploadBody').innerHTML=_renderLancctbAplicConfirmarValorForm(a,colBrutoNome,colLiquidoNome);
+        btn.style.display='none';
+        return;
+      }
+      statusEl.textContent='Modelo de PDF reconhecido automaticamente — lançando…';
+      await _lancctbAplicUploadAplicar(aplicacaoId,extraido,autoMap,a.valor_usar_extrato||'principal');
       return;
     }
     document.getElementById('lancctbAplicUploadBody').innerHTML=_renderLancctbAplicMapeamentoForm(a,extraido,mapSalvo);
@@ -18345,6 +18390,73 @@ async function _lancctbAplicUploadExtrair(){
     toast('Erro ao extrair: '+e.message,'err');
     btn.disabled=false;
   }
+}
+// Reconhece o padrão "Aplic. Invest Fácil" (Bradesco) e modelos parecidos
+// sem pedir pro usuário mapear nada — a coluna de data efetiva já vem
+// sempre chamada literalmente "Data" (contrato do prompt de extração, ver
+// convaplicfin-extrair-tabela), e os nomes de valor variam pouco em
+// português bancário (sempre têm "princ"/"brut"/"líquid" na palavra,
+// mesmo abreviados/com acento diferente). Exige pelo menos Data + Principal
+// — Bruto/Líquido são opcionais (nem todo extrato de Aplicações tem os 3).
+function _lancctbAplicDetectarMapeamentoAutomatico(colunas){
+  const norm=s=>String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+  const colData=colunas.find(c=>norm(c)==='data');
+  // Nunca considera coluna de DATA como candidata a valor (evita "Dt.
+  // Resgate / Carência" sendo confundida com a coluna "Resgate" de valor
+  // — modelo novo do Invest Fácil, pedido do usuário 08/09/2026, tem as
+  // duas: uma data de pagamento E uma coluna de valor chamada só "Resgate").
+  const candidatosValor=colunas.filter(c=>{ const n=norm(c); return n!=='data'&&!n.startsWith('dt')&&!n.includes('data'); });
+  const colPrincipal=candidatosValor.find(c=>/princ/.test(norm(c)));
+  // "Bruto" no sentido genérico do sistema = valor cheio recebido antes do
+  // IR (inclui rendimento) — no modelo "Emissão/Pagamento" do Invest Fácil
+  // essa coluna chama só "Resgate" (sem "Dt." na frente, isso já foi
+  // filtrado acima). "Líquido" = valor após IR — nesse mesmo modelo chama
+  // "Crédito".
+  const colBruto=candidatosValor.find(c=>/\bbrut/.test(norm(c)))||candidatosValor.find(c=>norm(c)==='resgate');
+  const colLiquido=candidatosValor.find(c=>/liquid/.test(norm(c)))||candidatosValor.find(c=>/credit/.test(norm(c)));
+  if(!colData||!colPrincipal) return null;
+  const mapeamento={ [colData]:'data', [colPrincipal]:'principal' };
+  if(colBruto) mapeamento[colBruto]='bruto';
+  if(colLiquido) mapeamento[colLiquido]='liquido';
+  return mapeamento;
+}
+// Pergunta única (só na 1ª vez que este modelo de PDF é reconhecido) qual
+// valor vai pro Extrato Bancário nos Resgates — usa os nomes REAIS das
+// colunas encontradas neste PDF (ex: "Resgate"/"Crédito" no modelo
+// Emissão/Pagamento do Invest Fácil, "Vlr. Bruto (R$)"/"Vlr Líquido(R$)"
+// no modelo Dt. Aplicação/Dt. Resgate) em vez dos rótulos genéricos
+// Bruto/Líquido, pra não confundir.
+function _renderLancctbAplicConfirmarValorForm(aplicacao,colBrutoNome,colLiquidoNome){
+  const atual=aplicacao?.valor_usar_extrato||'principal';
+  return `<div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:6px">Modelo de PDF reconhecido — só falta uma coisa</div>
+  <div style="font-size:12px;color:var(--slate);margin-bottom:12px">Esse modelo tem mais de um valor possível pro Resgate. Qual deles deve virar o lançamento no Extrato Bancário?</div>
+  <div class="fg">
+    <select class="si" id="lancctbAplicConfirmarValor" style="width:100%">
+      <option value="principal" ${atual==='principal'?'selected':''}>Principal</option>
+      ${colBrutoNome?`<option value="bruto" ${atual==='bruto'?'selected':''}>${esc(colBrutoNome)}</option>`:''}
+      ${colLiquidoNome?`<option value="liquido" ${atual==='liquido'?'selected':''}>${esc(colLiquidoNome)}</option>`:''}
+    </select>
+  </div>
+  <div style="font-size:11px;color:var(--slate)">Fica salvo pra esta Aplicação — nos próximos PDFs do mesmo modelo não pergunta de novo (dá pra trocar depois em "✎ Editar").</div>
+  ${(()=>{ setTimeout(()=>{
+    const acoes=document.getElementById('lancctbAplicUploadAcoes');
+    if(acoes&&!document.getElementById('lancctbAplicUploadBtnConfirmarValor')){
+      const btnConfirmar=document.createElement('button');
+      btnConfirmar.className='btn bp'; btnConfirmar.id='lancctbAplicUploadBtnConfirmarValor';
+      btnConfirmar.textContent='✓ Confirmar e lançar';
+      btnConfirmar.onclick=_lancctbAplicConfirmarValorELancar;
+      acoes.appendChild(btnConfirmar);
+    }
+  },0); return ''; })()}`;
+}
+async function _lancctbAplicConfirmarValorELancar(){
+  const {aplicacaoId}=_lancctbAplicUploadContexto;
+  const extraido=_lancctbAplicUploadExtraido;
+  const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
+  if(!extraido||!a){ toast('Sessão de importação perdida — reabra o modal.','err'); return; }
+  const valorEscolhido=document.getElementById('lancctbAplicConfirmarValor').value;
+  await _supaClient.from('aplicacoes_financeiras').update({valor_usar_extrato:valorEscolhido}).eq('id',aplicacaoId);
+  await _lancctbAplicUploadAplicar(aplicacaoId,extraido,a.mapeamento_colunas_ia,valorEscolhido);
 }
 function _renderLancctbAplicMapeamentoForm(aplicacao,extraido,mapSalvo){
   const{colunas,linhas,observacoes}=extraido;
