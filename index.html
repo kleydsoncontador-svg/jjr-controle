@@ -2114,6 +2114,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
       <div class="fg">
         <div class="fl">No Resgate, usar no Extrato Bancário</div>
         <select class="si" id="lancctbAplicacaoValorUsar" style="width:100%">
+          <option value="principal">Valor Principal</option>
           <option value="bruto">Valor Bruto</option>
           <option value="liquido">Valor Líquido</option>
         </select>
@@ -2154,6 +2155,10 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
         <div class="fl">Valor Bruto *</div>
         <input class="fi" id="lancctbAplicMovValorBruto" type="text" placeholder="0,00">
       </div>
+      <div class="fg" id="lancctbAplicMovPrincipalWrap" style="display:none">
+        <div class="fl">Valor Principal <span style="font-weight:400;color:var(--slate)">(valor originalmente aplicado, sem o rendimento)</span></div>
+        <input class="fi" id="lancctbAplicMovValorPrincipal" type="text" placeholder="0,00">
+      </div>
       <div class="fg" id="lancctbAplicMovLiquidoWrap" style="display:none">
         <div class="fl">Valor Líquido <span style="font-weight:400;color:var(--slate)">(se houver IR retido na fonte)</span></div>
         <input class="fi" id="lancctbAplicMovValorLiquido" type="text" placeholder="0,00">
@@ -2162,6 +2167,25 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     <div class="ma">
       <button class="btn bo" onclick="closeModal('mLancctbAplicacaoMovimento')">Cancelar</button>
       <button class="btn bp" onclick="salvarLancctbAplicacaoMovimento()">✓ Lançar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: importar em massa Aplicações/Resgates de uma Aplicação Financeira via PDF (IA) -->
+<div class="mb" id="mLancctbAplicUpload" style="display:none">
+  <div class="modal" style="max-width:640px">
+    <div class="mt">
+      <h3 id="lancctbAplicUploadTitulo">Importar PDF — Aplicações e Resgates</h3>
+      <button onclick="closeModal('mLancctbAplicUpload')">&#x2715;</button>
+    </div>
+    <div class="mc" id="lancctbAplicUploadBody">
+      <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Sobe o extrato de aplicações do banco (ex: modelo Bradesco, com as seções "Aplicações" e "Resgates/Vencimentos") — a IA lê a tabela e você aponta qual coluna é qual. Da 2ª vez em diante, um arquivo do mesmo padrão entra sozinho.</div>
+      <input type="file" id="lancctbAplicUploadArquivo" accept=".pdf" class="fi">
+      <div id="lancctbAplicUploadStatus" style="font-size:12px;color:var(--slate);margin-top:8px"></div>
+    </div>
+    <div class="ma" id="lancctbAplicUploadAcoes">
+      <button class="btn bo" onclick="closeModal('mLancctbAplicUpload')">Cancelar</button>
+      <button class="btn bp" id="lancctbAplicUploadBtnExtrair" onclick="_lancctbAplicUploadExtrair()">▶ Extrair</button>
     </div>
   </div>
 </div>
@@ -18035,7 +18059,7 @@ async function renderLancctbAplicacoes(){
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
 
   const { data: todasAplicacoes, error } = await _supaClient.from('aplicacoes_financeiras')
-    .select('id,nome,conta_bancaria_id,conta_contabil_id,levar_para_extrato,valor_usar_extrato,doc_visao_geral_nome,agencias_bancarias(banco_nome,agencia,conta_corrente),plano_contas(numero_conta,classificacao,descricao)')
+    .select('id,nome,conta_bancaria_id,conta_contabil_id,levar_para_extrato,valor_usar_extrato,doc_visao_geral_nome,mapeamento_colunas_ia,agencias_bancarias(banco_nome,agencia,conta_corrente),plano_contas(numero_conta,classificacao,descricao)')
     .eq('empresa_eid',eid).eq('ativo',true).order('nome');
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar aplicações: ${esc(error.message)}</div>`; return; }
   _lancctbUltimasAplicacoes=todasAplicacoes||[];
@@ -18085,6 +18109,7 @@ async function renderLancctbAplicacoes(){
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn bp bsm" onclick="abrirLancctbAplicacaoMovimentoModal(${a.id})">+ Lançar Movimento</button>
+          <button class="btn bo bsm" onclick="abrirLancctbAplicUploadModal(${a.id})" title="Sobe um PDF com várias Aplicações e Resgates (ex: extrato de aplicações do banco) e lança tudo de uma vez, com IA">⬆ Importar PDF (IA)</button>
           <button class="btn bo bsm" onclick="abrirLancctbAplicacaoModal(${a.id})">✎ Editar</button>
           <button class="btn bo bsm" style="color:#dc2626" onclick="excluirLancctbAplicacao(${a.id})">🗑️ Excluir</button>
         </div>
@@ -18185,12 +18210,25 @@ function abrirLancctbAplicacaoMovimentoModal(aplicacaoId){
   document.getElementById('lancctbAplicMovData').value='';
   document.getElementById('lancctbAplicMovValorBruto').value='';
   document.getElementById('lancctbAplicMovValorLiquido').value='';
+  document.getElementById('lancctbAplicMovValorPrincipal').value='';
   _lancctbAtualizarCampoLiquido();
   openModal('mLancctbAplicacaoMovimento');
 }
 function _lancctbAtualizarCampoLiquido(){
   const ehResgate=document.getElementById('lancctbAplicMovTipo').value==='resgate';
   document.getElementById('lancctbAplicMovLiquidoWrap').style.display=ehResgate?'':'none';
+  document.getElementById('lancctbAplicMovPrincipalWrap').style.display=ehResgate?'':'none';
+}
+// Decide qual valor vai pro Extrato Bancário quando a Aplicação está
+// marcada "levar_para_extrato" — reaproveitado pelo lançamento manual e
+// pelo import em massa via PDF (Fase 14, pedido do usuário 08/09/2026).
+// Sempre cai pro Bruto se o valor escolhido não veio preenchido nesse
+// movimento (ex.: aplicação sem Vlr Líquido informado).
+function _lancctbAplicValorParaExtrato(tipo,valorPrincipal,valorBruto,valorLiquido,valorUsarExtrato){
+  if(tipo!=='resgate') return valorPrincipal!=null?valorPrincipal:valorBruto;
+  if(valorUsarExtrato==='principal'&&valorPrincipal!=null) return valorPrincipal;
+  if(valorUsarExtrato==='liquido'&&valorLiquido!=null) return valorLiquido;
+  return valorBruto;
 }
 async function salvarLancctbAplicacaoMovimento(){
   const aplicacaoId=document.getElementById('lancctbAplicMovAplicacaoId').value;
@@ -18201,16 +18239,18 @@ async function salvarLancctbAplicacaoMovimento(){
   const valorBruto=_lancctbParseValorInput(document.getElementById('lancctbAplicMovValorBruto').value);
   const valorLiquidoInput=document.getElementById('lancctbAplicMovValorLiquido').value;
   const valorLiquido=tipo==='resgate'&&valorLiquidoInput?_lancctbParseValorInput(valorLiquidoInput):null;
+  const valorPrincipalInput=document.getElementById('lancctbAplicMovValorPrincipal').value;
+  const valorPrincipal=tipo==='resgate'&&valorPrincipalInput?_lancctbParseValorInput(valorPrincipalInput):null;
   if(!data){ toast('Preencha a Data','err'); return; }
   if(!valorBruto){ toast('Preencha o Valor Bruto','err'); return; }
 
   const { data: movSalvo, error: erroMov } = await _supaClient.from('aplicacoes_financeiras_movimentos')
-    .insert({ aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual, tipo, data, valor_bruto:valorBruto, valor_liquido:valorLiquido })
+    .insert({ aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual, tipo, data, valor_bruto:valorBruto, valor_liquido:valorLiquido, valor_principal:valorPrincipal })
     .select().single();
   if(erroMov){ toast('Erro ao salvar movimento: '+erroMov.message,'err'); return; }
 
   if(a.levar_para_extrato){
-    const valorExtrato=(tipo==='resgate'&&a.valor_usar_extrato==='liquido'&&valorLiquido!=null)?valorLiquido:valorBruto;
+    const valorExtrato=_lancctbAplicValorParaExtrato(tipo,valorPrincipal,valorBruto,valorLiquido,a.valor_usar_extrato);
     const ehAplicacao=tipo==='aplicacao';
     const historico=`${ehAplicacao?'Aplicação Financeira':'Resgate Financeiro'} - ${a.nome}`;
     const registroExtrato={
@@ -18245,6 +18285,202 @@ async function excluirLancctbAplicacaoMovimento(movId){
   const { error } = await _supaClient.from('aplicacoes_financeiras_movimentos').delete().eq('id',movId);
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
   toast('Movimento excluído','ok');
+  renderLancctbAplicacoes();
+}
+
+// ─── Importar Aplicações/Resgates em massa via PDF (IA) ────────────────────
+// Pedido do usuário 08/09/2026: "eu preciso te apontar lá dentro o que
+// quero trazer pro extrato bancário... complementar o extrato bancário com
+// aplicações e resgates diários (principal, bruto ou líquido — eu escolho
+// na hora)". Reaproveita o mesmo extrator genérico de tabela (Gemini) já
+// usado em Ganhos/Rendimentos e no conversor de Aplicações Financeiras —
+// o usuário mapeia QUALQUER coluna do PDF pra Data/Principal/Bruto/Líquido
+// (não só as batizadas literalmente "Data"/"Valor", já que o extrato do
+// Bradesco usa nomes como "Dt. Resgate / Carência", "Vlr Princ. (R$)"...).
+// O TIPO de cada linha (Aplicação × Resgate) é inferido pelo que veio
+// preenchido: só Principal → Aplicação; Bruto e/ou Líquido presentes →
+// Resgate (é assim que o modelo Bradesco distingue as duas seções).
+let _lancctbAplicUploadContexto=null; // {aplicacaoId}
+let _lancctbAplicUploadExtraido=null;
+function abrirLancctbAplicUploadModal(aplicacaoId){
+  const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
+  if(!a) return;
+  _lancctbAplicUploadContexto={aplicacaoId};
+  _lancctbAplicUploadExtraido=null;
+  document.getElementById('lancctbAplicUploadTitulo').textContent=`Importar PDF — ${a.nome}`;
+  document.getElementById('lancctbAplicUploadArquivo').value='';
+  document.getElementById('lancctbAplicUploadStatus').textContent='';
+  document.getElementById('lancctbAplicUploadBody').innerHTML=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Sobe o extrato de aplicações do banco (ex: modelo Bradesco, com as seções "Aplicações" e "Resgates/Vencimentos") — a IA lê a tabela e você aponta qual coluna é qual. Da 2ª vez em diante, um arquivo do mesmo padrão entra sozinho.</div>
+    <input type="file" id="lancctbAplicUploadArquivo" accept=".pdf" class="fi">
+    <div id="lancctbAplicUploadStatus" style="font-size:12px;color:var(--slate);margin-top:8px"></div>`;
+  const btnExtrair=document.getElementById('lancctbAplicUploadBtnExtrair');
+  if(btnExtrair){ btnExtrair.style.display=''; btnExtrair.disabled=false; }
+  const btnSalvar=document.getElementById('lancctbAplicUploadBtnSalvar');
+  if(btnSalvar) btnSalvar.remove();
+  openModal('mLancctbAplicUpload');
+}
+async function _lancctbAplicUploadExtrair(){
+  const {aplicacaoId}=_lancctbAplicUploadContexto;
+  const file=document.getElementById('lancctbAplicUploadArquivo').files[0];
+  if(!file){ toast('Selecione um arquivo','err'); return; }
+  const statusEl=document.getElementById('lancctbAplicUploadStatus');
+  const btn=document.getElementById('lancctbAplicUploadBtnExtrair');
+  btn.disabled=true;
+  statusEl.textContent='Lendo arquivo (pode levar alguns segundos)…';
+  try{
+    const extraido=await _convAplicFinExtrairGenerico(file);
+    _lancctbAplicUploadExtraido=extraido;
+    const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
+    const mapSalvo=a?.mapeamento_colunas_ia;
+    const cobreTudo=mapSalvo&&extraido.colunas.every(c=>c in mapSalvo);
+    statusEl.textContent='';
+    if(cobreTudo){
+      await _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapSalvo,a.valor_usar_extrato||'bruto');
+      return;
+    }
+    document.getElementById('lancctbAplicUploadBody').innerHTML=_renderLancctbAplicMapeamentoForm(a,extraido,mapSalvo);
+    btn.style.display='none';
+  }catch(e){
+    statusEl.textContent='Erro: '+e.message;
+    toast('Erro ao extrair: '+e.message,'err');
+    btn.disabled=false;
+  }
+}
+function _renderLancctbAplicMapeamentoForm(aplicacao,extraido,mapSalvo){
+  const{colunas,linhas,observacoes}=extraido;
+  const amostra=linhas.slice(0,3);
+  const mapAtual=mapSalvo||{};
+  const ALVOS=[
+    {id:'data',nome:'Data do Movimento'},
+    {id:'principal',nome:'Valor Principal'},
+    {id:'bruto',nome:'Valor Bruto'},
+    {id:'liquido',nome:'Valor Líquido'},
+  ];
+  let html=`<div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:6px">Modelo não reconhecido automaticamente — mapeie as colunas encontradas</div>`;
+  if(observacoes) html+=`<div style="font-size:11px;color:var(--slate);margin-bottom:8px">${esc(observacoes)}</div>`;
+  html+=`<div style="margin-bottom:10px;max-height:140px;overflow:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;font-size:10.5px;border-collapse:collapse">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">${colunas.map(c=>`<th style="padding:4px 6px;text-align:left;white-space:nowrap">${esc(c)}</th>`).join('')}</tr></thead>
+      <tbody>${amostra.map(l=>`<tr style="border-top:1px solid var(--border)">${colunas.map(c=>`<td style="padding:4px 6px;white-space:nowrap">${l[c]!=null?esc(String(l[c])):'—'}</td>`).join('')}</tr>`).join('')}</tbody>
+    </table>
+  </div>
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Cada LINHA do PDF vira um movimento. O tipo é decidido sozinho: só "Valor Principal" preenchido = Aplicação; "Valor Bruto" e/ou "Valor Líquido" preenchidos = Resgate (é assim que o Bradesco separa as duas seções — não precisa mapear uma coluna de "Tipo").</div>
+  <div style="display:grid;gap:8px;margin-bottom:14px">`;
+  colunas.forEach((col,i)=>{
+    const atual=mapAtual[col]||'';
+    html+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px;background:var(--bg);border-radius:4px">
+      <b style="font-size:11.5px;min-width:220px">${esc(col)}</b>
+      <select class="si" id="lancctbAplicMapCol_${i}" data-coluna="${esc(col)}" style="min-width:220px">
+        <option value="">— Ignorar —</option>
+        ${ALVOS.map(al=>`<option value="${al.id}" ${atual===al.id?'selected':''}>${esc(al.nome)}</option>`).join('')}
+      </select>
+    </div>`;
+  });
+  html+=`</div>
+  <div class="fg">
+    <div class="fl">No Resgate, usar no Extrato Bancário (pode escolher diferente do padrão desta Aplicação)</div>
+    <select class="si" id="lancctbAplicUploadValorExtrato" style="width:100%">
+      <option value="principal" ${aplicacao?.valor_usar_extrato==='principal'?'selected':''}>Valor Principal</option>
+      <option value="bruto" ${!aplicacao||aplicacao.valor_usar_extrato==='bruto'?'selected':''}>Valor Bruto</option>
+      <option value="liquido" ${aplicacao?.valor_usar_extrato==='liquido'?'selected':''}>Valor Líquido</option>
+    </select>
+  </div>`;
+  setTimeout(()=>{
+    const acoes=document.getElementById('lancctbAplicUploadAcoes');
+    if(acoes&&!document.getElementById('lancctbAplicUploadBtnSalvar')){
+      const btnSalvar=document.createElement('button');
+      btnSalvar.className='btn bp'; btnSalvar.id='lancctbAplicUploadBtnSalvar';
+      btnSalvar.textContent='✓ Salvar mapeamento e importar';
+      btnSalvar.onclick=_lancctbAplicUploadSalvarMapeamento;
+      acoes.appendChild(btnSalvar);
+    }
+  },0);
+  return html;
+}
+async function _lancctbAplicUploadSalvarMapeamento(){
+  const {aplicacaoId}=_lancctbAplicUploadContexto;
+  const extraido=_lancctbAplicUploadExtraido;
+  if(!extraido){ toast('Extração não encontrada — tente novamente.','err'); return; }
+  const mapeamento={};
+  extraido.colunas.forEach((col,i)=>{
+    const v=document.getElementById('lancctbAplicMapCol_'+i)?.value||'';
+    if(v) mapeamento[col]=v;
+  });
+  if(!Object.values(mapeamento).includes('data')){ toast('Mapeie qual coluna é a Data do Movimento.','err'); return; }
+  const temValor=['principal','bruto','liquido'].some(id=>Object.values(mapeamento).includes(id));
+  if(!temValor){ toast('Mapeie ao menos uma coluna de valor (Principal, Bruto ou Líquido).','err'); return; }
+  const valorExtratoEscolhido=document.getElementById('lancctbAplicUploadValorExtrato')?.value||'bruto';
+
+  const { error } = await _supaClient.from('aplicacoes_financeiras').update({mapeamento_colunas_ia:mapeamento,valor_usar_extrato:valorExtratoEscolhido}).eq('id',aplicacaoId);
+  if(error){ toast('Mapeamento não pôde ser salvo (mas a importação continua): '+error.message,'err'); }
+
+  await _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapeamento,valorExtratoEscolhido);
+}
+async function _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapeamento,valorUsarExtrato){
+  const statusEl=document.getElementById('lancctbAplicUploadStatus');
+  if(statusEl) statusEl.textContent='Lançando movimentos…';
+  const a=_lancctbUltimasAplicacoes.find(x=>String(x.id)===String(aplicacaoId));
+  if(!a){ toast('Aplicação não encontrada.','err'); return; }
+
+  // Coluna-alvo → nome da coluna do PDF (inverso do mapeamento salvo, que é
+  // coluna-do-PDF → alvo).
+  const colPorAlvo={};
+  Object.keys(mapeamento).forEach(col=>{ colPorAlvo[mapeamento[col]]=col; });
+  const colData=colPorAlvo['data'], colPrincipal=colPorAlvo['principal'], colBruto=colPorAlvo['bruto'], colLiquido=colPorAlvo['liquido'];
+
+  // Dedup: não relança um movimento já existente (mesmo tipo+data+valor
+  // bruto) — permite reimportar o mesmo PDF sem duplicar.
+  const { data: movsExistentes } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras_movimentos')
+    .select('tipo,data,valor_bruto').eq('aplicacao_id',aplicacaoId));
+  const jaExiste=(tipo,data,valorBruto)=>(movsExistentes||[]).some(m=>m.tipo===tipo&&m.data===data&&Math.abs((m.valor_bruto||0)-(valorBruto||0))<0.01);
+
+  let lancAplic=0, lancResgate=0, pulados=0, duplicados=0;
+  const erros=[];
+  for(const linha of extraido.linhas){
+    const dataRaw=colData?linha[colData]:null;
+    const data=dataRaw?_lancctbFluxoParseData(dataRaw):null;
+    const principal=colPrincipal&&linha[colPrincipal]!=null&&linha[colPrincipal]!==''?Number(linha[colPrincipal])||null:null;
+    const bruto=colBruto&&linha[colBruto]!=null&&linha[colBruto]!==''?Number(linha[colBruto])||null:null;
+    const liquido=colLiquido&&linha[colLiquido]!=null&&linha[colLiquido]!==''?Number(linha[colLiquido])||null:null;
+    if(!data||(principal==null&&bruto==null&&liquido==null)){ pulados++; continue; }
+    const tipo=(bruto!=null||liquido!=null)?'resgate':'aplicacao';
+    const valorBrutoFinal=bruto!=null?bruto:(principal!=null?principal:liquido);
+    if(jaExiste(tipo,data,valorBrutoFinal)){ duplicados++; continue; }
+
+    const { data: movSalvo, error: erroMov } = await _supaClient.from('aplicacoes_financeiras_movimentos')
+      .insert({ aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual, tipo, data, valor_bruto:valorBrutoFinal, valor_liquido:liquido, valor_principal:principal })
+      .select().single();
+    if(erroMov){ erros.push(erroMov.message); pulados++; continue; }
+
+    if(a.levar_para_extrato){
+      const valorExtrato=_lancctbAplicValorParaExtrato(tipo,principal,valorBrutoFinal,liquido,valorUsarExtrato);
+      const ehAplicacao=tipo==='aplicacao';
+      const historico=`${ehAplicacao?'Aplicação Financeira':'Resgate Financeiro'} - ${a.nome}`;
+      const { data: extratoSalvo, error: erroExtrato } = await _supaClient.from('lancamentos_extrato').insert({
+        empresa_eid: _lancctbEidAtual, conta_bancaria_id: a.conta_bancaria_id, data_pagamento: data,
+        valor_saida: ehAplicacao?valorExtrato:0, valor_entrada: ehAplicacao?0:valorExtrato,
+        historico_bancario: historico, origem_importacao: 'aplicacao_financeira',
+        hash_dedup: `aplicacao_financeira_mov_${movSalvo.id}`,
+      }).select().single();
+      if(!erroExtrato){
+        await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:extratoSalvo.id}).eq('id',movSalvo.id);
+        if(a.doc_visao_geral_nome) _lancctbFlagVisaoGeral(_lancctbEidAtual,a.doc_visao_geral_nome,data.slice(0,7));
+      } else {
+        erros.push(erroExtrato.message);
+      }
+    }
+    if(tipo==='aplicacao') lancAplic++; else lancResgate++;
+  }
+
+  if(statusEl) statusEl.textContent='';
+  const partes=[];
+  if(lancAplic) partes.push(`${lancAplic} aplicação(ões)`);
+  if(lancResgate) partes.push(`${lancResgate} resgate(s)`);
+  if(duplicados) partes.push(`${duplicados} já existiam (pulado)`);
+  if(pulados) partes.push(`${pulados} linha(s) sem data/valor identificável`);
+  toast(`Importação concluída: ${partes.join(', ')||'nada encontrado'}.`,lancAplic||lancResgate?'ok':'err');
+  if(erros.length) console.warn('Erros na importação de Aplicações Financeiras:',erros);
+  closeModal('mLancctbAplicUpload');
   renderLancctbAplicacoes();
 }
 
