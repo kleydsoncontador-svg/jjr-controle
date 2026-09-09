@@ -4558,7 +4558,8 @@ function substituirRazaoConta(codigo, novosLancamentos){
   // 2) Roda a conciliação automática sobre os NOVOS lançamentos (do zero).
   var novosComIdx=novosLancamentos.map(function(l,i){return Object.assign({},l,{_idx:i});});
   var tipo=tipoFromCodigo(codigo);
-  var conciliadosNovos=conciliarConta(novosComIdx,tipo,150);
+  var nomeContaSubst=(razaoContaAntiga&&razaoContaAntiga.nome)||codigo;
+  var conciliadosNovos=conciliarConta(novosComIdx,tipo,150,nomeContaSubst);
 
   // 3) Para cada estado confirmado, localiza o lançamento correspondente nos novos
   //    e reaplica o estado (sobrescrevendo o resultado automático, se diferente).
@@ -4901,7 +4902,19 @@ function lcsSubstrText(a, b){
   return a.slice(endA-best, endA).trim();
 }
 
-function conciliarConta(lancamentos, tipo, maxDias) {
+// Reconhece conta de imposto/encargo PELO NOME da conta (pedido do usuário
+// 08/09/2026: "queria que a IA verificasse também contas de impostos, por
+// exemplo INSS, dá pra tentar casar valores creditados em 06/2026 com
+// pagamentos em 07/2026... eu tenho que ficar flegando"). Termos cobrindo os
+// tributos/encargos mais comuns — lista pode crescer conforme aparecerem
+// outros nomes de conta reais que não foram reconhecidos.
+var TERMOS_CONTA_IMPOSTO=['inss','fgts','irrf','irpj','csll',' pis ','cofins','iss ','issqn','icms','ipi ','simples nacional',' das ','iof','difal','contrib. sindical','contribuicao sindical','pat ','sest senat','inss retido','ir retido'];
+function isContaDeImposto(nome){
+  var n=' '+String(nome||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')+' ';
+  return TERMOS_CONTA_IMPOSTO.some(function(t){ return n.indexOf(t)>=0; });
+}
+
+function conciliarConta(lancamentos, tipo, maxDias, nomeConta) {
   // lancamentos: [{data, numero, historico, debito, credito, saldo, _idx}]
   // tipo: 'Ativo' ou 'Passivo'
   // maxDias: 5 meses ≈ 150 dias
@@ -4930,6 +4943,52 @@ function conciliarConta(lancamentos, tipo, maxDias) {
   // Para Ativo:  débito = origem, crédito = baixa
   var origemField  = tipo === 'Passivo' ? 'credito' : 'debito';
   var baixaField   = tipo === 'Passivo' ? 'debito'  : 'credito';
+
+  // ── PASSO 0: Contas de imposto/encargo — casa só por VALOR + janela de dias ──
+  // Provisão (crédito) num mês e pagamento (débito) no mês seguinte nunca têm
+  // nº de documento em comum, e o texto costuma ser bem diferente dos dois
+  // lados ("Provisão INSS" x "Pgto Guia INSS") — por isso os PASSOs 1/1.5/1.6
+  // abaixo (que dependem de doc. comum ou trecho de texto comum ≥15 chars)
+  // raramente casam esse tipo de lançamento sozinhos. Mas o NOME DA CONTA já
+  // garante a regra: dentro de uma conta de imposto, todo crédito é provisão
+  // e todo débito é o pagamento dela — não precisa de mais nada pra casar.
+  // Roda ANTES dos outros passos porque é a fonte mais confiável pra essas
+  // contas específicas (pedido do usuário 08/09/2026, ver isContaDeImposto).
+  if (isContaDeImposto(nomeConta)) {
+    var origensImp = [];
+    for (var oi0 = 0; oi0 < result.length; oi0++) {
+      if (result[oi0][origemField] > 0) origensImp.push(oi0);
+    }
+    origensImp.sort(function(a,b){ return (result[a].data||'') < (result[b].data||'') ? -1 : 1; });
+    origensImp.forEach(function(oi){
+      if (used[oi]) return;
+      var origem = result[oi];
+      var melhorJ = -1, melhorDiff = Infinity;
+      for (var bj = 0; bj < result.length; bj++) {
+        if (used[bj] || bj === oi) continue;
+        var baixaCand = result[bj];
+        if (baixaCand[baixaField] <= 0) continue;
+        if (dateDiff(origem.data, baixaCand.data) > maxDias) continue;
+        // Pagamento sempre vem DEPOIS (ou no mesmo dia) da provisão — nunca antes.
+        if (baixaCand.data && origem.data && baixaCand.data < origem.data) continue;
+        var diffV = Math.abs(origem[origemField] - baixaCand[baixaField]);
+        var pctV = origem[origemField] > 0 ? diffV / origem[origemField] : 1;
+        if (pctV > 0.05) continue; // multa/juros/desconto grande demais — deixa pra conferência manual
+        if (diffV < melhorDiff) { melhorDiff = diffV; melhorJ = bj; }
+      }
+      if (melhorJ < 0) return;
+      var baixa = result[melhorJ];
+      var exato = melhorDiff < 0.01;
+      origem.status = exato ? 'baixado_exato' : 'baixado_aprox';
+      origem.matchIdx = melhorJ; origem.matchTipo = exato ? 'Exato (imposto)' : 'Aprox. (imposto)';
+      origem.matchDetalhe = 'Provisão → pagamento (por valor)';
+      if (!exato) origem.residual = melhorDiff;
+      baixa.status = origem.status; baixa.matchIdx = oi; baixa.matchTipo = origem.matchTipo;
+      baixa.matchDetalhe = origem.matchDetalhe;
+      if (!exato) baixa.residual = melhorDiff;
+      used[oi] = true; used[melhorJ] = true;
+    });
+  }
 
   // Extrai os números de documento de cada lançamento UMA única vez e reaproveita
   // em todos os passos abaixo — em ledgers grandes (milhares de linhas), recalcular
@@ -5211,7 +5270,7 @@ function rodarConciliacao(empId, mes) {
       return;
     }
     var lancsComIdx = r.lancamentos.map(function(l, i){ return Object.assign({}, l, {_idx: i}); });
-    var conciliados = conciliarConta(lancsComIdx, conta.tipo, 150);
+    var conciliados = conciliarConta(lancsComIdx, conta.tipo, 150, conta.nome||(r&&r.nome));
 
     var totalOrigem = conciliados.filter(function(l){ return l.status.indexOf('baixado') >= 0; }).length;
     var totalAberto = conciliados.filter(function(l){ return l.status === 'aberto'; }).length;
@@ -5339,8 +5398,9 @@ function conciliarContaIndividual(mes, codigo) {
     toast('Sem lançamentos do Razão para esta conta', 'err'); return;
   }
   var tipo = contaObj ? contaObj.tipo : tipoFromCodigo(codigo);
+  var nomeContaInd = (contaObj&&contaObj.nome)||r.nome||codigo;
   var lancsComIdx = r.lancamentos.map(function(l,i){ return Object.assign({},l,{_idx:i}); });
-  var conciliados = conciliarConta(lancsComIdx, tipo, 150);
+  var conciliados = conciliarConta(lancsComIdx, tipo, 150, nomeContaInd);
   var abertos = conciliados.filter(function(l){ return l.status==='aberto'; }).length;
   var matched = conciliados.filter(function(l){ return l.status.indexOf('baixado')>=0; }).length;
 
