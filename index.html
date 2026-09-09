@@ -17566,8 +17566,10 @@ async function _lancctbExtrairValorPdfTributo(pdf){
 }
 function _lancctbExtrairCompetenciaDoNome(descricao){
   const s=String(descricao||'');
-  const m=s.match(/(\d{2}[\.\/]\d{4}|\d[ºª]\s*Trim\.?\s*\d{4})/i);
-  if(m) return m[1];
+  // Aceita "/", "." OU "-" como separador (arquivo real: "Guia FGTS -
+  // 07-2026" usa hífen, não bate no formato antigo só "/"/".").
+  const m=s.match(/(\d{2}[\.\/\-]\d{4}|\d[ºª]\s*Trim\.?\s*\d{4})/i);
+  if(m) return m[1].replace(/[.\-]/,'/');
   // Padrão sem separador — "GuiaPagamento_072026_PIS_COFINS" (bug real
   // relatado 08/09/2026: competência não aparecia porque o nome do arquivo
   // não tem "/" nem "." entre mês e ano, só "072026" grudado). Só aceita
@@ -17575,6 +17577,34 @@ function _lancctbExtrairCompetenciaDoNome(descricao){
   // confundir com outro número de 6 dígitos qualquer no nome do arquivo.
   const m2=s.match(/\b(0[1-9]|1[0-2])(\d{4})\b/);
   return m2?`${m2[1]}/${m2[2]}`:null;
+}
+// Nome "bonito" do tributo, extraído do nome do arquivo/descrição do PDF —
+// usado tanto pro texto de Histórico Utilizado quanto (o token curto, ex:
+// "FGTS") pro Texto Gatilho da Regra. Pedido do usuário 09/09/2026: o
+// histórico BANCÁRIO desse tipo de pagamento normalmente é genérico (ex:
+// "SISPAG PIX QR-CODE CAIXA ECONOMICA FEDERAL..."), nunca menciona o nome
+// do imposto — então "Processar Tributos" NUNCA casa pelo histórico
+// bancário, casa pelo NOME DO ARQUIVO do PDF encontrado na pasta Tributos
+// do Mês (ver _lancctbProcessarTributos) — por isso o gatilho da regra
+// precisa ser um token que apareça no NOME DO ARQUIVO ("FGTS", "GNRE"...),
+// não no histórico do banco.
+function _lancctbNomeTributoLegivel(descricaoOuNome){
+  const s=String(descricaoOuNome||'');
+  const mGuia=s.match(/Guia\s+(?:de\s+)?([A-Za-zÀ-Ü0-9]+)/i);
+  if(mGuia) return { nomeCompleto:`Guia de ${mGuia[1].toUpperCase()}`, token:mGuia[1].toUpperCase() };
+  const mSigla=s.match(/\b(GNRE|DARF|DAS|DAE|FGTS|GPS|GFIP|IPTU|ISS|ITBI|SIMPLES)\b/i);
+  if(mSigla) return { nomeCompleto:mSigla[1].toUpperCase(), token:mSigla[1].toUpperCase() };
+  return { nomeCompleto:s, token:null };
+}
+// Recalcula a competência dentro de um texto de histórico já pronto — usado
+// pra reaproveitar a MESMA Regra em meses seguintes sem o texto ficar preso
+// na competência do mês em que a regra foi criada (pedido do usuário
+// 09/09/2026, ver _lancctbProcessarTributos).
+function _lancctbSubstituirCompetenciaTexto(texto,novaCompetencia){
+  if(!novaCompetencia) return texto;
+  const re=/(\d{2}[\.\/\-]\d{4}|\d[ºª]\s*Trim\.?\s*\d{4})/i;
+  if(re.test(texto)) return texto.replace(re,novaCompetencia);
+  return `${texto} ${novaCompetencia}`.trim();
 }
 // Sugestões de PDF pra regra que está sendo criada a partir de um
 // lançamento concreto (ver _lancctbRegraExtratoAlvo) — busca pelo mês do
@@ -17639,18 +17669,35 @@ async function _lancctbUsarSugestaoTributo(idx){
   const f=_lancctbTributosSugeridosAtual[idx];
   if(!f) return;
   const info=_lancctbParsearNomeArquivoTributo(f.nome);
+  // Nome legível do imposto direto do NOME DO ARQUIVO (ex: "34 - AUTO
+  // NACIONAL - Guia FGTS - 07-2026" → "Guia de FGTS"/token "FGTS") — pedido
+  // do usuário 09/09/2026: guias que não são DARF estruturado (FGTS, GNRE
+  // simples etc.) caíam no rótulo genérico "Tributo" (fallback interno de
+  // _lancctbExtrairComposicaoDamsp quando não acha o campo "Receita" no
+  // PDF), virando um histórico inútil "Pagamento ref. Tributo" — e sem
+  // nome de verdade no Texto Gatilho, a regra nunca mais casava sozinha
+  // nos meses seguintes (o histórico BANCÁRIO desse tipo de pagamento é
+  // sempre genérico, tipo "SISPAG PIX..." — nunca menciona o imposto; quem
+  // casa é _lancctbProcessarTributos comparando esse gatilho contra o NOME
+  // DO ARQUIVO do PDF encontrado no mês, não contra o histórico bancário).
+  const nomeLegivel=_lancctbNomeTributoLegivel(info.descricao);
   let darf=null;
   try{
     const arquivo=await f.fileHandle.getFile();
     const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
     darf=await _lancctbExtrairComposicaoDarf(pdfDoc)||await _lancctbExtrairComposicaoDamsp(pdfDoc);
   }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); }
+  // Descarta o rótulo genérico "Tributo" (não achou o campo "Receita" no
+  // PDF) em favor do nome tirado do arquivo, sempre mais específico.
+  if(darf&&darf.itens.length===1&&darf.itens[0].denominacao==='Tributo'&&nomeLegivel.nomeCompleto){
+    darf.itens[0].denominacao=nomeLegivel.nomeCompleto;
+  }
 
   const competenciaPdf=darf?.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao);
   const textoHistoricoTributo=(nome,codigo)=>{
     const partes=[`Pagamento ref. ${nome}`];
     if(codigo) partes.push(`código ${codigo}`);
-    if(competenciaPdf) partes.push(`- competência ${competenciaPdf}`);
+    if(competenciaPdf) partes.push(competenciaPdf);
     return partes.join(' ');
   };
 
@@ -17679,10 +17726,11 @@ async function _lancctbUsarSugestaoTributo(idx){
   }
 
   // 1 imposto só (ou PDF não é DARF estruturado — GNRE/DAS/FGTS etc, cai
-  // pro texto baseado no nome do arquivo como antes).
+  // pro texto baseado no nome do arquivo como antes, agora usando o nome
+  // legível em vez do nome do arquivo cru).
   const textoHist=darf&&darf.itens.length===1
     ? textoHistoricoTributo(darf.itens[0].denominacao,darf.itens[0].codigo)
-    : `Pagamento ${info.descricao}${competenciaPdf?' ref. '+competenciaPdf:''}`.trim();
+    : `Pagamento ref. ${nomeLegivel.nomeCompleto}${competenciaPdf?' '+competenciaPdf:''}`.trim();
   if(_lancctbRateioAtivo&&_lancctbRateioRowIds.length){
     const rowIdVazia=_lancctbRateioRowIds.find(id=>!document.getElementById('lancctbRateioHistorico_'+id)?.value);
     const rowId=rowIdVazia!==undefined?rowIdVazia:_lancctbRateioRowIds[0];
@@ -17693,7 +17741,21 @@ async function _lancctbUsarSugestaoTributo(idx){
     _lancctbRateioAtualizarTotal();
   } else {
     document.getElementById('lancctbRegraDescricao').value=textoHist;
-    document.getElementById('lancctbRegraHistoricoGatilho').value=textoHist;
+    // Texto Gatilho: pedido do usuário 09/09/2026 — precisa ser um token
+    // que apareça no NOME DO ARQUIVO do imposto (ex: "FGTS"), não no
+    // histórico bancário genérico (Sispag/PIX), porque é isso que
+    // _lancctbProcessarTributos compara pra achar a Regra sozinho nos
+    // meses seguintes. Sem token reconhecido, cai pro nome completo mesmo.
+    document.getElementById('lancctbRegraHistoricoGatilho').value=nomeLegivel.token||nomeLegivel.nomeCompleto;
+    // Histórico Utilizado: seleciona "Personalizado" e já preenche com o
+    // texto completo (com competência) — resolve JÁ este lançamento com o
+    // texto certo. Nos meses seguintes, _lancctbProcessarTributos troca a
+    // competência sozinho a partir do PDF encontrado naquele mês (a regra
+    // continua reutilizável, não fica presa em "07/2026" pra sempre).
+    const radioFixo=document.querySelector('input[name="lancctbRegraHistModo"][value="fixo"]');
+    if(radioFixo){ radioFixo.checked=true; _lancctbAtualizarCampoHistoricoFixo(); }
+    const campoFixo=document.getElementById('lancctbRegraHistoricoFixo');
+    if(campoFixo) campoFixo.value=textoHist;
   }
   toast('Sugestão aplicada — confira e complete se precisar.','ok');
 }
@@ -20632,6 +20694,14 @@ async function _lancctbProcessarTributos(){
       return r.historico_gatilho&&info.descricao.toLowerCase().includes(r.historico_gatilho.toLowerCase());
     });
     if(!regra){ comSugestao++; continue; }
+    // Pedido do usuário 09/09/2026: a Regra foi criada no mês em que a
+    // competência era, ex., "07/2026" — reaproveitando ela em agosto, a
+    // competência do PDF encontrado ESTE mês pode ser outra. Recalcula a
+    // competência a partir do arquivo de ESTE mês e troca dentro do texto
+    // salvo em historico_fixo, em vez de gravar o texto travado no mês da
+    // criação da regra pra sempre.
+    const competenciaEsteMes=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao);
+    const historicoFixoAtualizado=regra.historico_fixo?_lancctbSubstituirCompetenciaTexto(regra.historico_fixo,competenciaEsteMes):null;
 
     const filhas=linhasRateioPorRegra[regra.id]||[];
     let linhas;
@@ -20645,13 +20715,13 @@ async function _lancctbProcessarTributos(){
       const somaFilhas=valoresFilhas.reduce((s,v)=>s+v,0);
       linhas=[
         { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor:valor-somaFilhas, historico:regra.historico_fixo||l.historico_bancario||'', lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor:valor-somaFilhas, historico:historicoFixoAtualizado||l.historico_bancario||'', lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
       ];
       filhas.forEach((f,idx)=>{
-        linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:f.plano_contas?.classificacao||'', conta_contabil_id:f.conta_contabil_id, tipo:f.dc, valor:valoresFilhas[idx], historico:f.descricao_imposto||regra.historico_fixo||l.historico_bancario||'', lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' });
+        linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:f.plano_contas?.classificacao||'', conta_contabil_id:f.conta_contabil_id, tipo:f.dc, valor:valoresFilhas[idx], historico:f.descricao_imposto||historicoFixoAtualizado||l.historico_bancario||'', lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' });
       });
     } else {
-      const historicoUtilizado=regra.historico_fixo||info.descricao;
+      const historicoUtilizado=historicoFixoAtualizado||info.descricao;
       linhas=[
         { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
         { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
