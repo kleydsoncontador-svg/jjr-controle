@@ -2206,6 +2206,19 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<div class="mb" id="mLancctbIgnorar" style="display:none">
+  <div class="modal" style="max-width:640px">
+    <div class="mt">
+      <h3>🚫 Ignorar Sempre (por Histórico exato)</h3>
+      <button onclick="closeModal('mLancctbIgnorar')">&#x2715;</button>
+    </div>
+    <div class="mc" id="lancctbIgnorarBody"></div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbIgnorar')">Fechar</button>
+    </div>
+  </div>
+</div>
+
 <div class="mb" id="mLancctbAplicUpload" style="display:none">
   <div class="modal" style="max-width:640px">
     <div class="mt">
@@ -23550,6 +23563,106 @@ function _lancctbExtratoFiltroDebounced(v){
   _lancctbExtratoFiltroTimer=setTimeout(renderLancctbExtrato,350);
 }
 
+// ─── Ignorar sempre (por histórico EXATO) ──────────────────────────────────
+// Pedido do usuário 08/09/2026: "em algumas empresas quero poder ignorar
+// alguns lançamentos bancários... por exemplo nas entradas RES APLIC AUT
+// MAIS e nas saídas APLIC AUT MAIS. E claro se um dia eu precisar retorno
+// com eles a partir do mês que eu escolher retornar. Então esse ignorar é
+// definitivo, se replica mês a mês, e não fará parte do cálculo do saldo
+// diário." — depois "tem que ser histórico exato" (não é conter, é igual).
+//
+// Cada padrão tem um "histórico" (comparado por igualdade exata, sem
+// diferenciar maiúsc/minúsc/espaços nas pontas) e um "ativoAte" opcional —
+// null = ignora pra sempre (padrão); definido = só ignora lançamentos com
+// data até essa competência (AAAA-MM), a partir do mês seguinte volta a
+// entrar normal na conciliação. Escopo por EMPRESA (não por conta), já que
+// o mesmo histórico de aplicação pode aparecer em mais de uma conta.
+function _lancctbIgnorarPadroesGet(eid){ return S.g('lancctb_ignorar_padroes_'+eid)||[]; }
+function _lancctbIgnorarPadroesSet(eid,arr){ S.s('lancctb_ignorar_padroes_'+eid,arr); }
+function _lancctbIgnorarPadraoBate(padrao,dataYM){
+  return !padrao.ativoAte || dataYM<=padrao.ativoAte;
+}
+async function abrirLancctbIgnorarModal(){
+  const eid=_lancctbEidAtual;
+  const padroes=_lancctbIgnorarPadroesGet(eid);
+  let html=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Lançamentos cujo Histórico Bancário for EXATAMENTE igual a um destes textos entram automaticamente como "ignorado" — em qualquer conta desta empresa, todo mês, sem contar no saldo diário. Sem data de corte = ignora pra sempre.</div>`;
+  html+=`<div style="display:flex;gap:8px;margin-bottom:12px">
+    <input class="fi" id="lancctbIgnorarNovoTexto" placeholder="Histórico exato — ex: RES APLIC AUT MAIS" style="flex:1">
+    <button class="btn bp bsm" onclick="_lancctbIgnorarAdicionar()">+ Adicionar</button>
+  </div>`;
+  if(!padroes.length){
+    html+='<div style="color:var(--slate);font-size:12.5px;text-align:center;padding:14px">Nenhum padrão cadastrado ainda.</div>';
+  } else {
+    html+='<div style="display:grid;gap:8px">';
+    padroes.forEach(p=>{
+      html+=`<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;border:1px solid var(--border);border-radius:6px;flex-wrap:wrap">
+        <b style="flex:1;min-width:180px;font-size:12.5px">${esc(p.padrao)}</b>
+        ${p.ativoAte?`<span style="font-size:11px;color:#D97706">Ignora só até ${esc(p.ativoAte)}</span>`:`<span style="font-size:11px;color:var(--slate)">Ignora pra sempre</span>`}
+        <input type="month" class="si" id="lancctbIgnorarAte_${esc(p.id)}" value="${esc(p.ativoAte||'')}" style="width:150px;font-size:11px" title="Deixe em branco pra ignorar pra sempre; preencha o último mês em que ainda deve ignorar">
+        <button class="btn bo bsm" style="font-size:11px" onclick="_lancctbIgnorarSalvarAte('${esc(p.id)}')">Salvar corte</button>
+        <button class="btn bo bsm" style="font-size:11px;border-color:#dc2626;color:#dc2626" onclick="_lancctbIgnorarRemover('${esc(p.id)}')">🗑 Remover</button>
+      </div>`;
+    });
+    html+='</div>';
+  }
+  document.getElementById('lancctbIgnorarBody').innerHTML=html;
+  openModal('mLancctbIgnorar');
+}
+async function _lancctbIgnorarAdicionar(){
+  const eid=_lancctbEidAtual;
+  const input=document.getElementById('lancctbIgnorarNovoTexto');
+  const texto=(input.value||'').trim();
+  if(!texto){ toast('Digite o histórico exato','err'); return; }
+  const padroes=_lancctbIgnorarPadroesGet(eid);
+  if(padroes.some(p=>p.padrao.toLowerCase()===texto.toLowerCase())){ toast('Esse histórico já está na lista','err'); return; }
+  padroes.push({id:String(Date.now()),padrao:texto,ativoAte:null});
+  _lancctbIgnorarPadroesSet(eid,padroes);
+  toast('Padrão adicionado — aplicando aos lançamentos existentes…','ok');
+  await _lancctbReaplicarIgnorar(eid);
+  abrirLancctbIgnorarModal();
+}
+async function _lancctbIgnorarSalvarAte(id){
+  const eid=_lancctbEidAtual;
+  const padroes=_lancctbIgnorarPadroesGet(eid);
+  const p=padroes.find(x=>x.id===id);
+  if(!p) return;
+  const v=document.getElementById('lancctbIgnorarAte_'+id)?.value||'';
+  p.ativoAte=v||null;
+  _lancctbIgnorarPadroesSet(eid,padroes);
+  toast('Corte salvo — reaplicando aos lançamentos…','ok');
+  await _lancctbReaplicarIgnorar(eid);
+  abrirLancctbIgnorarModal();
+}
+async function _lancctbIgnorarRemover(id){
+  const eid=_lancctbEidAtual;
+  if(!confirm('Remover este padrão? Os lançamentos já ignorados por causa dele voltam a ficar pendentes.')) return;
+  const padroes=_lancctbIgnorarPadroesGet(eid).filter(x=>x.id!==id);
+  _lancctbIgnorarPadroesSet(eid,padroes);
+  await _lancctbReaplicarIgnorar(eid);
+  abrirLancctbIgnorarModal();
+}
+// Roda em TODA a empresa (todas as contas) — passa por pendente/ignorado e
+// corrige os dois sentidos: marca ignorado quem deve, devolve pra pendente
+// quem não deve mais (padrão removido, ou passou do mês de corte). Nunca
+// mexe em quem já está 'conciliado' — isso é um resultado de verdade.
+async function _lancctbReaplicarIgnorar(eid){
+  const padroes=_lancctbIgnorarPadroesGet(eid);
+  const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    .select('id,data_pagamento,historico_bancario,status_conciliacao').eq('empresa_eid',eid).in('status_conciliacao',['pendente','ignorado']));
+  const paraIgnorar=[],paraReverter=[];
+  (linhas||[]).forEach(l=>{
+    const hist=(l.historico_bancario||'').trim().toLowerCase();
+    const ym=(l.data_pagamento||'').slice(0,7);
+    const deveIgnorar=padroes.some(p=>p.padrao.trim().toLowerCase()===hist&&_lancctbIgnorarPadraoBate(p,ym));
+    if(deveIgnorar&&l.status_conciliacao!=='ignorado') paraIgnorar.push(l.id);
+    else if(!deveIgnorar&&l.status_conciliacao==='ignorado') paraReverter.push(l.id);
+  });
+  if(paraIgnorar.length) await _lancctbEmLotesDb(paraIgnorar,200,lote=>_supaClient.from('lancamentos_extrato').update({status_conciliacao:'ignorado'}).in('id',lote));
+  if(paraReverter.length) await _lancctbEmLotesDb(paraReverter,200,lote=>_supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).in('id',lote));
+  if(paraIgnorar.length||paraReverter.length) renderLancctbExtrato();
+  return {ignorados:paraIgnorar.length,revertidos:paraReverter.length};
+}
+
 async function renderLancctbExtrato(){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
@@ -23581,9 +23694,13 @@ async function renderLancctbExtrato(){
     .order('id',{ascending:true}));
 
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar extrato: ${esc(error.message)}</div>`; return; }
+  // Lançamento "ignorado" (ver abrirLancctbIgnorarModal) não entra no saldo
+  // diário — pedido do usuário 08/09/2026: "não fará parte do cálculo do
+  // saldo diário". O saldo dele na linha (coluna "Saldo") continua sendo o
+  // mesmo do lançamento anterior, só pra não deixar a coluna em branco.
   let saldoCorrido=saldoInicial;
   const comSaldo=(todosLancs||[]).map(l=>{
-    saldoCorrido += (l.valor_entrada||0) - (l.valor_saida||0);
+    if(l.status_conciliacao!=='ignorado') saldoCorrido += (l.valor_entrada||0) - (l.valor_saida||0);
     return {...l, saldo_acumulado: Math.round(saldoCorrido*100)/100};
   });
   // Filtro de mês é só visual (sobre a lista já com saldo corrido calculado
@@ -23629,6 +23746,7 @@ async function renderLancctbExtrato(){
       <button class="action-btn action-btn-excel" onclick="exportarLancctbExtratoExcel()">📊 Gerar Excel</button>
       <button class="btn bo bsm" id="lancctbReprocessarBtn" onclick="_lancctbReprocessarPendencias()" title="Roda o cruzamento automático Extrato × Comprovante × NF × Regras nos lançamentos pendentes desta conta">🔄 Reprocessar pendências</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbExtratoConta(${count})" ${count?'':'disabled'}>🗑️ Excluir tudo desta conta</button>
+      <button class="btn bo bsm" onclick="abrirLancctbIgnorarModal()" title="Histórico exato que deve entrar sempre como ignorado, todo mês, sem contar no saldo — ex: aplicações financeiras internas">🚫 Ignorar Sempre</button>
       <button class="btn bo bsm" onclick="abrirLancctbExtratoManualModal()">+ Lançar Manual</button>
       <button class="btn bp bsm" onclick="abrirLancctbUploadExtratoModal(false)">⬆ Upload de Extrato</button>
     </div>
@@ -23857,6 +23975,7 @@ async function salvarLancctbExtratoManual(){
     hash_dedup: `manual_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
   });
   if(error){ toast('Erro ao lançar: '+error.message,'err'); return; }
+  await _lancctbReaplicarIgnorar(_lancctbEidAtual);
   toast('Lançamento manual criado.','ok');
   closeModal('mLancctbExtratoManual');
   renderLancctbExtrato();
@@ -24462,6 +24581,7 @@ async function confirmarLancctbImportExtrato(){
     const mesesDoLote=[...new Set(registros.map(r=>r.data_pagamento.slice(0,7)))];
     mesesDoLote.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,contaVinculada.doc_visao_geral_nome,m));
   }
+  await _lancctbReaplicarIgnorar(_lancctbEidAtual);
   closeModal('mLancctbUpload');
   _lancctbExtratoPagina=0;
   renderLancctbExtrato();
