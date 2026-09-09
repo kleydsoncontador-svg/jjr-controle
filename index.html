@@ -2504,6 +2504,30 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
   </div>
 </div>
 
+<!-- Modal: editar/dividir a(s) parcela(s) de uma NF — pedido do usuário
+     09/09/2026: "na SIEG essa NF veio sem abertura de parcela" mas o
+     pagamento real (Fluxo de Caixa do cliente) foi parcelado — o XML não
+     declarou <dup>, então não tem como o sistema adivinhar isso sozinho. -->
+<div class="mb" id="mLancctbDividirParcela" style="display:none">
+  <div class="modal" style="max-width:560px">
+    <div class="mt">
+      <h3>Editar parcelas da NF</h3>
+      <button onclick="closeModal('mLancctbDividirParcela')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <div id="lancctbDividirParcelaInfo" style="background:#EEF2FF;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
+      <div id="lancctbDividirParcelaAviso" style="display:none;background:#FEF3C7;border-radius:4px;padding:8px 10px;font-size:12px;color:var(--ink);margin-bottom:10px"></div>
+      <div id="lancctbDividirParcelaLinhas"></div>
+      <button class="btn bo bsm" type="button" onclick="_lancctbDividirParcelaAdicionarLinha()">+ Adicionar parcela</button>
+      <div id="lancctbDividirParcelaFeedback" style="font-size:12px;margin-top:10px"></div>
+      <div class="ma">
+        <button class="btn bo" onclick="closeModal('mLancctbDividirParcela')">Cancelar</button>
+        <button class="btn bp" id="lancctbDividirParcelaSalvarBtn" onclick="salvarLancctbDividirParcela()">✓ Salvar parcelas</button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Modal: importação de XMLs de NF-e/NFS-e de uma pasta local (Fase 6,
      alternativa à API da SIEG). -->
 <div class="mb" id="mLancctbImportXml" style="display:none">
@@ -18195,6 +18219,108 @@ async function renderLancctbImportarXmls(){
   el.innerHTML='<div style="padding:20px;color:var(--slate)">Carregando…</div>';
   el.innerHTML=await _lancctbFilaSiegPainelHtml(eid);
 }
+// ─── Editar/dividir parcela de NF (pedido do usuário 09/09/2026) ──────────
+// Quando o XML veio sem <dup> (parcela única = valor cheio), mas o
+// pagamento real foi parcelado (confirmado pelo Fluxo de Caixa do cliente),
+// permite reescrever manualmente as parcelas dessa NF — data+valor por
+// linha, soma tem que bater com o valor total da NF.
+let _lancctbDividirParcelaNfId=null;
+let _lancctbDividirParcelaLinhas=[]; // {rowId,data,valor}
+let _lancctbDividirParcelaProximoId=0;
+let _lancctbDividirParcelaValorTotal=0;
+let _lancctbDividirParcelaBloqueado=false;
+async function abrirLancctbDividirParcelaModal(nfId){
+  const { data: nf } = await _supaClient.from('notas_fiscais')
+    .select('id,numero,valor_total,nome_emitente,nome_destinatario,direcao,cnpj_emitente,cnpj_destinatario')
+    .eq('id',nfId).single();
+  if(!nf){ toast('NF não encontrada.','err'); return; }
+  const { data: parcelas } = await _supaClient.from('notas_fiscais_parcelas')
+    .select('id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao')
+    .eq('nf_id',nfId).order('numero_parcela');
+
+  _lancctbDividirParcelaNfId=nfId;
+  _lancctbDividirParcelaValorTotal=nf.valor_total||0;
+  const nomeTerc=nf.direcao==='venda'?nf.nome_destinatario:nf.nome_emitente;
+  document.getElementById('lancctbDividirParcelaInfo').innerHTML=
+    `NF <strong>${esc(nf.numero||'')}</strong> — ${esc(nomeTerc||'')} — Valor total: <strong>R$ ${_fmt(nf.valor_total||0)}</strong>`;
+
+  // Bloqueia edição se alguma parcela já foi conciliada/ignorada — dividir
+  // de novo apagaria o vínculo com o lançamento contábil já gravado. Pede
+  // pra desfazer a conciliação primeiro (Registro Contábil) antes de mexer.
+  const avisoEl=document.getElementById('lancctbDividirParcelaAviso');
+  _lancctbDividirParcelaBloqueado=(parcelas||[]).some(p=>p.status_conciliacao!=='pendente');
+  if(_lancctbDividirParcelaBloqueado){
+    avisoEl.style.display='';
+    avisoEl.innerHTML='⚠️ Uma ou mais parcelas desta NF já estão conciliadas/ignoradas — desfaça a conciliação no Registro Contábil antes de editar as parcelas (senão o lançamento já gravado fica órfão).';
+  } else {
+    avisoEl.style.display='none';
+  }
+  document.getElementById('lancctbDividirParcelaSalvarBtn').disabled=_lancctbDividirParcelaBloqueado;
+
+  _lancctbDividirParcelaLinhas=(parcelas&&parcelas.length?parcelas:[{data_vencimento:null,valor_parcela:nf.valor_total}]).map(p=>({
+    rowId:_lancctbDividirParcelaProximoId++, data:p.data_vencimento||'', valor:p.valor_parcela!=null?p.valor_parcela:''
+  }));
+  _lancctbDividirParcelaRenderLinhas();
+  openModal('mLancctbDividirParcela');
+}
+function _lancctbDividirParcelaAdicionarLinha(){
+  _lancctbDividirParcelaLinhas.push({rowId:_lancctbDividirParcelaProximoId++,data:'',valor:''});
+  _lancctbDividirParcelaRenderLinhas();
+}
+function _lancctbDividirParcelaRemoverLinha(rowId){
+  if(_lancctbDividirParcelaLinhas.length<=1){ toast('A NF precisa de pelo menos 1 parcela.','err'); return; }
+  _lancctbDividirParcelaLinhas=_lancctbDividirParcelaLinhas.filter(l=>l.rowId!==rowId);
+  _lancctbDividirParcelaRenderLinhas();
+}
+function _lancctbDividirParcelaAtualizarCampo(rowId,campo,v){
+  const l=_lancctbDividirParcelaLinhas.find(l=>l.rowId===rowId);
+  if(l) l[campo]=v;
+  _lancctbDividirParcelaAtualizarFeedback();
+}
+function _lancctbDividirParcelaAtualizarFeedback(){
+  const soma=_lancctbDividirParcelaLinhas.reduce((s,l)=>s+(_lancctbParseValorInput?_lancctbParseValorInput(String(l.valor)):parseFloat(String(l.valor).replace(',','.'))||0),0);
+  const bate=Math.abs(soma-_lancctbDividirParcelaValorTotal)<0.01;
+  const feedback=document.getElementById('lancctbDividirParcelaFeedback');
+  if(feedback) feedback.innerHTML=`Soma das parcelas: <strong>R$ ${_fmt(soma)}</strong> — valor da NF: <strong>R$ ${_fmt(_lancctbDividirParcelaValorTotal)}</strong> ${bate?'<span style="color:var(--teal)">✓ bate</span>':'<span style="color:#dc2626">✗ não bate</span>'}`;
+  const btn=document.getElementById('lancctbDividirParcelaSalvarBtn');
+  if(btn) btn.disabled=_lancctbDividirParcelaBloqueado||!bate;
+}
+function _lancctbDividirParcelaRenderLinhas(){
+  const el=document.getElementById('lancctbDividirParcelaLinhas');
+  el.innerHTML=_lancctbDividirParcelaLinhas.map((l,i)=>`<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+    <span style="font-size:11px;color:var(--slate);width:20px">${i+1}ª</span>
+    <input class="fi" type="date" value="${esc(l.data)}" style="width:160px" onchange="_lancctbDividirParcelaAtualizarCampo(${l.rowId},'data',this.value)">
+    <input class="fi" type="text" inputmode="decimal" placeholder="Valor" value="${l.valor!==''?String(l.valor).replace('.',','):''}" style="width:130px" oninput="_lancctbDividirParcelaAtualizarCampo(${l.rowId},'valor',this.value)">
+    <button class="btn bo bsm" type="button" style="color:#dc2626" onclick="_lancctbDividirParcelaRemoverLinha(${l.rowId})">✕</button>
+  </div>`).join('');
+  _lancctbDividirParcelaAtualizarFeedback();
+}
+async function salvarLancctbDividirParcela(){
+  if(_lancctbDividirParcelaBloqueado) return;
+  const nfId=_lancctbDividirParcelaNfId;
+  for(const l of _lancctbDividirParcelaLinhas){
+    if(!l.data){ toast('Preencha a data de todas as parcelas.','err'); return; }
+  }
+  const soma=_lancctbDividirParcelaLinhas.reduce((s,l)=>s+(parseFloat(String(l.valor).replace(',','.'))||0),0);
+  if(Math.abs(soma-_lancctbDividirParcelaValorTotal)>=0.01){ toast('A soma das parcelas precisa bater com o valor da NF.','err'); return; }
+  const btn=document.getElementById('lancctbDividirParcelaSalvarBtn');
+  btn.disabled=true; btn.textContent='Salvando…';
+  try{
+    const { data: nfInfo } = await _supaClient.from('notas_fiscais').select('empresa_eid').eq('id',nfId).single();
+    await _supaClient.from('notas_fiscais_parcelas').delete().eq('nf_id',nfId);
+    const linhasInsert=_lancctbDividirParcelaLinhas.map((l,i)=>({
+      nf_id:nfId, empresa_eid:nfInfo.empresa_eid, numero_parcela:i+1, data_vencimento:l.data,
+      valor_parcela:parseFloat(String(l.valor).replace(',','.'))||0, status_conciliacao:'pendente',
+    }));
+    const { error } = await _supaClient.from('notas_fiscais_parcelas').insert(linhasInsert);
+    if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+    toast('Parcelas atualizadas.','ok');
+    closeModal('mLancctbDividirParcela');
+    renderLancctbConteudo();
+  } finally {
+    btn.disabled=false; btn.textContent='✓ Salvar parcelas';
+  }
+}
 async function renderLancctbNotas(aba){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
@@ -18316,6 +18442,7 @@ async function renderLancctbNotas(aba){
         ${ehServico?'<th style="padding:8px 10px;text-align:right">ISS</th>':''}
         <th style="padding:8px 10px;text-align:left">Modelo</th>
         <th style="padding:8px 10px;text-align:center">Status</th>
+        <th style="padding:8px 10px;text-align:center"></th>
       </tr>
       <tr style="background:var(--bg2)">
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-emissao-de" type="date" style="width:100%;font-size:11px" value="${_lancctbNfeEmissaoDe}" onchange="_lancctbNfeFiltroData('emissaoDe',this.value)" title="Dt Emissão de"></th>
@@ -18335,10 +18462,11 @@ async function renderLancctbNotas(aba){
           <option value="pendente" ${_lancctbNfeFiltroStatus==='pendente'?'selected':''}>Pendente</option>
           <option value="ignorado" ${_lancctbNfeFiltroStatus==='ignorado'?'selected':''}>Ignorado</option>
         </select></th>
+        <th style="padding:4px 6px"></th>
       </tr></thead>
       <tbody>`;
   if(!_lancctbUltimaLeitura.length){
-    html+=`<tr><td colspan="${ehServico?12:11}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
+    html+=`<tr><td colspan="${ehServico?13:12}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
   } else {
     _lancctbUltimaLeitura.forEach(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
       const statusCor=p.status_conciliacao==='conciliado'?'var(--teal)':p.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
@@ -18355,6 +18483,7 @@ async function renderLancctbNotas(aba){
         ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:''}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
+        <td style="padding:7px 10px;text-align:center"><button class="btn bo bsm" style="font-size:10.5px;padding:3px 6px" title="Editar/dividir a(s) parcela(s) desta NF — use quando o XML veio sem abertura de parcela mas o pagamento real foi parcelado" onclick="abrirLancctbDividirParcelaModal(${p.nf_id})">✂️ Parcela</button></td>
       </tr>`;
     });
   }
