@@ -18343,30 +18343,45 @@ async function _lancctbCorrigirParcelasPorFluxo(){
       const nfNum=m[1], parcNum=parseInt(m[2],10);
       (grupos[nfNum]=grupos[nfNum]||[]).push({parcNum, data:f.data, valor:f.valor_saida||f.valor_entrada||0});
     });
-    const nfNumeros=Object.keys(grupos).filter(k=>grupos[k].length>=2);
+    const nfNumeros=Object.keys(grupos);
     if(!nfNumeros.length){
-      toast('Nenhum agrupamento de parcela encontrado no Fluxo de Caixa (precisa de "nºNF/parcela" no campo Número, com 2+ linhas pra mesma NF).','err');
+      toast('Nenhuma referência de parcela encontrada no Fluxo de Caixa (precisa de "nºNF/parcela" no campo Número).','err');
       return;
     }
     let divididas=0, puladas=0;
     for(const nfNum of nfNumeros){
-      const { data: nfs } = await _supaClient.from('notas_fiscais').select('id,numero').eq('empresa_eid',eid).eq('numero',nfNum);
+      const { data: nfs } = await _supaClient.from('notas_fiscais').select('id,numero,valor_total').eq('empresa_eid',eid).eq('numero',nfNum);
       if(!nfs||nfs.length!==1){ puladas++; continue; } // não achou, ou número ambíguo (mais de 1 NF)
-      const nfId=nfs[0].id;
-      const { data: parcelasAtuais } = await _supaClient.from('notas_fiscais_parcelas').select('id,status_conciliacao').eq('nf_id',nfId);
+      const nfId=nfs[0].id, valorTotalNf=nfs[0].valor_total||0;
+      const { data: parcelasAtuais } = await _supaClient.from('notas_fiscais_parcelas').select('id,status_conciliacao,data_vencimento').eq('nf_id',nfId);
       // Só mexe em NF que ainda está com 1 parcela só (sinal de que o XML
       // não abriu parcela) E ainda pendente — pedido do usuário: "isso só
       // nos casos que ficaram pendentes". NF já dividida (manual ou por
       // esta mesma rotina antes) ou já conciliada fica intocada.
       if(!parcelasAtuais||parcelasAtuais.length!==1||parcelasAtuais[0].status_conciliacao!=='pendente'){ puladas++; continue; }
       const linhas=grupos[nfNum].slice().sort((a,b)=>a.parcNum-b.parcNum);
+      // Pedido do usuário 09/09/2026: "se no fluxo indica parcela 1, e o
+      // valor não bate com o da NF do XML, deveria abrir parcela também —
+      // é como se sobrasse saldo da NF pra 30 dias à frente do vencimento
+      // original" — soma o que o Fluxo já indicou; se sobrar diferença
+      // (>1 centavo) contra o valor total da NF, cria mais 1 parcela com
+      // o saldo, vencendo 30 dias depois da última data conhecida.
+      const somaFluxo=linhas.reduce((s,l)=>s+(l.valor||0),0);
+      const residual=valorTotalNf-somaFluxo;
+      if(Math.abs(residual)>=0.01&&residual>0){
+        const dataBase=linhas.length?linhas[linhas.length-1].data:parcelasAtuais[0].data_vencimento;
+        const d=new Date((dataBase||new Date().toISOString().slice(0,10))+'T00:00:00');
+        d.setDate(d.getDate()+30);
+        linhas.push({ parcNum:(linhas.length?Math.max(...linhas.map(l=>l.parcNum)):0)+1, data:d.toISOString().slice(0,10), valor:residual, residual:true });
+      }
+      if(linhas.length<2){ puladas++; continue; } // Fluxo bateu certinho com a NF, nada pra dividir
       await _supaClient.from('notas_fiscais_parcelas').delete().eq('nf_id',nfId);
       await _supaClient.from('notas_fiscais_parcelas').insert(linhas.map((l,i)=>({
         nf_id:nfId, empresa_eid:eid, numero_parcela:i+1, data_vencimento:l.data, valor_parcela:l.valor, status_conciliacao:'pendente',
       })));
       divididas++;
     }
-    toast(`${divididas} NF(s) tiveram a parcela dividida automaticamente a partir do Fluxo de Caixa, ${puladas} pulada(s) (já dividida, já conciliada, ou NF não encontrada/ambígua).`, divididas?'ok':'err');
+    toast(`${divididas} NF(s) tiveram a parcela dividida automaticamente a partir do Fluxo de Caixa (inclusive saldo residual +30 dias, quando houve), ${puladas} pulada(s) (já dividida, já conciliada, sem diferença de valor, ou NF não encontrada/ambígua).`, divididas?'ok':'err');
     renderLancctbConteudo();
   } finally {
     if(btn){ btn.disabled=false; btn.textContent='🔀 Dividir Parcelas via Fluxo'; }
