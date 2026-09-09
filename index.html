@@ -3804,12 +3804,29 @@ const S = {
     cccCache[k]=v;
     cccIdbSet(k,v);
     var ts=new Date().toISOString();
-    cccLocalUpdatedAt[k]=ts;
-    cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
+    // BUG REAL 09/09/2026 (causou o Matheus ocultar abas pro Kleydson e a
+    // mudança "não pegar" na tela dele — ver [[project_jjr_incidente_...]]):
+    // este carimbo de hora local só pode virar a "verdade" usada pra decidir
+    // quem é mais recente no boot (_loadFromSupabase) DEPOIS de confirmar
+    // que a gravação realmente chegou no Supabase — nunca antes. Marcar
+    // otimisticamente aqui (como era antes) e a gravação falhar em silêncio
+    // (rede caiu, aba fechou no meio) deixava esse carimbo "fantasma"
+    // bloqueando pra sempre qualquer atualização de verdade vinda de outro
+    // operador pra essa mesma chave, sem nenhum aviso visível — porque a
+    // checagem de divergência (linha ~9220) só dispara pra chave que já
+    // tem carimbo local, e aqui ela tinha, só que de uma gravação que nunca
+    // aconteceu de verdade. Confirmado marcando só no sucesso: usuário fica
+    // exposto no MÁXIMO à mesma janela de corrida de 10s já existente
+    // (RACE_CONDITION_MS) entre salvar e recarregar a própria página — bem
+    // mais seguro que deixar um carimbo nunca confirmado válido pra sempre.
+    function marcarConfirmado(){
+      cccLocalUpdatedAt[k]=ts;
+      cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
+    }
     if(_supaClient&&k!=='ccc_session'){
       _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
         if(r.error){ console.warn('SB save err',k,r.error); _tratarFalhaGravacao(k,r.error); }
-        else { _limparErroSincronizacao(k); }
+        else { marcarConfirmado(); _limparErroSincronizacao(k); }
       }, function(e){ console.warn('SB save err',k,e); _tratarFalhaGravacao(k,e); });
     } else if(!_supaClient&&k!=='ccc_session') {
       // Se Supabase não está pronto, tenta novamente em 500ms
@@ -3817,7 +3834,7 @@ const S = {
         if(_supaClient){
           _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
             if(r&&r.error){ console.warn('SB retry err',k,r.error); _tratarFalhaGravacao(k,r.error); }
-            else { _limparErroSincronizacao(k); }
+            else { marcarConfirmado(); _limparErroSincronizacao(k); }
           }, function(e){ console.warn('SB retry err',k,e); _tratarFalhaGravacao(k,e); });
         } else {
           console.warn('SB retry err',k,'Supabase ainda não disponível após 500ms');
