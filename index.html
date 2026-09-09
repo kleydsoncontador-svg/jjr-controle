@@ -14655,10 +14655,14 @@ async function _convAplicFinExtrairBBRendeFacil(file){
   const rendimentosNoMes=pegarResumo('Rendimentos\\s+no\\s+m[êe]s');
 
   // Histórico de movimentação — 1 linha por evento, mesma ordem de colunas
-  // sempre (Data Histórico Capital Rendimento IR IOF ValorLíquido).
+  // sempre (Data Histórico Capital Rendimento IR IOF ValorLíquido). Cada
+  // valor vem com "R$" na frente NA PRÓPRIA CÉLULA (confirmado no PDF real:
+  // "R$ 13.307,73 R$ 3,35 R$ 0,00..."), não só 1x no início da linha — o
+  // regex original não previa isso e nunca casava nenhuma linha.
   const idxInicio=textoCompleto.search(/Hist[óo]rico\s+de\s+movimenta[çc][ãa]o/i);
   const bloco=idxInicio>=0?textoCompleto.slice(idxInicio):textoCompleto;
-  const reLinha=/(\d{2}\/\d{2}\/\d{4})\s+(Saldo\s+Anterior|Aplica[çc][ãa]o|Resgate|Saldo\s+Final)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/gi;
+  const rs='(?:R\\$\\s*)?([\\d.,]+)';
+  const reLinha=new RegExp('(\\d{2}/\\d{2}/\\d{4})\\s+(Saldo\\s+Anterior|Aplica[çc][ãa]o|Resgate|Saldo\\s+Final)\\s+'+rs+'\\s+'+rs+'\\s+'+rs+'\\s+'+rs+'\\s+'+rs,'gi');
   const linhas=[];
   let m;
   while((m=reLinha.exec(bloco))){
@@ -19335,7 +19339,9 @@ function _lancctbAplicDetectarMapeamentoAutomatico(colunas){
   // — modelo novo do Invest Fácil tem as duas: uma data de pagamento E uma
   // coluna de valor chamada só "Resgate").
   const candidatosValor=colunas.filter(c=>{ const n=norm(c); return n!=='data'&&n!=='emissao'&&n!=='pagamento'&&!n.startsWith('dt')&&!n.includes('data'); });
-  const colPrincipal=candidatosValor.find(c=>/princ/.test(norm(c)));
+  // "Capital" — pedido do usuário 09/09/2026, modelo "BB Rende Fácil": a
+  // coluna de valor principal chama "Capital", não "Principal"/"Vlr Princ.".
+  const colPrincipal=candidatosValor.find(c=>/princ/.test(norm(c)))||candidatosValor.find(c=>norm(c)==='capital');
   // "Bruto" no sentido genérico do sistema = valor cheio recebido antes do
   // IR (inclui rendimento) — no modelo "Emissão/Pagamento" do Invest Fácil
   // essa coluna chama só "Resgate" (sem "Dt." na frente, isso já foi
@@ -19352,6 +19358,14 @@ function _lancctbAplicDetectarMapeamentoAutomatico(colunas){
   if(colDataResgate&&colDataResgate!==colData) mapeamento[colDataResgate]='data_resgate';
   if(colBruto) mapeamento[colBruto]='bruto';
   if(colLiquido) mapeamento[colLiquido]='liquido';
+  // "Histórico" com o rótulo literal Aplicação/Resgate — pedido do usuário
+  // 09/09/2026: no modelo "BB Rende Fácil" a linha de Aplicação TAMBÉM tem
+  // "Valor Líquido" preenchido (igual ao Capital), então inferir o tipo só
+  // pela presença de bruto/líquido (como o resto do sistema faz) classifica
+  // aplicação como resgate por engano. Quando existe uma coluna de rótulo
+  // literal, ela manda — ver uso em _lancctbAplicUploadAplicar.
+  const colTipo=colunas.find(c=>norm(c)==='historico');
+  if(colTipo) mapeamento[colTipo]='tipo_historico';
   return mapeamento;
 }
 // Pergunta única (só na 1ª vez que este modelo de PDF é reconhecido) qual
@@ -19477,7 +19491,7 @@ async function _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapeamento,valorU
   // coluna-do-PDF → alvo).
   const colPorAlvo={};
   Object.keys(mapeamento).forEach(col=>{ colPorAlvo[mapeamento[col]]=col; });
-  const colData=colPorAlvo['data'], colDataResgate=colPorAlvo['data_resgate'], colPrincipal=colPorAlvo['principal'], colBruto=colPorAlvo['bruto'], colLiquido=colPorAlvo['liquido'];
+  const colData=colPorAlvo['data'], colDataResgate=colPorAlvo['data_resgate'], colPrincipal=colPorAlvo['principal'], colBruto=colPorAlvo['bruto'], colLiquido=colPorAlvo['liquido'], colTipoHistorico=colPorAlvo['tipo_historico'];
 
   // Dedup: não relança um movimento já existente (mesmo tipo+data+valor
   // bruto) — permite reimportar o mesmo PDF sem duplicar.
@@ -19498,7 +19512,12 @@ async function _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapeamento,valorU
     const bruto=colBruto&&linha[colBruto]!=null&&linha[colBruto]!==''?Number(linha[colBruto])||null:null;
     const liquido=colLiquido&&linha[colLiquido]!=null&&linha[colLiquido]!==''?Number(linha[colLiquido])||null:null;
     if(!data||(principal==null&&bruto==null&&liquido==null)){ pulados++; continue; }
-    const tipo=(bruto!=null||liquido!=null)?'resgate':'aplicacao';
+    // Rótulo literal (coluna "Histórico": Aplicação/Resgate) manda quando
+    // existir — pedido do usuário 09/09/2026, ver comentário em
+    // _lancctbAplicDetectarMapeamentoAutomatico. Sem essa coluna, mantém o
+    // comportamento antigo (infere pela presença de bruto/líquido).
+    const rotuloTipo=colTipoHistorico?String(linha[colTipoHistorico]||'').toLowerCase():'';
+    const tipo=rotuloTipo.includes('resg')?'resgate':rotuloTipo.includes('aplic')?'aplicacao':((bruto!=null||liquido!=null)?'resgate':'aplicacao');
     const valorBrutoFinal=bruto!=null?bruto:(principal!=null?principal:liquido);
     if(jaExiste(tipo,data,valorBrutoFinal)){ duplicados++; continue; }
 
