@@ -24403,6 +24403,21 @@ function _lancctbFluxoParseValorCel(v){
   if(typeof v==='number') return Math.abs(v);
   return Math.abs(_lancctbParseValorInput(v));
 }
+// Extrai só o número da NF/documento de uma célula que pode vir suja de
+// prefixo/sufixo (ex: "AG893503", "AG-421992", "Doc 57785") — pedido do
+// usuário 09/09/2026: "muitos clientes informam algumas descrições ou
+// caracteres na coluna que deveria conter apenas o número da NF". Lógica:
+// pega a MAIOR sequência contígua de dígitos da célula (em empate, a
+// primeira) — cobre letras de prefixo e separadores (-, /, espaço) sem
+// juntar números de partes diferentes num só. Se não achar nenhum dígito,
+// devolve o texto como veio (não inventa número nem apaga a célula).
+function _lancctbExtrairNumeroNF(texto){
+  const t=String(texto||'').trim();
+  if(!t) return '';
+  const seqs=t.match(/\d+/g);
+  if(!seqs||!seqs.length) return t;
+  return seqs.reduce((maior,atual)=>atual.length>maior.length?atual:maior);
+}
 function _lancctbFluxoSelecionarConta(id){
   _lancctbFluxoContaSel=id;
   // Se selecionou nenhuma conta ("Todas as contas"), filtra automaticamente "não associados"
@@ -24498,6 +24513,7 @@ async function renderLancctbFluxoCaixa(){
     </div>
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbFluxoExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" title="Corrige o número de documento/NF de lançamentos JÁ importados que vieram com letras/prefixo junto (ex: AG893503 → 893503) — não mexe em quem já está limpo" onclick="_lancctbFluxoLimparNumeros()">🧹 Corrigir números</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbFluxoConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes lançamentos</button>
       <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Excel</button>
     </div>
@@ -25001,7 +25017,7 @@ async function confirmarLancctbFluxoImport(){
     // fornecedor (linha de saída) ou cliente (linha de entrada) — ver
     // comentário nos campos fornecedor_nome/cliente_nome.
     const clienteNome=pegar(row,'cliente_fornecedor_nome')||(valorSaida?pegar(row,'fornecedor_nome'):pegar(row,'cliente_nome'))||'';
-    const docNumero=pegar(row,'documento_numero');
+    const docNumero=_lancctbExtrairNumeroNF(pegar(row,'documento_numero'));
     let descricao=pegar(row,'descricao');
     if(!descricao) descricao=[descontoOrigem,clienteNome,docNumero?'Doc '+docNumero:''].filter(Boolean).join(' — ');
     if(!descricao) descricao='(sem descrição)';
@@ -25105,6 +25121,38 @@ function escolherLancctbFluxoAssociar(idx){
 
 // ─── Exclusão em lote (mesmo padrão de Comprovantes/Extrato) ──────────────
 let _lancctbExclusaoFluxoQtd=0;
+// Corrige o documento_numero de lançamentos JÁ IMPORTADOS que vieram sujos
+// (letras/prefixo junto do número) — mesma lógica de _lancctbExtrairNumeroNF
+// usada nas importações novas, aplicada aqui só nas linhas onde o valor
+// limpo é DIFERENTE do que já está salvo (nunca mexe em quem já está OK).
+// Escopo: empresa atual inteira (não só a página/filtro visível na tela),
+// já que o problema é do arquivo de origem, não de uma página específica.
+async function _lancctbFluxoLimparNumeros(){
+  const eid=_lancctbEidAtual;
+  const { data: linhas, error } = await _lancctbFetchTudo(()=>_supaClient
+    .from('fluxo_caixa_lancamentos')
+    .select('id,documento_numero')
+    .eq('empresa_eid',eid)
+    .not('documento_numero','is',null));
+  if(error){ toast('Erro ao buscar lançamentos: '+error.message,'err'); return; }
+  const alteracoes=(linhas||[])
+    .map(l=>({ id:l.id, de:l.documento_numero, para:_lancctbExtrairNumeroNF(l.documento_numero) }))
+    .filter(a=>a.para&&a.para!==a.de);
+  if(!alteracoes.length){ toast('Nenhum número de documento precisa de correção.','ok'); return; }
+  const amostra=alteracoes.slice(0,5).map(a=>`"${a.de}" → "${a.para}"`).join('\n');
+  if(!confirm(`${alteracoes.length} lançamento(s) têm número de documento com letras/caracteres extras. Corrigir mantendo só o número?\n\nExemplos:\n${amostra}${alteracoes.length>5?'\n...':''}`)) return;
+  // Lote pequeno (não dá pra usar upsert em lote aqui — cada linha muda pra
+  // um valor DIFERENTE, e upsert exigiria reenviar todas as colunas
+  // NOT NULL da tabela) — updates individuais em paralelo, poucos por vez
+  // pra não abrir conexão demais de uma vez com o Postgres.
+  const { error: errUpd } = await _lancctbEmLotesDb(alteracoes,25,lote=>
+    Promise.all(lote.map(a=>_supaClient.from('fluxo_caixa_lancamentos').update({documento_numero:a.para,numero:a.para}).eq('id',a.id)))
+      .then(resultados=>({error:resultados.find(r=>r.error)?.error||null}))
+  );
+  if(errUpd){ toast('Erro ao corrigir: '+errUpd.message,'err'); return; }
+  toast(`${alteracoes.length} número(s) de documento corrigido(s).`,'ok');
+  renderLancctbFluxoCaixa();
+}
 function excluirLancctbFluxoConta(qtd){
   if(!qtd){ toast('Nenhum lançamento pra excluir com esse filtro.','err'); return; }
   _lancctbExclusaoTipo='fluxo';
