@@ -7341,6 +7341,9 @@ function _democVal(v, def){
 }
 function democGetEmpresas(){ return S.g('democ_empresas')||[]; }
 function democSetEmpresas(arr){ S.s('democ_empresas',arr); }
+function _democGarantirEmpresaNaLista(eid){
+  if(democGetEmpresas().indexOf(eid)<0) democSetEmpresas(democGetEmpresas().concat([eid]));
+}
 function democGetExternas(){ return _democVal(S.g('democ_externas'), {}); }
 function democSetExternas(obj){ S.s('democ_externas', obj); }
 function democNormCnpj(v){ return String(v||'').replace(/\D/g,''); }
@@ -7677,7 +7680,7 @@ async function democVerificarPasta(){
         }
         if(!aplicado.ok){ erros++; continue; }
         democSetArquivoMod(p.tipo,p.eid,p.ano,p.mes,p.lastModified);
-        if(democGetEmpresas().indexOf(p.eid)<0) democSetEmpresas(democGetEmpresas().concat([p.eid]));
+        _democGarantirEmpresaNaLista(p.eid);
         if(jaExistia){
           substituidos++;
           const empInfo=democInfoEmpresa(p.eid);
@@ -7744,7 +7747,27 @@ function _renderDemocImpl(container){
     return;
   }
 
-  var html='<div class="hide-in-print" style="display:flex;gap:8px;align-items:center;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);flex-wrap:wrap">'
+  // Pedido do usuário 08/09/2026: "essa tela de demonstrativo fique como
+  // ganhos e rendimentos, a listagem de empresas" — mesma busca+seleção
+  // usada em Ganhos/Parcelamentos/Empréstimos/Imóveis (prepararAdicionarEmpresa/
+  // mostrarSugestoesMenu/etc, todas genéricas e baseadas em S.emps()) só pra
+  // a UI de busca — a lista em si continua vindo de democGetEmpresas() (não
+  // do estoque genérico "menuAdicionadas_democ"), porque aqui uma empresa
+  // também entra sozinha ao chegar um documento com CNPJ dela (inclusive
+  // "empresa externa", que nem está em S.emps() — o sistema genérico não
+  // suporta isso, por isso a tabela abaixo é própria, não reaproveitada).
+  var html='<div class="hide-in-print" style="padding:12px 0 20px;border-bottom:1px solid var(--border);margin-bottom:16px">'
+    +'<label style="font-weight:600;color:#1E3558;display:block;margin-bottom:8px;font-size:12.5px">Adicionar empresa:</label>'
+    +'<div style="position:relative;max-width:500px">'
+    +'<input id="democBuscaAddInput" type="search" placeholder="🔍 Buscar empresa, CNPJ ou ID..." oninput="filtrarEmpresasMenu(\'democ\')" onfocus="mostrarSugestoesMenu(\'democ\')" onblur="esconderSugestoesMenu(\'democ\')" style="width:100%;padding:10px 12px;border:1px solid var(--border);border-radius:6px;font-size:13px;margin-bottom:8px">'
+    +'<div id="democSugestoesAdd" style="position:absolute;top:100%;left:0;right:0;background:var(--white);color:var(--ink);border:1px solid var(--border);border-radius:6px;max-height:200px;overflow-y:auto;display:none;z-index:100;box-shadow:0 4px 6px rgba(0,0,0,0.3);margin-top:-8px"></div>'
+    +'</div>'
+    +'<select id="democEmpresaSel" class="si" style="width:100%;max-width:500px;min-width:300px">'
+    +'<option value="">— Escolha uma empresa —</option>'
+    +'</select>'
+    +'<div style="margin-top:8px"><button class="btn" onclick="democAdicionarEmpresaSelecionada()" style="background:#166534;color:#fff;padding:8px 16px;border:none;border-radius:6px;cursor:pointer">+ Adicionar Empresa</button></div>'
+    +'</div>'
+    +'<div class="hide-in-print" style="display:flex;gap:8px;align-items:center;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);flex-wrap:wrap">'
     +'<button class="btn bo bsm" onclick="_democConcederAcessoPasta()">📁 Conceder acesso à pasta local</button>'
     +'<button class="btn bp bsm" id="democBtnVerificarPasta" onclick="democVerificarPasta()">🔄 Verificar pasta</button>'
     +'<span style="font-size:11px;color:var(--slate)">Lê sozinho os Balancetes/DREs/Faturamentos novos da pasta "Demonstrativos Contábeis" — sem precisar anexar um por um.</span>'
@@ -7758,26 +7781,49 @@ function _renderDemocImpl(container){
     +'</div>'
     +_democRenderLogSubstituicoes();
 
-  if(!eids.length){
-    html+='<div style="text-align:center;color:var(--slate);padding:30px 10px;font-size:13px">Nenhuma empresa com documento anexado ainda. Use um dos botões acima pra anexar o(s) primeiro(s) arquivo(s).</div>';
-    container.innerHTML=html;
-    return;
-  }
+  html+=_democRenderTabelaEmpresas(eids);
+  container.innerHTML=html;
+  prepararAdicionarEmpresa('democ'); // popula o <select>/busca — mesma função genérica de Ganhos etc.
+}
+// Tabela compacta no mesmo estilo já usado em Ganhos/Parcelamentos/
+// Empréstimos/Imóveis (ID/Empresa/CNPJ/Resp./Tributação) — própria (não
+// reaproveita renderMenuAdicionadasLista) porque aqui uma empresa pode ser
+// "externa" (só CNPJ, nem cadastrada em S.emps()), caso que o sistema
+// genérico de listagem não cobre.
+function _democRenderTabelaEmpresas(eids){
+  if(!eids.length) return '<div style="text-align:center;color:var(--slate);padding:30px 10px;font-size:13px">Nenhuma empresa com documento anexado ainda. Adicione uma empresa acima ou use um dos botões de importação.</div>';
   var empresas=eids.map(democInfoEmpresa);
-  html+='<div style="display:grid;gap:10px">';
+  var h='<div class="tw" style="overflow-x:auto"><table class="data" style="width:100%">'
+    +'<thead><tr style="background:var(--ink2)">'
+    +'<th style="background:var(--ink2);color:#fff;text-align:center;width:36px">ID</th>'
+    +'<th style="background:var(--ink2);color:#fff">Empresa</th>'
+    +'<th style="background:var(--ink2);color:#fff;white-space:nowrap;min-width:160px">CNPJ</th>'
+    +'<th style="background:var(--ink2);color:#fff;white-space:nowrap">Resp.</th>'
+    +'<th style="background:var(--ink2);color:#fff;white-space:nowrap">Tributação</th>'
+    +'<th style="background:var(--ink2);color:#fff"></th>'
+    +'</tr></thead><tbody>';
   empresas.forEach(function(emp){
     var eid=emp.eid;
-    html+='<div style="border:1px solid var(--border);border-radius:8px;padding:14px 16px;background:var(--white);cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:12px;transition:box-shadow .15s" onmouseover="this.style.boxShadow=\'0 2px 8px rgba(0,0,0,.08)\'" onmouseout="this.style.boxShadow=\'\'" onclick="democAbrirEmpresa(\''+eid+'\')">'
-      +'<div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap">'
-      +'<span style="font-weight:600;color:#1E3558">'+esc(emp.nome)+'</span>'
-      +(emp.cnpj?'<span style="font-family:var(--mono);font-size:12px;color:var(--slate)">'+esc(emp.cnpj)+'</span>':'')
-      +(emp.externa?'<span style="font-size:11px;color:var(--slate)">(não cadastrada em Cadastro de Empresas)</span>':'')
-      +'</div>'
-      +'<button class="btn bo bsm" style="font-size:11px;border-color:var(--red);color:var(--red)" onclick="event.stopPropagation();democRemoverEmpresa(\''+eid+'\')">🗑️ Remover</button>'
-      +'</div>';
+    var real=S.emps().find(function(e){ return String(e.eid)===String(eid); });
+    h+='<tr style="cursor:pointer" onclick="democAbrirEmpresa(\''+eid+'\')">'
+      +'<td style="text-align:center"><span class="idtag">'+esc(emp.externa?String(eid).replace(/^ext:/,''):eid)+'</span></td>'
+      +'<td><b style="color:#1E3558">'+esc(emp.nome)+'</b>'+(emp.externa?' <span style="font-size:11px;color:var(--slate);font-weight:400">(não cadastrada em Cadastro de Empresas)</span>':'')+'</td>'
+      +'<td style="font-family:var(--mono);color:var(--slate)">'+esc(emp.cnpj||'')+'</td>'
+      +'<td>'+esc(real?(real.resp||'—'):'—')+'</td>'
+      +'<td style="font-size:12px">'+esc(real?(real.reg||'—'):'—')+'</td>'
+      +'<td style="text-align:center"><button class="icon-btn" onclick="event.stopPropagation();democRemoverEmpresa(\''+eid+'\')" title="Remover da lista" style="padding:6px;background:none;border:none;cursor:pointer;color:#dc2626">🗑️</button></td>'
+      +'</tr>';
   });
-  html+='</div>';
-  container.innerHTML=html;
+  h+='</tbody></table></div>';
+  return h;
+}
+function democAdicionarEmpresaSelecionada(){
+  var sel=document.getElementById('democEmpresaSel');
+  var eid=sel?sel.value:'';
+  if(!eid){ toast('Selecione uma empresa','warn'); return; }
+  _democGarantirEmpresaNaLista(eid);
+  renderDemoc();
+  toast('Empresa adicionada com sucesso','ok');
 }
 
 function democRemoverEmpresa(eid){
@@ -7835,8 +7881,7 @@ async function _democBulkExtrairIncluir(tipo){
       var res=democResolverEidPorCnpj(d.cnpj, d.razaoSocial);
       if(!res){ arquivosIgnorados.push({arquivo:f.name,motivo:'Não foi possível identificar o CNPJ no arquivo.'}); continue; }
       var eid=res.eid;
-      var eids=democGetEmpresas();
-      if(eids.indexOf(eid)<0){ eids.push(eid); democSetEmpresas(eids); }
+      _democGarantirEmpresaNaLista(eid);
       if(res.criouExterna && empresasNovas.indexOf(d.razaoSocial||d.cnpj)<0) empresasNovas.push(d.razaoSocial||d.cnpj);
       var nomeEmp=democInfoEmpresa(eid).nome;
 
@@ -8053,20 +8098,38 @@ function _democRenderPagerEContas(tipo,eid,docs){
   if(!dados||!dados.contas||!dados.contas.length){
     return h+'<div style="color:var(--slate);font-size:12.5px">Sem contas registradas pra este mês.</div>';
   }
+  // Pedido do usuário 08/09/2026 ("balancete tem Saldo Anterior, Débito
+  // Crédito e Saldo Atual... idem ao PDF"): Balancete mostra as 4 colunas
+  // reais do documento, não só um valor único. Documentos importados ANTES
+  // dessa mudança só têm o campo antigo ".saldo" (sem os 4 separados) —
+  // nesse caso cai pro fallback (mostra só em Saldo Atual, resto em "—") em
+  // vez de quebrar ou mostrar 0,00 enganoso; reimportar o mês repõe os 4.
+  var ehBalanceteDetalhado=tipo==='balancete';
   h+='<div style="max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:6px">'
     +'<table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px">'
     +'<thead><tr style="position:sticky;top:0;z-index:1">'
     +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Código</th>'
-    +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Conta</th>'
-    +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saldo do mês</th>'
+    +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">'+(ehBalanceteDetalhado?'Conta Analítica':'Conta')+'</th>'
+    +(ehBalanceteDetalhado?(
+        '<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saldo Anterior</th>'
+        +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Débito</th>'
+        +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Crédito</th>'
+        +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saldo Atual</th>'
+      ):'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saldo do mês</th>')
     +(mostraAcumulado?'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Acumulado no ano</th>':'')
     +'</tr></thead><tbody>';
   dados.contas.forEach(function(c,i){
     var chaveConta=c.codigo_analitico||('nome:'+c.nome_conta);
+    var saldoAtual=c.saldo_atual!=null?c.saldo_atual:c.saldo; // fallback pra documento importado no formato antigo
     h+='<tr style="background:'+(i%2===0?'var(--white)':'var(--bg)')+'">'
       +'<td style="padding:5px 10px;font-family:var(--mono)">'+esc(c.codigo_analitico||'')+'</td>'
       +'<td style="padding:5px 10px">'+esc(c.nome_conta||'')+'</td>'
-      +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(c.saldo!=null?_fmt(c.saldo):'—')+'</td>'
+      +(ehBalanceteDetalhado?(
+          '<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(c.saldo_anterior!=null?_fmt(c.saldo_anterior):'—')+'</td>'
+          +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(c.debito!=null?_fmt(c.debito):'—')+'</td>'
+          +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(c.credito!=null?_fmt(c.credito):'—')+'</td>'
+          +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(saldoAtual!=null?_fmt(saldoAtual):'—')+'</td>'
+        ):'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(saldoAtual!=null?_fmt(saldoAtual):'—')+'</td>')
       +(mostraAcumulado?'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+_fmt(acumulado[chaveConta]||0)+'</td>':'')
       +'</tr>';
   });

@@ -36,7 +36,7 @@ Responda SOMENTE com um JSON válido, exatamente neste formato:
 {
   "colunas": ["nome da 1ª coluna", "nome da 2ª coluna", "..."],
   "linhas": [
-    { "nome da 1ª coluna": "valor", "nome da 2ª coluna": "valor", "...": "..." }
+    { "_secao": "nome da seção/tabela de onde essa linha veio", "nome da 1ª coluna": "valor", "nome da 2ª coluna": "valor", "...": "..." }
   ],
   "observacoes": "1-2 frases em português caso haja ambiguidade, seções que não ficaram claras, ou linhas de total que você excluiu"
 }
@@ -44,6 +44,7 @@ Responda SOMENTE com um JSON válido, exatamente neste formato:
 Regras:
 - "Data" é sempre a primeira coluna e é obrigatória em toda linha — nunca null. Se o documento tiver mais de uma coluna de data (ex: "Dt. Aplicação", "Dt. Vencto", "Dt. Resgate"), inclua TODAS como colunas separadas, na ordem em que aparecem — a primeira coluna do JSON continua sendo a que representa a data efetiva daquele movimento (data da aplicação numa linha de aplicação; data do resgate numa linha de resgate).
 - Cada chave dentro de "colunas" deve aparecer, com o mesmo nome exato, em toda linha de "linhas" (use null quando aquela linha não tiver valor naquela coluna).
+- "_secao" é OBRIGATÓRIO em toda linha e identifica de qual seção/tabela do documento ela veio (ex: "Aplicações", "Resgates / Vencimentos", "Resgates Antecipados/Vencimentos"). Use o texto do cabeçalho da seção como aparece no documento. Isso é essencial: quando o documento tem mais de uma seção com as MESMAS colunas (ex: "Vlr Princ. (R$)" aparece tanto em "Aplicações" quanto em "Resgates/Vencimentos", mas significa "quanto foi aplicado" numa e "quanto foi resgatado" na outra), o "_secao" é o que permite ao usuário mapear cada coluna corretamente por seção depois — sem ele, colunas com o mesmo nome de seções diferentes ficam ambíguas e a coluna deixa de fazer sentido.
 - Se o documento tiver mais de uma seção/tabela (ex: "Aplicações" e "Resgates/Vencimentos", cada uma com colunas diferentes), combine tudo numa única lista de "linhas" usando a UNIÃO de todas as colunas encontradas em qualquer seção — uma linha de "Aplicações" só preenche as colunas daquela seção e usa null nas colunas exclusivas de "Resgates/Vencimentos", e vice-versa.
 - NÃO inclua a linha de "Total"/"Acumulado do Mês"/"Saldo Anterior" como uma linha de movimentação — ela é só a soma ou o saldo de abertura; mencione isso em "observacoes" se houver.
 - Valores monetários sempre em número puro (sem "R$", sem separador de milhar, com ponto decimal — ex: 3994.10). Células vazias na tabela original viram null.

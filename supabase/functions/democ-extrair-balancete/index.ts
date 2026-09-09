@@ -91,16 +91,21 @@ Extraia os dados e responda SOMENTE com um JSON válido, exatamente neste format
   "ano": "AAAA" (ano de referência do balancete) ou null,
   "contas": [
     {
-      "codigo_analitico": "código analítico completo da conta, ex: 1.1.01.001" ou null,
-      "codigo_reduzido": "código reduzido da conta, se houver" ou null,
-      "nome_conta": "nome/descrição da conta",
-      "saldo": número (saldo final/atual da conta — POSITIVO se o saldo for devedor, NEGATIVO se o saldo for credor; se o balancete trouxer colunas separadas de saldo devedor e credor, use o valor da coluna que tiver valor, com o sinal correspondente)
+      "codigo_analitico": "código/classificação completo da conta, ex: 1.1.1.01.000001 (coluna 'Classificação', se o balancete tiver as duas colunas 'Código' E 'Classificação' separadas)" ou null,
+      "codigo_reduzido": "código sequencial/reduzido da conta, se houver uma coluna 'Código' numérica simples SEPARADA da classificação (ex: 1, 2, 3...)" ou null,
+      "nome_conta": "nome/descrição da conta (coluna 'Descrição da conta')",
+      "saldo_anterior": número ou null (coluna "Saldo Anterior" — saldo no início do período),
+      "debito": número ou null (coluna "Débito" — sempre um valor positivo, é a soma dos débitos do período; não tem sinal D/C),
+      "credito": número ou null (coluna "Crédito" — sempre um valor positivo, é a soma dos créditos do período; não tem sinal D/C),
+      "saldo_atual": número (coluna "Saldo Atual"/"Saldo Final" — saldo ao final do período; ver regra de sinal abaixo)
     }
   ],
   "observacoes": "1-3 frases em português sobre ambiguidades, contas cujo sinal (devedor/credor) ficou incerto, ou se o balancete parece estar incompleto/cortado"
 }
 
-Inclua todas as contas analíticas (as que têm saldo, de qualquer nível/grupo — Ativo, Passivo, Patrimônio Líquido, Receitas, Custos, Despesas). Não inclua linhas de "Total Geral" nem subtotais de grupo (ex: "Total do Ativo Circulante") como se fossem uma conta — essas são apenas somatórios. Valores monetários sempre em número puro (sem "R$", sem separador de milhar, com ponto decimal — ex: 61150.00).`;
+REGRA DE SINAL (devedor/credor) — muito importante: balancetes brasileiros normalmente NÃO usam sinal de menos para indicar saldo credor. Em vez disso, cada valor de saldo vem com uma LETRA colada logo depois do número: "D" para devedor, "C" para credor (ex: "34.006.057,22D", "3.011.785,04C") — às vezes com espaço antes da letra. Ao extrair "saldo_anterior" e "saldo_atual": se a letra for "D" (ou não houver letra nenhuma — no balancete alguns modelos omitem "D" por ser o padrão), o número fica POSITIVO; se a letra for "C", o número fica NEGATIVO. Remova a letra do valor numérico depois de aplicar o sinal — nunca deixe "D"/"C" dentro do número. "debito" e "credito" (as colunas de movimento do período) são sempre positivos, essas não têm letra.
+
+Inclua todas as contas ANALÍTICAS (as que têm saldo, de qualquer nível/grupo — Ativo, Passivo, Patrimônio Líquido, Receitas, Custos, Despesas) — normalmente são as linhas com código de classificação mais longo/específico (ex: "1.1.1.01.000001"), não as linhas de grupo/síntese com código curto (ex: "1", "1.1", "1.1.1") que apenas somam as contas abaixo delas. Não inclua essas linhas de grupo/síntese nem linhas de "Total Geral" como se fossem uma conta — essas são apenas somatórios, mesmo que tenham um "Código" sequencial e apareçam misturadas na mesma tabela das contas analíticas. Valores monetários sempre em número puro (sem "R$", sem separador de milhar, sem a letra D/C, com ponto decimal — ex: 61150.00 ou -61150.00).`;
 
     let raw = await chamarGemini(prompt);
     raw = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
