@@ -1260,6 +1260,32 @@ async function ca2InitStorage(){
   }
 }
 
+// Lê sob demanda um documento do módulo "Demonstrativos Contábeis"
+// (index.html) direto do Supabase — NUNCA fica em ca2Cache/IndexedDB (esse
+// módulo não é dono desse dado, só lê pra semear a composição a partir do
+// Balancete já importado lá; ver pedido do usuário 08/09/2026: "aqui agora
+// será criado de acordo com o primeiro balancete anexado"). Só leitura,
+// nunca escreve de volta nessas chaves — mesmo cuidado já documentado
+// acima pra 'emps'/'grupos'.
+function ca2ToggleIgnorarSempre(eid,codigo){
+  const lista=S.contasSempreIgnoradas(eid);
+  const idx=lista.indexOf(codigo);
+  if(idx>=0) lista.splice(idx,1); else lista.push(codigo);
+  S.saveContasSempreIgnoradas(eid,lista);
+  return idx<0; // true = acabou de LIGAR o "sempre ignorar"
+}
+async function ca2LerDemocBalancete(eid,ano,mes){
+  if(!_ca2SupaClient) return null;
+  await _ca2SessaoPronta;
+  try{
+    const{data,error}=await _ca2SupaClient.from('dados_app').select('value').eq('key','democ_balancete_'+eid+'_'+ano+'_'+mes).maybeSingle();
+    if(error){ console.error('ca2LerDemocBalancete',error); return null; }
+    let v=data?data.value:null;
+    if(typeof v==='string'){ try{ v=JSON.parse(v); }catch(e){ v=null; } }
+    return v;
+  }catch(e){ console.error('ca2LerDemocBalancete',e); return null; }
+}
+
 const S = {
   g:(k)=>(k in ca2Cache)?ca2Cache[k]:null,
   s:(k,v)=>{ ca2Cache[k]=v; ca2IdbSet(k,v); ca2OneDriveSave(k,v); ca2SupabaseUpsert(k,v); },
@@ -1267,6 +1293,14 @@ const S = {
   saveEmps:(a)=>S.s('emps',a),
   comp:(eId)=>S.g('comp_'+eId)||{},
   saveComp:(eId,o)=>S.s('comp_'+eId,o),
+  // "Sempre ignorar" — lista de códigos de conta que a composição já marca
+  // como ignorada automaticamente em todo mês novo (pedido do usuário
+  // 08/09/2026), sem precisar clicar em Ignorar de novo todo mês. Usa o
+  // prefixo comp_ de propósito — é a mesma lista de chaves sincronizáveis
+  // já liberada pra nuvem (ver _ca2ChaveSincronizavel), sem precisar mexer
+  // nela.
+  contasSempreIgnoradas:(eId)=>S.g('comp_ignoradas_'+eId)||[],
+  saveContasSempreIgnoradas:(eId,arr)=>S.s('comp_ignoradas_'+eId,arr),
   razao:(eId,mes)=>S.g('razao_'+eId+'_'+mes)||{},
   saveRazao:(eId,mes,o)=>S.s('razao_'+eId+'_'+mes,o),
   grupos:()=>S.g('grupos')||[],
@@ -2825,16 +2859,55 @@ function novoMes(){
   openModal('mEscolherMes');
 }
 
-function confirmarEscolhaMes(){
+async function confirmarEscolhaMes(){
   const m=document.getElementById('mEscolherMesInput').value;
   if(!m){toast('Selecione um mês','err');return}
   closeModal('mEscolherMes');
-  const comp=S.comp(curEmpId);const meses=Object.keys(comp).sort();
+  const comp=S.comp(curEmpId);
   if(comp[m]){curMes=m;renderComp();return}
-  pendingMes=m;
-  document.getElementById('mIniciarMes').textContent=mesLabel(m);
-  if(!meses.length){pendingInitOpt='zero';selectOpt('zero');openModal('mIniciar');return;}
-  iniciarMesComCarryForward(m);
+  await iniciarMesDeBalancete(m);
+}
+// Pedido do usuário 08/09/2026: "aqui agora será criado de acordo com o
+// primeiro balancete anexado" — substitui totalmente o fluxo antigo
+// (Iniciar do zero/Digitar saldos/Importar Excel — ver mIniciar, que fica
+// sem uso a partir daqui) por semear a composição direto do Balancete já
+// importado em Demonstrativos Contábeis: cada conta ANALÍTICA do balancete
+// já traz saldo anterior/débito/crédito/saldo atual prontos, no mesmo
+// formato que a tabela de composição usa. Contas SINTÉTICAS (grupo) não
+// entram aqui — a composição é por conta de lançamento.
+async function iniciarMesDeBalancete(m){
+  const partes=m.split('-'); const ano=partes[0], mes=partes[1];
+  toast('Buscando Balancete de '+mesLabel(m)+' em Demonstrativos Contábeis…','info');
+  const balancete=await ca2LerDemocBalancete(curEmpId,ano,mes);
+  if(!balancete||!Array.isArray(balancete.contas)||!balancete.contas.length){
+    toast('Nenhum Balancete de '+mesLabel(m)+' encontrado — importe primeiro em Demonstrativos Contábeis (aba Balancete) antes de compor este mês.','err');
+    return;
+  }
+  const ignoradas=S.contasSempreIgnoradas(curEmpId);
+  const contasAnaliticas=balancete.contas.filter(c=>c&&c.tipo!=='sintetica');
+  const comp=S.comp(curEmpId);
+  comp[m]={
+    contas:contasAnaliticas.map(c=>{
+      const codigo=c.codigo_analitico||c.codigo_reduzido||'';
+      return{
+        codigo, nome:c.nome_conta||'',
+        tipo:tipoFromCodigo(codigo),
+        saldoAnterior:parseFloat(c.saldo_anterior)||0,
+        debitos:parseFloat(c.debito)||0,
+        creditos:parseFloat(c.credito)||0,
+        saldoFinal:parseFloat(c.saldo_atual)||0,
+        ignorada:ignoradas.indexOf(codigo)>=0,
+        itens:[]
+      };
+    }),
+    locked:false,
+    origemBalancete:true,
+    arquivoBalancete:balancete.arquivo||''
+  };
+  S.saveComp(curEmpId,comp);
+  curMes=m;
+  renderComp();
+  toast('Balancete de '+mesLabel(m)+' carregado — '+contasAnaliticas.length+' conta(s) ✓','ok');
 }
 
 function selectOpt(v){
@@ -4171,8 +4244,27 @@ function renderContasTable(contas, m, locked){
       btnIgn.title = isIgnorada ? 'Clique para reativar' : 'Ignorar esta conta na composição';
       btnIgn.onclick = (function(mes,cod){return function(e){e.stopPropagation();ignorarConta(mes,cod);};})(m, c.codigo);
 
+      // "Sempre ignorar" (pedido do usuário 08/09/2026): marca a conta pra
+      // já entrar ignorada automaticamente em todo mês novo, sem precisar
+      // clicar em Ignorar de novo — ver S.contasSempreIgnoradas.
+      var estaSempre = S.contasSempreIgnoradas(curEmpId).indexOf(c.codigo) >= 0;
+      var btnIgnSempre = document.createElement('button');
+      btnIgnSempre.className = 'btn bsm';
+      btnIgnSempre.style.cssText = estaSempre
+        ? 'background:#7C3AED;color:#fff;border:none;font-size:10px'
+        : 'background:#F1F5F9;color:#64748B;border:1px solid #CBD5E1;font-size:10px';
+      btnIgnSempre.textContent = estaSempre ? '🔁 Sempre' : '🔁';
+      btnIgnSempre.title = estaSempre ? 'Ignorada automaticamente todo mês — clique pra voltar ao normal' : 'Ignorar esta conta automaticamente em todo mês novo';
+      btnIgnSempre.onclick = (function(cod){return function(e){
+        e.stopPropagation();
+        var ligou = ca2ToggleIgnorarSempre(curEmpId, cod);
+        toast(ligou?'Conta '+cod+' vai entrar ignorada em todo mês novo daqui pra frente.':'Conta '+cod+' voltou ao normal.','ok');
+        renderComp();
+      };})(c.codigo);
+
       tdCfg.appendChild(btnFecha);
       tdCfg.appendChild(btnIgn);
+      tdCfg.appendChild(btnIgnSempre);
       tr.appendChild(tdCfg);
 
       tbody.appendChild(tr);
