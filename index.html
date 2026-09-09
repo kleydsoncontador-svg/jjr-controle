@@ -26713,9 +26713,19 @@ function _ganhoUploadIASalvarMapeamento(){
   toast(`Mapeamento salvo — ${qtdMeses} mês(es) atualizado(s). Da próxima vez que anexar um extrato desse mesmo padrão, entra sozinho.`,'ok');
   closeModal('mGanhoUploadIA');
 }
+function _ganhoDataOrdenavel(v){
+  // Converte dd/mm/aaaa (ou aaaa-mm-dd) num número comparável (aaaammdd),
+  // pra achar a linha de data mais recente independente da ordem em que o
+  // extrato/IA listou as linhas.
+  const s=String(v||'').trim();
+  let m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); if(m) return Number(m[3]+m[2]+m[1]);
+  m=s.match(/^(\d{4})-(\d{2})-(\d{2})$/); if(m) return Number(m[1]+m[2]+m[3]);
+  return 0;
+}
 function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
   const chaveData=extraido.colunas.find(c=>_ehColunaData(c));
   const somasPorMes={};
+  const saldoBrutoExtratoData={}; // mk -> data (aaaammdd) da linha que já forneceu o saldoBrutoExtrato
   extraido.linhas.forEach(linha=>{
     const mk=chaveData?_ganhoParseDataParaMk(linha[chaveData]):null;
     if(!mk) return;
@@ -26733,47 +26743,23 @@ function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
       if(!somasPorMes[mk]) somasPorMes[mk]={};
       if(colId==='saldoBrutoExtrato'){
         // Não é um valor de movimentação pra somar — é a posição/saldo
-        // corrido do dia. Fica valendo o ÚLTIMO valor do mês (fecha o mês),
-        // assumindo que as linhas do extrato vêm em ordem cronológica.
-        somasPorMes[mk][colId]=Number(linha[col])||0;
+        // corrido do dia. Fica valendo o valor da linha de data MAIS
+        // RECENTE do mês (fecha o mês) — não simplesmente "a última
+        // encontrada", pra não depender da ordem em que a IA listou as
+        // linhas (BUG REAL 08/09/2026: saldo de 07/2026 saiu 44.111,98 em
+        // vez de 44.111,99 do PDF — 1 centavo de diferença compatível com
+        // ter pego uma linha fora de ordem).
+        const dataLinha=_ganhoDataOrdenavel(linha[chaveData]);
+        if(saldoBrutoExtratoData[mk]==null||dataLinha>=saldoBrutoExtratoData[mk]){
+          saldoBrutoExtratoData[mk]=dataLinha;
+          somasPorMes[mk][colId]=Number(linha[col])||0;
+        }
       }else{
         somasPorMes[mk][colId]=(somasPorMes[mk][colId]||0)+(Number(linha[col])||0);
       }
     });
   });
   const ganhos=getGanhos(eid),ganho=ganhos[pid];
-  // Se o extrato só trouxe o Saldo Bruto corrido (sem coluna pronta de
-  // Rendimento do Mês), calcula o rendimento de cada mês pela diferença
-  // entre esse saldo e o saldo do mês anterior — usando o saldo do mês
-  // anterior desta mesma extração quando presente, senão o já salvo de uma
-  // extração anterior (persistido em ganho.dados[mk].saldoBrutoExtrato).
-  // Pedido do usuário 08/09/2026. Só calcula quando o mapeamento NÃO deu um
-  // "Rendimento do Mês" direto pra aquele mês (as duas formas são alternativas).
-  //
-  // BUG REAL 08/09/2026 (usuário testou e apagou o valor: "mais de 100k de
-  // rendimento, não fazia sentido"): a diferença bruta de saldo já embute o
-  // efeito de QUALQUER Aplicação/Resgate/IOF/IRRF ocorrido no mês — se essas
-  // colunas TAMBÉM vierem mapeadas no mesmo extrato (caso comum: o extrato
-  // tem tanto o detalhe diário quanto uma coluna de posição/saldo), a
-  // diferença de saldo não é "rendimento puro", é rendimento + aportes -
-  // resgates. Descontar o efeito das outras colunas (pelos mesmos sinais
-  // +/- já configurados em ganho.cols) isola só o rendimento de verdade.
-  Object.keys(somasPorMes).forEach(mk=>{
-    const soma=somasPorMes[mk];
-    if(soma.saldoBrutoExtrato==null||soma.rendMes!=null) return;
-    const[mm,aaaa]=mk.split('/');
-    const mkAnt=(mm==='01'?'12/'+(Number(aaaa)-1):String(Number(mm)-1).padStart(2,'0')+'/'+aaaa);
-    const saldoAnt=somasPorMes[mkAnt]?.saldoBrutoExtrato??ganho.dados?.[mkAnt]?.saldoBrutoExtrato;
-    if(saldoAnt==null) return; // sem base de comparação — não dá pra calcular ainda
-    let diferenca=soma.saldoBrutoExtrato-saldoAnt;
-    (ganho.cols||[]).forEach(c=>{
-      if(c.id==='rendMes'||!c.op||c.tipo!=='num') return;
-      const v=soma[c.id];
-      if(v==null) return;
-      diferenca-=c.op==='+'?v:-v; // desfaz o mesmo +/- que calcSaldosGanho aplicaria de novo
-    });
-    soma.rendMes=diferenca;
-  });
   // Se o mapeamento usou alguma coluna de detalhe (Valor Principal, Bruto,
   // IOF, IRRF, Líquido…) mas essa aplicação ainda está no layout simples
   // (só "Rendimento do Mês"), promove pro layout completo automaticamente
@@ -26788,6 +26774,45 @@ function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
   Object.keys(somasPorMes).forEach(mk=>{
     if(!ganho.dados[mk])ganho.dados[mk]={};
     Object.keys(somasPorMes[mk]).forEach(colId=>{ ganho.dados[mk][colId]=somasPorMes[mk][colId]; });
+  });
+  // Se o extrato só trouxe o Saldo Bruto corrido (sem coluna pronta de
+  // Rendimento do Mês), calcula o rendimento de cada mês pela diferença
+  // entre esse saldo e o saldo do mês anterior. Pedido do usuário
+  // 08/09/2026. Só calcula quando o mapeamento NÃO deu um "Rendimento do
+  // Mês" direto pra aquele mês (as duas formas são alternativas).
+  //
+  // BUG REAL 08/09/2026 (usuário testou e apagou o valor: "mais de 100k de
+  // rendimento, não fazia sentido"): a diferença bruta de saldo já embute o
+  // efeito de QUALQUER Aplicação/Resgate/IOF/IRRF ocorrido no mês — se essas
+  // colunas TAMBÉM vierem mapeadas no mesmo extrato, a diferença de saldo
+  // não é "rendimento puro", é rendimento + aportes - resgates. Descontar o
+  // efeito das outras colunas (pelos mesmos sinais +/- já configurados em
+  // ganho.cols) isola só o rendimento de verdade.
+  //
+  // BUG REAL #2 08/09/2026 ("ainda vazios" — 06 e 08 continuaram sem
+  // Rendimento do Mês depois de subir só o extrato de 07): usa sempre os
+  // dados JÁ SALVOS de cada mês em ganho.dados (não os desta extração
+  // isolada) pro saldo anterior E pro desconto das colunas — a linha de
+  // "Saldo Anterior" de um extrato (ex: 30/06 no extrato de julho) só traz
+  // o saldo, nunca o detalhe de Aplicação/Resgate/IOF daquele mês; sem essa
+  // troca, faltava base pra achar o saldo anterior OU pra descontar as
+  // outras colunas corretamente.
+  Object.keys(somasPorMes).forEach(mk=>{
+    if(somasPorMes[mk].saldoBrutoExtrato==null) return;
+    const d=ganho.dados[mk];
+    if(somasPorMes[mk].rendMes!=null) return; // este upload já trouxe um Rendimento do Mês direto de outra coluna
+    const[mm,aaaa]=mk.split('/');
+    const mkAnt=(mm==='01'?'12/'+(Number(aaaa)-1):String(Number(mm)-1).padStart(2,'0')+'/'+aaaa);
+    const saldoAnt=ganho.dados[mkAnt]?.saldoBrutoExtrato;
+    if(saldoAnt==null) return; // sem base de comparação — não dá pra calcular ainda
+    let diferenca=d.saldoBrutoExtrato-saldoAnt;
+    (ganho.cols||[]).forEach(c=>{
+      if(c.id==='rendMes'||!c.op||c.tipo!=='num') return;
+      const v=d[c.id];
+      if(v==null) return;
+      diferenca-=c.op==='+'?v:-v; // desfaz o mesmo +/- que calcSaldosGanho aplicaria de novo
+    });
+    d.rendMes=diferenca;
   });
   setGanhos(eid,ganhos);
   // Vinculado a um item do Visão Geral (salvarGanhoDocVisaoGeral) — marca
