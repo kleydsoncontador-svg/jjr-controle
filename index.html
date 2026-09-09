@@ -18225,10 +18225,12 @@ async function renderLancctbImportarXmls(){
 // permite reescrever manualmente as parcelas dessa NF — data+valor por
 // linha, soma tem que bater com o valor total da NF.
 let _lancctbDividirParcelaNfId=null;
-let _lancctbDividirParcelaLinhas=[]; // {rowId,data,valor}
+let _lancctbDividirParcelaLinhas=[]; // {rowId,data,valor} — só as PENDENTES, editáveis
+let _lancctbDividirParcelaTravadas=[]; // {numero_parcela,data_vencimento,valor_parcela,status_conciliacao} — só leitura
 let _lancctbDividirParcelaProximoId=0;
-let _lancctbDividirParcelaValorTotal=0;
-let _lancctbDividirParcelaBloqueado=false;
+let _lancctbDividirParcelaValorTotal=0; // valor total da NF inteira
+let _lancctbDividirParcelaValorAlvo=0; // valor total MENOS as travadas — é o que as editáveis precisam somar
+let _lancctbDividirParcelaMaxNumeroExistente=0;
 async function abrirLancctbDividirParcelaModal(nfId){
   const { data: nf } = await _supaClient.from('notas_fiscais')
     .select('id,numero,valor_total,nome_emitente,nome_destinatario,direcao,cnpj_emitente,cnpj_destinatario')
@@ -18244,20 +18246,29 @@ async function abrirLancctbDividirParcelaModal(nfId){
   document.getElementById('lancctbDividirParcelaInfo').innerHTML=
     `NF <strong>${esc(nf.numero||'')}</strong> — ${esc(nomeTerc||'')} — Valor total: <strong>R$ ${_fmt(nf.valor_total||0)}</strong>`;
 
-  // Bloqueia edição se alguma parcela já foi conciliada/ignorada — dividir
-  // de novo apagaria o vínculo com o lançamento contábil já gravado. Pede
-  // pra desfazer a conciliação primeiro (Registro Contábil) antes de mexer.
+  // Pedido do usuário 09/09/2026: "não deixa eu salvar" — travar a edição
+  // inteira sempre que 1 parcela já estava conciliada era bloqueio demais
+  // (o caso real: 2 das 3 já conciliaram sozinhas entre o auto-split e o
+  // usuário abrir o modal, ele só queria ajustar a data da 3ª que ainda
+  // tava pendente). Agora só as parcelas JÁ conciliadas/ignoradas ficam
+  // travadas (aparecem só como referência, não editáveis, nunca apagadas);
+  // as pendentes continuam livres pra editar/adicionar/remover.
+  const travadas=(parcelas||[]).filter(p=>p.status_conciliacao!=='pendente');
+  const editaveis=(parcelas||[]).filter(p=>p.status_conciliacao==='pendente');
+  _lancctbDividirParcelaTravadas=travadas;
+  _lancctbDividirParcelaMaxNumeroExistente=(parcelas||[]).reduce((m,p)=>Math.max(m,p.numero_parcela||0),0);
+  const somaTravadas=travadas.reduce((s,p)=>s+(p.valor_parcela||0),0);
+  _lancctbDividirParcelaValorAlvo=_lancctbDividirParcelaValorTotal-somaTravadas;
+
   const avisoEl=document.getElementById('lancctbDividirParcelaAviso');
-  _lancctbDividirParcelaBloqueado=(parcelas||[]).some(p=>p.status_conciliacao!=='pendente');
-  if(_lancctbDividirParcelaBloqueado){
+  if(travadas.length){
     avisoEl.style.display='';
-    avisoEl.innerHTML='⚠️ Uma ou mais parcelas desta NF já estão conciliadas/ignoradas — desfaça a conciliação no Registro Contábil antes de editar as parcelas (senão o lançamento já gravado fica órfão).';
+    avisoEl.innerHTML=`🔒 ${travadas.length} parcela(s) já conciliada(s)/ignorada(s) — ficam travadas (só leitura), somando R$ ${_fmt(somaTravadas)}. As demais parcelas abaixo precisam somar R$ ${_fmt(_lancctbDividirParcelaValorAlvo)} pra fechar com o total da NF.`;
   } else {
     avisoEl.style.display='none';
   }
-  document.getElementById('lancctbDividirParcelaSalvarBtn').disabled=_lancctbDividirParcelaBloqueado;
 
-  _lancctbDividirParcelaLinhas=(parcelas&&parcelas.length?parcelas:[{data_vencimento:null,valor_parcela:nf.valor_total}]).map(p=>({
+  _lancctbDividirParcelaLinhas=(editaveis.length?editaveis:(travadas.length?[]:[{data_vencimento:null,valor_parcela:nf.valor_total}])).map(p=>({
     rowId:_lancctbDividirParcelaProximoId++, data:p.data_vencimento||'', valor:p.valor_parcela!=null?p.valor_parcela:''
   }));
   _lancctbDividirParcelaRenderLinhas();
@@ -18268,7 +18279,7 @@ function _lancctbDividirParcelaAdicionarLinha(){
   _lancctbDividirParcelaRenderLinhas();
 }
 function _lancctbDividirParcelaRemoverLinha(rowId){
-  if(_lancctbDividirParcelaLinhas.length<=1){ toast('A NF precisa de pelo menos 1 parcela.','err'); return; }
+  if(_lancctbDividirParcelaLinhas.length<=1&&!_lancctbDividirParcelaTravadas.length){ toast('A NF precisa de pelo menos 1 parcela.','err'); return; }
   _lancctbDividirParcelaLinhas=_lancctbDividirParcelaLinhas.filter(l=>l.rowId!==rowId);
   _lancctbDividirParcelaRenderLinhas();
 }
@@ -18279,38 +18290,59 @@ function _lancctbDividirParcelaAtualizarCampo(rowId,campo,v){
 }
 function _lancctbDividirParcelaAtualizarFeedback(){
   const soma=_lancctbDividirParcelaLinhas.reduce((s,l)=>s+(_lancctbParseValorInput?_lancctbParseValorInput(String(l.valor)):parseFloat(String(l.valor).replace(',','.'))||0),0);
-  const bate=Math.abs(soma-_lancctbDividirParcelaValorTotal)<0.01;
+  const bate=Math.abs(soma-_lancctbDividirParcelaValorAlvo)<0.01;
   const feedback=document.getElementById('lancctbDividirParcelaFeedback');
-  if(feedback) feedback.innerHTML=`Soma das parcelas: <strong>R$ ${_fmt(soma)}</strong> — valor da NF: <strong>R$ ${_fmt(_lancctbDividirParcelaValorTotal)}</strong> ${bate?'<span style="color:var(--teal)">✓ bate</span>':'<span style="color:#dc2626">✗ não bate</span>'}`;
+  if(feedback){
+    const totalGeral=soma+_lancctbDividirParcelaTravadas.reduce((s,p)=>s+(p.valor_parcela||0),0);
+    feedback.innerHTML=`Soma das parcelas editáveis: <strong>R$ ${_fmt(soma)}</strong>${_lancctbDividirParcelaTravadas.length?` (+ R$ ${_fmt(_lancctbDividirParcelaTravadas.reduce((s,p)=>s+(p.valor_parcela||0),0))} travadas)`:''} — total: <strong>R$ ${_fmt(totalGeral)}</strong> — valor da NF: <strong>R$ ${_fmt(_lancctbDividirParcelaValorTotal)}</strong> ${bate?'<span style="color:var(--teal)">✓ bate</span>':'<span style="color:#dc2626">✗ não bate</span>'}`;
+  }
   const btn=document.getElementById('lancctbDividirParcelaSalvarBtn');
-  if(btn) btn.disabled=_lancctbDividirParcelaBloqueado||!bate;
+  if(btn) btn.disabled=!bate;
 }
 function _lancctbDividirParcelaRenderLinhas(){
   const el=document.getElementById('lancctbDividirParcelaLinhas');
-  el.innerHTML=_lancctbDividirParcelaLinhas.map((l,i)=>`<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
-    <span style="font-size:11px;color:var(--slate);width:20px">${i+1}ª</span>
+  const travadasHtml=_lancctbDividirParcelaTravadas.map(p=>{
+    const dataFmt=p.data_vencimento?new Date(p.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'';
+    return `<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px;opacity:.65">
+      <span style="font-size:11px;color:var(--slate);width:20px">${p.numero_parcela}ª</span>
+      <span style="width:160px;font-size:12.5px">🔒 ${esc(dataFmt)}</span>
+      <span style="width:130px;font-size:12.5px">R$ ${_fmt(p.valor_parcela||0)}</span>
+      <span style="font-size:11px;color:var(--slate)">${esc(p.status_conciliacao||'')}</span>
+    </div>`;
+  }).join('');
+  const editaveisHtml=_lancctbDividirParcelaLinhas.map((l,i)=>`<div style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
+    <span style="font-size:11px;color:var(--slate);width:20px">${_lancctbDividirParcelaTravadas.length+i+1}ª</span>
     <input class="fi" type="date" value="${esc(l.data)}" style="width:160px" onchange="_lancctbDividirParcelaAtualizarCampo(${l.rowId},'data',this.value)">
     <input class="fi" type="text" inputmode="decimal" placeholder="Valor" value="${l.valor!==''?String(l.valor).replace('.',','):''}" style="width:130px" oninput="_lancctbDividirParcelaAtualizarCampo(${l.rowId},'valor',this.value)">
     <button class="btn bo bsm" type="button" style="color:#dc2626" onclick="_lancctbDividirParcelaRemoverLinha(${l.rowId})">✕</button>
   </div>`).join('');
+  el.innerHTML=travadasHtml+editaveisHtml;
   _lancctbDividirParcelaAtualizarFeedback();
 }
 async function salvarLancctbDividirParcela(){
-  if(_lancctbDividirParcelaBloqueado) return;
   const nfId=_lancctbDividirParcelaNfId;
   for(const l of _lancctbDividirParcelaLinhas){
     if(!l.data){ toast('Preencha a data de todas as parcelas.','err'); return; }
   }
   const soma=_lancctbDividirParcelaLinhas.reduce((s,l)=>s+(parseFloat(String(l.valor).replace(',','.'))||0),0);
-  if(Math.abs(soma-_lancctbDividirParcelaValorTotal)>=0.01){ toast('A soma das parcelas precisa bater com o valor da NF.','err'); return; }
+  if(Math.abs(soma-_lancctbDividirParcelaValorAlvo)>=0.01){ toast('A soma das parcelas editáveis precisa bater com o valor restante da NF (descontando as já travadas).','err'); return; }
   const btn=document.getElementById('lancctbDividirParcelaSalvarBtn');
   btn.disabled=true; btn.textContent='Salvando…';
   try{
     const { data: nfInfo } = await _supaClient.from('notas_fiscais').select('empresa_eid').eq('id',nfId).single();
-    await _supaClient.from('notas_fiscais_parcelas').delete().eq('nf_id',nfId);
+    // Só apaga/recria as parcelas PENDENTES — as travadas (conciliadas/
+    // ignoradas) nunca são tocadas, ficam com o mesmo id/número de sempre.
+    await _supaClient.from('notas_fiscais_parcelas').delete().eq('nf_id',nfId).eq('status_conciliacao','pendente');
+    let proximoNumero=_lancctbDividirParcelaMaxNumeroExistente+1;
+    // Reaproveita os números 1..N que sobraram livres (não usados pelas
+    // travadas) antes de continuar a sequência, só por organização visual.
+    const numerosTravados=new Set(_lancctbDividirParcelaTravadas.map(p=>p.numero_parcela));
+    const numerosLivres=[];
+    for(let n=1;n<=_lancctbDividirParcelaMaxNumeroExistente;n++){ if(!numerosTravados.has(n)) numerosLivres.push(n); }
     const linhasInsert=_lancctbDividirParcelaLinhas.map((l,i)=>({
-      nf_id:nfId, empresa_eid:nfInfo.empresa_eid, numero_parcela:i+1, data_vencimento:l.data,
-      valor_parcela:parseFloat(String(l.valor).replace(',','.'))||0, status_conciliacao:'pendente',
+      nf_id:nfId, empresa_eid:nfInfo.empresa_eid,
+      numero_parcela: i<numerosLivres.length?numerosLivres[i]:(proximoNumero++),
+      data_vencimento:l.data, valor_parcela:parseFloat(String(l.valor).replace(',','.'))||0, status_conciliacao:'pendente',
     }));
     const { error } = await _supaClient.from('notas_fiscais_parcelas').insert(linhasInsert);
     if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
