@@ -14619,6 +14619,82 @@ function _convAplicFinGerarLinhasInvestFacilBradesco(item,dados,usarCredito){
   }
   return linhas;
 }
+// ── Modelo "BB Rende Fácil" (Banco do Brasil) ── pedido do usuário
+// 09/09/2026: extrato tem um bloco "Resumo do mês" com 5 totais prontos
+// (Aplicações/Resgates líquidos/IR/IOF/Rendimentos, todos "no mês") e uma
+// tabela "Histórico de movimentação" (Data | Histórico | Capital |
+// Rendimento* | IR | IOF | Valor Líquido) com uma linha por evento (Saldo
+// Anterior/Aplicação/Resgate/Saldo Final). Layout de texto simples (sem o
+// bug de posição do Bradesco) — dá pra ler direto por regex na ordem natural.
+async function _convAplicFinExtrairBBRendeFacil(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let textoCompleto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+    textoCompleto+=' '+texto;
+  }
+  textoCompleto=textoCompleto.trim();
+  const reconhecido=/BB\s*RENDE\s*F[ÁA]CIL/i.test(textoCompleto)&&/Hist[óo]rico\s+de\s+movimenta[çc][ãa]o/i.test(textoCompleto);
+  if(!reconhecido) return null;
+
+  const num=s=>_convCobrParseValor(s);
+  const mMesAno=textoCompleto.match(/Resumo\s+do\s+m[êe]s\s*-\s*([A-Za-zçÇ]+)\/(\d{4})/i);
+  const mesTxt=mMesAno?mMesAno[1]:null, anoTxt=mMesAno?mMesAno[2]:null;
+  function pegarResumo(rotuloRe){
+    const m=textoCompleto.match(new RegExp(rotuloRe+'\\s*:?\\s*(?:R\\$)?\\s*([\\d.,]+)','i'));
+    return m?num(m[1]):null;
+  }
+  const aplicacoesNoMes=pegarResumo('Aplica[çc][õo]es\\s+no\\s+m[êe]s');
+  const resgatesLiquidosNoMes=pegarResumo('Resgates\\s+l[íi]quidos\\s+no\\s+m[êe]s');
+  const irSobreResgatesNoMes=pegarResumo('IR\\s+sobre\\s+resgates\\s+no\\s+m[êe]s');
+  const iofSobreResgatesNoMes=pegarResumo('IOF\\s+sobre\\s+resgates\\s+no\\s+m[êe]s');
+  const rendimentosNoMes=pegarResumo('Rendimentos\\s+no\\s+m[êe]s');
+
+  // Histórico de movimentação — 1 linha por evento, mesma ordem de colunas
+  // sempre (Data Histórico Capital Rendimento IR IOF ValorLíquido).
+  const idxInicio=textoCompleto.search(/Hist[óo]rico\s+de\s+movimenta[çc][ãa]o/i);
+  const bloco=idxInicio>=0?textoCompleto.slice(idxInicio):textoCompleto;
+  const reLinha=/(\d{2}\/\d{2}\/\d{4})\s+(Saldo\s+Anterior|Aplica[çc][ãa]o|Resgate|Saldo\s+Final)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)/gi;
+  const linhas=[];
+  let m;
+  while((m=reLinha.exec(bloco))){
+    linhas.push({ data:m[1], historico:m[2].replace(/\s+/g,' ').trim(), capital:num(m[3]), rendimento:num(m[4]), ir:num(m[5]), iof:num(m[6]), valorLiquido:num(m[7]) });
+  }
+  // Pedido do usuário 09/09/2026: "da coluna Rendimento* apenas os valores
+  // das linhas Resgate, somadas" — só as linhas "Resgate" (Saldo Anterior/
+  // Saldo Final também têm valor nessa coluna, mas é rendimento apropriado
+  // acumulado, não rendimento realizado num resgate de verdade).
+  const rendimentoResgates=linhas.filter(l=>/^resgate$/i.test(l.historico)).reduce((s,l)=>s+(l.rendimento||0),0);
+  const dataFinal=linhas.length?linhas[linhas.length-1].data:null;
+
+  return { aplicacoesNoMes,resgatesLiquidosNoMes,irSobreResgatesNoMes,iofSobreResgatesNoMes,rendimentosNoMes, mesTxt,anoTxt, linhas,rendimentoResgates,dataFinal };
+}
+function _convAplicFinGerarLinhasBBRendeFacil(item,dados){
+  const linhas=[];
+  const contaAplic=item.contaAplicacao,contaBanco=item.contaBanco;
+  const dataRef=dados.dataFinal||'';
+  const periodoTxt=dados.mesTxt&&dados.anoTxt?(' - '+dados.mesTxt+'/'+dados.anoTxt):'';
+  if(dados.aplicacoesNoMes&&Math.abs(dados.aplicacoesNoMes)>=0.005){
+    linhas.push({data:dataRef,historico:'Aplicações BB Rende Fácil'+periodoTxt,valor:Math.abs(dados.aplicacoesNoMes),debito:contaAplic,credito:contaBanco});
+  }
+  if(dados.resgatesLiquidosNoMes&&Math.abs(dados.resgatesLiquidosNoMes)>=0.005){
+    linhas.push({data:dataRef,historico:'Resgates líquidos BB Rende Fácil'+periodoTxt,valor:Math.abs(dados.resgatesLiquidosNoMes),debito:contaBanco,credito:contaAplic});
+  }
+  if(dados.irSobreResgatesNoMes&&Math.abs(dados.irSobreResgatesNoMes)>=0.005){
+    linhas.push({data:dataRef,historico:'IR sobre resgates BB Rende Fácil'+periodoTxt,valor:Math.abs(dados.irSobreResgatesNoMes),debito:CONV_APLICFIN_CONTA_IRRF,credito:contaAplic});
+  }
+  if(dados.iofSobreResgatesNoMes&&Math.abs(dados.iofSobreResgatesNoMes)>=0.005){
+    linhas.push({data:dataRef,historico:'IOF sobre resgates BB Rende Fácil'+periodoTxt,valor:Math.abs(dados.iofSobreResgatesNoMes),debito:CONV_APLICFIN_CONTA_IOF,credito:contaAplic});
+  }
+  if(dados.rendimentosNoMes&&Math.abs(dados.rendimentosNoMes)>=0.005){
+    linhas.push({data:dataRef,historico:'Rendimentos BB Rende Fácil'+periodoTxt,valor:Math.abs(dados.rendimentosNoMes),debito:contaAplic,credito:CONV_APLICFIN_CONTA_RENDIMENTO});
+  }
+  return linhas;
+}
 // ── Modelo genérico (qualquer banco não reconhecido pelo parser fixo acima) ──
 // Extrai texto via pdfjsLib como de costume; se vier vazio/curto (PDF é
 // imagem escaneada — caso real: "Aplic. Aut Mais Itaú", confirmado sem
@@ -14712,7 +14788,28 @@ async function processarConvAplicFinItem(eid,itemId){
       toast('Extrato processado com sucesso!','ok');
       return;
     }
-    // Modelo fixo (Bradesco) não reconheceu — tenta o fluxo genérico via IA.
+    // Não é Bradesco Invest Fácil — tenta o modelo "BB Rende Fácil" antes de
+    // cair pro genérico (pedido do usuário 09/09/2026).
+    const dadosBB=await _convAplicFinExtrairBBRendeFacil(file);
+    if(dadosBB){
+      const linhas=_convAplicFinGerarLinhasBBRendeFacil(item,dadosBB);
+      if(!linhas.length){
+        _convAplicFinSetStatus(itemId,'Nenhum valor encontrado no "Resumo do mês" deste extrato.','err');
+        toast('Nada encontrado no extrato.','err');
+        _convAplicFinResetBotao(itemId);return;
+      }
+      _convAplicFinResultados[itemId]={linhas,meta:dadosBB};
+      // Confere o "Rendimentos no mês" do resumo contra a soma do
+      // Rendimento* só das linhas "Resgate" — pedido do usuário 09/09/2026,
+      // avisa se os dois números não baterem (não impede de usar, é só
+      // conferência visual).
+      const bateRendimento=dadosBB.rendimentosNoMes==null||Math.abs((dadosBB.rendimentoResgates||0)-dadosBB.rendimentosNoMes)<=0.02;
+      _convAplicFinSetStatus(itemId,bateRendimento?'':`⚠️ Rendimento somado das linhas "Resgate" (R$ ${_fmt(dadosBB.rendimentoResgates||0)}) difere do "Rendimentos no mês" do resumo (R$ ${_fmt(dadosBB.rendimentosNoMes||0)}) — confira manualmente.`,bateRendimento?'':'err');
+      renderConvAplicFinLista();
+      toast(bateRendimento?'Extrato processado com sucesso!':'Extrato processado — confira o aviso de rendimento.',bateRendimento?'ok':'err');
+      return;
+    }
+    // Nenhum modelo fixo reconheceu — tenta o fluxo genérico via IA.
     _convAplicFinSetStatus(itemId,'Modelo não identificado — lendo com IA (pode levar alguns segundos)…','');
     const extraido=await _convAplicFinExtrairGenerico(file);
     // Se já existe um mapeamento salvo pra essa aplicação E ele cobre todas
