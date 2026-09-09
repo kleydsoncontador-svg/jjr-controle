@@ -19806,7 +19806,10 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     const historicoUtilizado=`${ehSaida?'Pagamento a':'Recebimento de'} ${nomeTerceiro||cnpjTerceiro||''} - NF ${nf?.numero||''} - parcela ${parcela.numero_parcela}`.trim();
     const linhas=[
       { empresa_eid:eid, data:r.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:r.id, origem_match:'manual' },
-      { empresa_eid:eid, data:r.data_pagamento, classificacao:classifContrapartida, conta_contabil_id:contaContrapartidaId, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:r.id, origem_match:'manual' },
+      // nf_parcela_id: mesma correção do matching automático — sem isso as
+      // colunas "Data Parcela"/"Mês Bate?" do Registro Contábil ficavam
+      // sempre "—" mesmo pra lançamentos já amarrados manualmente a uma NF.
+      { empresa_eid:eid, data:r.data_pagamento, classificacao:classifContrapartida, conta_contabil_id:contaContrapartidaId, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, nf_parcela_id:parcelaId, lancamento_extrato_id:r.id, origem_match:'manual' },
     ];
     const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
     if(error){ toast('Erro ao gravar o lançamento: '+error.message,'err'); return; }
@@ -20347,7 +20350,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     }
   }
 
-  async function gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,numerosNF,comprovanteMatch,numeroParcela){
+  async function gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,numerosNF,comprovanteMatch,numeroParcela,parcelaId){
     const bancoTipo=ehSaida?'C':'D';
     const contrapartidaTipo=ehSaida?'D':'C';
     const regraOverride=regras.find(r=>{
@@ -20374,7 +20377,12 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       : `${ehSaida?'Pagamento a':'Recebimento de'} ${nomeTerceiro||cnpjTerceiro||''}${nfTexto?' - '+nfTexto:''}${parcelaTexto}`.trim();
     const linhas=[
       { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regraUsadaId, origem_match:'automatico_triangular' },
-      { empresa_eid:eid, data:l.data_pagamento, classificacao:classifContrapartida, conta_contabil_id:contaContrapartidaId, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regraUsadaId, origem_match:'automatico_triangular' },
+      // nf_parcela_id só na linha da CONTRAPARTIDA (não na do banco) — é o
+      // que preenche as colunas "Data Parcela"/"Mês Bate?" do Registro
+      // Contábil (bug real relatado 09/09/2026: ficavam sempre "—" mesmo em
+      // lançamento já amarrado a uma NF, porque essa coluna nunca era
+      // gravada aqui nem na associação manual — ver _lancctbAssociarNfManual).
+      { empresa_eid:eid, data:l.data_pagamento, classificacao:classifContrapartida, conta_contabil_id:contaContrapartidaId, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, nf_parcela_id:parcelaId||null, lancamento_extrato_id:l.id, regra_matching_id:regraUsadaId, origem_match:'automatico_triangular' },
     ];
     const resultado=await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
     if(!resultado.error) await checarAlertaAutomatico(linhas,l,valor,historicoUtilizado,nomeTerceiro);
@@ -20591,7 +20599,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       const nf=escolhida.notas_fiscais;
       const cnpjTerceiro=cnpjAncora||(ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario);
       const nomeTerceiro=comprovanteMatch?.cliente_fornecedor_nome||(ehSaida?nf?.nome_emitente:nf?.nome_destinatario);
-      const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch,escolhida.numero_parcela);
+      const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch,escolhida.numero_parcela,escolhida.id);
       if(error){
         erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
       } else {
@@ -20878,6 +20886,48 @@ async function _lancctbProcessarTributos(){
 // lancamentos_contabeis.informacao_extra (coluna "IA" no Registro Contábil)
 // pro contador conferir/desfazer — a IA nunca decide "no escuro": é melhor
 // ela dizer "sem match confiável" do que arriscar casar errado.
+// Backfill pra lançamentos JÁ conciliados por NF (automático OU manual)
+// ANTES da correção de 09/09/2026 — gerarLancamentoNF/_lancctbAssociarNfManual
+// nunca gravavam nf_parcela_id na linha, então "Data Parcela"/"Mês Bate?"
+// ficavam pra sempre em "—" mesmo com a NF certa amarrada (pedido do
+// usuário: "continua sem trazer essa informação das XML" — eram lançamentos
+// ANTIGOS, a correção de código só vale pra daqui pra frente). Reconstrói a
+// parcela a partir do próprio texto salvo em Histórico Utilizado (padrão
+// "... - NF <numero> - parcela <n>", já usado nos dois fluxos) cruzando com
+// o CNPJ/CPF salvo na mesma linha — não toca em nada além de nf_parcela_id.
+async function _lancctbCorrigirDataParcelaExistente(){
+  const eid=_lancctbEidAtual;
+  if(!confirm('Varre os lançamentos já conciliados desta empresa e tenta preencher "Data Parcela"/"Mês Bate?" pra quem foi amarrado a uma NF mas ficou sem isso salvo (bug de lançamentos antigos, já corrigido pra novos). Não altera valor, conta nem histórico. Continuar?')) return;
+  const btn=document.getElementById('lancctbCorrigirParcelaBtn');
+  if(btn){ btn.disabled=true; btn.textContent='Corrigindo…'; }
+  try{
+    const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
+      .select('id,cnpj_cpf,historico')
+      .eq('empresa_eid',eid).eq('estornado',false).is('nf_parcela_id',null).not('cnpj_cpf','is',null));
+    const alvo=(linhas||[]).map(l=>{
+      const m=(l.historico||'').match(/NF\s+(\S+)\s*-\s*parcela\s*(\d+)/i);
+      return m?{ id:l.id, cnpj:l.cnpj_cpf, numero:m[1].replace(/[.,]$/,''), parcela:+m[2] }:null;
+    }).filter(Boolean);
+    if(!alvo.length){ toast('Nada pra corrigir — nenhum lançamento com "Data Parcela" faltando nesse padrão.','ok'); return; }
+    let corrigidos=0, semAchado=0;
+    for(const item of alvo){
+      const { data: candidatas } = await _supaClient.from('notas_fiscais_parcelas')
+        .select('id,numero_parcela,notas_fiscais!inner(id,numero,cnpj_emitente,cnpj_destinatario)')
+        .eq('empresa_eid',eid).eq('numero_parcela',item.parcela).eq('notas_fiscais.numero',item.numero);
+      const match=(candidatas||[]).find(c=>{
+        const nf=c.notas_fiscais;
+        return nf&&(nf.cnpj_emitente===item.cnpj||nf.cnpj_destinatario===item.cnpj);
+      });
+      if(!match){ semAchado++; continue; }
+      const { error } = await _supaClient.from('lancamentos_contabeis').update({nf_parcela_id:match.id}).eq('id',item.id);
+      if(!error) corrigidos++; else semAchado++;
+    }
+    toast(`Data Parcela corrigida em ${corrigidos} lançamento(s)${semAchado?`, ${semAchado} sem NF correspondente encontrada`:''}.`,'ok');
+    renderLancctbRegistroContabil();
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent='🔧 Corrigir Data Parcela'; }
+  }
+}
 async function _lancctbProcessarViaIA(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
@@ -21398,6 +21448,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
+      <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
       <button class="btn bsm" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" style="background:#F59E0B;color:#fff;border:none" title="Último recurso — usa IA (Groq/Gemini) pra tentar amarrar Pagamento/Recebimento × Nota Fiscal, e depois tenta casar pelo Fluxo de Caixa (se a empresa tiver) com uma Regra por histórico. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA + Fluxo</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) no período filtrado — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis deste período, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
