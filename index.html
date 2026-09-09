@@ -20976,20 +20976,48 @@ async function renderLancctbRegistroContabil(){
   if(pendentes.length){
     // Saída sugere via Comprovantes (pagamento), entrada via Comprovantes de
     // Recebimento — tabelas separadas (ver Fase 9), nunca cruza uma com a outra.
-    const [{ data: compsPag },{ data: compsReceb }]=await Promise.all([
+    const [{ data: compsPag },{ data: compsReceb },{ data: parcelasPend },{ data: fluxoPend }]=await Promise.all([
       _lancctbFetchTudo(()=>_supaClient.from('comprovantes_bancarios')
         .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
         .eq('empresa_eid',eid).eq('status_conciliacao','pendente')),
       _lancctbFetchTudo(()=>_supaClient.from('comprovantes_recebimento')
         .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
         .eq('empresa_eid',eid).eq('status_conciliacao','pendente')),
+      // Pedido do usuário 09/09/2026: "não trouxe data da parcela e nem
+      // disse sim ou não pra se está dentro do mês" — antes essas 2 colunas
+      // só vinham preenchidas depois de conciliado (ligadas via ctb). Pra
+      // pendente, sugere a NF pendente mais próxima por valor+data (mesma
+      // lógica de tolerância do resto do módulo) e já mostra Data
+      // Parcela/Mês Bate como PALPITE (itálico), antes de confirmar.
+      _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
+        .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao)')
+        .eq('empresa_eid',eid).eq('status_conciliacao','pendente')),
+      // Pedido do usuário 09/09/2026: "preciso ter a coluna Fluxo de Caixa,
+      // pois posso criar regra por ela, tentando associar ao fluxo, pra
+      // aqueles que ainda não estão conciliados" — mostra se já existe uma
+      // linha do Fluxo de Caixa do cliente batendo valor+data com essa
+      // pendência, e permite abrir o modal de Regra já usando o texto dela.
+      _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+        .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id')
+        .eq('empresa_eid',eid).eq('status_associado','nao_associado')),
     ]);
     pendentes.forEach(item=>{
       const r=item.extrato;
       const valor=r.valor_saida||r.valor_entrada;
-      const comps=r.valor_saida>0?compsPag:compsReceb;
+      const ehSaida=r.valor_saida>0;
+      const comps=ehSaida?compsPag:compsReceb;
       const match=(comps||[]).find(c=>Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
       if(match) item.comprovanteSugerido=match;
+      const direcaoAlvo=ehSaida?'compra':'venda';
+      const nfMatch=(parcelasPend||[]).filter(p=>p.notas_fiscais?.direcao===direcaoAlvo)
+        .find(p=>Math.abs(p.valor_parcela-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_NF&&_lancctbDiffDias(p.data_vencimento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS*3);
+      if(nfMatch) item.parcelaSugerida=nfMatch;
+      const fluxoMatch=(fluxoPend||[]).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
+        .find(f=>{
+          const vF=ehSaida?f.valor_saida:f.valor_entrada;
+          return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
+        });
+      if(fluxoMatch) item.fluxoSugerido=fluxoMatch;
     });
   }
 
@@ -21058,6 +21086,24 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     const bate=dv.slice(0,7)===(r.data_pagamento||'').slice(0,7);
     return `<td style="padding:7px 10px;font-family:var(--mono)">${dataParcFmt}</td><td style="padding:7px 10px;text-align:center"><span style="font-weight:600;color:${bate?'var(--teal)':'var(--red)'}">${bate?'Sim':'Não'}</span></td>`;
   };
+  // Data Parcela/Mês Bate como PALPITE, quando ainda pendente (sem NF
+  // amarrada de verdade) — pedido do usuário 09/09/2026, mesmo texto: "não
+  // trouxe data da parcela e nem disse sim ou não pra se está dentro do mês".
+  const parcelaSugeridaCelsHtml=(sug)=>{
+    if(!sug?.data_vencimento) return `<td style="padding:7px 10px;color:var(--slate)">—</td><td style="padding:7px 10px;color:var(--slate);text-align:center">—</td>`;
+    const dataParcFmt=new Date(sug.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR');
+    const bate=sug.data_vencimento.slice(0,7)===(r.data_pagamento||'').slice(0,7);
+    return `<td style="padding:7px 10px;font-family:var(--mono);font-style:italic;color:var(--slate)" title="Palpite — ainda não confirmado">${dataParcFmt}?</td><td style="padding:7px 10px;text-align:center"><span style="font-weight:600;font-style:italic;color:${bate?'var(--teal)':'var(--red)'}">${bate?'Sim?':'Não?'}</span></td>`;
+  };
+  // Coluna Fluxo de Caixa — pedido do usuário 09/09/2026: "preciso ter a
+  // coluna Fluxo de Caixa, pois posso criar regra por ela, tentando
+  // associar ao fluxo, pra aqueles que ainda não estão conciliados".
+  const fluxoCelHtml=()=>{
+    if(!item.fluxoSugerido) return `<td style="padding:7px 10px;color:var(--slate)">—</td>`;
+    const f=item.fluxoSugerido;
+    const dFmt=f.data?new Date(f.data+'T00:00:00').toLocaleDateString('pt-BR'):'';
+    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(f.descricao||'')} — clique pra associar" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="font-style:italic;color:var(--teal);cursor:pointer">🔗 ${esc(f.descricao||'')} (${dFmt})</span></td>`;
+  };
 
   if(item.ctb.length&&ds.length===1&&cs.length===1){
     const d=ds[0], c=cs[0];
@@ -21076,6 +21122,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(d.cliente_fornecedor_nome||'')}">${esc(d.cliente_fornecedor_nome||'')}</td>
       <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(d.cnpj_cpf))}</td>
       ${parcelaCelsHtml(d.nf_parcela_id?d:(c.nf_parcela_id?c:null))}
+      <td style="padding:7px 10px;color:var(--slate)">—</td>
       <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
       ${iaCelHtml(d.origem_match==='ia'?d:c)}
     </tr>`;
@@ -21099,6 +21146,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(l.cliente_fornecedor_nome||'')}">${esc(l.cliente_fornecedor_nome||'')}</td>
         <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
         ${parcelaCelsHtml(l)}
+        <td style="padding:7px 10px;color:var(--slate)">—</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
         ${iaCelHtml(l)}
       </tr>`;
@@ -21121,7 +21169,8 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;color:var(--slate)">—</td>
     <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${item.comprovanteSugerido?'Sugestão via comprovante (ainda não conciliado): '+esc(item.comprovanteSugerido.cliente_fornecedor_nome||''):''}">${item.comprovanteSugerido?`<span style="font-style:italic;color:var(--slate)">${esc(item.comprovanteSugerido.cliente_fornecedor_nome||'')} ?</span>`:'—'}</td>
     <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);color:var(--slate);white-space:nowrap">${item.comprovanteSugerido?esc(_fmtCnpjCpf(item.comprovanteSugerido.cnpj_cpf)):'—'}</td>
-    <td style="padding:7px 10px;color:var(--slate)">—</td><td style="padding:7px 10px;color:var(--slate);text-align:center">—</td>
+    ${parcelaSugeridaCelsHtml(item.parcelaSugerida)}
+    ${fluxoCelHtml()}
     <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
     <td style="padding:7px 10px;color:var(--slate)">—</td>
   </tr>`;
@@ -21182,8 +21231,8 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   // pequenas (5-6%) e o título ("Classificação", "Descrição da conta"
   // etc.) ficava sobrepondo/cortado. Aqui cada uma tem ch suficiente pro
   // próprio título caber por inteiro.
-  const CH_DATA=9,CH_CONTA=11,CH_CLASSIF=16,CH_DESCR=21,CH_VALOR=10,CH_CLIENTE=26,CH_CNPJ=19,CH_DTPARC=11,CH_MESBATE=9,CH_STATUS=9,CH_IA=18;
-  const somaChFixo=CH_DATA+CH_CONTA*2+CH_CLASSIF*2+CH_DESCR*2+CH_VALOR+CH_CLIENTE+CH_CNPJ+CH_DTPARC+CH_MESBATE+CH_STATUS+CH_IA;
+  const CH_DATA=9,CH_CONTA=11,CH_CLASSIF=16,CH_DESCR=21,CH_VALOR=10,CH_CLIENTE=26,CH_CNPJ=19,CH_DTPARC=11,CH_MESBATE=9,CH_FLUXO=22,CH_STATUS=9,CH_IA=18;
+  const somaChFixo=CH_DATA+CH_CONTA*2+CH_CLASSIF*2+CH_DESCR*2+CH_VALOR+CH_CLIENTE+CH_CNPJ+CH_DTPARC+CH_MESBATE+CH_FLUXO+CH_STATUS+CH_IA;
   const minWidthTabela=Math.max(1320,(somaChFixo+chHistBanc+chHistUsado)*7.4);
   html+=`
   <table style="width:100%;min-width:${minWidthTabela}px;border-collapse:collapse;font-size:12.5px;table-layout:fixed">
@@ -21191,7 +21240,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <col style="width:${CH_DATA}ch"><col style="width:${CH_CONTA}ch"><col style="width:${CH_CLASSIF}ch"><col style="width:${CH_DESCR}ch">
       <col style="width:${CH_CONTA}ch"><col style="width:${CH_CLASSIF}ch"><col style="width:${CH_DESCR}ch"><col style="width:${CH_VALOR}ch">
       <col style="width:${chHistBanc}ch"><col style="width:${chHistUsado}ch"><col style="width:${CH_CLIENTE}ch"><col style="width:${CH_CNPJ}ch">
-      <col style="width:${CH_DTPARC}ch"><col style="width:${CH_MESBATE}ch"><col style="width:${CH_STATUS}ch"><col style="width:${CH_IA}ch">
+      <col style="width:${CH_DTPARC}ch"><col style="width:${CH_MESBATE}ch"><col style="width:${CH_FLUXO}ch"><col style="width:${CH_STATUS}ch"><col style="width:${CH_IA}ch">
     </colgroup>
     <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">
       <th style="padding:8px 10px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Data</th>
@@ -21208,6 +21257,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <th style="padding:8px 10px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">CPF/CNPJ</th>
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Data da Parcela (da NF amarrada a este lançamento)">Data Parcela</th>
       <th style="padding:8px 10px;text-align:center;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Mês da Parcela bate com o mês do pagamento?">Mês Bate?</th>
+      <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Linha do Fluxo de Caixa do cliente que bate valor+data com este lançamento — clique pra associar/criar Regra a partir dela">Fluxo de Caixa</th>
       <th style="padding:8px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Status</th>
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="🤖 Explicação da IA">🤖 Explicação da IA</th>
     </tr>
@@ -21228,6 +21278,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
         <option value="sim" ${_lancctbRegistroMesBate==='sim'?'selected':''}>Sim</option>
         <option value="nao" ${_lancctbRegistroMesBate==='nao'?'selected':''}>Não</option>
       </select></th>
+      <th style="padding:4px 6px"></th>
       <th style="padding:4px 6px"></th>
       <th style="padding:4px 6px"></th>
     </tr></thead>
@@ -22909,6 +22960,27 @@ const LANCCTB_FLUXO_CAMPOS=[
 function _lancctbNormalizarHeader(s){
   return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
 }
+// Pedido do usuário 09/09/2026: arquivo real da Auto Técnica tem uma linha
+// de TÍTULO ("AGOSTO"/2026) ANTES do cabeçalho de verdade — o código antigo
+// sempre assumia matriz[0]=cabeçalho, então a linha de título virava o
+// "cabeçalho" e nada dos candidatos batia (inclusive "detalhe pgto", que o
+// usuário mapeou manualmente sem efeito nenhum). Varre as primeiras linhas
+// da planilha e escolhe a que mais bate com os candidatos conhecidos.
+function _lancctbFluxoDetectarLinhaCabecalho(matriz){
+  const TODOS_CANDIDATOS=LANCCTB_FLUXO_CAMPOS.flatMap(c=>c.candidatos).map(_lancctbNormalizarHeader);
+  let melhorIdx=0,melhorScore=-1;
+  for(let i=0;i<Math.min(8,matriz.length);i++){
+    const linha=matriz[i];
+    if(!linha||!linha.length) continue;
+    let score=0;
+    linha.forEach(cel=>{
+      const h=_lancctbNormalizarHeader(cel);
+      if(h && TODOS_CANDIDATOS.some(c=>h===c||h.includes(c)||c.includes(h))) score++;
+    });
+    if(score>melhorScore){ melhorScore=score; melhorIdx=i; }
+  }
+  return melhorScore>0?melhorIdx:0;
+}
 // Varre os candidatos NA ORDEM DE PRIORIDADE da lista (não na ordem em que
 // as colunas aparecem no arquivo) — importante porque um mesmo arquivo pode
 // ter mais de uma coluna candidata (ex: "Vencimento" E "Data de pagamento";
@@ -23301,8 +23373,13 @@ function _lancctbFluxoProcessarAbas(wb,nomesAbas){
     const ws=wb.Sheets[nome];
     const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
     if(!matriz.length) return;
-    if(!matrizTotal) matrizTotal=[matriz[0],...matriz.slice(1)];
-    else matrizTotal.push(...matriz.slice(1));
+    // Descarta qualquer linha de título ANTES do cabeçalho de verdade (ex:
+    // "AGOSTO"/2026 numa linha própria) — detecta a linha de cabeçalho de
+    // cada aba individualmente, já que abas diferentes podem ter esse
+    // título ocupando um número diferente de linhas.
+    const idxCab=_lancctbFluxoDetectarLinhaCabecalho(matriz);
+    if(!matrizTotal) matrizTotal=[matriz[idxCab],...matriz.slice(idxCab+1)];
+    else matrizTotal.push(...matriz.slice(idxCab+1));
   });
   if(!matrizTotal||!matrizTotal.length){ status.textContent='Arquivo vazio.'; return; }
   _lancctbFluxoImportLinhas=matrizTotal;
