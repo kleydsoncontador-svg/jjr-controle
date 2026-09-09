@@ -28585,6 +28585,60 @@ function _ganhoParseDataParaMk(v){
   m=s.match(/^(\d{4})-(\d{2})$/); if(m) return m[2]+'/'+m[1]; // aaaa-mm
   return null;
 }
+// Modelo "BB Rende Fácil" — pedido do usuário 09/09/2026: "são essas
+// informações que vou levar pra cada coluna" (Resumo do mês: Aplicações/
+// Resgates líquidos/IR/IOF/Rendimentos no mês) — não precisa mapear coluna
+// nenhuma do extrato de movimentação, o resumo mensal já traz pronto
+// exatamente o que cada coluna da tela de Ganhos precisa. Mesmo regex já
+// validado contra o PDF real no Conversor de Aplicações (ver
+// _convAplicFinExtrairBBRendeFacil) — aqui só reaproveita o "Resumo do
+// mês" e escreve direto em ganho.dados, sem passar pelo mapeamento manual.
+async function _ganhoExtrairBBRendeFacil(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let textoCompleto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    textoCompleto+=' '+content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+  }
+  textoCompleto=textoCompleto.trim();
+  if(!/BB\s*RENDE\s*F[ÁA]CIL/i.test(textoCompleto)||!/Resumo\s+do\s+m[êe]s/i.test(textoCompleto)) return null;
+  const num=s=>_convCobrParseValor(s);
+  const mMesAno=textoCompleto.match(/Resumo\s+do\s+m[êe]s\s*-\s*([A-Za-zçÇ]+)\/(\d{4})/i);
+  if(!mMesAno) return null;
+  const mesesPt=['janeiro','fevereiro','março','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  const mesNum=mesesPt.findIndex(m=>m===mMesAno[1].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,''))+1;
+  if(!mesNum) return null;
+  const mk=String(mesNum).padStart(2,'0')+'/'+mMesAno[2];
+  function pegarResumo(rotuloRe){
+    const m=textoCompleto.match(new RegExp(rotuloRe+'\\s*:?\\s*(?:R\\$)?\\s*([\\d.,]+)','i'));
+    return m?num(m[1]):0;
+  }
+  // Pedido do usuário 09/09/2026: "são essas informações que vou levar pra
+  // cada coluna" + circulou o Rendimento* só das linhas "Resgate" — o
+  // "Rendimento Bruto s/ Resgates" da tela de Ganhos precisa ser a SOMA do
+  // Rendimento* só das linhas Resgate da tabela "Histórico de
+  // movimentação" (não o "Rendimentos no mês" do resumo, que mistura
+  // rendimento acumulado de Saldo Anterior/Saldo Final também).
+  const idxInicio=textoCompleto.search(/Hist[óo]rico\s+de\s+movimenta[çc][ãa]o/i);
+  const bloco=idxInicio>=0?textoCompleto.slice(idxInicio):'';
+  const rs='(?:R\\$\\s*)?([\\d.,]+)';
+  const reLinha=new RegExp('(\\d{2}/\\d{2}/\\d{4})\\s+(Saldo\\s+Anterior|Aplica[çc][ãa]o|Resgate|Saldo\\s+Final)\\s+'+rs+'\\s+'+rs+'\\s+'+rs+'\\s+'+rs+'\\s+'+rs,'gi');
+  let brutoResgates=0, m2;
+  while((m2=reLinha.exec(bloco))){
+    if(/^resgate$/i.test(m2[2])) brutoResgates+=num(m2[4]); // grupo 4 = coluna Rendimento*
+  }
+  return {
+    mk,
+    bruto: brutoResgates,
+    iof: pegarResumo('IOF\\s+sobre\\s+resgates\\s+no\\s+m[êe]s'),
+    irrf: pegarResumo('IR\\s+sobre\\s+resgates\\s+no\\s+m[êe]s'),
+    aplic: pegarResumo('Aplica[çc][õo]es\\s+no\\s+m[êe]s'),
+    resgate: pegarResumo('Resgates\\s+l[íi]quidos\\s+no\\s+m[êe]s'),
+  };
+}
 async function _ganhoUploadIAExtrair(){
   const {eid,pid}=_ganhoUploadIAContexto;
   const file=document.getElementById('ganhoUploadIAArquivo').files[0];
@@ -28594,6 +28648,21 @@ async function _ganhoUploadIAExtrair(){
   btn.disabled=true;
   statusEl.textContent='Lendo arquivo (pode levar alguns segundos)…';
   try{
+    // Modelo fixo "BB Rende Fácil" — reconhece sozinho, sem pedir mapeamento
+    // de coluna nenhum (pedido do usuário 09/09/2026).
+    const bb=await _ganhoExtrairBBRendeFacil(file);
+    if(bb){
+      const ganhos=getGanhos(eid),ganho=ganhos[pid];
+      if(!ganho.dados)ganho.dados={};
+      if(!ganho.dados[bb.mk])ganho.dados[bb.mk]={};
+      Object.assign(ganho.dados[bb.mk],{bruto:bb.bruto,iof:bb.iof,irrf:bb.irrf,aplic:bb.aplic,resgate:bb.resgate});
+      setGanhos(eid,ganhos);
+      statusEl.textContent='';
+      toast(`Extrato BB Rende Fácil processado — ${bb.mk} atualizado.`,'ok');
+      closeModal('mGanhoUploadIA');
+      if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
+      return;
+    }
     const extraido=await _convAplicFinExtrairGenerico(file);
     _ganhoUploadIAExtraido=extraido;
     const ganhos=getGanhos(eid),ganho=ganhos[pid];
