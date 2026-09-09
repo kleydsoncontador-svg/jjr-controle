@@ -2497,7 +2497,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
 <div class="mb" id="mLancctbImportMes" style="display:none">
   <div class="modal" style="max-width:400px">
     <div class="mt">
-      <h3>Importar mês</h3>
+      <h3 id="lancctbImportMesTitulo">Importar mês</h3>
       <div style="display:flex;gap:6px;align-items:center">
         <button title="Minimizar — continua processando, você pode navegar pelo site" onclick="minimizarLancctbModal('mLancctbImportMes','lancctbImportMesStatus','Importar mês (XMLs)')">&#x1F5D5;</button>
         <button onclick="closeModal('mLancctbImportMes')">&#x2715;</button>
@@ -2516,7 +2516,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
       <div id="lancctbImportMesStatus" style="font-size:12px;color:var(--slate);margin-top:10px"></div>
       <div class="ma">
         <button class="btn bo" onclick="closeModal('mLancctbImportMes')">Cancelar</button>
-        <button class="btn bp" id="lancctbImportMesConfirmarBtn" onclick="confirmarLancctbImportarMes()">📥 Importar mês</button>
+        <button class="btn bp" id="lancctbImportMesConfirmarBtn" onclick="_lancctbImportTodasModoAtivo?confirmarLancctbImportarMesTodas():confirmarLancctbImportarMes()">📥 Importar mês</button>
       </div>
     </div>
   </div>
@@ -16742,8 +16742,11 @@ function renderLancctbLista(){
   // "Período Finalizado" (pedido do usuário 09/09/2026, mesmo estilo já
   // usado em Ganhos/Rendimentos): mês/ano digitado à mão por empresa, linha
   // fica azul quando o mês finalizado já alcançou o Fechamento Atual.
-  let html=`<div style="margin-bottom:10px;max-width:280px">
-    <select class="si" onchange="_lancctbListaMudarFiltroResp(this.value)">${opcoesResp}</select>
+  let html=`<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
+    <div style="max-width:280px;flex:1;min-width:200px">
+      <select class="si" onchange="_lancctbListaMudarFiltroResp(this.value)">${opcoesResp}</select>
+    </div>
+    <button class="btn bo bsm" onclick="abrirLancctbImportarMesTodasModal()" title="Roda 'Importar mês' (pasta SIEG + Portal NFS-e) pra CADA empresa desta listagem, uma de cada vez">📥 Importar NF de todas as empresas</button>
   </div>
   <div class="tw" style="overflow-x:auto">
     <table class="data" style="width:100%">
@@ -17773,6 +17776,8 @@ async function abrirLancctbImportarMesModal(){
   if(!handle){ toast('Conceda acesso à pasta primeiro.','err'); return; }
   const perm=await handle.requestPermission({mode:'read'});
   if(perm!=='granted'){ toast('Acesso à pasta não concedido.','err'); return; }
+  _lancctbImportTodasModoAtivo=false;
+  document.getElementById('lancctbImportMesTitulo').textContent='Importar mês';
   document.getElementById('lancctbImportMesInput').value='';
   document.getElementById('lancctbImportMesAteInput').value='';
   document.getElementById('lancctbImportMesStatus').textContent='';
@@ -17795,23 +17800,18 @@ function _lancctbGerarIntervaloMeses(mesDe,mesAte){
   }
   return lista;
 }
-async function confirmarLancctbImportarMes(){
-  const mesDe=document.getElementById('lancctbImportMesInput').value;
-  const mesAteInput=document.getElementById('lancctbImportMesAteInput').value;
-  if(!mesDe){ toast('Escolha o mês.','err'); return; }
-  const mesAte=mesAteInput||mesDe;
-  if(mesAte<mesDe){ toast('O mês "até" precisa ser igual ou depois do mês "de".','err'); return; }
-  const meses=_lancctbGerarIntervaloMeses(mesDe,mesAte);
-  const eid=_lancctbEidAtual;
+// Núcleo do import de XMLs por pasta local, extraído de confirmarLancctbImportarMes
+// (pedido do usuário 09/09/2026: "dá pra criar um botão que busca as NF de
+// todas as empresas da listagem?") pra poder rodar tanto pra 1 empresa
+// (modal de dentro da empresa) quanto em loop pra todas as empresas da
+// listagem — a lógica de varredura das pastas (Entrada/Saída/Tomado/
+// Prestado × ano × mês, pulando arquivo já conhecido pela chave) é
+// EXATAMENTE a mesma de antes, só isolada em função própria; nenhum
+// comportamento mudou pra quem já usava "Importar mês" numa empresa só.
+async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onStatus){
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
-  if(!emp){ toast('Empresa não encontrada em Cadastro de Empresas.','err'); return; }
+  if(!emp) return { erro:'Empresa não encontrada em Cadastro de Empresas.' };
   const cnpjs=[...new Set([emp.cnpjNum,...(getFiliais(eid)||[]).map(f=>(f.cnpj||'').replace(/\D/g,''))].filter(Boolean))];
-
-  const handleRaiz=await _lancctbCarregarHandlePasta();
-  const dirXml=await _lancctbResolverPastaXml(handleRaiz);
-  const statusEl=document.getElementById('lancctbImportMesStatus');
-  const btn=document.getElementById('lancctbImportMesConfirmarBtn');
-  btn.disabled=true;
 
   // Pré-carrega as chaves de acesso já gravadas — o nome do arquivo de NF-e
   // na pasta da SIEG É a própria chave de 44 dígitos, então dá pra pular um
@@ -17819,9 +17819,8 @@ async function confirmarLancctbImportarMes(){
   // atalho genérico de _lancctbSalvarNotaFiscalArquivo, que só evita
   // upload/upsert mas ainda lê e faz parse do XML). NFS-e não tem esse
   // atalho (o nome do arquivo na pasta da SIEG não é a chave), só NF-e.
-  statusEl.textContent='Carregando chaves já importadas…';
+  if(onStatus) onStatus('Carregando chaves já importadas…');
   const chavesConhecidas=await _lancctbChavesConhecidas(eid);
-  const handleRaizNfse=await _lancctbCarregarHandleNfsePortal();
   const pastasNfse=_lancctbPastasNfsePortalGet(eid);
 
   let puladasPorNome=0;
@@ -17839,17 +17838,19 @@ async function confirmarLancctbImportarMes(){
     });
 
     const arquivos=[]; // {file, direcao}
-    for(const alvo of alvos){
-      try{
-        const dirMes=await dirXml.getDirectoryHandle(alvo.tipoPasta)
-          .then(d=>d.getDirectoryHandle(alvo.cnpj)).then(d=>d.getDirectoryHandle(alvo.papelPasta))
-          .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
-        for await (const [nome,fh] of dirMes.entries()){
-          if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
-          if(alvo.tipoPasta==='NF-es'&&chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
-          arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
-        }
-      } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
+    if(dirXml){
+      for(const alvo of alvos){
+        try{
+          const dirMes=await dirXml.getDirectoryHandle(alvo.tipoPasta)
+            .then(d=>d.getDirectoryHandle(alvo.cnpj)).then(d=>d.getDirectoryHandle(alvo.papelPasta))
+            .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+          for await (const [nome,fh] of dirMes.entries()){
+            if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
+            if(alvo.tipoPasta==='NF-es'&&chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
+            arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
+          }
+        } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
+      }
     }
 
     // 2ª fonte: NFS-e do Portal de Gestão (Contribuinte) — complementa o que
@@ -17876,15 +17877,36 @@ async function confirmarLancctbImportarMes(){
     if(!arquivos.length) continue;
     const contagemMes={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
     for(let i=0;i<arquivos.length;i++){
-      statusEl.textContent=`${mesNome}/${ano} — processando ${i+1}/${arquivos.length}… (${contagemMes.importada} salvas)`;
+      if(onStatus) onStatus(`${emp.nome} — ${mesNome}/${ano} — processando ${i+1}/${arquivos.length}… (${contagemMes.importada} salvas)`);
       const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas});
       contagemMes[resultado]++;
       contagemTotal[resultado]++;
     }
     resumoPorMes.push(`${mesNome}/${ano}: ${contagemMes.importada} salva(s)`);
   }
+  return { contagemTotal, resumoPorMes, puladasPorNome };
+}
+async function confirmarLancctbImportarMes(){
+  const mesDe=document.getElementById('lancctbImportMesInput').value;
+  const mesAteInput=document.getElementById('lancctbImportMesAteInput').value;
+  if(!mesDe){ toast('Escolha o mês.','err'); return; }
+  const mesAte=mesAteInput||mesDe;
+  if(mesAte<mesDe){ toast('O mês "até" precisa ser igual ou depois do mês "de".','err'); return; }
+  const meses=_lancctbGerarIntervaloMeses(mesDe,mesAte);
+  const eid=_lancctbEidAtual;
 
+  const handleRaiz=await _lancctbCarregarHandlePasta();
+  const dirXml=await _lancctbResolverPastaXml(handleRaiz);
+  const statusEl=document.getElementById('lancctbImportMesStatus');
+  const btn=document.getElementById('lancctbImportMesConfirmarBtn');
+  btn.disabled=true;
+
+  const handleRaizNfse=await _lancctbCarregarHandleNfsePortal();
+  const resultado=await _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,txt=>{statusEl.textContent=txt;});
   btn.disabled=false;
+  if(resultado.erro){ toast(resultado.erro,'err'); return; }
+  const { contagemTotal, resumoPorMes, puladasPorNome } = resultado;
+
   closeModal('mLancctbImportMes');
   const totalPuladas=puladasPorNome+contagemTotal.jaExistente;
   if(!contagemTotal.importada&&!totalPuladas){
@@ -17894,6 +17916,62 @@ async function confirmarLancctbImportarMes(){
   const prefixo=meses.length>1?`${meses.length} mês(es) (${resumoPorMes.join(' · ')||'nada novo'}): `:'';
   toast(`${prefixo}${contagemTotal.importada} nota(s) salva(s), ${totalPuladas} já existente(s) (pulada), ${contagemTotal.naoReconhecido} não reconhecida(s), ${contagemTotal.erro} erro(s).`, contagemTotal.erro?'err':'ok');
   renderLancctbConteudo();
+}
+// Pedido do usuário 09/09/2026: "dá pra criar um botão aqui, que busca as NF
+// de todas as empresa da listagem abaixo? Das duas pastas?" — mesmo modal
+// de escolher o mês, só que roda _lancctbImportarXmlsMesRange em loop pra
+// CADA empresa da listagem de Lançamentos Contábeis, uma de cada vez (não
+// em paralelo — a mesma pasta local sendo lida por várias operações ao
+// mesmo tempo é mais frágil, e o status de progresso fica ilegível).
+let _lancctbImportTodasModoAtivo=false;
+async function abrirLancctbImportarMesTodasModal(){
+  const handle=await _lancctbCarregarHandlePasta();
+  if(!handle){ toast('Conceda acesso à pasta SIEG primeiro (entre em qualquer empresa → Importar XMLs).','err'); return; }
+  const perm=await handle.requestPermission({mode:'read'});
+  if(perm!=='granted'){ toast('Acesso à pasta não concedido.','err'); return; }
+  _lancctbImportTodasModoAtivo=true;
+  document.getElementById('lancctbImportMesTitulo').textContent='Importar NF de TODAS as empresas da listagem';
+  document.getElementById('lancctbImportMesInput').value='';
+  document.getElementById('lancctbImportMesAteInput').value='';
+  document.getElementById('lancctbImportMesStatus').textContent='';
+  openModal('mLancctbImportMes');
+}
+async function confirmarLancctbImportarMesTodas(){
+  const mesDe=document.getElementById('lancctbImportMesInput').value;
+  const mesAteInput=document.getElementById('lancctbImportMesAteInput').value;
+  if(!mesDe){ toast('Escolha o mês.','err'); return; }
+  const mesAte=mesAteInput||mesDe;
+  if(mesAte<mesDe){ toast('O mês "até" precisa ser igual ou depois do mês "de".','err'); return; }
+  const meses=_lancctbGerarIntervaloMeses(mesDe,mesAte);
+  const eids=Object.keys(ensureMenuAdicionadasMigrado('lancctb')).sort((a,b)=>Number(a)-Number(b));
+  if(!eids.length){ toast('Nenhuma empresa na listagem.','err'); return; }
+
+  const statusEl=document.getElementById('lancctbImportMesStatus');
+  const btn=document.getElementById('lancctbImportMesConfirmarBtn');
+  btn.disabled=true;
+
+  const handleRaiz=await _lancctbCarregarHandlePasta();
+  const dirXml=await _lancctbResolverPastaXml(handleRaiz);
+  const handleRaizNfse=await _lancctbCarregarHandleNfsePortal();
+
+  const totalGeral={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
+  let puladasGeral=0, empresasComNota=0;
+  for(let i=0;i<eids.length;i++){
+    const eid=eids[i];
+    const emp=S.emps().find(e=>String(e.eid)===eid);
+    statusEl.textContent=`Empresa ${i+1}/${eids.length}: ${emp?emp.nome:eid}…`;
+    const resultado=await _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,txt=>{statusEl.textContent=`[${i+1}/${eids.length}] ${txt}`;});
+    if(resultado.erro) continue;
+    Object.keys(totalGeral).forEach(k=>totalGeral[k]+=resultado.contagemTotal[k]);
+    puladasGeral+=resultado.puladasPorNome;
+    if(resultado.contagemTotal.importada) empresasComNota++;
+  }
+  btn.disabled=false;
+  _lancctbImportTodasModoAtivo=false;
+  closeModal('mLancctbImportMes');
+  const totalPuladas=puladasGeral+totalGeral.jaExistente;
+  toast(`${eids.length} empresa(s) verificada(s), ${empresasComNota} com nota(s) nova(s): ${totalGeral.importada} nota(s) salva(s) no total, ${totalPuladas} já existente(s), ${totalGeral.naoReconhecido} não reconhecida(s), ${totalGeral.erro} erro(s).`, totalGeral.erro?'err':'ok');
+  renderLancctbLista();
 }
 // Aba "Importar XMLs" — pedido do usuário (05/09/2026): enquanto a API da
 // SIEG não funcionar, o card de importação sai de dentro de cada uma das 4
