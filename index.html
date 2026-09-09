@@ -26595,6 +26595,7 @@ function fecharGanhoDetalhe(){
 // mesmo padrão de extrato aplica sozinho, sem abrir o formulário de novo.
 let _ganhoUploadIAContexto=null; // {eid,pid}
 let _ganhoUploadIAExtraido=null; // {colunas,linhas,observacoes}
+let _lancctbGanhoMapColEntradas=[]; // [{col,secao}] — ordem dos selects renderizados em _renderGanhoMapeamentoForm
 function abrirGanhoUploadIAModal(eid,pid){
   _ganhoUploadIAContexto={eid,pid};
   _ganhoUploadIAExtraido=null;
@@ -26630,7 +26631,8 @@ async function _ganhoUploadIAExtrair(){
     const ganhos=getGanhos(eid),ganho=ganhos[pid];
     const colunasMapeaveis=extraido.colunas.filter(c=>!_ehColunaData(c));
     const mapSalvo=ganho.mapeamentoColunasIA;
-    const cobreTudo=mapSalvo&&colunasMapeaveis.every(c=>c in mapSalvo);
+    const entradasNecessarias=_lancctbGanhoEntradasMapeamento(colunasMapeaveis,extraido.linhas);
+    const cobreTudo=mapSalvo&&entradasNecessarias.every(({col,secao})=>(secao?col+'␟'+secao:col) in mapSalvo);
     statusEl.textContent='';
     if(cobreTudo){
       const qtdMeses=_ganhoAplicarMapeamento(eid,pid,extraido,mapSalvo);
@@ -26645,6 +26647,22 @@ async function _ganhoUploadIAExtrair(){
     toast('Erro ao extrair: '+e.message,'err');
     btn.disabled=false;
   }
+}
+// Determina, pra cada coluna mapeável, se ela precisa de UM mapeamento
+// (aparece numa seção só, ou o extrato não tem seções) ou de UM POR SEÇÃO
+// (mesma coluna com valor em 2+ seções distintas — ambígua, ver comentário
+// em _renderGanhoMapeamentoForm). Usado tanto pra montar o formulário
+// quanto pra decidir se um mapeamento já salvo cobre tudo (sem perguntar de
+// novo) — as duas pontas usam SEMPRE esta mesma lista, nunca cada uma com a
+// sua própria lógica, senão elas divergem silenciosamente.
+function _lancctbGanhoEntradasMapeamento(colunasMapeaveis,linhas){
+  const entradas=[];
+  colunasMapeaveis.forEach(col=>{
+    const secoesComValor=[...new Set(linhas.filter(l=>l[col]!=null&&l[col]!=='').map(l=>l._secao).filter(Boolean))];
+    if(secoesComValor.length>1) secoesComValor.forEach(secao=>entradas.push({col,secao}));
+    else entradas.push({col,secao:null});
+  });
+  return entradas;
 }
 function _renderGanhoMapeamentoForm(ganho,extraido,mapSalvo){
   // Sempre oferece o conjunto COMPLETO de colunas mapeáveis (Bruto, IOF,
@@ -26670,11 +26688,24 @@ function _renderGanhoMapeamentoForm(ganho,extraido,mapSalvo){
   </div>
   <div style="font-size:11px;color:var(--slate);margin-bottom:8px">O valor de cada coluna mapeada é somado por mês (mais de uma linha do mesmo mês — ex: mais de uma operação no período — soma na mesma célula). A coluna de data é usada só pra identificar o mês, não precisa mapear.<br>Se esse extrato NÃO tiver uma coluna pronta de "Rendimento do Mês", mapeie a coluna de <b>Saldo Bruto</b> (posição/saldo corrido do dia) como "Saldo Bruto do Extrato" — o rendimento é calculado sozinho pela diferença para o saldo do mês anterior.</div>
   <div style="display:grid;gap:8px">`;
-  colunasMapeaveis.forEach((col,i)=>{
-    const atual=mapAtual[col]||'';
+  // Pedido do usuário 08/09/2026: extratos com mais de uma seção (Aplicações
+  // / Resgates/Vencimentos) reaproveitam os MESMOS nomes de coluna com
+  // significado DIFERENTE em cada seção (ex: "Vlr Princ. (R$)" é o valor
+  // aplicado numa seção e o valor resgatado na outra) — mapear a coluna uma
+  // única vez pra tudo é ambíguo e sempre erra uma das duas. Quando a coluna
+  // tiver valor em mais de uma "_secao" (marcada pela IA — ver PROMPT em
+  // convaplicfin-extrair-tabela), pergunta uma vez POR SEÇÃO em vez de uma
+  // vez só; senão (coluna só aparece numa seção, ou o extrato não tem
+  // seções) pergunta uma vez só, como antes.
+  _lancctbGanhoMapColEntradas=_lancctbGanhoEntradasMapeamento(colunasMapeaveis,linhas);
+  _lancctbGanhoMapColEntradas.forEach((entrada,i)=>{
+    const{col,secao}=entrada;
+    const chave=secao?col+'␟'+secao:col;
+    const atual=mapAtual[chave]||'';
+    const rotulo=secao?`${col} <span style="font-weight:400;color:var(--slate)">(de ${esc(secao)})</span>`:esc(col);
     html+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px;background:var(--bg);border-radius:4px">
-      <b style="font-size:11.5px;min-width:220px">${esc(col)}</b>
-      <select class="si" id="ganhoMapCol_${i}" data-coluna="${esc(col)}" style="min-width:240px">
+      <b style="font-size:11.5px;min-width:220px">${rotulo}</b>
+      <select class="si" id="ganhoMapCol_${i}" data-chave="${esc(chave)}" style="min-width:240px">
         <option value="">— Ignorar —</option>
         ${colsAlvo.map(c=>`<option value="${esc(c.id)}" ${atual===c.id?'selected':''}>${esc(c.nome)}</option>`).join('')}
         <option value="saldoBrutoExtrato" ${atual==='saldoBrutoExtrato'?'selected':''}>Saldo Bruto do Extrato (calcula Rendimento do Mês pela diferença)</option>
@@ -26703,11 +26734,12 @@ function _ganhoUploadIASalvarMapeamento(){
   const {eid,pid}=_ganhoUploadIAContexto;
   const extraido=_ganhoUploadIAExtraido;
   if(!extraido){ toast('Extração não encontrada — tente novamente.','err'); return; }
-  const colunasMapeaveis=extraido.colunas.filter(c=>!_ehColunaData(c));
   const mapeamento={};
-  colunasMapeaveis.forEach((col,i)=>{
+  (_lancctbGanhoMapColEntradas||[]).forEach((entrada,i)=>{
     const v=document.getElementById('ganhoMapCol_'+i)?.value||'';
-    if(v) mapeamento[col]=v;
+    if(!v) return;
+    const chave=entrada.secao?entrada.col+'␟'+entrada.secao:entrada.col;
+    mapeamento[chave]=v;
   });
   if(!Object.keys(mapeamento).length){ toast('Mapeie ao menos uma coluna.','err'); return; }
   const ganhos=getGanhos(eid),ganho=ganhos[pid];
@@ -26733,9 +26765,18 @@ function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
   extraido.linhas.forEach(linha=>{
     const mk=chaveData?_ganhoParseDataParaMk(linha[chaveData]):null;
     if(!mk) return;
-    Object.keys(mapeamento).forEach(col=>{
-      const colId=mapeamento[col];
+    Object.keys(mapeamento).forEach(chave=>{
+      const colId=mapeamento[chave];
       if(!colId) return;
+      // Chave pode ser "NomeDaColuna" (aplica em qualquer linha) ou
+      // "NomeDaColuna␟NomeDaSeção" (só aplica na linha daquela seção — ver
+      // _renderGanhoMapeamentoForm: extrato com "Aplicações" e "Resgates/
+      // Vencimentos" reaproveita "Vlr Princ. (R$)" com significado
+      // diferente em cada seção, então o usuário mapeou uma vez por seção).
+      const idxSep=chave.indexOf('␟');
+      const col=idxSep<0?chave:chave.slice(0,idxSep);
+      const secaoExigida=idxSep<0?null:chave.slice(idxSep+1);
+      if(secaoExigida&&linha._secao!==secaoExigida) return;
       // Célula vazia/null (ex: linha de "Saldo Anterior"/posição de abertura,
       // datada do último dia do mês anterior, sem valores de movimentação
       // nessas colunas) não deve criar/zerar entrada nenhuma — só soma
