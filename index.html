@@ -7555,6 +7555,149 @@ async function _democExtrairTextoEChamarIA(edgeFnNome, file){
   return d;
 }
 
+// ─── Leitura automática da pasta local "Demonstrativos Contábeis" ──────────
+// Pasta real: X:\03 - CONTABIL\Documentação Suporte para Conciliação\
+// Demonstrativos Contábeis\{Balancete|DRE|Faturamento}\{ano}\
+// {Rótulo}_{eid}_{DDMMAAAA} a {DDMMAAAA}.pdf — confirmado com nomes reais
+// ("Balancete_163_01082026 a 31082026.pdf", "D. R. E._4_01082026 a
+// 31082026.pdf"). Livro Razão fica de fora (arquivo grande demais — mesma
+// razão já documentada em _democRenderRazaoSecao). Pedido do usuário
+// 08/09/2026: mesma técnica já usada em Tributos do Mês/SIEG/Portal NFS-e
+// (_lancctbAbrirDbHandles, mesmo IndexedDB, chave própria) — concede acesso
+// 1x, e um botão "Verificar pasta" lê o que tiver de novo.
+//
+// Fica LEVE de propósito: listar os arquivos de uma pasta (nome + data de
+// modificação) é instantâneo e não abre/lê o conteúdo de nada — o próprio
+// NOME do arquivo já basta pra saber empresa/mês. Só abre e manda pra IA
+// (Gemini) os arquivos genuinamente novos ou reexportados depois da última
+// importação (compara a data de modificação do arquivo com a da última vez
+// que foi lido, guardada em democGetArquivoMod) — os já importados e sem
+// mudança nunca são reabertos nem custam uma chamada de IA de novo.
+const DEMOC_SUBPASTA_TIPO={'Balancete':'balancete','DRE':'dre','Faturamento':'faturamento'};
+async function _democSalvarHandlePasta(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readwrite');
+    tx.objectStore('handles').put(handle,'raizDemoc');
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function _democCarregarHandlePasta(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readonly');
+    const req=tx.objectStore('handles').get('raizDemoc');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _democTemAcessoPasta(){
+  if(!window.showDirectoryPicker) return false;
+  try{
+    const handle=await _democCarregarHandlePasta();
+    if(!handle) return false;
+    return (await handle.queryPermission({mode:'read'}))==='granted';
+  } catch { return false; }
+}
+async function _democConcederAcessoPasta(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    await _democSalvarHandlePasta(handle);
+    toast('Acesso à pasta "Demonstrativos Contábeis" concedido! Clique em "Verificar pasta".','ok');
+    renderDemoc();
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+// "{Rótulo}_{eid}_{DDMMAAAA} a {DDMMAAAA}.pdf" → usa o mês/ano FINAL do
+// período (fim do fechamento), que é a competência de fato do documento.
+function _democParsearNomeArquivoPasta(nome){
+  const m=nome.match(/_(\d+)_\d{2}(\d{2})(\d{4})\s*a\s*\d{2}(\d{2})(\d{4})\.pdf$/i);
+  if(!m) return null;
+  return { eid:m[1], mes:m[4], ano:m[5] };
+}
+function democGetArquivoMod(tipo,eid,ano,mes){ return S.g('democ_mod_'+tipo+'_'+eid+'_'+ano+'_'+mes)||0; }
+function democSetArquivoMod(tipo,eid,ano,mes,ts){ S.s('democ_mod_'+tipo+'_'+eid+'_'+ano+'_'+mes,ts); }
+
+async function democVerificarPasta(){
+  const handleRaiz=await _democCarregarHandlePasta();
+  if(!handleRaiz){ toast('Conceda acesso à pasta primeiro.','err'); return; }
+  const perm=await handleRaiz.queryPermission({mode:'read'});
+  if(perm!=='granted'){ toast('Acesso à pasta expirou — conceda de novo.','err'); return; }
+
+  const btn=document.getElementById('democBtnVerificarPasta');
+  const txtOriginal=btn?btn.textContent:'';
+  if(btn){ btn.disabled=true; btn.textContent='Verificando pasta…'; }
+
+  try{
+    // 1ª passada: só nomes de arquivo + data de modificação (instantâneo,
+    // não abre conteúdo nenhum) — decide o que precisa ser reaberto de verdade.
+    const pendentes=[]; // {tipo,eid,ano,mes,fh,nome,lastModified}
+    let totalArquivos=0, semPadrao=0;
+    for(const nomePasta of Object.keys(DEMOC_SUBPASTA_TIPO)){
+      const tipo=DEMOC_SUBPASTA_TIPO[nomePasta];
+      let dirTipo;
+      try{ dirTipo=await handleRaiz.getDirectoryHandle(nomePasta); } catch { continue; }
+      for await (const [,dirAno] of dirTipo.entries()){
+        if(dirAno.kind!=='directory') continue;
+        for await (const [nomeArq,fh] of dirAno.entries()){
+          if(fh.kind!=='file'||!nomeArq.toLowerCase().endsWith('.pdf')) continue;
+          totalArquivos++;
+          const info=_democParsearNomeArquivoPasta(nomeArq);
+          if(!info){ semPadrao++; continue; }
+          const file=await fh.getFile(); // só metadado (lastModified/size)
+          const modAnterior=democGetArquivoMod(tipo,info.eid,info.ano,info.mes);
+          if(file.lastModified<=modAnterior) continue; // já importado e sem mudança — pula sem abrir
+          pendentes.push({ tipo, eid:info.eid, ano:info.ano, mes:info.mes, fh, nome:nomeArq, lastModified:file.lastModified });
+        }
+      }
+    }
+
+    if(!pendentes.length){
+      toast('Pasta verificada: '+totalArquivos+' arquivo(s) encontrados, nada novo pra importar.','ok');
+      return;
+    }
+
+    // 2ª passada: só os arquivos genuinamente novos/alterados vão pra IA.
+    let importados=0, substituidos=0, erros=0;
+    for(const p of pendentes){
+      if(btn) btn.textContent='Lendo '+(importados+substituidos+erros+1)+'/'+pendentes.length+'…';
+      try{
+        const jaExistia=p.tipo!=='faturamento'&&!!democGetDoc(p.tipo,p.eid,p.ano,p.mes);
+        const file=await p.fh.getFile();
+        const d=await _democExtrairTextoEChamarIA(_democEdgeFnTipo(p.tipo),file);
+        let aplicado;
+        if(p.tipo==='faturamento'){
+          aplicado=_democAplicarFaturamento(p.eid,d,p.nome);
+        } else {
+          // O nome do arquivo já garante a competência certa — não depende
+          // da IA acertar sozinha uma data lida de dentro do PDF.
+          d.mes=p.mes; d.ano=p.ano;
+          aplicado=_democAplicarDocContas(p.tipo,p.eid,d,p.nome);
+        }
+        if(!aplicado.ok){ erros++; continue; }
+        democSetArquivoMod(p.tipo,p.eid,p.ano,p.mes,p.lastModified);
+        if(democGetEmpresas().indexOf(p.eid)<0) democSetEmpresas(democGetEmpresas().concat([p.eid]));
+        if(jaExistia){
+          substituidos++;
+          const empInfo=democInfoEmpresa(p.eid);
+          _democRegistrarSubstituicao(empInfo?empInfo.nome:p.eid, _democLabelTipo(p.tipo)+' '+p.mes+'/'+p.ano);
+        } else {
+          importados++;
+        }
+      }catch(e){
+        console.error('democVerificarPasta erro em '+p.nome+':',e);
+        erros++;
+      }
+    }
+
+    toast('Pasta verificada: '+importados+' novo(s), '+substituidos+' atualizado(s)'+(erros?', '+erros+' erro(s)':'')+(semPadrao?' ('+semPadrao+' arquivo(s) fora do padrão de nome, ignorado(s))':'')+'.', erros?'err':'ok');
+    renderDemoc();
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent=txtOriginal||'🔄 Verificar pasta'; }
+  }
+}
+
 function renderDemoc(){
   var container=document.getElementById('democContainer');
   if(!container) return;
@@ -7601,8 +7744,13 @@ function _renderDemocImpl(container){
     return;
   }
 
-  var html='<div class="hide-in-print" style="padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--border)">'
-    +'<label style="font-weight:600;color:#1E3558;display:block;margin-bottom:8px;font-size:12.5px">Anexar documentos (várias empresas de uma vez):</label>'
+  var html='<div class="hide-in-print" style="display:flex;gap:8px;align-items:center;margin-bottom:14px;padding-bottom:14px;border-bottom:1px solid var(--border);flex-wrap:wrap">'
+    +'<button class="btn bo bsm" onclick="_democConcederAcessoPasta()">📁 Conceder acesso à pasta local</button>'
+    +'<button class="btn bp bsm" id="democBtnVerificarPasta" onclick="democVerificarPasta()">🔄 Verificar pasta</button>'
+    +'<span style="font-size:11px;color:var(--slate)">Lê sozinho os Balancetes/DREs/Faturamentos novos da pasta "Demonstrativos Contábeis" — sem precisar anexar um por um.</span>'
+    +'</div>'
+    +'<div class="hide-in-print" style="padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--border)">'
+    +'<label style="font-weight:600;color:#1E3558;display:block;margin-bottom:8px;font-size:12.5px">Ou anexar manualmente (várias empresas de uma vez):</label>'
     +'<div style="display:flex;flex-direction:column;gap:10px;align-items:flex-start">'
     +DEMOC_TIPOS_ORDEM.filter(function(t){ return t!=='razao'; }).map(function(tipo){ return _democRenderBulkForm(tipo); }).join('')
     +'</div>'
@@ -7724,14 +7872,25 @@ async function _democBulkExtrairIncluir(tipo){
 }
 
 let _democUnicoFormAberto={};
+// Pedido do usuário 08/09/2026: "entrei na Fast Lube, deveria poder clicar
+// em Balancete, DRE, Livro Razão, um ao lado do outro... conforme eu for
+// clicando vai abrindo ao lado [da aba], não abaixo" — trocou o empilhado
+// vertical (as 4 seções sempre abertas, uma embaixo da outra) por abas
+// horizontais, só a selecionada aparece por vez.
+let _democTipoAtivo='balancete';
+function democSelecionarTipo(tipo){
+  _democTipoAtivo=tipo;
+  renderDemoc();
+}
 function _democRenderEmpBody(eid){
-  var h='<div style="padding:12px 16px;display:flex;flex-direction:column;gap:18px">';
+  if(DEMOC_TIPOS_ORDEM.indexOf(_democTipoAtivo)<0) _democTipoAtivo='balancete';
+  var h='<div style="display:flex;gap:4px;border-bottom:2px solid var(--border);margin-bottom:14px">';
   DEMOC_TIPOS_ORDEM.forEach(function(tipo){
-    h+='<div>'
-      +'<div style="font-size:11px;font-weight:700;color:var(--slate);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">'+_democLabelPluralTipo(tipo)+'</div>'
-      +(tipo==='faturamento'?_democRenderFaturamentoSecao(eid):tipo==='razao'?_democRenderRazaoSecao(eid):_democRenderContasSecao(tipo,eid))
-      +'</div>';
+    var ativo=tipo===_democTipoAtivo;
+    h+='<button onclick="democSelecionarTipo(\''+tipo+'\')" style="padding:8px 16px;font-size:12.5px;font-weight:700;border:none;border-bottom:2px solid '+(ativo?'#1E3558':'transparent')+';margin-bottom:-2px;background:none;color:'+(ativo?'#1E3558':'var(--slate)')+';cursor:pointer">'+_democLabelPluralTipo(tipo)+'</button>';
   });
+  h+='</div><div style="padding:0 4px 12px">';
+  h+=(_democTipoAtivo==='faturamento'?_democRenderFaturamentoSecao(eid):_democTipoAtivo==='razao'?_democRenderRazaoSecao(eid):_democRenderContasSecao(_democTipoAtivo,eid));
   h+='</div>';
   return h;
 }
@@ -7840,31 +7999,78 @@ function _democRenderContasSecao(tipo, eid){
       +'<span id="democUnicoStatus_'+tipo+'_'+eid+'" style="font-size:12px;color:var(--slate)"></span>'
       +'</div></div>';
   }
-  h+='<div style="margin-top:10px">';
-  if(!docs.length){
-    h+='<div style="color:var(--slate);font-size:12.5px">Nenhum documento anexado ainda.</div>';
-  } else {
-    h+='<table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px">'
-      +'<thead><tr>'
-      +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Mês/Ano</th>'
-      +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Contas</th>'
-      +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Arquivo</th>'
-      +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Incluído em</th>'
-      +'<th style="padding:6px 10px;background:var(--ink2);color:#fff"></th>'
-      +'</tr></thead><tbody>';
-    docs.slice().reverse().forEach(function(b,i){
-      var dados=democGetDoc(tipo,eid,b.ano,b.mes);
-      h+='<tr style="background:'+(i%2===0?'var(--white)':'var(--bg)')+'">'
-        +'<td style="padding:6px 10px">'+(LUC_MESES_FULL[parseInt(b.mes,10)-1]||b.mes)+'/'+b.ano+'</td>'
-        +'<td style="padding:6px 10px;text-align:right;font-family:var(--mono)">'+(dados?dados.contas.length:'—')+'</td>'
-        +'<td style="padding:6px 10px">'+esc(dados?dados.arquivo:'')+'</td>'
-        +'<td style="padding:6px 10px">'+esc(dados?dados.dataInclusao:'')+'</td>'
-        +'<td style="padding:6px 10px"><button class="btn bd bsm" style="font-size:10px" onclick="democExcluirDoc(\''+tipo+'\',\''+eid+'\',\''+b.ano+'\',\''+b.mes+'\')">🗑</button></td>'
-        +'</tr>';
+  h+=_democRenderPagerEContas(tipo,eid,docs);
+  return h;
+}
+// Pedido do usuário 08/09/2026: "na visualização de baixo, conseguirmos
+// passar pros lados mês a mês" — troca a lista plana de meses por um pager
+// (◄ Mês/Ano ►) que mostra as contas do mês selecionado, uma de cada vez.
+let _democMesVisualizando={}; // chave "tipo|eid" -> {ano,mes} atualmente exibido
+function democMesVisNavegar(tipo,eid,delta){
+  var docs=democGetDocsLista(tipo,eid);
+  if(!docs.length) return;
+  var chave=tipo+'|'+eid;
+  var atual=_democMesVisualizando[chave];
+  var idx=atual?docs.findIndex(function(d){return d.ano===atual.ano&&d.mes===atual.mes;}):-1;
+  if(idx<0) idx=docs.length-1;
+  idx=Math.max(0,Math.min(docs.length-1,idx+delta));
+  _democMesVisualizando[chave]=docs[idx];
+  renderDemoc();
+}
+// DRE é composta por contas de resultado, que costumam ser lançadas mês a
+// mês (não são um saldo patrimonial corrido) — soma-se o saldo de cada
+// conta de janeiro até o mês exibido pra dar o Acumulado no Ano (pedido do
+// usuário 08/09/2026). Balancete não entra aqui: lá "saldo" já É o saldo
+// corrido da conta (Ativo/Passivo/PL) — somar mês a mês dobraria o valor.
+function _democContasAcumuladas(tipo,eid,ano,mesLimite){
+  var acumulado={};
+  democGetDocsLista(tipo,eid).filter(function(d){ return d.ano===ano&&d.mes<=mesLimite; }).forEach(function(d){
+    var dados=democGetDoc(tipo,eid,d.ano,d.mes);
+    (dados&&dados.contas||[]).forEach(function(c){
+      var chaveConta=c.codigo_analitico||('nome:'+c.nome_conta);
+      acumulado[chaveConta]=(acumulado[chaveConta]||0)+(parseFloat(c.saldo)||0);
     });
-    h+='</tbody></table>';
+  });
+  return acumulado;
+}
+function _democRenderPagerEContas(tipo,eid,docs){
+  docs=docs||democGetDocsLista(tipo,eid);
+  if(!docs.length) return '<div style="color:var(--slate);font-size:12.5px;margin-top:10px">Nenhum documento anexado ainda.</div>';
+  var chave=tipo+'|'+eid;
+  var atual=_democMesVisualizando[chave];
+  var idx=atual?docs.findIndex(function(d){return d.ano===atual.ano&&d.mes===atual.mes;}):-1;
+  if(idx<0){ idx=docs.length-1; atual=docs[idx]; _democMesVisualizando[chave]=atual; }
+  var dados=democGetDoc(tipo,eid,atual.ano,atual.mes);
+  var mostraAcumulado=(tipo==='dre');
+  var acumulado=mostraAcumulado?_democContasAcumuladas(tipo,eid,atual.ano,atual.mes):null;
+  var h='<div style="display:flex;align-items:center;gap:10px;margin-top:12px;margin-bottom:8px;flex-wrap:wrap">'
+    +'<button class="btn bo bsm" '+(idx<=0?'disabled':'')+' onclick="democMesVisNavegar(\''+tipo+'\',\''+eid+'\',-1)">◄</button>'
+    +'<div style="font-weight:700;min-width:130px;text-align:center;color:#1E3558">'+(LUC_MESES_FULL[parseInt(atual.mes,10)-1]||atual.mes)+'/'+atual.ano+'</div>'
+    +'<button class="btn bo bsm" '+(idx>=docs.length-1?'disabled':'')+' onclick="democMesVisNavegar(\''+tipo+'\',\''+eid+'\',1)">►</button>'
+    +'<span style="font-size:11.5px;color:var(--slate)">'+(dados?dados.contas.length:0)+' conta(s) · '+esc(dados?dados.arquivo:'')+' · incluído em '+esc(dados?dados.dataInclusao:'')+'</span>'
+    +'<button class="btn bd bsm" style="margin-left:auto;font-size:10px" onclick="democExcluirDoc(\''+tipo+'\',\''+eid+'\',\''+atual.ano+'\',\''+atual.mes+'\')">🗑 Excluir este mês</button>'
+    +'</div>';
+  if(!dados||!dados.contas||!dados.contas.length){
+    return h+'<div style="color:var(--slate);font-size:12.5px">Sem contas registradas pra este mês.</div>';
   }
-  h+='</div>';
+  h+='<div style="max-height:460px;overflow:auto;border:1px solid var(--border);border-radius:6px">'
+    +'<table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px">'
+    +'<thead><tr style="position:sticky;top:0;z-index:1">'
+    +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Código</th>'
+    +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Conta</th>'
+    +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saldo do mês</th>'
+    +(mostraAcumulado?'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Acumulado no ano</th>':'')
+    +'</tr></thead><tbody>';
+  dados.contas.forEach(function(c,i){
+    var chaveConta=c.codigo_analitico||('nome:'+c.nome_conta);
+    h+='<tr style="background:'+(i%2===0?'var(--white)':'var(--bg)')+'">'
+      +'<td style="padding:5px 10px;font-family:var(--mono)">'+esc(c.codigo_analitico||'')+'</td>'
+      +'<td style="padding:5px 10px">'+esc(c.nome_conta||'')+'</td>'
+      +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(c.saldo!=null?_fmt(c.saldo):'—')+'</td>'
+      +(mostraAcumulado?'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+_fmt(acumulado[chaveConta]||0)+'</td>':'')
+      +'</tr>';
+  });
+  h+='</tbody></table></div>';
   return h;
 }
 function _democRenderFaturamentoSecao(eid){
