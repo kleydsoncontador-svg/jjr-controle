@@ -17609,6 +17609,217 @@ async function _lancctbConcederAcessoPastaTributos(){
   } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
 }
 
+// ─── ConfiBackup (Folha de Pagamento/Adiantamento Mensal) — pedido do
+// usuário 09/09/2026: "Crie o botão Processar FOPAG, pra tentar matar
+// lançamento da folha". Pasta real: X:\01 - PÚBLICA\ConfiBackup\({eid})
+// {NOME}\{Folha de Pagamento|Adiantamento Mensal}\{MM-AAAA}\{MM-AAAA}
+// Relatorio de Liquidos[ Adiantamento].pdf — se não achar na pasta certa,
+// cai pra sem_tipo_tarefa\{MM-AAAA}\ (confirmado real: nem todo mês cai no
+// tipo certo). Mesmo handle genérico ('raizConfiBackup', mesmo IndexedDB).
+async function _lancctbSalvarHandleConfiBackup(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readwrite');
+    tx.objectStore('handles').put(handle,'raizConfiBackup');
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function _lancctbCarregarHandleConfiBackup(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readonly');
+    const req=tx.objectStore('handles').get('raizConfiBackup');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _lancctbTemAcessoPastaConfiBackup(){
+  if(!window.showDirectoryPicker) return false;
+  try{
+    const handle=await _lancctbCarregarHandleConfiBackup();
+    if(!handle) return false;
+    return (await handle.queryPermission({mode:'read'}))==='granted';
+  } catch { return false; }
+}
+async function _lancctbConcederAcessoPastaConfiBackup(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    await _lancctbSalvarHandleConfiBackup(handle);
+    toast('Acesso à pasta "ConfiBackup" concedido!','ok');
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+// Acha a pasta da empresa dentro do ConfiBackup pelo prefixo "({eid})" no
+// nome (confirmado real: "(34) AUTO TECNICA NACIONAL & MECANICA LTDA").
+async function _lancctbAcharPastaEmpresaConfiBackup(handleRaiz,eid){
+  for await (const [nome,fh] of handleRaiz.entries()){
+    if(fh.kind==='directory'&&nome.startsWith('('+eid+')')) return fh;
+  }
+  return null;
+}
+// Acha o PDF "Relatorio de Liquidos" (salário) ou "Relatorio de Liquidos
+// Adiantamento" pra uma competência — tenta a pasta típica primeiro,
+// sem_tipo_tarefa como 2ª tentativa (mesmo espírito do resto do módulo).
+async function _lancctbBuscarRelatorioLiquidos(pastaEmpresa,competenciaMMAAAA,tipo){
+  const pastaTipica=tipo==='salario'?'Folha de Pagamento':'Adiantamento Mensal';
+  const nomeArquivo=tipo==='salario'?`${competenciaMMAAAA} Relatorio de Liquidos.pdf`:`${competenciaMMAAAA} Relatorio de Liquidos Adiantamento.pdf`;
+  for(const pastaTentativa of [pastaTipica,'sem_tipo_tarefa']){
+    try{
+      const dirTipo=await pastaEmpresa.getDirectoryHandle(pastaTentativa);
+      const dirMes=await dirTipo.getDirectoryHandle(competenciaMMAAAA);
+      const fh=await dirMes.getFileHandle(nomeArquivo);
+      return await fh.getFile();
+    }catch(e){ /* não achou nessa pasta — tenta a próxima */ }
+  }
+  return null;
+}
+// Lê o PDF "RELAÇÃO GERAL DOS LÍQUIDOS" — extrai o Total da Empresa (pra
+// conferência de valor, mais confiável que somar linha por linha) e cada
+// funcionário/sócio (nome+CPF+valor), separando "Empregados" de
+// "Contribuintes" (sócios, vão pra conta 1.2.9.x — ver _lancctbContaDoSocio).
+async function _lancctbParsearRelatorioLiquidos(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const page=await pdf.getPage(1);
+  const content=await page.getTextContent();
+  const texto=content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+  if(!/RELA[ÇC][ÃA]O GERAL DOS L[ÍI]QUIDOS/i.test(texto)) return null;
+  const mComp=texto.match(/Compet[êe]ncia:\s*(\d{2}\/\d{4})/i);
+  const competencia=mComp?mComp[1].replace('/','-'):null;
+  const mTotal=texto.match(/Total da Empresa:\s*([\d.,]+)/i);
+  if(!mTotal) return null;
+  const total=_convCobrParseValor(mTotal[1]);
+  // Linhas de pessoa: "{código} {NOME}{espaços}{CPF} {valor}" — o nome pode
+  // ter várias palavras, então captura tudo até o CPF (padrão fixo
+  // 999.999.999-99) como delimitador confiável.
+  const idxEmpregados=texto.search(/\bEmpregados\b/i);
+  const idxContribuintes=texto.search(/\bContribuintes\b/i);
+  const idxFim=texto.search(/Empregados:\s*\d+\s*Estagi[áa]rios/i);
+  const pessoas=[];
+  const extrairBloco=(inicio,fimBloco,tipo)=>{
+    if(inicio<0) return;
+    const bloco=texto.slice(inicio,fimBloco>=0?fimBloco:texto.length);
+    const re=/(\d+)\s+([A-ZÀ-Üa-zà-ü.\s]+?)\s+(\d{3}\.\d{3}\.\d{3}-\d{2})\s+([\d.,]+)/g;
+    let m;
+    while((m=re.exec(bloco))){
+      pessoas.push({ codigo:m[1], nome:m[2].trim(), cpf:m[3], valor:_convCobrParseValor(m[4]), tipo });
+    }
+  };
+  extrairBloco(idxEmpregados,idxContribuintes>=0?idxContribuintes:idxFim,'empregado');
+  extrairBloco(idxContribuintes,idxFim,'contribuinte');
+  return { competencia, total, pessoas };
+}
+// Botão "📋 Processar FOPAG" (Registro Contábil) — pra cada pendência de
+// SAÍDA da conta, tenta achar um Relatório de Líquidos (salário na
+// competência do mês ANTERIOR primeiro — pagamento de julho costuma ser
+// competência de junho; adiantamento não desloca, usa o mês do período)
+// cuja soma bate exato com o valor do lançamento. Resolve com 1 linha de
+// contrapartida por PESSOA (não uma linha genérica): empregado vai pra
+// conta 187 (salário) ou 724 (adiantamento — padrão do escritório, ver
+// reference_contas_padrao_mistercontador); sócio (seção "Contribuintes")
+// vai pra conta 1.2.9.x dele (mesmo cruzamento por nome já usado no motor
+// de matching geral, _lancctbAcharSocioPorHistorico/_lancctbContaDoSocio).
+// NÃO cobre ainda (deixado pra depois, combinado com o usuário): 2ª fonte
+// "Relatórios FOPAG para Contábil", Recibo de Férias, combinação Sispag+
+// Distribuição de Lucros, e o acúmulo de "diferença" de pró-labore mês a
+// mês — pendência que não bater fecha sem mexer, fica como está hoje.
+async function _lancctbProcessarFopag(){
+  const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
+  if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  const temAcesso=await _lancctbTemAcessoPastaConfiBackup();
+  if(!temAcesso){ toast('Conceda acesso à pasta ConfiBackup primeiro — clique em "📁 Conceder acesso ao ConfiBackup".','err'); return; }
+  const handleRaiz=await _lancctbCarregarHandleConfiBackup();
+  const perm=await handleRaiz.requestPermission({mode:'read'});
+  if(perm!=='granted'){ toast('Acesso à pasta não concedido.','err'); return; }
+
+  const btn=document.getElementById('lancctbProcessarFopagBtn');
+  const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
+  if(btn) btn.disabled=true;
+  try{
+    const emp=S.emps().find(e=>String(e.eid)===String(eid));
+    if(!emp){ toast('Empresa não encontrada.','err'); return; }
+    const pastaEmpresa=await _lancctbAcharPastaEmpresaConfiBackup(handleRaiz,eid);
+    if(!pastaEmpresa){ toast(`Não achei a pasta "(${eid}) ..." dentro do ConfiBackup.`,'err'); return; }
+
+    const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+      .select('id,data_pagamento,valor_saida,historico_bancario')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0));
+    if(!pendencias||!pendencias.length){ toast('Nenhuma pendência de saída nesta conta.','ok'); return; }
+
+    const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
+      .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
+    if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada.','err'); return; }
+    const { data: contasFixas } = await _supaClient.from('plano_contas')
+      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['187','724']);
+    const contaSalario=(contasFixas||[]).find(c=>c.numero_conta==='187');
+    const contaAdiantamento=(contasFixas||[]).find(c=>c.numero_conta==='724');
+    const socios=lucSocGet(eid);
+    const { data: contasSocios } = socios.length
+      ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
+          .eq('empresa_eid',eid).ilike('classificacao','1.2.9%').eq('ativo',true))
+      : { data:[] };
+
+    const mesAnterior=(mmaaaa)=>{
+      let [mm,aaaa]=mmaaaa.split('-').map(Number);
+      mm--; if(mm<1){mm=12;aaaa--;}
+      return `${String(mm).padStart(2,'0')}-${aaaa}`;
+    };
+
+    let resolvidos=0, semAchado=0;
+    for(let i=0;i<pendencias.length;i++){
+      const l=pendencias[i];
+      if(statusEl) statusEl.textContent=`Processando FOPAG ${i+1}/${pendencias.length}…`;
+      const mmaaaaPeriodo=l.data_pagamento.slice(0,7).split('-').reverse().join('-'); // "AAAA-MM" → "MM-AAAA"
+      const tentativas=[
+        { tipo:'salario', competencia:mesAnterior(mmaaaaPeriodo) },
+        { tipo:'adiantamento', competencia:mmaaaaPeriodo },
+      ];
+      let achou=null;
+      for(const t of tentativas){
+        const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,t.competencia,t.tipo);
+        if(!file) continue;
+        let dados;
+        try{ dados=await _lancctbParsearRelatorioLiquidos(file); } catch(e){ console.error('Falha ao ler Relatório de Líquidos:',e); continue; }
+        if(dados&&Math.abs(dados.total-l.valor_saida)<=0.01){ achou={...t,dados}; break; }
+      }
+      if(!achou){ semAchado++; continue; }
+
+      const contaContrapartidaPadrao=achou.tipo==='salario'?contaSalario:contaAdiantamento;
+      const linhas=[
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'regra' },
+      ];
+      let linhasFecharam=true;
+      achou.dados.pessoas.forEach(p=>{
+        let contaId2=null, classif=null;
+        if(p.tipo==='contribuinte'){
+          const socio=_lancctbAcharSocioPorHistorico(socios,p.nome);
+          const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
+          if(conta){ contaId2=conta.id; classif=conta.classificacao; }
+        } else if(contaContrapartidaPadrao){
+          contaId2=contaContrapartidaPadrao.id; classif=contaContrapartidaPadrao.classificacao;
+        }
+        if(!contaId2){ linhasFecharam=false; return; }
+        linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:classif, conta_contabil_id:contaId2, tipo:'D', valor:p.valor, historico:`Pagamento ref. salário ${achou.dados.competencia||achou.competencia} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+      });
+      // Se algum funcionário/sócio não tem conta contábil resolvível
+      // (falta 187/724 no Plano de Contas, ou sócio sem 1.2.9.x cadastrado),
+      // não arrisca gravar partida incompleta — fica pendente.
+      if(!linhasFecharam||linhas.length<2){ semAchado++; continue; }
+      const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+      if(error){ console.error('Erro ao gravar lançamento FOPAG:',error); semAchado++; continue; }
+      await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+      resolvidos++;
+    }
+    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s), ${semAchado} sem Relatório de Líquidos correspondente (ou conta contábil faltando).`,'ok');
+    renderLancctbRegistroContabil();
+  } finally {
+    if(btn) btn.disabled=false;
+    if(statusEl) statusEl.textContent='';
+  }
+}
+
 // ─── NFS-e Portal de Gestão (Contribuinte) — 2ª fonte de NFS-e, complementa
 // o que a SIEG não capturou (pedido do usuário, 05/09/2026). Pasta real:
 // X:\03 - CONTABIL\NFS-e - Portal de Gestão NFS-e - Contribuinte\{empresa}\
@@ -22230,6 +22441,8 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <span id="lancctbRegistroProcessarStatus" style="font-size:11.5px;color:var(--slate)"></span>
       <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
+      <button class="btn bo bsm" onclick="_lancctbConcederAcessoPastaConfiBackup()" title="Concede acesso 1x à pasta ConfiBackup (X:\\01 - PÚBLICA\\ConfiBackup), usada pelo Processar FOPAG">📁 Conceder acesso ConfiBackup</button>
+      <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbProcessarFopag()" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele">📋 Processar FOPAG</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
       <button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>
