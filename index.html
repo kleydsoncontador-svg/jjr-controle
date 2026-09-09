@@ -20787,6 +20787,18 @@ function _lancctbOpcoesDocVisaoGeral(eid,selecionado){
 function _lancctbDiffDias(d1,d2){
   return Math.abs((new Date(d1+'T00:00:00')-new Date(d2+'T00:00:00'))/86400000);
 }
+// Conta quantas palavras (3+ letras, sem stopword) dois textos têm em
+// comum — usado pra desempatar sugestões (ex: Fluxo de Caixa) que batem
+// por valor+data mas podem ser de fornecedores completamente diferentes.
+const LANCCTB_STOPWORDS_MATCH=new Set(['ltda','ltd','sociedade','com','de','da','do','das','dos','em','e','pago','pagamento','recebido','recebimento','boleto','pix','transferencia','transf','enviado']);
+function _lancctbTextoScoreSimilaridade(a,b){
+  const norm=s=>String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().match(/[a-z0-9]{3,}/g)||[];
+  const tokensA=new Set(norm(a).filter(t=>!LANCCTB_STOPWORDS_MATCH.has(t)));
+  const tokensB=norm(b).filter(t=>!LANCCTB_STOPWORDS_MATCH.has(t));
+  let score=0;
+  tokensB.forEach(t=>{ if(tokensA.has(t)) score++; });
+  return score;
+}
 // Subset-sum por força bruta sobre até 15 valores (2^15=32768 combinações,
 // rápido) — alvo e valores em CENTAVOS inteiros pra evitar erro de ponto
 // flutuante. Testa combinações com menos itens primeiro (mais plausível
@@ -21826,12 +21838,27 @@ async function renderLancctbRegistroContabil(){
       const nfMatch=(parcelasPend||[]).filter(p=>p.notas_fiscais?.direcao===direcaoAlvo)
         .find(p=>Math.abs(p.valor_parcela-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_NF&&_lancctbDiffDias(p.data_vencimento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS*3);
       if(nfMatch) item.parcelaSugerida=nfMatch;
-      const fluxoMatch=(fluxoPend||[]).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
-        .find(f=>{
+      // Pedido do usuário 09/09/2026 (caso real: histórico "GP TECNOLOGIA EM
+      // SEGURANCA", sugestão veio "vivo- telefonica brasil" — só bateu por
+      // valor+data, ignorando que havia outra linha do Fluxo do mesmo
+      // fornecedor E mesmo valor): quando tem MAIS DE UM candidato
+      // valor+data, desempata por semelhança de texto com o histórico
+      // bancário — nunca escolhe uma descrição completamente diferente
+      // se existir uma parecida também dentro da tolerância.
+      const candidatosFluxo=(fluxoPend||[]).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
+        .filter(f=>{
           const vF=ehSaida?f.valor_saida:f.valor_entrada;
           return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
         });
-      if(fluxoMatch) item.fluxoSugerido=fluxoMatch;
+      if(candidatosFluxo.length){
+        candidatosFluxo.sort((a,b)=>{
+          const scoreA=_lancctbTextoScoreSimilaridade(r.historico_bancario,a.descricao);
+          const scoreB=_lancctbTextoScoreSimilaridade(r.historico_bancario,b.descricao);
+          if(scoreA!==scoreB) return scoreB-scoreA;
+          return _lancctbDiffDias(a.data,r.data_pagamento)-_lancctbDiffDias(b.data,r.data_pagamento);
+        });
+        item.fluxoSugerido=candidatosFluxo[0];
+      }
     });
   }
 
