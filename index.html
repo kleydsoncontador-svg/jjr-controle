@@ -2265,6 +2265,15 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
         </div>
         <div id="lancctbRegraBuscaNfResultado" style="margin-top:8px;max-height:220px;overflow-y:auto"></div>
       </div>
+      <div id="lancctbRegraBuscaFluxoWrap" style="display:none;background:#EFF6FF;border:1px solid #93C5FD;border-radius:6px;padding:10px;margin-bottom:12px">
+        <div style="font-weight:600;font-size:12.5px;color:var(--ink);margin-bottom:6px">🔎 Amarrar manualmente a um lançamento do Fluxo de Caixa</div>
+        <div style="font-size:11.5px;color:var(--slate);margin-bottom:8px">Busca em lançamentos do Fluxo de Caixa desta empresa ainda não associados, por descrição, valor ou data — use quando a sugestão automática não achou nada.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <input class="fi" id="lancctbRegraBuscaFluxoTermo" placeholder="Descrição…" style="flex:1;min-width:180px" oninput="_lancctbBuscarFluxoProLancamentoDebounced()">
+          <input class="fi" id="lancctbRegraBuscaFluxoValor" type="number" step="0.01" placeholder="Valor (opcional)" style="width:130px" oninput="_lancctbBuscarFluxoProLancamentoDebounced()">
+        </div>
+        <div id="lancctbRegraBuscaFluxoResultado" style="margin-top:8px;max-height:220px;overflow-y:auto"></div>
+      </div>
       <div id="lancctbRegraTributosArea"></div>
       <div class="fg">
         <div class="fl">Descrição *</div>
@@ -19517,6 +19526,10 @@ async function abrirLancctbRegraModal(id){
   document.getElementById('lancctbRegraBuscaNfTermo').value='';
   document.getElementById('lancctbRegraBuscaNfValor').value='';
   document.getElementById('lancctbRegraBuscaNfResultado').innerHTML='';
+  document.getElementById('lancctbRegraBuscaFluxoWrap').style.display='none';
+  document.getElementById('lancctbRegraBuscaFluxoTermo').value='';
+  document.getElementById('lancctbRegraBuscaFluxoValor').value='';
+  document.getElementById('lancctbRegraBuscaFluxoResultado').innerHTML='';
   document.getElementById('lancctbRegraTributosArea').innerHTML='';
   document.getElementById('lancctbRegraAprenderWrap').style.display='none';
   document.getElementById('lancctbRegraAprenderCheckbox').checked=true;
@@ -19658,12 +19671,23 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
   // sentido pra lançamento ainda PENDENTE — um já conciliado (item.ctb
   // preenchido) reabre este modal só pra revisar/criar Regra a partir dele.
   const buscaNfWrap=document.getElementById('lancctbRegraBuscaNfWrap');
+  const buscaFluxoWrap=document.getElementById('lancctbRegraBuscaFluxoWrap');
   if(!item.ctb.length){
     buscaNfWrap.style.display='';
     document.getElementById('lancctbRegraBuscaNfValor').value=valor;
     _lancctbBuscarNfProLancamento();
+    // Pedido do usuário 09/09/2026: "pra esse que não achou eu quero
+    // procurar no fluxo" — busca manual de Fluxo de Caixa, pro caso da
+    // sugestão automática (coluna Fluxo de Caixa do Registro Contábil) não
+    // ter achado nada (ex: descrição muito diferente pra bater na
+    // tolerância, ou o Fluxo ainda não foi importado quando a tela
+    // carregou). Mesmo espírito da busca de NF acima.
+    buscaFluxoWrap.style.display='';
+    document.getElementById('lancctbRegraBuscaFluxoValor').value=valor;
+    _lancctbBuscarFluxoProLancamento();
   } else {
     buscaNfWrap.style.display='none';
+    buscaFluxoWrap.style.display='none';
   }
 
   let cnpjSugerido=opts.cnpjSugerido||null, nomeSugerido=opts.nomeSugerido||null;
@@ -19791,6 +19815,67 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     toast('Lançamento amarrado à NF '+(nf?.numero||'')+' com sucesso.','ok');
     closeModal('mLancctbRegra');
     if(typeof renderLancctbRegistroContabil==='function') renderLancctbRegistroContabil();
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent='✓ Usar esta'; }
+  }
+}
+// Busca manual de Fluxo de Caixa dentro do modal de Regra — pedido do
+// usuário 09/09/2026: "pra esse que não achou eu quero procurar no fluxo".
+// Mesmo espírito de _lancctbBuscarNfProLancamento, mas em
+// fluxo_caixa_lancamentos ainda não associados; ao clicar "Usar esta",
+// reaproveita abrirLancctbRegraModalFluxoAssociacao (mesma função do botão
+// "🔗" automático do Registro Contábil) pra pré-preencher o histórico e
+// resolver o lançamento.
+let _lancctbBuscarFluxoTimer=null;
+function _lancctbBuscarFluxoProLancamentoDebounced(){
+  clearTimeout(_lancctbBuscarFluxoTimer);
+  _lancctbBuscarFluxoTimer=setTimeout(_lancctbBuscarFluxoProLancamento,350);
+}
+async function _lancctbBuscarFluxoProLancamento(){
+  const resEl=document.getElementById('lancctbRegraBuscaFluxoResultado');
+  const r=_lancctbRegraExtratoAlvo;
+  if(!r){ resEl.innerHTML=''; return; }
+  const ehSaida=r.valor_saida>0;
+  const termo=(document.getElementById('lancctbRegraBuscaFluxoTermo').value||'').trim().toLowerCase();
+  const valorAlvo=parseFloat(document.getElementById('lancctbRegraBuscaFluxoValor').value)||(r.valor_saida||r.valor_entrada);
+  resEl.innerHTML=`<div style="color:var(--slate);font-size:12px;padding:6px 0">Buscando…</div>`;
+  const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id')
+    .eq('empresa_eid',_lancctbEidAtual).eq('status_associado','nao_associado'));
+  let candidatas=(linhas||[]).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id));
+  if(termo) candidatas=candidatas.filter(f=>(f.descricao||'').toLowerCase().includes(termo));
+  candidatas.sort((a,b)=>{
+    const va=ehSaida?a.valor_saida:a.valor_entrada, vb=ehSaida?b.valor_saida:b.valor_entrada;
+    const diffValor=Math.abs((va||0)-valorAlvo)-Math.abs((vb||0)-valorAlvo);
+    if(Math.abs(diffValor)>0.005) return diffValor;
+    return _lancctbDiffDias(a.data,r.data_pagamento)-_lancctbDiffDias(b.data,r.data_pagamento);
+  });
+  candidatas=candidatas.slice(0,25);
+  if(!candidatas.length){ resEl.innerHTML=`<div style="color:var(--slate);font-size:12px;padding:6px 0">Nenhum lançamento do Fluxo de Caixa pendente encontrado com esse filtro.</div>`; return; }
+  resEl.innerHTML=candidatas.map(f=>{
+    const v=ehSaida?f.valor_saida:f.valor_entrada;
+    const dataFmt=f.data?new Date(f.data+'T00:00:00').toLocaleDateString('pt-BR'):'';
+    const bateValor=Math.abs((v||0)-valorAlvo)<=LANCCTB_MATCH_TOLERANCIA_VALOR;
+    return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:6px 8px;border-bottom:1px solid var(--border);font-size:12px">
+      <div>
+        <strong>${esc(f.descricao||'')}</strong><br>
+        <span style="color:var(--slate)">${dataFmt} — <span style="color:${bateValor?'var(--teal)':'var(--red)'}">R$ ${_fmt(v||0)}</span></span>
+      </div>
+      <button class="btn bp bsm" type="button" onclick="_lancctbAssociarFluxoManualDoModal(${f.id},this)">✓ Usar esta</button>
+    </div>`;
+  }).join('');
+}
+async function _lancctbAssociarFluxoManualDoModal(fluxoId,btn){
+  const r=_lancctbRegraExtratoAlvo;
+  if(!r){ toast('Lançamento de origem não encontrado — feche e reabra o modal.','err'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='Associando…'; }
+  try{
+    const { data: fluxoRow } = await _supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id')
+      .eq('id',fluxoId).single();
+    if(!fluxoRow){ toast('Lançamento do Fluxo de Caixa não encontrado — pode já ter sido usado.','err'); return; }
+    await abrirLancctbRegraModalFluxoAssociacao(fluxoRow,r);
+    toast('Fluxo de Caixa associado ao histórico — confira e clique em Salvar pra confirmar.','ok');
   } finally {
     if(btn){ btn.disabled=false; btn.textContent='✓ Usar esta'; }
   }
