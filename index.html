@@ -18321,6 +18321,57 @@ async function salvarLancctbDividirParcela(){
     btn.disabled=false; btn.textContent='✓ Salvar parcelas';
   }
 }
+// Pedido do usuário 09/09/2026: "isso não deveria ser feito de forma
+// automática pelo site? Pois o fluxo já indica a NF e a parcela" — o Fluxo
+// de Caixa do cliente já traz o número da NF + parcela junto no campo
+// Número (confirmado com dado real: "606393/02", "606393/3"). Quando 2+
+// linhas do Fluxo apontam pra mesma NF, e essa NF ainda está com 1 parcela
+// só (do XML sem <dup>) e ainda PENDENTE, divide sozinho — nunca mexe em
+// NF já conciliada/já dividida (ver mesma trava do modal manual acima).
+async function _lancctbCorrigirParcelasPorFluxo(){
+  const eid=_lancctbEidAtual;
+  const btn=document.getElementById('lancctbDividirParcelasFluxoBtn');
+  if(btn){ btn.disabled=true; btn.textContent='Verificando…'; }
+  try{
+    const { data: fluxoRows } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,documento_numero,valor_saida,valor_entrada')
+      .eq('empresa_eid',eid).not('documento_numero','is',null));
+    const grupos={};
+    (fluxoRows||[]).forEach(f=>{
+      const m=String(f.documento_numero||'').match(/(\d{3,})\s*\/\s*(\d{1,3})\b/);
+      if(!m) return;
+      const nfNum=m[1], parcNum=parseInt(m[2],10);
+      (grupos[nfNum]=grupos[nfNum]||[]).push({parcNum, data:f.data, valor:f.valor_saida||f.valor_entrada||0});
+    });
+    const nfNumeros=Object.keys(grupos).filter(k=>grupos[k].length>=2);
+    if(!nfNumeros.length){
+      toast('Nenhum agrupamento de parcela encontrado no Fluxo de Caixa (precisa de "nºNF/parcela" no campo Número, com 2+ linhas pra mesma NF).','err');
+      return;
+    }
+    let divididas=0, puladas=0;
+    for(const nfNum of nfNumeros){
+      const { data: nfs } = await _supaClient.from('notas_fiscais').select('id,numero').eq('empresa_eid',eid).eq('numero',nfNum);
+      if(!nfs||nfs.length!==1){ puladas++; continue; } // não achou, ou número ambíguo (mais de 1 NF)
+      const nfId=nfs[0].id;
+      const { data: parcelasAtuais } = await _supaClient.from('notas_fiscais_parcelas').select('id,status_conciliacao').eq('nf_id',nfId);
+      // Só mexe em NF que ainda está com 1 parcela só (sinal de que o XML
+      // não abriu parcela) E ainda pendente — pedido do usuário: "isso só
+      // nos casos que ficaram pendentes". NF já dividida (manual ou por
+      // esta mesma rotina antes) ou já conciliada fica intocada.
+      if(!parcelasAtuais||parcelasAtuais.length!==1||parcelasAtuais[0].status_conciliacao!=='pendente'){ puladas++; continue; }
+      const linhas=grupos[nfNum].slice().sort((a,b)=>a.parcNum-b.parcNum);
+      await _supaClient.from('notas_fiscais_parcelas').delete().eq('nf_id',nfId);
+      await _supaClient.from('notas_fiscais_parcelas').insert(linhas.map((l,i)=>({
+        nf_id:nfId, empresa_eid:eid, numero_parcela:i+1, data_vencimento:l.data, valor_parcela:l.valor, status_conciliacao:'pendente',
+      })));
+      divididas++;
+    }
+    toast(`${divididas} NF(s) tiveram a parcela dividida automaticamente a partir do Fluxo de Caixa, ${puladas} pulada(s) (já dividida, já conciliada, ou NF não encontrada/ambígua).`, divididas?'ok':'err');
+    renderLancctbConteudo();
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent='🔀 Dividir Parcelas via Fluxo'; }
+  }
+}
 async function renderLancctbNotas(aba){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
@@ -18424,7 +18475,8 @@ async function renderLancctbNotas(aba){
     <strong>Última ${ehServico?'NFS-e':'NF-e'} capturada:</strong> nº ${esc(ultimaNf.numero)} — em ${new Date(ultimaNf.created_at).toLocaleDateString('pt-BR')} às ${new Date(ultimaNf.created_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
   </div>`:'';
 
-  let html=`<div style="display:flex;justify-content:flex-end;margin-bottom:10px">
+  let html=`<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+      <button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
     <div style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 360px)">
