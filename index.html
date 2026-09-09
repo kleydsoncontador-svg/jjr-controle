@@ -17188,6 +17188,33 @@ async function _lancctbExtrairComposicaoDarf(pdf){
 // Fallback genérico (GNRE, DAS, FGTS, ISS...) — procura rótulos comuns de
 // "total" em guias brasileiras. Best-effort: se não achar rótulo nenhum,
 // devolve null (nunca inventa um valor sem fonte clara).
+const LANCCTB_RE_MONETARIO=/^\d{1,3}(?:\.\d{3})*,\d{2}$/;
+// Acha, dentro de `itens` (com x/y — ver _lancctbExtrairItensPagina), o item
+// mais próximo espacialmente de um rótulo que bate com `reRotulo`, filtrando
+// os candidatos por `reCandidato` (ex: valor monetário, ou texto qualquer).
+// Usado em formulários tipo DAMSP onde rótulo e valor ficam no mesmo campo
+// da página mas longe um do outro no texto corrido (ver comentário abaixo).
+function _lancctbItemPertoDoRotulo(itens,reRotulo,reCandidato){
+  const labels=itens.filter(it=>reRotulo.test(it.str.trim()));
+  if(!labels.length) return null;
+  const candidatos=itens.filter(it=>reCandidato.test(it.str.trim()));
+  let melhor=null,melhorDist=Infinity;
+  labels.forEach(l=>{
+    candidatos.forEach(v=>{
+      if(v.x<l.x-20) return; // valor fica no campo, à direita/mesma coluna do rótulo — nunca à esquerda
+      // BUG REAL 08/09/2026: sem limite vertical, o rótulo "Multa" pegava o
+      // valor do campo "Valor" logo acima dele (mais perto em distância
+      // reta do que o próprio valor da Multa, por causa do desalinhamento
+      // horizontal entre os dois) — os rótulos desse formulário ficam todos
+      // na mesma coluna x, então só a distância vertical (mesma linha do
+      // campo) distingue um campo do vizinho.
+      if(Math.abs(v.y-l.y)>25) return;
+      const dist=Math.hypot(v.x-l.x,v.y-l.y);
+      if(dist<melhorDist&&dist<=120){ melhorDist=dist; melhor=v; }
+    });
+  });
+  return melhor;
+}
 async function _lancctbExtrairValorTotalGenerico(pdf){
   const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
   const texto=itens.map(it=>it.str).join(' ');
@@ -17209,26 +17236,45 @@ async function _lancctbExtrairValorTotalGenerico(pdf){
   // pdfplumber: rótulo "Total" em x≈461.8/y≈299.5, valor "250,38" em
   // x≈536.7/y≈312.0 — ~76pt de distância). Busca por posição (x,y) em vez de
   // texto: acha o rótulo "Total" e pega o valor monetário mais próximo dele.
-  const RE_MONETARIO=/^\d{1,3}(?:\.\d{3})*,\d{2}$/;
-  const labels=itens.filter(it=>/^total\b/i.test(it.str.trim()));
-  if(!labels.length) return null;
-  const valores=itens.filter(it=>RE_MONETARIO.test(it.str.trim()));
-  let melhor=null,melhorDist=Infinity;
-  labels.forEach(l=>{
-    valores.forEach(v=>{
-      if(v.x<l.x-20) return; // valor fica no campo, à direita/mesma coluna do rótulo — nunca à esquerda
-      const dist=Math.hypot(v.x-l.x,v.y-l.y);
-      if(dist<melhorDist&&dist<=120){ melhorDist=dist; melhor=v; }
-    });
-  });
+  const melhor=_lancctbItemPertoDoRotulo(itens,/^total\b/i,LANCCTB_RE_MONETARIO);
   return melhor?_lancctbParseValorBR2(melhor.str.trim()):null;
+}
+// Composição por linha de uma guia DAMSP (Prefeitura de SP — TFE, ISS
+// próprio, taxas municipais) — mesmo espírito de _lancctbExtrairComposicaoDarf,
+// mas pro layout de campos (rótulo em cima, valor embaixo/à direita) desse
+// formulário, usando a mesma busca por posição. Pedido do usuário 08/09/2026:
+// "precisa abrir TFE, juros, e multa" — quando a guia tem Multa/Juros/
+// Atualização/Encargos > 0, o rateio deve abrir uma linha pra cada, não só
+// uma linha genérica "Pagamento TFE" com o valor total.
+async function _lancctbExtrairComposicaoDamsp(pdf){
+  const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const total=_lancctbItemPertoDoRotulo(itens,/^total\b/i,LANCCTB_RE_MONETARIO);
+  if(!total) return null; // não é esse layout
+  const receita=_lancctbItemPertoDoRotulo(itens,/^receita$/i,/^[A-ZÀ-Ü][A-ZÀ-Ü0-9 \-\/\.]{1,40}$/);
+  const valorPrincipal=_lancctbItemPertoDoRotulo(itens,/^valor\b/i,LANCCTB_RE_MONETARIO);
+  const multa=_lancctbItemPertoDoRotulo(itens,/^multa\b/i,LANCCTB_RE_MONETARIO);
+  const juros=_lancctbItemPertoDoRotulo(itens,/^juros\b/i,LANCCTB_RE_MONETARIO);
+  const atualizacao=_lancctbItemPertoDoRotulo(itens,/^atualiza[çc][ãa]o\b/i,LANCCTB_RE_MONETARIO);
+  const encargos=_lancctbItemPertoDoRotulo(itens,/^outros\s+encargos\b/i,LANCCTB_RE_MONETARIO);
+  if(!valorPrincipal) return null;
+  const itensComp=[{ codigo:null, denominacao:receita?receita.str.trim():'Tributo', valor:_lancctbParseValorBR2(valorPrincipal.str) }];
+  [['Multa',multa],['Juros',juros],['Atualização Monetária',atualizacao],['Outros Encargos',encargos]].forEach(([nome,it])=>{
+    if(!it) return;
+    const v=_lancctbParseValorBR2(it.str);
+    if(v>0) itensComp.push({ codigo:null, denominacao:nome, valor:v });
+  });
+  const valorTotal=_lancctbParseValorBR2(total.str);
+  return { itens:itensComp, valorTotal, competencia:null };
 }
 // Ponto único de extração de valor de um PDF de tributo — tenta o DARF
 // estruturado primeiro (mais confiável e já vem com a composição por
-// imposto, útil pra regra multi-linha), senão cai pro rótulo genérico.
+// imposto, útil pra regra multi-linha), depois a composição DAMSP
+// (Valor/Multa/Juros/Atualização/Encargos), senão cai pro rótulo genérico.
 async function _lancctbExtrairValorPdfTributo(pdf){
   const darf=await _lancctbExtrairComposicaoDarf(pdf);
   if(darf) return { valor:darf.valorTotal, composicao:darf.itens };
+  const damsp=await _lancctbExtrairComposicaoDamsp(pdf);
+  if(damsp) return { valor:damsp.valorTotal, composicao:damsp.itens.length>1?damsp.itens:null };
   const generico=await _lancctbExtrairValorTotalGenerico(pdf);
   return generico!=null?{ valor:generico, composicao:null }:null;
 }
@@ -17311,7 +17357,7 @@ async function _lancctbUsarSugestaoTributo(idx){
   try{
     const arquivo=await f.fileHandle.getFile();
     const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
-    darf=await _lancctbExtrairComposicaoDarf(pdfDoc);
+    darf=await _lancctbExtrairComposicaoDarf(pdfDoc)||await _lancctbExtrairComposicaoDamsp(pdfDoc);
   }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); }
 
   const competenciaPdf=darf?.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao);
@@ -26703,6 +26749,15 @@ function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
   // extração anterior (persistido em ganho.dados[mk].saldoBrutoExtrato).
   // Pedido do usuário 08/09/2026. Só calcula quando o mapeamento NÃO deu um
   // "Rendimento do Mês" direto pra aquele mês (as duas formas são alternativas).
+  //
+  // BUG REAL 08/09/2026 (usuário testou e apagou o valor: "mais de 100k de
+  // rendimento, não fazia sentido"): a diferença bruta de saldo já embute o
+  // efeito de QUALQUER Aplicação/Resgate/IOF/IRRF ocorrido no mês — se essas
+  // colunas TAMBÉM vierem mapeadas no mesmo extrato (caso comum: o extrato
+  // tem tanto o detalhe diário quanto uma coluna de posição/saldo), a
+  // diferença de saldo não é "rendimento puro", é rendimento + aportes -
+  // resgates. Descontar o efeito das outras colunas (pelos mesmos sinais
+  // +/- já configurados em ganho.cols) isola só o rendimento de verdade.
   Object.keys(somasPorMes).forEach(mk=>{
     const soma=somasPorMes[mk];
     if(soma.saldoBrutoExtrato==null||soma.rendMes!=null) return;
@@ -26710,7 +26765,14 @@ function _ganhoAplicarMapeamento(eid,pid,extraido,mapeamento){
     const mkAnt=(mm==='01'?'12/'+(Number(aaaa)-1):String(Number(mm)-1).padStart(2,'0')+'/'+aaaa);
     const saldoAnt=somasPorMes[mkAnt]?.saldoBrutoExtrato??ganho.dados?.[mkAnt]?.saldoBrutoExtrato;
     if(saldoAnt==null) return; // sem base de comparação — não dá pra calcular ainda
-    soma.rendMes=soma.saldoBrutoExtrato-saldoAnt;
+    let diferenca=soma.saldoBrutoExtrato-saldoAnt;
+    (ganho.cols||[]).forEach(c=>{
+      if(c.id==='rendMes'||!c.op||c.tipo!=='num') return;
+      const v=soma[c.id];
+      if(v==null) return;
+      diferenca-=c.op==='+'?v:-v; // desfaz o mesmo +/- que calcSaldosGanho aplicaria de novo
+    });
+    soma.rendMes=diferenca;
   });
   // Se o mapeamento usou alguma coluna de detalhe (Valor Principal, Bruto,
   // IOF, IRRF, Líquido…) mas essa aplicação ainda está no layout simples
