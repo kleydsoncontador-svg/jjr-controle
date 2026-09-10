@@ -18477,12 +18477,18 @@ async function _lancctbProcessarFopag(){
     // NOME do empregado na coluna "cliente/fornecedor" ou "descrição" do
     // fluxo, e o histórico bancário do SISPAG não traz. Pedido do usuário
     // (10/09/2026): usa o fluxo também pra identificar a quem foi pago.
-    const { data: fluxoLivre } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,cliente_fornecedor_nome')
-      .eq('empresa_eid',eid).eq('status_associado','nao_associado').gt('valor_saida',0));
-    const acharFluxoDaPendencia=(l)=>(fluxoLivre||[]).find(f=>
-      Math.abs((f.valor_saida||0)-l.valor_saida)<=LANCCTB_MATCH_TOLERANCIA_VALOR &&
-      _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+    // Prioridade: a linha do fluxo já ASSOCIADA a esta pendência (pelo
+    // "Processar Fluxo"); senão, uma linha livre que bate valor+data.
+    const { data: fluxoTodo } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,cliente_fornecedor_nome,status_associado,lancamento_extrato_id')
+      .eq('empresa_eid',eid).gt('valor_saida',0)
+      .or('status_associado.eq.nao_associado,lancamento_extrato_id.not.is.null'));
+    const fluxoLivre=(fluxoTodo||[]).filter(f=>f.status_associado==='nao_associado');
+    const acharFluxoDaPendencia=(l)=>
+      (fluxoTodo||[]).find(f=>String(f.lancamento_extrato_id)===String(l.id)) ||
+      (fluxoLivre||[]).find(f=>
+        Math.abs((f.valor_saida||0)-l.valor_saida)<=LANCCTB_MATCH_TOLERANCIA_VALOR &&
+        _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
 
     let resolvidos=0, semAchado=0, diferencasAbertas=0;
     for(let i=0;i<pendencias.length;i++){
@@ -21911,16 +21917,63 @@ function _lancctbTextoScoreSimilaridade(a,b){
 // dos 4 gatilhos extras de Fluxo preenchido — TODAS as condições marcadas
 // daquela regra (histórico do extrato + os 4 do Fluxo, ignorando as que
 // estiverem null) precisam bater (E lógico) pra resolver sozinho.
-async function _lancctbProcessarFluxoRegras(){
+// "🔗 Processar Fluxo" — NÃO processa Regras nem cria lançamento (pedido do
+// usuário 10/09/2026). Só ASSOCIA cada linha do Fluxo de Caixa do cliente à
+// pendência de extrato que bate valor+data (desempate por semelhança do
+// texto com o histórico bancário), pra preencher a coluna "Fluxo de Caixa"
+// do Registro Contábil. Essa identificação apoia depois o Processar FOPAG
+// (quem recebeu o salário) e o Processar Tributos (nome do favorecido).
+// Deve ser o PRIMEIRO passo do fluxo de trabalho.
+async function _lancctbProcessarFluxo(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  const btn=document.getElementById('lancctbProcessarFluxoBtn');
+  const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
+  if(btn){ btn.disabled=true; }
+  try{
+    const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+      .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente'));
+    if(!pendencias||!pendencias.length){ toast('Nenhuma pendência nesta conta.','ok'); return; }
+    const { data: fluxoPend } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome')
+      .eq('empresa_eid',eid).eq('status_associado','nao_associado'));
+    if(!fluxoPend||!fluxoPend.length){ toast('Nenhuma linha de Fluxo de Caixa livre pra associar — importe o Fluxo de Caixa da empresa primeiro (aba Fluxo de Caixa).','err'); return; }
+    const usados=new Set();
+    let associados=0;
+    for(let i=0;i<pendencias.length;i++){
+      const l=pendencias[i];
+      if(statusEl) statusEl.textContent=`Associando Fluxo ${i+1}/${pendencias.length}…`;
+      const ehSaida=l.valor_saida>0;
+      const valor=l.valor_saida||l.valor_entrada;
+      const cand=(fluxoPend||[]).filter(f=>!usados.has(f.id))
+        .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
+        .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; });
+      if(!cand.length) continue;
+      cand.sort((a,b)=>_lancctbTextoScoreSimilaridade(l.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(l.historico_bancario,a.descricao));
+      const f=cand[0];
+      const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',f.id);
+      if(error){ console.error('Erro ao associar fluxo:',error); continue; }
+      usados.add(f.id); associados++;
+    }
+    toast(`Fluxo: ${associados} linha(s) associada(s) a pendência(s) — agora rode Processar FOPAG / Tributos.`, associados?'ok':'err');
+    renderLancctbRegistroContabil();
+  } finally {
+    if(btn) btn.disabled=false;
+    if(statusEl) statusEl.textContent='';
+  }
+}
+async function _lancctbProcessarFluxoRegras(silencioso){
+  const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
+  if(!contaId){ if(!silencioso) toast('Selecione uma conta bancária primeiro','err'); return; }
   const btn=document.getElementById('lancctbProcessarFluxoRegrasBtn');
   if(btn){ btn.disabled=true; btn.textContent='Processando…'; }
+  const _toast=silencioso?(()=>{}):toast;
   try{
     const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente'));
-    if(!pendencias||!pendencias.length){ toast('Nenhuma pendência nesta conta.','ok'); return; }
+    if(!pendencias||!pendencias.length){ _toast('Nenhuma pendência nesta conta.','ok'); return; }
     const { data: fluxoPend } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
       .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem')
       .eq('empresa_eid',eid).eq('status_associado','nao_associado'));
@@ -21928,10 +21981,10 @@ async function _lancctbProcessarFluxoRegras(){
       .select('id,historico_fixo,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao),fluxo_historico_gatilho,fluxo_cliente_gatilho,fluxo_numero_gatilho,fluxo_descconta_gatilho')
       .eq('empresa_eid',eid).eq('ativo',true));
     const regras=(todasRegras||[]).filter(r=>r.fluxo_historico_gatilho||r.fluxo_cliente_gatilho||r.fluxo_numero_gatilho||r.fluxo_descconta_gatilho);
-    if(!regras.length){ toast('Nenhuma Regra com gatilho de Fluxo de Caixa cadastrada ainda — crie uma associando manualmente um lançamento ao Fluxo, com "Também criar uma Regra" marcado.','err'); return; }
+    if(!regras.length){ _toast('Nenhuma Regra com gatilho de Fluxo de Caixa cadastrada ainda — crie uma associando manualmente um lançamento ao Fluxo, com "Também criar uma Regra" marcado.','err'); return; }
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
-    if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+    if(!contaBancoInfo?.conta_contabil_id){ _toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
 
     const bateCondicao=(gatilho,alvo)=>!gatilho||(String(alvo||'').toLowerCase().includes(gatilho.toLowerCase()));
     let resolvidos=0;
@@ -21964,8 +22017,8 @@ async function _lancctbProcessarFluxoRegras(){
       await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxo.id);
       resolvidos++;
     }
-    toast(`${resolvidos} pendência(s) resolvida(s) automaticamente via Regra + Fluxo de Caixa.`, resolvidos?'ok':'err');
-    renderLancctbRegistroContabil();
+    _toast(`${resolvidos} pendência(s) resolvida(s) automaticamente via Regra + Fluxo de Caixa.`, resolvidos?'ok':'err');
+    if(!silencioso) renderLancctbRegistroContabil();
   } finally {
     if(btn){ btn.disabled=false; btn.textContent='🎯 Processar Fluxo (Regras)'; }
   }
@@ -22502,6 +22555,12 @@ async function _lancctbProcessarFonteRegistro(modo){
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn) btn.disabled=true;
   const resultado=await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,(msg)=>{ if(statusEl) statusEl.textContent=msg; },modo);
+  // Aplica também as Regras com gatilho de Fluxo de Caixa (antes ficava num
+  // botão à parte "Processar Fluxo (Regras)" — o botão "Processar Fluxo"
+  // agora só associa, sem aplicar Regra). Silencioso: o toast é do matching.
+  if(modo==='comprovantes_pagamento'){
+    try{ await _lancctbProcessarFluxoRegras(true); }catch(e){ console.error('Regras de fluxo:',e); }
+  }
   if(btn) btn.disabled=false;
   if(statusEl) statusEl.textContent='';
   if(resultado.erro){ toast(resultado.erro,'err'); return; }
@@ -23064,13 +23123,18 @@ async function renderLancctbRegistroContabil(){
       // linha do Fluxo de Caixa do cliente batendo valor+data com essa
       // pendência, e permite abrir o modal de Regra já usando o texto dela.
       _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-        .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem')
-        .eq('empresa_eid',eid).eq('status_associado','nao_associado')),
+        .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem,status_associado,lancamento_extrato_id')
+        .eq('empresa_eid',eid).or('status_associado.eq.nao_associado,lancamento_extrato_id.not.is.null')),
     ]);
+    // Linha do Fluxo JÁ associada a uma pendência (pelo "Processar Fluxo") —
+    // aparece na coluna Fluxo como confirmada (sem "?").
+    const fluxoAssocPorPend={};
+    (fluxoPend||[]).forEach(f=>{ if(f.lancamento_extrato_id) fluxoAssocPorPend[f.lancamento_extrato_id]=f; });
     pendentes.forEach(item=>{
       const r=item.extrato;
       const valor=r.valor_saida||r.valor_entrada;
       const ehSaida=r.valor_saida>0;
+      if(fluxoAssocPorPend[r.id]){ item.fluxoSugerido=fluxoAssocPorPend[r.id]; item.fluxoConfirmado=true; }
       const comps=ehSaida?compsPag:compsReceb;
       const match=(comps||[]).find(c=>Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
       if(match) item.comprovanteSugerido=match;
@@ -23085,7 +23149,7 @@ async function renderLancctbRegistroContabil(){
       // valor+data, desempata por semelhança de texto com o histórico
       // bancário — nunca escolhe uma descrição completamente diferente
       // se existir uma parecida também dentro da tolerância.
-      const candidatosFluxo=(fluxoPend||[]).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
+      const candidatosFluxo=item.fluxoConfirmado?[]:(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado').filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
         .filter(f=>{
           const vF=ehSaida?f.valor_saida:f.valor_entrada;
           return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
@@ -23197,7 +23261,8 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     // mostrava a Descrição (texto cru do lançamento); Cliente/Fornecedor é
     // o nome de quem recebeu/pagou, mais direto pra reconhecer de olho.
     const rotulo=f.cliente_fornecedor_nome||f.descricao||'';
-    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(f.descricao||'')} — clique pra associar" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="font-style:italic;color:var(--teal);cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})</span></td>`;
+    const confirmado=!!item.fluxoConfirmado;
+    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})</span></td>`;
   };
 
   if(item.ctb.length&&ds.length===1&&cs.length===1){
@@ -23291,13 +23356,13 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   </div>
   <div class="action-bar-sticky">
       <span id="lancctbRegistroProcessarStatus" style="font-size:11.5px;color:var(--slate)"></span>
-      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal">🔄 Processar Pagamentos</button>
+      <button class="btn bo bsm" id="lancctbProcessarFluxoBtn" onclick="_lancctbProcessarFluxo()" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo). NÃO cria lançamento nem aplica Regra — só identifica, pra apoiar o Processar FOPAG e o Processar Tributos.">🔗 Processar Fluxo</button>
+      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal. Também aplica as Regras com gatilho de Fluxo de Caixa.">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
       <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbProcessarFopag()" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
       <button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>
-      <button class="btn bo bsm" id="lancctbProcessarFluxoRegrasBtn" onclick="_lancctbProcessarFluxoRegras()" title="Roda as Regras que têm gatilho do Fluxo de Caixa (Descrição/Cliente-Fornecedor/Número/Descrição da conta) contra as pendências desta conta">🎯 Processar Fluxo (Regras)</button>
       <button class="btn bsm btn-ia-gemini" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" title="Último recurso — usa IA Gemini pra tentar amarrar Pagamento/Recebimento × Nota Fiscal, e depois tenta casar pelo Fluxo de Caixa (se a empresa tiver) com uma Regra por histórico. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA Gemini + Fluxo</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) no período filtrado — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis deste período, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
