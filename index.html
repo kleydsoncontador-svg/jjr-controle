@@ -23610,7 +23610,7 @@ function abrirLancctbUploadComprovanteModal(tipo,semIA){
     <div id="lancctbComprovPreviewArea" style="margin-top:14px"></div>
     <div class="ma">
       <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
-      ${(!ehReceb&&_lancctbUploadComprovTipo==='pagamento'&&!_lancctbComprovanteSemIA)?`<button class="btn bsm btn-ia-gemini" title="Usa a IA Gemini em vez do leitor sem IA — só pra formatos que o leitor determinístico não reconhecer. Gera custo na chave paga, use só se precisar." onclick="_lancctbComprovForcarIA=true;processarLancctbUploadComprovante()">🤖 Usar IA Gemini</button>`:''}
+      ${!_lancctbComprovanteSemIA?`<button class="btn bsm btn-ia-gemini" title="Usa a IA Gemini em vez do leitor sem IA — só pra formatos que o leitor determinístico não reconhecer. Gera custo na chave paga, use só se precisar." onclick="_lancctbComprovForcarIA=true;processarLancctbUploadComprovante()">🤖 Usar IA Gemini</button>`:''}
       <button class="btn bp" id="lancctbComprovProcessarBtn" onclick="_lancctbComprovForcarIA=false;processarLancctbUploadComprovante()">▶ ${_lancctbComprovanteSemIA?'Preencher':'Extrair'}</button>
     </div>`;
   openModal('mLancctbUpload');
@@ -24103,8 +24103,15 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
       return reconhecido.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:erroUpload?null:pathArquivo}));
     }
 
-    // Layout não reconhecido — usar Gemini via Edge Function lancctb-parse-extrato-cobranca
-    status.textContent=`"${file.name}" — enviando para IA (${pdf.numPages} páginas)…`;
+    // Layout não reconhecido — só usa Gemini (Edge Function
+    // lancctb-parse-extrato-cobranca) se o contador clicou explicitamente em
+    // "🤖 Usar IA Gemini" (pedido do usuário 10/09/2026: "quero ter certeza
+    // que não usei IA no processo que fizer, pra controlar os gastos
+    // financeiros do Gemini" — nunca mais um fallback automático e silencioso).
+    if(!_lancctbComprovForcarIA){
+      throw new Error('Layout não reconhecido pelo leitor sem IA (esperava o "Extrato de movimentação de boletos" do Itaú). Clique em "🤖 Usar IA Gemini" se quiser tentar ler este PDF com IA.');
+    }
+    status.textContent=`"${file.name}" — enviando para IA Gemini (${pdf.numPages} páginas)…`;
     const paginasTexto=[];
     for(let pNum=1;pNum<=pdf.numPages;pNum++){
       const page=await pdf.getPage(pNum);
@@ -26504,17 +26511,22 @@ function abrirLancctbUploadExtratoModal(forceIA){
   document.getElementById('lancctbUploadTitulo').textContent='Upload de Extrato Bancário';
   _lancctbUploadStatusAtualId='lancctbExtratoStatus';
   _lancctbUploadTituloAtual='Importando Extrato Bancário';
-  const avisoIA=forceIA?'Extração via IA — força o uso de inteligência artificial (mais robusto pra extratos de outros bancos ou em imagem).':'Extração padrão — reconhece layouts de Itaú, Banco do Brasil, Safra, Sicoob. Se não reconhecer, tenta com IA como alternativa.';
+  // Pedido do usuário (10/09/2026): "quero ter certeza que não usei IA no
+  // processo que fizer, pra controlar os gastos financeiros do Gemini" — os
+  // 2 botões ficam sempre lado a lado (nunca 1 só que decide sozinho): o
+  // padrão NUNCA cai pra IA sozinho se não reconhecer o layout, só avisa e
+  // pede pra clicar no botão de IA Gemini.
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-      Aceita Excel/CSV (lido direto) ou PDF. ${avisoIA}
+      Aceita Excel/CSV (lido direto) ou PDF. Extração padrão (sem IA) reconhece layouts de Itaú, Banco do Brasil, Safra, Sicoob, Mister Contador — se não reconhecer, avisa e você decide se quer tentar com IA Gemini.
     </div>
     <input class="fi" id="lancctbExtratoArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
     <div id="lancctbExtratoStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
     <div id="lancctbExtratoPreviewArea" style="margin-top:14px"></div>
     <div class="ma">
       <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
-      ${forceIA?`<button class="btn btn-ia-gemini" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(true)">🤖 Extrair via IA Gemini</button>`:`<button class="action-btn action-btn-txt" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(false)" title="Tenta reconhecimento automático primeiro, depois IA se necessário">▶ Extrair (padrão)</button>`}
+      <button class="btn bsm btn-ia-gemini" id="lancctbExtratoProcessarIaBtn" title="Usa a IA Gemini em vez do leitor sem IA — só pra formatos que o leitor determinístico não reconhecer. Gera custo na chave paga, use só se precisar." onclick="processarLancctbUploadExtrato(true)">🤖 Usar IA Gemini</button>
+      <button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(false)" title="Tenta reconhecimento automático (sem IA); se não reconhecer, avisa em vez de usar IA sozinho">▶ Extrair (padrão, sem IA)</button>
     </div>`;
   openModal('mLancctbUpload');
 }
@@ -26836,16 +26848,15 @@ async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
   const btn=document.getElementById('lancctbExtratoProcessarBtn');
-  // Só existe 1 botão no modal hoje (o rótulo alterna conforme forcarIA em
-  // abrirLancctbUploadExtratoModal) — um 2º id "...ProcessarIaBtn" de uma
-  // versão anterior com 2 botões simultâneos ficou esquecido aqui, sempre
-  // null, e o .disabled nele quebrava a função inteira ANTES do try/catch
-  // (TypeError silencioso: clicar em "Extrair" não fazia nada, sem erro
-  // visível). Bug real, MD 2 #53, 08/09/2026.
-  const rotuloBtn=forcarIA?'🤖 Extrair via IA':'▶ Extrair (padrão)';
+  const btnIa=document.getElementById('lancctbExtratoProcessarIaBtn');
+  // Os 2 botões (padrão sem IA / IA Gemini) ficam sempre lado a lado no
+  // modal (pedido do usuário 10/09/2026) — desabilita os dois enquanto
+  // processa, pra não disparar 2 extrações em paralelo no mesmo arquivo.
+  const rotuloBtn=forcarIA?'🤖 Extrair via IA Gemini':'▶ Extrair (padrão, sem IA)';
   if(!file){ toast('Selecione um arquivo','err'); return; }
-  btn.disabled=true;
-  btn.textContent='Extraindo…';
+  btn.disabled=true; if(btnIa) btnIa.disabled=true;
+  btn.textContent=forcarIA?btn.textContent:'Extraindo…';
+  if(forcarIA&&btnIa) btnIa.textContent='Extraindo…';
   status.textContent='Lendo arquivo…';
   try{
     const ehPdf=/\.pdf$/i.test(file.name);
@@ -26877,10 +26888,17 @@ async function processarLancctbUploadExtrato(forcarIA){
         status.textContent=`Layout reconhecido (${nomeLayout}, leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}`;
         _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
         renderLancctbExtratoPreview();
-        btn.disabled=false; btn.textContent=rotuloBtn;
+        btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; }
         return;
       }
-      status.textContent='Layout não reconhecido — tentando extrair via IA…';
+      // Pedido do usuário (10/09/2026): "quero ter certeza que não usei IA
+      // no processo que fizer, pra controlar os gastos financeiros do
+      // Gemini" — layout não reconhecido NÃO cai mais sozinho pra IA; só
+      // segue se o contador clicou explicitamente em "🤖 Extrair via IA Gemini".
+      if(!forcarIA){
+        throw new Error('Layout do PDF não reconhecido pelo leitor sem IA (Mister Contador/BB/Itaú). Clique em "🤖 Extrair via IA Gemini" se quiser tentar ler este extrato com IA.');
+      }
+      status.textContent='Layout não reconhecido — extraindo via IA Gemini…';
 
       origem='pdf_texto';
       const paginasTexto=[];
@@ -26950,7 +26968,7 @@ async function processarLancctbUploadExtrato(forcarIA){
     status.textContent='Erro: '+e.message;
     toast('Erro ao extrair: '+e.message,'err');
   }finally{
-    btn.disabled=false; btn.textContent=rotuloBtn;
+    btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; }
   }
 }
 function renderLancctbExtratoPreview(){
