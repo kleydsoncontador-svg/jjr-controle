@@ -18383,17 +18383,25 @@ async function _lancctbParsearRelatorioLiquidos(file){
 // Botão "📋 Processar FOPAG" (Registro Contábil) — pra cada pendência de
 // SAÍDA da conta, tenta achar um Relatório de Líquidos (salário na
 // competência do mês ANTERIOR primeiro — pagamento de julho costuma ser
-// competência de junho; adiantamento não desloca, usa o mês do período)
-// cuja soma bate exato com o valor do lançamento. Resolve com 1 linha de
-// contrapartida por PESSOA (não uma linha genérica): empregado vai pra
-// conta 187 (salário) ou 724 (adiantamento — padrão do escritório, ver
-// reference_contas_padrao_mistercontador); sócio (seção "Contribuintes")
-// vai pra conta 1.2.9.x dele (mesmo cruzamento por nome já usado no motor
-// de matching geral, _lancctbAcharSocioPorHistorico/_lancctbContaDoSocio).
-// NÃO cobre ainda (deixado pra depois, combinado com o usuário): 2ª fonte
-// "Relatórios FOPAG para Contábil", Recibo de Férias, combinação Sispag+
-// Distribuição de Lucros, e o acúmulo de "diferença" de pró-labore mês a
-// mês — pendência que não bater fecha sem mexer, fica como está hoje.
+// competência de junho; adiantamento não desloca, usa o mês do período).
+// Dois caminhos:
+//  1) Uma saída = o TOTAL da folha (paga todo mundo de uma vez) → resolve
+//     com 1 linha de débito por PESSOA: empregado na conta 187 (salário) /
+//     724 (adiantamento — padrão do escritório, ver
+//     reference_contas_padrao_mistercontador); sócio ("Contribuintes") na
+//     1.2.9.x dele (_lancctbAcharSocioPorHistorico/_lancctbContaDoSocio).
+//  2) Saída INDIVIDUAL identificada pelo histórico bancário (nome com 2+
+//     tokens ≥4 letras OU CPF) — pedido do usuário 10/09/2026, algumas
+//     empresas pagam por SISPAG uma transferência por pessoa. Sem limite de
+//     valor: se o histórico identifica a pessoa, confia. Se o valor pago é
+//     MAIOR que o líquido dela, o lançamento de extrato é DIVIDIDO em dois:
+//     o valor exato do líquido (conciliado agora na conta da pessoa) + a
+//     diferença, que vira uma pendência NOVA ("[DIFERENÇA FOLHA ...]") pra
+//     uma Regra tratar depois.
+// NÃO cobre ainda (deixado pra depois): 2ª fonte "Relatórios FOPAG para
+// Contábil", Recibo de Férias, identificação da pessoa pelo Fluxo de Caixa,
+// combinação Sispag+Distribuição de Lucros. Pendência que não bater fecha
+// sem mexer.
 async function _lancctbProcessarFopag(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -18436,7 +18444,34 @@ async function _lancctbProcessarFopag(){
       return `${String(mm).padStart(2,'0')}-${aaaa}`;
     };
 
-    let resolvidos=0, semAchado=0;
+    // Resolve a conta contábil (débito) de uma pessoa da folha.
+    const contaDaPessoa=(p,tipoRelatorio)=>{
+      if(p.tipo==='contribuinte'){
+        const socio=_lancctbAcharSocioPorHistorico(socios,p.nome);
+        const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
+        return conta?{id:conta.id,classificacao:conta.classificacao}:null;
+      }
+      const c=tipoRelatorio==='salario'?contaSalario:contaAdiantamento;
+      return c?{id:c.id,classificacao:c.classificacao}:null;
+    };
+    // Casa o histórico bancário com uma pessoa da folha pelo NOME (2+ tokens
+    // com ≥4 letras) ou pelo CPF (dígitos). Sem limite de valor — se o
+    // histórico identifica a pessoa, confia (pedido do usuário 10/09/2026).
+    const _norm=s=>String(s||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+    const identificaPessoa=(historico,candidatos)=>{
+      const h=_norm(historico), hDig=h.replace(/\D/g,'');
+      for(const p of candidatos){
+        const cpfDig=String(p.cpf||'').replace(/\D/g,'');
+        if(cpfDig.length===11 && hDig.includes(cpfDig)) return p;
+      }
+      for(const p of candidatos){
+        const toks=_norm(p.nome).split(' ').filter(t=>t.length>=4);
+        if(toks.length>=2 && toks.filter(t=>h.includes(t)).length>=2) return p;
+      }
+      return null;
+    };
+
+    let resolvidos=0, semAchado=0, diferencasAbertas=0;
     for(let i=0;i<pendencias.length;i++){
       const l=pendencias[i];
       if(statusEl) statusEl.textContent=`Processando FOPAG ${i+1}/${pendencias.length}…`;
@@ -18445,43 +18480,84 @@ async function _lancctbProcessarFopag(){
         { tipo:'salario', competencia:mesAnterior(mmaaaaPeriodo) },
         { tipo:'adiantamento', competencia:mmaaaaPeriodo },
       ];
-      let achou=null;
+      // Carrega os relatórios que existem (usados nos 2 caminhos abaixo).
+      const relatorios=[];
       for(const t of tentativas){
         const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,t.competencia,t.tipo);
         if(!file) continue;
-        let dados;
-        try{ dados=await _lancctbParsearRelatorioLiquidos(file); } catch(e){ console.error('Falha ao ler Relatório de Líquidos:',e); continue; }
-        if(dados&&Math.abs(dados.total-l.valor_saida)<=0.01){ achou={...t,dados}; break; }
+        try{ const dados=await _lancctbParsearRelatorioLiquidos(file); if(dados) relatorios.push({...t,dados}); }
+        catch(e){ console.error('Falha ao ler Relatório de Líquidos:',e); }
       }
-      if(!achou){ semAchado++; continue; }
+      if(!relatorios.length){ semAchado++; continue; }
 
-      const contaContrapartidaPadrao=achou.tipo==='salario'?contaSalario:contaAdiantamento;
-      const linhas=[
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'regra' },
-      ];
-      let linhasFecharam=true;
-      achou.dados.pessoas.forEach(p=>{
-        let contaId2=null, classif=null;
-        if(p.tipo==='contribuinte'){
-          const socio=_lancctbAcharSocioPorHistorico(socios,p.nome);
-          const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
-          if(conta){ contaId2=conta.id; classif=conta.classificacao; }
-        } else if(contaContrapartidaPadrao){
-          contaId2=contaContrapartidaPadrao.id; classif=contaContrapartidaPadrao.classificacao;
+      // ── Caminho 1: uma saída = o TOTAL da folha (paga todo mundo de uma vez)
+      const achou=relatorios.find(r=>Math.abs(r.dados.total-l.valor_saida)<=0.01);
+      if(achou){
+        const linhas=[
+          { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'regra' },
+        ];
+        let ok=true;
+        achou.dados.pessoas.forEach(p=>{
+          const c=contaDaPessoa(p,achou.tipo);
+          if(!c){ ok=false; return; }
+          linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. salário ${achou.dados.competencia||achou.competencia} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+        });
+        if(!ok||linhas.length<2){ semAchado++; continue; }
+        const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+        if(error){ console.error('Erro FOPAG (total):',error); semAchado++; continue; }
+        await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+        resolvidos++;
+        continue;
+      }
+
+      // ── Caminho 2: saída individual identificada pelo histórico (nome/CPF).
+      // Se o valor pago > líquido dessa pessoa, abre em 2 linhas: o líquido
+      // exato (conciliado agora) + a diferença, que vira uma pendência nova
+      // pra uma Regra tratar depois.
+      let matchIndiv=null;
+      for(const r of relatorios){
+        const p=identificaPessoa(l.historico_bancario, r.dados.pessoas);
+        if(p && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
+      }
+      if(!matchIndiv){ semAchado++; continue; }
+
+      const { r, p } = matchIndiv;
+      const contaP=contaDaPessoa(p,r.tipo);
+      if(!contaP){ semAchado++; continue; }
+      const liquido=Math.round(p.valor*100)/100;
+      const diferenca=Math.round((l.valor_saida-liquido)*100)/100;
+      const comp=r.dados.competencia||r.competencia;
+
+      if(diferenca>0.01){
+        // Divide o lançamento de extrato em dois: o original passa a valer
+        // só o líquido; a diferença vira uma linha nova PENDENTE.
+        const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ valor_saida: liquido }).eq('id',l.id);
+        if(eUpd){ console.error('Erro ao dividir extrato (líquido):',eUpd); semAchado++; continue; }
+        const { error: eIns } = await _supaClient.from('lancamentos_extrato').insert({
+          empresa_eid: eid, conta_bancaria_id: contaId, data_pagamento: l.data_pagamento,
+          valor_saida: diferenca, valor_entrada: 0,
+          historico_bancario: `[DIFERENÇA FOLHA ${comp} - ${p.nome}] ${l.historico_bancario||''}`.trim(),
+          origem_importacao: 'fopag_diferenca',
+          hash_dedup: `fopag_dif_${l.id}_${Date.now()}`,
+        });
+        if(eIns){
+          console.error('Erro ao criar linha de diferença:',eIns);
+          await _supaClient.from('lancamentos_extrato').update({ valor_saida: l.valor_saida }).eq('id',l.id); // desfaz
+          semAchado++; continue;
         }
-        if(!contaId2){ linhasFecharam=false; return; }
-        linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:classif, conta_contabil_id:contaId2, tipo:'D', valor:p.valor, historico:`Pagamento ref. salário ${achou.dados.competencia||achou.competencia} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
-      });
-      // Se algum funcionário/sócio não tem conta contábil resolvível
-      // (falta 187/724 no Plano de Contas, ou sócio sem 1.2.9.x cadastrado),
-      // não arrisca gravar partida incompleta — fica pendente.
-      if(!linhasFecharam||linhas.length<2){ semAchado++; continue; }
+        diferencasAbertas++;
+      }
+
+      const linhas=[
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:liquido, historico:`Pagamento ref. ${r.tipo==='adiantamento'?'adiantamento':'salário'} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaP.classificacao, conta_contabil_id:contaP.id, tipo:'D', valor:liquido, historico:`Pagamento ref. ${r.tipo==='adiantamento'?'adiantamento':'salário'} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
+      ];
       const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
-      if(error){ console.error('Erro ao gravar lançamento FOPAG:',error); semAchado++; continue; }
+      if(error){ console.error('Erro FOPAG (individual):',error); semAchado++; continue; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
       resolvidos++;
     }
-    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s), ${semAchado} sem Relatório de Líquidos correspondente (ou conta contábil faltando).`,'ok');
+    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
