@@ -24436,35 +24436,354 @@ function _itauParsearCodigoBarras(linhas, texto){
     warnings: warnings
   };
 }
+// ─────────────────────────────────────────────────────────────────────────
+// AMPLIAÇÃO 10/09/2026 (pedido do usuário): novos layouts de comprovante de
+// PAGAMENTO do Itaú, todos determinísticos (sem IA/LLM/OCR). Os headers
+// destes são DIFERENTES dos da Peixoto ("Comprovante de Operação - ...") —
+// aqui é "Comprovante de pagamento ..." / "Banco Itaú - Comprovante de
+// Pagamento ...". Por isso o detector novo roda ANTES do antigo; se não
+// reconhecer nada aqui, cai pro detector/parsers antigos (Peixoto intactos).
+// Validado contra os comprovantes reais da Fast Lube (jul/2026, ~1290
+// páginas: boleto novo, PIX transf, PIX QR, transf conta, DARF, DARE-SP,
+// e-Social, tributos estaduais/GNRE, tributos municipais, concessionária,
+// código de barras genérico).
+// ─────────────────────────────────────────────────────────────────────────
+function _itauNorm(s){ return String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim(); }
+// CNPJ/CPF (aceita mascarado tipo *****450689-**). Não confundir com
+// agência/conta (que tem só 4-8 dígitos e traço).
+function _itauCnpjCpfEm(s){
+  if(!s) return null;
+  var m=String(s).match(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/) // CNPJ
+      || String(s).match(/\d{3}\.\d{3}\.\d{3}-\d{2}/)       // CPF
+      || String(s).match(/\*{3,}\d{3,}-\*{2}/)              // CPF mascarado
+      || String(s).match(/\*{3,}\d{3,}\/\d{4}-\d{2}/);      // CNPJ mascarado
+  return m?m[0]:null;
+}
+function _itauDataEm(s){
+  if(!s) return null;
+  var m=String(s).match(/(\d{2})[.\/](\d{2})[.\/](\d{4})/);
+  return m?m[3]+'-'+m[2]+'-'+m[1]:null;
+}
+// Data de confirmação: "Operação/Transferência/transação/Pagamento efetuad[ao] em DD/MM/AAAA".
+function _itauDataConfirmacao(texto){
+  var m=texto.match(/efetuad[ao]\s+em\s+(\d{2}[.\/]\d{2}[.\/]\d{4})/i);
+  return m?_itauParseDataBR(m[1]):null;
+}
+function _itauCtrlEm(texto){
+  var m=texto.match(/CTRL\s*:?\s*(\d{6,})/i);
+  return m?m[1]:null;
+}
+// Valor "R$ 1.234,56" / "1.234,56" → 1234.56
+function _itauValorReais(s){ return _itauParseValorBR(s); }
+// Linha digitável de boleto: remove nome de instituição antes dos dígitos
+// (ex: "BOFA MERRILL LYNCH BM S.A. 75590 00703 ..." → "75590 00703 ...").
+function _itauLimparLinhaDigitavel(s){
+  if(!s) return null;
+  var m=String(s).match(/(\d[\d\s.]{20,})\s*$/);
+  if(m) return m[1].replace(/\s+/g,' ').trim();
+  return String(s).replace(/\s+/g,' ').trim()||null;
+}
+
+// Detecta os NOVOS layouts. Ordem do spec: DARE → DARF → ESOCIAL → BOLETO
+// → PIX_QR → PIX_TRANSF → TRANSF_CONTA → TRIB_EST → TRIB_MUN →
+// CONCESSIONARIA → CODBAR_GENERICO. Retorna null se nenhum bater (aí o
+// dispatcher usa o detector/parsers antigos da Peixoto).
+function _itauDetectarTipoPagamento(texto){
+  var t=_itauNorm(texto);
+  if(t.indexOf('sefaz-sp/dare')>=0||t.indexOf('sefaz-sp / dare')>=0||t.indexOf('controle do dare')>=0) return 'DARE_SP';
+  if(t.indexOf('comprovante de pagamento - darf')>=0||t.indexOf('pagamento - darf')>=0) return 'DARF';
+  if(t.indexOf('arrecadacao do e-social')>=0||t.indexOf('arrecadacao do esocial')>=0) return 'ESOCIAL';
+  if(t.indexOf('comprovante de pagamento de boleto')>=0) return 'BOLETO_NOVO';
+  if(t.indexOf('comprovante de pagamento qr code')>=0||t.indexOf('tipo da transacao: pix qr code')>=0) return 'PIX_QR_CODE';
+  if(t.indexOf('tipo de pagamento: pix transferencia')>=0||(t.indexOf('comprovante de transferencia')>=0&&t.indexOf('nome do recebedor')>=0)) return 'PIX_TRANSFERENCIA';
+  if(/de conta corrente para conta (?:corrente|poupan[çc]a)/.test(t)||/comprovante de transferencia[\s\S]{0,400}dados da conta creditada/.test(t)) return 'TRANSFERENCIA_CONTA';
+  if(t.indexOf('tributos estaduais')>=0) return 'TRIBUTO_ESTADUAL';
+  if(t.indexOf('tributos municipais')>=0&&t.indexOf('comprovante de operacao')<0) return 'TRIBUTO_MUNICIPAL';
+  if(t.indexOf('comprovante de pagamento de concessionarias')>=0&&t.indexOf('comprovante de operacao')<0) return 'CONCESSIONARIA';
+  if(t.indexOf('comprovante de pagamento com codigo de barras')>=0&&t.indexOf('comprovante de operacao')<0) return 'CODIGO_BARRAS_GENERICO';
+  return null;
+}
+
+// Molde vazio de registro extraído (todos os parsers devolvem esta forma).
+function _itauRegistroVazio(){
+  return { data_pagamento:null, cliente_fornecedor_nome:null, cnpj_cpf:null,
+    documento_numero:null, data_vencimento:null, valor_pago:null, warnings:[],
+    transaction_id:null, ctrl:null, barcode:null, barcode_normalized:null,
+    payment_reference:null, beneficiary_name:null, beneficiary_document:null,
+    final_beneficiary_name:null, final_beneficiary_document:null,
+    qr_code_identifier:null, expiration_at:null };
+}
+
+// ── 1. BOLETO NOVO (com ou sem Beneficiário Final) ──────────────────────
+function _itauParsearBoletoNovo(linhas, texto){
+  var r=_itauRegistroVazio();
+  var idxDig=linhas.findIndex(function(l){ return /identifica[çc][ãa]o no meu comprovante/i.test(l); });
+  if(idxDig>=0&&linhas[idxDig+1]) r.documento_numero=_itauLimparLinhaDigitavel(linhas[idxDig+1]);
+  r.barcode_normalized=r.documento_numero?r.documento_numero.replace(/\D/g,''):null;
+
+  var lBenef=linhas.find(function(l){ return /^Benefici[áa]rio\s*:/i.test(l); });
+  if(lBenef){ var mb=lBenef.match(/^Benefici[áa]rio\s*:\s*(.+?)\s*(?:CPF\s*\/\s*CNPJ|Data de venc|$)/i); if(mb) r.beneficiary_name=mb[1].trim()||null; }
+  var lRazao=linhas.find(function(l){ return /^Raz[ãa]o Social\s*:/i.test(l); });
+  if(lRazao){
+    var mr=lRazao.match(/^Raz[ãa]o Social\s*:\s*(.+)$/i);
+    if(mr){
+      var resto=mr[1];
+      var mcnpj=_itauCnpjCpfEm(resto);
+      var mdata=resto.match(/\d{2}[.\/]\d{2}[.\/]\d{4}/);
+      r.beneficiary_document=mcnpj;
+      r.data_vencimento=mdata?_itauParseDataBR(mdata[0]):null;
+      var nome=resto;
+      if(mcnpj) nome=nome.slice(0,nome.indexOf(mcnpj));
+      r.razao_social=nome.replace(/\s+/g,' ').trim()||null;
+    }
+  }
+  if(!r.data_vencimento){
+    var lv=linhas.find(function(l){ return /data de vencimento/i.test(l)&&/\d{2}[.\/]\d{2}[.\/]\d{4}/.test(l); });
+    if(lv){ var mv=lv.match(/\d{2}[.\/]\d{2}[.\/]\d{4}/); r.data_vencimento=mv?_itauParseDataBR(mv[0]):null; }
+  }
+
+  // Beneficiário Final (opcional): linha de rótulo seguida da linha "NOME CNPJ DATA"
+  var idxBF=linhas.findIndex(function(l){ return /benefici[áa]rio final\s*:/i.test(l); });
+  if(idxBF>=0&&linhas[idxBF+1]){
+    var lf=linhas[idxBF+1];
+    var mcnpjF=_itauCnpjCpfEm(lf);
+    var mdataF=lf.match(/\d{2}[.\/]\d{2}[.\/]\d{4}/);
+    r.final_beneficiary_document=mcnpjF;
+    var nomeF=lf;
+    if(mcnpjF) nomeF=nomeF.slice(0,nomeF.indexOf(mcnpjF));
+    r.final_beneficiary_name=nomeF.replace(/\s+/g,' ').trim()||null;
+    if(mdataF) r.data_pagamento=_itauParseDataBR(mdataF[0]);
+  }
+  // Data de pagamento (quando não há beneficiário final)
+  if(!r.data_pagamento){
+    var idxDP=linhas.findIndex(function(l){ return /^Data de pagamento\s*:/i.test(l)||/\(=\)\s*Data de pagamento/i.test(l); });
+    if(idxDP>=0){
+      var mdp=linhas[idxDP].match(/\d{2}[.\/]\d{2}[.\/]\d{4}/) || (linhas[idxDP+1]&&linhas[idxDP+1].match(/\d{2}[.\/]\d{2}[.\/]\d{4}/));
+      if(mdp) r.data_pagamento=_itauParseDataBR(mdp[0]);
+    }
+  }
+  if(!r.data_pagamento) r.data_pagamento=_itauDataConfirmacao(texto);
+
+  // Valor do pagamento (=): última quantia da linha "Pagador ... (=) Valor do pagamento"
+  var idxPag=linhas.findIndex(function(l){ return /\(=\)\s*Valor do pagamento/i.test(l); });
+  var valorPagamento=null;
+  if(idxPag>=0&&linhas[idxPag+1]){
+    var nums=linhas[idxPag+1].match(/[\d.]+,\d{2}/g);
+    if(nums&&nums.length) valorPagamento=_itauParseValorBR(nums[nums.length-1]);
+  }
+  if(valorPagamento==null){
+    // fallback: "Valor do boleto" +/- mora - desconto
+    var vb=_itauValorAposRotulo(linhas,/Valor do boleto\s*\(R\$\)\s*[:;]/i);
+    valorPagamento=_itauParseValorBR(vb);
+  }
+  r.valor_pago=valorPagamento;
+
+  r.ctrl=_itauCtrlEm(texto);
+  // CLIENTE/FORNECEDOR: final › razão social › beneficiário
+  r.cliente_fornecedor_nome=r.final_beneficiary_name||r.razao_social||r.beneficiary_name||null;
+  r.cnpj_cpf=r.final_beneficiary_name?r.final_beneficiary_document:(r.beneficiary_document||null);
+
+  if(!r.cliente_fornecedor_nome) r.warnings.push('BENEFICIARY_NOT_FOUND');
+  if(!r.cnpj_cpf) r.warnings.push('BENEFICIARY_DOCUMENT_NOT_FOUND');
+  if(r.valor_pago==null) r.warnings.push('VALUE_NOT_FOUND');
+  if(!r.documento_numero) r.warnings.push('DOCUMENT_NOT_FOUND');
+  return r;
+}
+
+// ── 2. TRANSFERÊNCIA CONTA CORRENTE → CONTA CORRENTE ────────────────────
+function _itauParsearTransferenciaConta(linhas, texto){
+  var r=_itauRegistroVazio();
+  var idxCred=linhas.findIndex(function(l){ return /dados da conta creditada/i.test(l); });
+  if(idxCred>=0){
+    for(var i=idxCred+1;i<Math.min(idxCred+5,linhas.length);i++){
+      var mn=linhas[i].match(/^Nome\s*:\s*(.+)$/i);
+      if(mn){ r.cliente_fornecedor_nome=mn[1].replace(/\s+/g,' ').trim(); break; }
+    }
+  }
+  r.valor_pago=_itauValorReais(_itauValorAposRotulo(linhas,/^Valor\s*:/i));
+  // "Informações fornecidas pelo pagador:" — o texto de referência pode vir
+  // DEPOIS do "pagador:" ("...pelo\npagador: WIND INV 26082227") ou ENTRE o
+  // "pelo" e o "pagador:" ("...pelo\nPENSAO LUIZ FERNANDO\npagador:").
+  var ref='';
+  var mRef1=texto.match(/pelo\s+pagador\s*:\s*([^\n]+)/i);
+  var mRef2=texto.match(/Informa[çc][õo]es fornecidas\s*\n?\s*pelo\s*\n([^\n]+)\n\s*pagador\s*:/i);
+  if(mRef1&&mRef1[1].trim()) ref=mRef1[1].replace(/\s+/g,' ').trim();
+  else if(mRef2&&mRef2[1].trim()) ref=mRef2[1].replace(/\s+/g,' ').trim();
+  r.payment_reference=ref||null;
+  r.ctrl=_itauCtrlEm(texto);
+  r.data_pagamento=_itauDataConfirmacao(texto);
+  r.documento_numero=ref||r.ctrl||null;
+  r.cnpj_cpf=null;
+  if(!r.cliente_fornecedor_nome) r.warnings.push('BENEFICIARY_NOT_FOUND');
+  if(r.valor_pago==null) r.warnings.push('VALUE_NOT_FOUND');
+  if(!r.documento_numero) r.warnings.push('DOCUMENT_NOT_FOUND');
+  return r;
+}
+
+// ── 3. Tributos federais com "número do documento" (DARF / DARE / e-Social) ──
+function _itauParsearTributoFederal(linhas, texto, nomeFixo){
+  var r=_itauRegistroVazio();
+  r.cliente_fornecedor_nome=nomeFixo;
+  r.cnpj_cpf=null;
+  var numDoc=_itauValorAposRotulo(linhas,/n[úu]mero (?:do documento|de controle do dare)\s*:/i);
+  var mBar=texto.match(/c[óo]digo de barras\s*:\s*([\d\s.-]{20,})/i);
+  r.barcode=mBar?mBar[1].replace(/\s+/g,' ').trim():null;
+  r.barcode_normalized=r.barcode?r.barcode.replace(/\D/g,''):null;
+  r.documento_numero=(numDoc&&numDoc.trim())?numDoc.trim():(r.barcode||null);
+  r.valor_pago=_itauValorReais(_itauValorAposRotulo(linhas,/^valor(?:\s+total)?\s*:/i));
+  var dp=_itauValorAposRotulo(linhas,/data do pagamento\s*:/i);
+  r.data_pagamento=dp?_itauParseDataBR(dp):_itauDataConfirmacao(texto);
+  r.ctrl=_itauCtrlEm(texto);
+  if(r.valor_pago==null) r.warnings.push('VALUE_NOT_FOUND');
+  if(!r.documento_numero) r.warnings.push('DOCUMENT_NOT_FOUND');
+  if(!r.data_pagamento) r.warnings.push('PAYMENT_DATE_NOT_FOUND');
+  return r;
+}
+
+// ── 4. Pagamentos "Código de barras" (tributo estadual/municipal,
+//      concessionária, genérico) — todos têm "Código de barras: NNNN" +
+//      "Valor do documento: R$" + "Operação efetuada em". ──────────────────
+function _itauParsearBarrasFastLube(linhas, texto, nomeFixo, warnBenefAusente){
+  var r=_itauRegistroVazio();
+  r.cliente_fornecedor_nome=nomeFixo;
+  r.cnpj_cpf=null;
+  var mBar=texto.match(/c[óo]digo de barras\s*:\s*([\d\s.-]{20,})/i);
+  r.barcode=mBar?mBar[1].replace(/\s+/g,' ').trim():null;
+  r.barcode_normalized=r.barcode?r.barcode.replace(/\D/g,''):null;
+  r.documento_numero=r.barcode;
+  r.valor_pago=_itauValorReais(_itauValorAposRotulo(linhas,/valor do documento\s*:/i));
+  r.data_pagamento=_itauDataConfirmacao(texto);
+  r.ctrl=_itauCtrlEm(texto);
+  if(warnBenefAusente) r.warnings.push('BENEFICIARY_NOT_AVAILABLE_IN_RECEIPT');
+  if(r.valor_pago==null) r.warnings.push('VALUE_NOT_FOUND');
+  if(!r.barcode) r.warnings.push('BARCODE_NOT_FOUND');
+  return r;
+}
+
+// ── PIX (transferência / QR Code) — para o formato "novo" (Fast Lube) e
+//      também compatível com o da Peixoto. Segue a prioridade de DOCUMENTO
+//      do spec: identificação no comprovante › mensagem ao recebedor ›
+//      ID da transação. Guarda transaction_id / qr_code_identifier /
+//      expiration_at separados. ──────────────────────────────────────────
+function _itauParsearPixV2(linhas, texto, ehQrCode){
+  var r=_itauRegistroVazio();
+  r.cliente_fornecedor_nome=_itauValorAposRotulo(linhas,/^nome do recebedor\s*:/i);
+  r.cnpj_cpf=_itauValorAposRotulo(linhas,/^CPF\s*\/\s*CNPJ do recebedor\s*:/i);
+  r.transaction_id=_itauValorAposRotulo(linhas,/^ID da transa[çc][ãa]o\s*:/i);
+  r.ctrl=_itauValorAposRotulo(linhas,/^controle\s*:/i);
+  var idComp=_itauValorAposRotulo(linhas,/identifica[çc][ãa]o no comprovante\s*:/i);
+  var msg=_itauValorAposRotulo(linhas,/mensagem ao recebedor\s*:/i);
+  // "valor após rótulo" pega a PRÓXIMA linha não-vazia quando o rótulo vem
+  // sozinho — mas aqui esses campos podem estar vazios (rótulo seguido de
+  // outro rótulo). Descarta se o "valor" for na verdade outro rótulo.
+  if(idComp&&/:$/.test(idComp.trim())) idComp=null;
+  if(msg&&/:$/.test(msg.trim())) msg=null;
+  r.payment_reference=msg||null;
+
+  if(ehQrCode){
+    r.valor_pago=_itauValorReais(_itauValorAposRotulo(linhas,/^valor da transa[çc][ãa]o\s*:/i))
+      || _itauValorReais(_itauValorAposRotulo(linhas,/^valor final\s*:/i))
+      || _itauValorReais(_itauValorAposRotulo(linhas,/^valor do documento\s*:/i));
+    r.qr_code_identifier=_itauValorAposRotulo(linhas,/identificador do qr code\s*:/i);
+    if(r.qr_code_identifier&&/:$/.test(r.qr_code_identifier.trim())) r.qr_code_identifier=null;
+    var venc=_itauValorAposRotulo(linhas,/^data de vencimento\s*:/i);
+    if(venc&&/\d{2}[.\/]\d{2}[.\/]\d{4}/.test(venc)) r.data_vencimento=_itauParseDataBR(venc);
+    var exp=_itauValorAposRotulo(linhas,/data e hora da expira[çc][ãa]o\s*:/i);
+    if(exp) r.expiration_at=exp.trim();
+    var mp=texto.match(/pagamento\s+efetuad[oa]\s+em\s+(\d{2}[.\/]\d{2}[.\/]\d{4})/i)
+        || texto.match(/transa[çc][ãa]o\s+efetuada\s+em\s+(\d{2}[.\/]\d{2}[.\/]\d{4})/i);
+    r.data_pagamento=mp?_itauParseDataBR(mp[1]):null;
+  } else {
+    r.valor_pago=_itauValorReais(_itauValorAposRotulo(linhas,/^valor\s*:/i));
+    var dt=_itauValorAposRotulo(linhas,/^data da transfer[êe]ncia\s*:/i);
+    r.data_pagamento=dt?_itauParseDataBR(dt):_itauDataConfirmacao(texto);
+  }
+  // DOCUMENTO: identificação no comprovante › mensagem › ID da transação
+  r.documento_numero=(idComp&&idComp.trim())||(msg&&msg.trim())||r.transaction_id||null;
+
+  if(!r.cliente_fornecedor_nome) r.warnings.push('BENEFICIARY_NOT_FOUND');
+  if(r.valor_pago==null) r.warnings.push('VALUE_NOT_FOUND');
+  if(!r.data_pagamento) r.warnings.push('PAYMENT_DATE_NOT_FOUND');
+  return r;
+}
+
+// Hash determinístico de dedup (spec): chave por tipo, nunca só fornecedor+valor.
+function _itauHashComprovante(tipo, r){
+  var base;
+  if(tipo==='PIX_TRANSFERENCIA'||tipo==='PIX_QR_CODE') base='pix|'+(r.transaction_id||'')+'|'+(r.valor_pago||'')+'|'+(r.data_pagamento||'');
+  else if(tipo==='BOLETO_NOVO'||tipo==='TITULO_ITAU'||tipo==='TITULO_OUTRO_BANCO') base='bol|'+((r.barcode_normalized||r.documento_numero||'').replace(/\D/g,''))+'|'+(r.valor_pago||'')+'|'+(r.data_pagamento||'');
+  else if(tipo==='DARF'||tipo==='DARE_SP'||tipo==='ESOCIAL') base='fed|'+(r.documento_numero||'')+'|'+(r.valor_pago||'')+'|'+(r.data_pagamento||'');
+  else if(tipo==='TRANSFERENCIA_CONTA') base='ted|'+(r.ctrl||'')+'|'+(r.valor_pago||'')+'|'+(r.data_pagamento||'');
+  else base='bar|'+((r.barcode_normalized||'')||(r.documento_numero||''))+'|'+(r.valor_pago||'')+'|'+(r.data_pagamento||'');
+  var h=0; for(var i=0;i<base.length;i++){ h=((h<<5)-h+base.charCodeAt(i))|0; }
+  return tipo.toLowerCase()+'_'+(h>>>0).toString(36);
+}
+
 // Nunca retorna null — toda página vira 1 registro, mesmo sem reconhecer nada.
 function _itauParsearPaginaComprovante(linhas, texto, numeroPagina){
-  var tipo=_itauDetectarTipo(texto);
-  var extraido;
-  if(tipo==='TITULO_ITAU'||tipo==='TITULO_OUTRO_BANCO') extraido=_itauParsearTitulo(linhas,texto);
-  else if(tipo==='PIX_TRANSFERENCIA') extraido=_itauParsearPix(linhas,texto,false);
-  else if(tipo==='PIX_QR_CODE') extraido=_itauParsearPix(linhas,texto,true);
-  else if(tipo==='CODIGO_BARRAS'||tipo==='CONCESSIONARIA'||tipo==='TRIBUTO_MUNICIPAL') extraido=_itauParsearCodigoBarras(linhas,texto);
-  else extraido={data_pagamento:null,cliente_fornecedor_nome:null,cnpj_cpf:null,documento_numero:null,data_vencimento:null,valor_pago:null,warnings:['TIPO_NAO_RECONHECIDO']};
+  var tipoNovo=_itauDetectarTipoPagamento(texto);
+  var tipo, extraido;
+  if(tipoNovo){
+    tipo=tipoNovo;
+    if(tipo==='BOLETO_NOVO') extraido=_itauParsearBoletoNovo(linhas,texto);
+    else if(tipo==='TRANSFERENCIA_CONTA') extraido=_itauParsearTransferenciaConta(linhas,texto);
+    else if(tipo==='DARF') extraido=_itauParsearTributoFederal(linhas,texto,'DARF');
+    else if(tipo==='DARE_SP') extraido=_itauParsearTributoFederal(linhas,texto,'SEFAZ-SP / DARE');
+    else if(tipo==='ESOCIAL') extraido=_itauParsearTributoFederal(linhas,texto,'E-SOCIAL');
+    else if(tipo==='TRIBUTO_ESTADUAL') extraido=_itauParsearBarrasFastLube(linhas,texto,/gnre/i.test(texto)?'GNRE / TRIBUTOS ESTADUAIS':'TRIBUTOS ESTADUAIS',false);
+    else if(tipo==='TRIBUTO_MUNICIPAL') extraido=_itauParsearBarrasFastLube(linhas,texto,'TRIBUTOS MUNICIPAIS',false);
+    else if(tipo==='CONCESSIONARIA'){
+      var nomeConc='CONCESSIONÁRIA';
+      var mc=linhas[1]&&linhas[1].match(/^\d{3,5}\s*-\s*(.+)$/);
+      if(mc) nomeConc=mc[1].trim();
+      extraido=_itauParsearBarrasFastLube(linhas,texto,nomeConc,false);
+    }
+    else if(tipo==='CODIGO_BARRAS_GENERICO') extraido=_itauParsearBarrasFastLube(linhas,texto,'PAGAMENTO COM CÓDIGO DE BARRAS',true);
+    else if(tipo==='PIX_TRANSFERENCIA') extraido=_itauParsearPixV2(linhas,texto,false);
+    else if(tipo==='PIX_QR_CODE') extraido=_itauParsearPixV2(linhas,texto,true);
+    else extraido=_itauRegistroVazio();
+  } else {
+    // Layouts antigos (Peixoto) — detector/parsers originais, INTOCADOS.
+    tipo=_itauDetectarTipo(texto);
+    if(tipo==='TITULO_ITAU'||tipo==='TITULO_OUTRO_BANCO') extraido=_itauParsearTitulo(linhas,texto);
+    else if(tipo==='PIX_TRANSFERENCIA') extraido=_itauParsearPix(linhas,texto,false);
+    else if(tipo==='PIX_QR_CODE') extraido=_itauParsearPix(linhas,texto,true);
+    else if(tipo==='CODIGO_BARRAS'||tipo==='CONCESSIONARIA'||tipo==='TRIBUTO_MUNICIPAL') extraido=_itauParsearCodigoBarras(linhas,texto);
+    else extraido={data_pagamento:null,cliente_fornecedor_nome:null,cnpj_cpf:null,documento_numero:null,data_vencimento:null,valor_pago:null,warnings:['TIPO_NAO_RECONHECIDO']};
+  }
+  if(!extraido.warnings) extraido.warnings=[];
 
-  var temConfirmacao=/pagamento\s+efetuad[oa]|transa[çc][ãa]o\s+efetuada|transfer[êe]ncia\s+efetuada/i.test(texto);
+  var temConfirmacao=/(?:opera[çc][ãa]o|pagamento|transa[çc][ãa]o|transfer[êe]ncia)\s+(?:efetuad[oa]|realizad[oa])/i.test(texto);
   var status=(temConfirmacao&&extraido.valor_pago>0)?'PAGO':'VERIFICAR';
   if(status==='VERIFICAR'&&extraido.warnings.indexOf('STATUS_NAO_CONFIRMADO')<0) extraido.warnings.push('STATUS_NAO_CONFIRMADO');
 
   return {
     data_pagamento: extraido.data_pagamento,
-    cliente_fornecedor_nome: extraido.cliente_fornecedor_nome?extraido.cliente_fornecedor_nome.replace(/\s+/g,' ').trim():null,
+    cliente_fornecedor_nome: extraido.cliente_fornecedor_nome?String(extraido.cliente_fornecedor_nome).replace(/\s+/g,' ').trim():null,
     cnpj_cpf: extraido.cnpj_cpf,
     documento_numero: extraido.documento_numero,
     data_vencimento: extraido.data_vencimento,
     valor_pago: extraido.valor_pago,
     observacao: tipo,
     status: status,
-    // Campos auxiliares (auditoria/debug) — não vão pras colunas do banco,
-    // ficam só no objeto em memória pra conferência antes de salvar.
+    // Campos auxiliares (auditoria) — vão pras colunas novas de
+    // comprovantes_bancarios (ver supabase-schema-comprovantes-bancarios-auditoria.sql).
     page_number: numeroPagina,
     parser_type: tipo,
     warnings: extraido.warnings,
-    raw_text: texto
+    raw_text: texto,
+    transaction_id: extraido.transaction_id||null,
+    ctrl: extraido.ctrl||null,
+    barcode: extraido.barcode||null,
+    barcode_normalized: extraido.barcode_normalized||null,
+    payment_reference: extraido.payment_reference||null,
+    beneficiary_name: extraido.beneficiary_name||null,
+    beneficiary_document: extraido.beneficiary_document||null,
+    final_beneficiary_name: extraido.final_beneficiary_name||null,
+    final_beneficiary_document: extraido.final_beneficiary_document||null,
+    qr_code_identifier: extraido.qr_code_identifier||null,
+    expiration_at: extraido.expiration_at||null,
+    hash_dedup: _itauHashComprovante(tipo, extraido)
   };
 }
 // Processa o PDF inteiro, garantindo 1 registro por página (nunca menos).
@@ -24701,10 +25020,40 @@ async function confirmarLancctbImportComprovantes(){
       tipo_operacao: c.tipo_operacao||null,
       numero_parcela: c.numero_parcela||1,
     }:{}),
+    // Campos de auditoria do parser determinístico do Itaú (só pagamento;
+    // colunas criadas em supabase-schema-comprovantes-bancarios-auditoria.sql).
+    // Só envia o que estiver preenchido, pra não quebrar em bases que ainda
+    // não rodaram essa migration (o campo inexistente é ignorado pelo PostgREST
+    // só se não vier no payload).
+    ...(tipo==='pagamento'?{
+      parser_type: c.parser_type||null,
+      transaction_id: c.transaction_id||null,
+      ctrl: c.ctrl||null,
+      barcode: c.barcode||null,
+      barcode_normalized: c.barcode_normalized||null,
+      payment_reference: c.payment_reference||null,
+      beneficiary_name: c.beneficiary_name||null,
+      beneficiary_document: c.beneficiary_document||null,
+      final_beneficiary_name: c.final_beneficiary_name||null,
+      final_beneficiary_document: c.final_beneficiary_document||null,
+      qr_code_identifier: c.qr_code_identifier||null,
+      expiration_at: c.expiration_at||null,
+      page_number: c.page_number||null,
+      warnings: (c.warnings&&c.warnings.length)?c.warnings:null,
+      raw_text: c.raw_text||null,
+      hash_dedup: c.hash_dedup||null,
+    }:{}),
   }));
-  const { error } = await _supaClient.from(_lancctbComprovTabela(tipo)).insert(registros);
+  // Pagamento: upsert ignorando duplicados (dedup por hash_dedup, spec) —
+  // reimportar o mesmo PDF não cria linhas repetidas. Recebimento/salários:
+  // insert normal (não têm hash).
+  const { error, count } = tipo==='pagamento'
+    ? await _supaClient.from('comprovantes_bancarios').upsert(registros,{onConflict:'empresa_eid,hash_dedup',ignoreDuplicates:true,count:'exact'})
+    : await _supaClient.from(_lancctbComprovTabela(tipo)).insert(registros);
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
-  toast(`${registros.length} comprovante(s) salvo(s) com sucesso`,'ok');
+  const salvos=(typeof count==='number')?count:registros.length;
+  const ignorados=registros.length-salvos;
+  toast(`${salvos} comprovante(s) salvo(s)${ignorados>0?` (${ignorados} já existiam, ignorados)`:''}`,'ok');
   // Vínculo com o Visão Geral (Fase 16) — só Comprovantes de Pagamento por
   // enquanto, pedido do usuário (05/09/2026); mesma ideia do Extrato/Aplicações.
   if(tipo==='pagamento'){
