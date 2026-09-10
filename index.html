@@ -7841,6 +7841,167 @@ function democExcluirLogSubstituicao(idx){
   toast('Registro excluído.','ok');
 }
 
+// ─── Leitor de Balancete/DRE em Excel — SEM IA, nem como reserva ──────────
+// Pedido do usuário 09/09/2026: "então preciso que esse processo seja
+// feito fora da IA" / "nem como reserva". O Domínio consegue exportar
+// Balancete/DRE tanto em PDF quanto em Excel (.xlsx) — o PDF tem texto com
+// posição sobreposta entre colunas (Código/Classificação colam visualmente
+// um no outro na extração, testado ao vivo com um balancete real da
+// Peixoto — não dá pra confiar num parser de texto ali sem arriscar
+// número errado). O Excel, por outro lado, vem em colunas de verdade,
+// limpo, e foi validado byte a byte contra 2 arquivos reais (Balancete e
+// DRE da Esperienza, mar/2026) antes de entrar em produção. Por isso: SÓ
+// aceita .xlsx aqui — se o contador anexar .pdf continua indo pra IA
+// (função antiga, inalterada), mas .xlsx nunca chama IA nenhuma.
+function _democNormalizarHeaderTxt(s){
+  return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().trim();
+}
+function _democAcharColuna(headerRow, alvoNormalizado){
+  for(var i=0;i<headerRow.length;i++){
+    if(_democNormalizarHeaderTxt(headerRow[i])===alvoNormalizado) return i;
+  }
+  return -1;
+}
+function _democValorAposRotulo(row, regexRotulo){
+  for(var i=0;i<row.length;i++){
+    if(row[i]!=null && regexRotulo.test(String(row[i]))){
+      for(var j=i+1;j<row.length;j++){ if(row[j]!=null && String(row[j]).trim()!=='') return String(row[j]).trim(); }
+    }
+  }
+  return null;
+}
+function _democNumOuNull(v){
+  if(v==null||v==='') return null;
+  var n=typeof v==='number'?v:parseFloat(String(v).replace(/\./g,'').replace(',','.'));
+  return isNaN(n)?null:n;
+}
+function _democPeriodoParaMesAno(periodo){
+  if(!periodo) return {mes:null,ano:null};
+  var m=String(periodo).match(/(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/);
+  // Usa a data FINAL do período — mesma convenção já usada em
+  // _democParsearNomeArquivoPasta pro nome do arquivo em PDF.
+  return m?{mes:m[5],ano:m[6]}:{mes:null,ano:null};
+}
+// Balancete: tem código+classificação reais — sintética/analítica decidida
+// por hierarquia de verdade (tem filha na árvore de classificações).
+function _democParsearBalanceteXlsx(matriz){
+  var idxCab=-1, colCod=-1, colClass=-1, colDesc=-1, colSaldoAnt=-1, colDeb=-1, colCred=-1, colSaldoAtual=-1;
+  for(var r=0;r<Math.min(matriz.length,20);r++){
+    var row=matriz[r]||[];
+    var cCod=_democAcharColuna(row,'codigo');
+    var cClass=_democAcharColuna(row,'classificacao');
+    if(cCod>=0&&cClass>=0){
+      idxCab=r; colCod=cCod; colClass=cClass;
+      colDesc=_democAcharColuna(row,'descricao da conta');
+      colSaldoAnt=_democAcharColuna(row,'saldo anterior');
+      colDeb=_democAcharColuna(row,'debito');
+      colCred=_democAcharColuna(row,'credito');
+      colSaldoAtual=_democAcharColuna(row,'saldo atual');
+      break;
+    }
+  }
+  if(idxCab<0) return null;
+
+  var razaoSocial=null, cnpj=null, periodo=null;
+  for(var r2=0;r2<idxCab;r2++){
+    var row2=matriz[r2]||[];
+    if(!razaoSocial) razaoSocial=_democValorAposRotulo(row2,/empresa\s*:/i);
+    if(!cnpj) cnpj=_democValorAposRotulo(row2,/c\.?n\.?p\.?j\.?\s*:/i);
+    if(!periodo) periodo=_democValorAposRotulo(row2,/per[ií]odo\s*:/i);
+  }
+  var mesAno=_democPeriodoParaMesAno(periodo);
+
+  var contas=[];
+  for(var r3=idxCab+1;r3<matriz.length;r3++){
+    var row3=matriz[r3]||[];
+    var classificacao=row3[colClass];
+    // Linhas de rodapé/total (ATIVO, PASSIVO, RESULTADO DO MÊS...) não têm
+    // classificação — são resumo duplicado do topo, não entram na árvore.
+    if(classificacao==null||String(classificacao).trim()==='') continue;
+    var nome=(row3[colDesc]!=null?String(row3[colDesc]):'').trim();
+    if(!nome) continue;
+    contas.push({
+      codigo_reduzido: row3[colCod]!=null?String(row3[colCod]):'',
+      codigo_analitico: String(classificacao).trim(),
+      nome_conta: nome,
+      saldo_anterior: _democNumOuNull(row3[colSaldoAnt]),
+      debito: _democNumOuNull(row3[colDeb]),
+      credito: _democNumOuNull(row3[colCred]),
+      saldo_atual: _democNumOuNull(row3[colSaldoAtual])
+    });
+  }
+  var codigos=contas.map(function(c){return c.codigo_analitico;});
+  contas.forEach(function(c){
+    var temFilha=codigos.some(function(k){ return k!==c.codigo_analitico && k.indexOf(c.codigo_analitico+'.')===0; });
+    c.tipo=temFilha?'sintetica':'analitica';
+  });
+  if(!contas.length) return null;
+  return {razaoSocial:razaoSocial, cnpj:cnpj, mes:mesAno.mes, ano:mesAno.ano, contas:contas};
+}
+// DRE: não tem coluna de código — hierarquia vem da posição (coluna mais à
+// direita da "Descrição" = linha analítica, coluna da própria "Descrição"
+// = linha sintética/grupo). Detecta a coluna da filha dinamicamente (não
+// assume um deslocamento fixo) pra tolerar pequenas variações de layout.
+function _democParsearDreXlsx(matriz){
+  var idxCab=-1, colDesc=-1, colValor=-1;
+  for(var r=0;r<Math.min(matriz.length,20);r++){
+    var row=matriz[r]||[];
+    var cDesc=_democAcharColuna(row,'descricao');
+    var cValor=_democAcharColuna(row,'saldo atual');
+    if(cDesc>=0&&cValor>=0){ idxCab=r; colDesc=cDesc; colValor=cValor; break; }
+  }
+  if(idxCab<0) return null;
+
+  var colFilhaDetectada=-1;
+  for(var r4=idxCab+1;r4<matriz.length&&colFilhaDetectada<0;r4++){
+    var row4=matriz[r4]||[];
+    if(row4[colDesc]==null||String(row4[colDesc]).trim()===''){
+      for(var c=colDesc+1;c<colValor;c++){
+        if(row4[c]!=null&&String(row4[c]).trim()!==''){ colFilhaDetectada=c; break; }
+      }
+    }
+  }
+  var colDescFilha=colFilhaDetectada>=0?colFilhaDetectada:colDesc+2;
+
+  var razaoSocial=null, cnpj=null, periodoTxt=null;
+  for(var r2=0;r2<idxCab;r2++){
+    var row2=matriz[r2]||[];
+    if(!razaoSocial) razaoSocial=_democValorAposRotulo(row2,/empresa\s*:/i);
+    if(!cnpj) cnpj=_democValorAposRotulo(row2,/c\.?n\.?p\.?j\.?\s*:/i);
+    if(!periodoTxt) periodoTxt=_democValorAposRotulo(row2,/per[ií]odo\s*:/i);
+  }
+  var mesAno=_democPeriodoParaMesAno(periodoTxt);
+
+  var contas=[];
+  for(var r3=idxCab+1;r3<matriz.length;r3++){
+    var row3=matriz[r3]||[];
+    var nomeSint=row3[colDesc]!=null?String(row3[colDesc]).trim():'';
+    var nomeAnalit=row3[colDescFilha]!=null?String(row3[colDescFilha]).trim():'';
+    var valor=_democNumOuNull(row3[colValor]);
+    if(nomeSint){
+      contas.push({codigo_analitico:'',nome_conta:nomeSint,tipo:'sintetica',saldo_atual:valor,saldo_anterior:null,debito:null,credito:null});
+    } else if(nomeAnalit){
+      contas.push({codigo_analitico:'',nome_conta:nomeAnalit,tipo:'analitica',saldo_atual:valor,saldo_anterior:null,debito:null,credito:null});
+    }
+    // linhas vazias (separadores) e o bloco de assinatura no rodapé caem
+    // fora naturalmente (nenhuma das 2 colunas de nome fica preenchida).
+  }
+  if(!contas.length) return null;
+  return {razaoSocial:razaoSocial, cnpj:cnpj, mes:mesAno.mes, ano:mesAno.ano, contas:contas};
+}
+// Lê o arquivo .xlsx e devolve no MESMO formato que a IA devolveria
+// ({mes,ano,cnpj,razaoSocial,contas}), pra plugar direto em
+// _democAplicarDocContas sem mudar mais nada do fluxo existente.
+async function _democLerXlsxSemIA(tipo, file){
+  var buf=await file.arrayBuffer();
+  var wb=XLSX.read(buf,{type:'array'});
+  var ws=wb.Sheets[wb.SheetNames[0]];
+  var matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null});
+  var resultado=tipo==='dre'?_democParsearDreXlsx(matriz):_democParsearBalanceteXlsx(matriz);
+  if(!resultado) throw new Error('Não reconheci o layout deste Excel — confira se é a exportação de '+(tipo==='dre'?'DRE':'Balancete')+' do Domínio.');
+  if(!resultado.mes||!resultado.ano) throw new Error('Não consegui identificar o Período (mês/ano) no cabeçalho do arquivo.');
+  return resultado;
+}
 async function _democExtrairTextoEChamarIA(edgeFnNome, file){
   var texto=await _empExtrairTextoPDF(file,30);
   var resp=await fetch(SUPABASE_URL+'/functions/v1/'+edgeFnNome,{
@@ -8582,7 +8743,8 @@ function _democRenderContasSecao(tipo, eid){
   h+='<button class="btn bo bsm" style="font-size:11px" onclick="_democUnicoToggleForm(\''+tipo+'\',\''+eid+'\')">📎 Importar '+DEMOC_TIPOS_CONTAS[tipo].label+' (um arquivo)</button>';
   if(aberto){
     h+='<div style="margin-top:8px;padding:10px 12px;border:1px dashed var(--border);border-radius:6px;background:var(--bg);max-width:560px">'
-      +'<input type="file" id="democUnico_'+tipo+'_'+eid+'" accept=".pdf" class="fi" style="width:100%">'
+      +'<input type="file" id="democUnico_'+tipo+'_'+eid+'" accept=".pdf,.xlsx" class="fi" style="width:100%">'
+      +'<div style="font-size:11px;color:var(--slate);margin-top:4px">.xlsx (exportação do Domínio) é lido direto, sem IA. .pdf continua indo pra IA (Gemini).</div>'
       +'<div style="margin-top:8px;display:flex;align-items:center;gap:10px">'
       +'<button class="btn bp bsm" id="democUnicoBtn_'+tipo+'_'+eid+'" onclick="_democUnicoExtrairIncluir(\''+tipo+'\',\''+eid+'\')">🔍 Extrair e Incluir</button>'
       +'<span id="democUnicoStatus_'+tipo+'_'+eid+'" style="font-size:12px;color:var(--slate)"></span>'
@@ -8733,11 +8895,17 @@ async function _democUnicoExtrairIncluir(tipo, eid){
   var btn=document.getElementById('democUnicoBtn_'+tipo+'_'+eid);
   if(!input||!input.files||!input.files.length){ toast('Anexe o PDF primeiro.','err'); return; }
   var f=input.files[0];
+  var ehXlsx=/\.xlsx?$/i.test(f.name);
   var btnTextoOriginal=btn.textContent;
-  btn.disabled=true; btn.textContent='Lendo PDF...';
-  statusEl.style.color='var(--slate)'; statusEl.textContent='Extraindo texto e analisando com IA...';
+  btn.disabled=true; btn.textContent=ehXlsx?'Lendo Excel...':'Lendo PDF...';
+  statusEl.style.color='var(--slate)'; statusEl.textContent=ehXlsx?'Lendo Excel (sem IA)...':'Extraindo texto e analisando com IA...';
   try{
-    var d=await _democExtrairTextoEChamarIA(_democEdgeFnTipo(tipo), f);
+    // Excel (.xlsx) nunca passa pela IA — pedido do usuário 09/09/2026,
+    // "nem como reserva". Só balancete/dre têm leitor determinístico;
+    // faturamento continua pela IA (não fazia parte do pedido).
+    var d=(ehXlsx&&(tipo==='balancete'||tipo==='dre'))
+      ? await _democLerXlsxSemIA(tipo, f)
+      : await _democExtrairTextoEChamarIA(_democEdgeFnTipo(tipo), f);
     if(tipo==='faturamento'){
       var aplicadoFat=_democAplicarFaturamento(eid, d, f.name);
       if(!aplicadoFat.ok) throw new Error(aplicadoFat.motivo);
