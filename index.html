@@ -7992,15 +7992,32 @@ function _democParsearDreXlsx(matriz){
 // Lê o arquivo .xlsx e devolve no MESMO formato que a IA devolveria
 // ({mes,ano,cnpj,razaoSocial,contas}), pra plugar direto em
 // _democAplicarDocContas sem mudar mais nada do fluxo existente.
+// Devolve uma LISTA de resultados (um por mês encontrado) — o arquivo real
+// da Peixoto (09/09/2026) veio com 7 abas num único .xls, uma por mês
+// ("Balancete 01-2026" ... "Balancete 07-2026"), não um mês por arquivo
+// como o nome sugeria. Lê TODAS as abas e aplica cada mês que conseguir
+// reconhecer, em vez de assumir só a 1ª aba (que ficaria incompleto/errado
+// com esse formato real). Abas que não reconhecer são só puladas (sem
+// travar as outras).
 async function _democLerXlsxSemIA(tipo, file){
   var buf=await file.arrayBuffer();
   var wb=XLSX.read(buf,{type:'array'});
-  var ws=wb.Sheets[wb.SheetNames[0]];
-  var matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null});
-  var resultado=tipo==='dre'?_democParsearDreXlsx(matriz):_democParsearBalanceteXlsx(matriz);
-  if(!resultado) throw new Error('Não reconheci o layout deste Excel — confira se é a exportação de '+(tipo==='dre'?'DRE':'Balancete')+' do Domínio.');
-  if(!resultado.mes||!resultado.ano) throw new Error('Não consegui identificar o Período (mês/ano) no cabeçalho do arquivo.');
-  return resultado;
+  if(!wb.SheetNames.length) throw new Error('Não consegui abrir nenhuma aba deste arquivo — confira se o Excel não está protegido/corrompido, ou se foi salvo em .xlsx em vez de .xls (o formato binário antigo às vezes não é lido corretamente).');
+  var resultados=[];
+  var erros=[];
+  wb.SheetNames.forEach(function(nomeAba){
+    var ws=wb.Sheets[nomeAba];
+    if(!ws){ erros.push(nomeAba+': aba não pôde ser lida'); return; }
+    var matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:null});
+    var resultado=tipo==='dre'?_democParsearDreXlsx(matriz):_democParsearBalanceteXlsx(matriz);
+    if(!resultado){ erros.push(nomeAba+': layout não reconhecido'); return; }
+    if(!resultado.mes||!resultado.ano){ erros.push(nomeAba+': período não identificado'); return; }
+    resultados.push(resultado);
+  });
+  if(!resultados.length){
+    throw new Error('Não consegui ler nenhum mês deste Excel ('+wb.SheetNames.length+' aba(s): '+erros.join('; ')+'). Confira se é a exportação de '+(tipo==='dre'?'DRE':'Balancete')+' do Domínio — se o arquivo for .xls (formato binário antigo), tente salvar como .xlsx e reenviar.');
+  }
+  return resultados;
 }
 async function _democExtrairTextoEChamarIA(edgeFnNome, file){
   var texto=await _empExtrairTextoPDF(file,30);
@@ -8167,32 +8184,51 @@ async function democVerificarPasta(){
       if(btn) btn.textContent=txtProgresso;
       if(chipStatus) chipStatus.textContent=txtProgresso;
       try{
-        const jaExistia=p.tipo!=='faturamento'&&!!democGetDoc(p.tipo,p.eid,p.ano,p.mes);
         const file=await p.fh.getFile();
         // .xlsx/.xls nunca passa pela IA (pedido do usuário 09/09/2026,
         // "sem IA") — só .pdf continua indo pro Gemini.
         const ehXlsx=/\.xlsx?$/i.test(p.nome);
-        const d=(ehXlsx&&(p.tipo==='balancete'||p.tipo==='dre'))
-          ? await _democLerXlsxSemIA(p.tipo,file)
-          : await _democExtrairTextoEChamarIA(_democEdgeFnTipo(p.tipo),file);
-        let aplicado;
-        if(p.tipo==='faturamento'){
-          aplicado=_democAplicarFaturamento(p.eid,d,p.nome);
+        if(ehXlsx&&(p.tipo==='balancete'||p.tipo==='dre')){
+          // Achado real (Peixoto, 09/09/2026): o arquivo pode trazer VÁRIOS
+          // meses em abas separadas dentro do mesmo .xlsx/.xls, não só o mês
+          // que o nome do arquivo sugere — aplica todos que conseguir ler.
+          const listaMeses=await _democLerXlsxSemIA(p.tipo,file);
+          listaMeses.forEach(function(d){
+            const jaExistiaMes=!!democGetDoc(p.tipo,p.eid,d.ano,d.mes);
+            const aplicadoMes=_democAplicarDocContas(p.tipo,p.eid,d,p.nome);
+            if(!aplicadoMes.ok){ erros++; return; }
+            if(jaExistiaMes){
+              substituidos++;
+              const empInfo=democInfoEmpresa(p.eid);
+              _democRegistrarSubstituicao(empInfo?empInfo.nome:p.eid, _democLabelTipo(p.tipo)+' '+d.mes+'/'+d.ano);
+            } else {
+              importados++;
+            }
+          });
+          democSetArquivoMod(p.tipo,p.eid,p.ano,p.mes,p.lastModified);
+          _democGarantirEmpresaNaLista(p.eid);
         } else {
-          // O nome do arquivo já garante a competência certa — não depende
-          // da IA acertar sozinha uma data lida de dentro do PDF.
-          d.mes=p.mes; d.ano=p.ano;
-          aplicado=_democAplicarDocContas(p.tipo,p.eid,d,p.nome);
-        }
-        if(!aplicado.ok){ erros++; continue; }
-        democSetArquivoMod(p.tipo,p.eid,p.ano,p.mes,p.lastModified);
-        _democGarantirEmpresaNaLista(p.eid);
-        if(jaExistia){
-          substituidos++;
-          const empInfo=democInfoEmpresa(p.eid);
-          _democRegistrarSubstituicao(empInfo?empInfo.nome:p.eid, _democLabelTipo(p.tipo)+' '+p.mes+'/'+p.ano);
-        } else {
-          importados++;
+          const jaExistia=p.tipo!=='faturamento'&&!!democGetDoc(p.tipo,p.eid,p.ano,p.mes);
+          const d=await _democExtrairTextoEChamarIA(_democEdgeFnTipo(p.tipo),file);
+          let aplicado;
+          if(p.tipo==='faturamento'){
+            aplicado=_democAplicarFaturamento(p.eid,d,p.nome);
+          } else {
+            // O nome do arquivo já garante a competência certa — não depende
+            // da IA acertar sozinha uma data lida de dentro do PDF.
+            d.mes=p.mes; d.ano=p.ano;
+            aplicado=_democAplicarDocContas(p.tipo,p.eid,d,p.nome);
+          }
+          if(!aplicado.ok){ erros++; continue; }
+          democSetArquivoMod(p.tipo,p.eid,p.ano,p.mes,p.lastModified);
+          _democGarantirEmpresaNaLista(p.eid);
+          if(jaExistia){
+            substituidos++;
+            const empInfo=democInfoEmpresa(p.eid);
+            _democRegistrarSubstituicao(empInfo?empInfo.nome:p.eid, _democLabelTipo(p.tipo)+' '+p.mes+'/'+p.ano);
+          } else {
+            importados++;
+          }
         }
       }catch(e){
         console.error('democVerificarPasta erro em '+p.nome+':',e);
@@ -8913,23 +8949,34 @@ async function _democUnicoExtrairIncluir(tipo, eid){
   btn.disabled=true; btn.textContent=ehXlsx?'Lendo Excel...':'Lendo PDF...';
   statusEl.style.color='var(--slate)'; statusEl.textContent=ehXlsx?'Lendo Excel (sem IA)...':'Extraindo texto e analisando com IA...';
   try{
-    // Excel (.xlsx) nunca passa pela IA — pedido do usuário 09/09/2026,
+    // Excel (.xlsx/.xls) nunca passa pela IA — pedido do usuário 09/09/2026,
     // "nem como reserva". Só balancete/dre têm leitor determinístico;
     // faturamento continua pela IA (não fazia parte do pedido).
-    var d=(ehXlsx&&(tipo==='balancete'||tipo==='dre'))
-      ? await _democLerXlsxSemIA(tipo, f)
-      : await _democExtrairTextoEChamarIA(_democEdgeFnTipo(tipo), f);
-    if(tipo==='faturamento'){
-      var aplicadoFat=_democAplicarFaturamento(eid, d, f.name);
-      if(!aplicadoFat.ok) throw new Error(aplicadoFat.motivo);
-      _democUnicoFormAberto['faturamento|'+eid]=false;
-      var msg=(aplicadoFat.incluidos.length?aplicadoFat.incluidos.length+' mês(es) incluído(s)':'')+(aplicadoFat.jaExistiam.length?(aplicadoFat.incluidos.length?', ':'')+aplicadoFat.jaExistiam.length+' já existia(m) (mantido(s))':'');
-      toast('Faturamento processado: '+msg,'ok');
-    } else {
-      var aplicado=_democAplicarDocContas(tipo, eid, d, f.name);
-      if(!aplicado.ok) throw new Error(aplicado.motivo);
+    if(ehXlsx&&(tipo==='balancete'||tipo==='dre')){
+      // O Excel pode trazer vários meses em abas separadas (achado real,
+      // Peixoto 09/09/2026) — aplica todos que conseguir reconhecer.
+      var listaMeses=await _democLerXlsxSemIA(tipo, f);
+      var incluidosCount=0, erroCount=0;
+      listaMeses.forEach(function(dMes){
+        var aplicadoMes=_democAplicarDocContas(tipo, eid, dMes, f.name);
+        if(aplicadoMes.ok) incluidosCount++; else erroCount++;
+      });
       _democUnicoFormAberto[tipo+'|'+eid]=false;
-      toast(DEMOC_TIPOS_CONTAS[tipo].label+' de '+aplicado.mes+'/'+aplicado.ano+' incluído!'+(aplicado.novasContas?' '+aplicado.novasContas+' conta(s) nova(s) detectada(s).':''),'ok');
+      toast(incluidosCount+' mês(es) de '+DEMOC_TIPOS_CONTAS[tipo].label+' incluído(s) deste Excel'+(erroCount?' — '+erroCount+' aba(s) com erro':'')+'.', erroCount&&!incluidosCount?'err':'ok');
+    } else {
+      var d=await _democExtrairTextoEChamarIA(_democEdgeFnTipo(tipo), f);
+      if(tipo==='faturamento'){
+        var aplicadoFat=_democAplicarFaturamento(eid, d, f.name);
+        if(!aplicadoFat.ok) throw new Error(aplicadoFat.motivo);
+        _democUnicoFormAberto['faturamento|'+eid]=false;
+        var msg=(aplicadoFat.incluidos.length?aplicadoFat.incluidos.length+' mês(es) incluído(s)':'')+(aplicadoFat.jaExistiam.length?(aplicadoFat.incluidos.length?', ':'')+aplicadoFat.jaExistiam.length+' já existia(m) (mantido(s))':'');
+        toast('Faturamento processado: '+msg,'ok');
+      } else {
+        var aplicado=_democAplicarDocContas(tipo, eid, d, f.name);
+        if(!aplicado.ok) throw new Error(aplicado.motivo);
+        _democUnicoFormAberto[tipo+'|'+eid]=false;
+        toast(DEMOC_TIPOS_CONTAS[tipo].label+' de '+aplicado.mes+'/'+aplicado.ano+' incluído!'+(aplicado.novasContas?' '+aplicado.novasContas+' conta(s) nova(s) detectada(s).':''),'ok');
+      }
     }
     renderDemoc();
   }catch(e){
