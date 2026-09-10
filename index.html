@@ -8069,10 +8069,13 @@ async function _democConcederAcessoPasta(){
     renderDemoc();
   } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
 }
-// "{Rótulo}_{eid}_{DDMMAAAA} a {DDMMAAAA}.pdf" → usa o mês/ano FINAL do
-// período (fim do fechamento), que é a competência de fato do documento.
+// "{Rótulo}_{eid}_{DDMMAAAA} a {DDMMAAAA}.pdf/.xlsx/.xls" → usa o mês/ano
+// FINAL do período (fim do fechamento), que é a competência de fato do
+// documento. .xlsx/.xls aceitos a partir de 09/09/2026 (pedido do
+// usuário: "sem IA") — permite ler Balancete/DRE da pasta local sem IA
+// quando o Domínio exportar em Excel em vez de PDF.
 function _democParsearNomeArquivoPasta(nome){
-  const m=nome.match(/_(\d+)_\d{2}(\d{2})(\d{4})\s*a\s*\d{2}(\d{2})(\d{4})\.pdf$/i);
+  const m=nome.match(/_(\d+)_\d{2}(\d{2})(\d{4})\s*a\s*\d{2}(\d{2})(\d{4})\.(pdf|xlsx?)$/i);
   if(!m) return null;
   return { eid:m[1], mes:m[4], ano:m[5] };
 }
@@ -8130,7 +8133,12 @@ async function democVerificarPasta(){
       for await (const [,dirAno] of dirTipo.entries()){
         if(dirAno.kind!=='directory') continue;
         for await (const [nomeArq,fh] of dirAno.entries()){
-          if(fh.kind!=='file'||!nomeArq.toLowerCase().endsWith('.pdf')) continue;
+          if(fh.kind!=='file') continue;
+          const nomeMin=nomeArq.toLowerCase();
+          // .xlsx/.xls só fazem sentido pra balancete/dre (é onde existe
+          // leitor sem IA) — faturamento continua só em .pdf.
+          const ehExtensaoValida=nomeMin.endsWith('.pdf')||((tipo==='balancete'||tipo==='dre')&&(nomeMin.endsWith('.xlsx')||nomeMin.endsWith('.xls')));
+          if(!ehExtensaoValida) continue;
           totalArquivos++;
           const info=_democParsearNomeArquivoPasta(nomeArq);
           if(!info){ semPadrao++; continue; }
@@ -8161,7 +8169,12 @@ async function democVerificarPasta(){
       try{
         const jaExistia=p.tipo!=='faturamento'&&!!democGetDoc(p.tipo,p.eid,p.ano,p.mes);
         const file=await p.fh.getFile();
-        const d=await _democExtrairTextoEChamarIA(_democEdgeFnTipo(p.tipo),file);
+        // .xlsx/.xls nunca passa pela IA (pedido do usuário 09/09/2026,
+        // "sem IA") — só .pdf continua indo pro Gemini.
+        const ehXlsx=/\.xlsx?$/i.test(p.nome);
+        const d=(ehXlsx&&(p.tipo==='balancete'||p.tipo==='dre'))
+          ? await _democLerXlsxSemIA(p.tipo,file)
+          : await _democExtrairTextoEChamarIA(_democEdgeFnTipo(p.tipo),file);
         let aplicado;
         if(p.tipo==='faturamento'){
           aplicado=_democAplicarFaturamento(p.eid,d,p.nome);
