@@ -2433,7 +2433,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
       </div>
       <div class="fg" id="lancctbRegraCampoHistorico">
         <div class="fl">Texto que deve aparecer no histórico bancário</div>
-        <input class="fi" id="lancctbRegraHistoricoGatilho" placeholder="Ex: Tar/Custas Cobrança">
+        <input class="fi" id="lancctbRegraHistoricoGatilho" placeholder="Ex: Tar/Custas Cobrança" oninput="_lancctbRegraAvaliarDas()">
         <div class="fl" style="margin-top:8px">Valor exato (opcional) — só bate quando o histórico contém o texto acima <u>e</u> o valor do lançamento for este</div>
         <input class="fi" id="lancctbRegraValorGatilho" type="number" step="0.01" placeholder="Ex: 1500.00 — deixe em branco pra bater só pelo histórico">
       </div>
@@ -2454,7 +2454,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
           <select class="si" id="lancctbRegraAgencia" style="width:100%"><option value="">— Todas as contas —</option></select>
         </div>
       </div>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px;font-size:12.5px">
+      <label id="lancctbRegraRateioLabel" style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-bottom:10px;font-size:12.5px">
         <input type="checkbox" id="lancctbRegraRateioCheckbox" onchange="_lancctbRegraToggleRateio(this.checked)">
         <span>Ratear entre mais de uma conta (ex: DARF com IRPJ+CSLL — 1 crédito do banco pra vários débitos)</span>
       </label>
@@ -21045,6 +21045,16 @@ function _lancctbRegraToggleRateio(ativo){
     _lancctbRateioAdicionarLinha();
   }
 }
+// DAS (Simples Nacional) é imposto único — nunca é rateado em IRPJ/CSLL/etc.
+// Quando o gatilho da Regra contém "DAS" como palavra, esconde a opção de
+// rateio pra não confundir (pedido do usuário 10/09/2026).
+function _lancctbRegraAvaliarDas(){
+  const g=(document.getElementById('lancctbRegraHistoricoGatilho')?.value||'')+' '+(document.getElementById('lancctbRegraDescricao')?.value||'');
+  const ehDas=/\bDAS\b/i.test(g)||/simples\s+nacional/i.test(g);
+  const label=document.getElementById('lancctbRegraRateioLabel');
+  if(label) label.style.display=ehDas?'none':'';
+  if(ehDas&&_lancctbRateioAtivo) _lancctbRegraToggleRateio(false);
+}
 function _lancctbRateioLinhaHtml(rowId){
   const podeRemover=_lancctbRateioRowIds.length>1;
   return `<div id="lancctbRateioLinha_${rowId}" style="display:flex;gap:6px;align-items:center;margin-bottom:6px">
@@ -21124,6 +21134,7 @@ async function abrirLancctbRegraModal(id){
   document.getElementById('lancctbRegraRateioCheckbox').checked=false;
   document.getElementById('lancctbRegraContaUnicaWrap').style.display='';
   document.getElementById('lancctbRegraRateioWrap').style.display='none';
+  const _rl=document.getElementById('lancctbRegraRateioLabel'); if(_rl) _rl.style.display='';
   document.getElementById('lancctbRegraRateioLinhas').innerHTML='';
   document.getElementById('lancctbRateioTotalFeedback').textContent='';
   document.getElementById('lancctbRegraSalvarBtn').disabled=false;
@@ -21211,6 +21222,7 @@ async function abrirLancctbRegraModal(id){
   }
   _lancctbAtualizarCampoHistoricoFixo();
   _lancctbAtualizarCamposRegra();
+  _lancctbRegraAvaliarDas();
   openModal('mLancctbRegra');
 }
 // Alterna o campo de texto do "Histórico Utilizado" conforme o rádio
@@ -21249,6 +21261,7 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
   const hist=(opts.historico||r.historico_bancario||'').trim();
   document.getElementById('lancctbRegraDescricao').value=hist;
   document.getElementById('lancctbRegraHistoricoGatilho').value=hist;
+  _lancctbRegraAvaliarDas();
 
   const origemInfo=document.getElementById('lancctbRegraOrigemInfo');
   const dataFmt=r.data_pagamento?new Date(r.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'';
@@ -22539,7 +22552,7 @@ async function _lancctbProcessarTributos(){
   for(let i=0;i<pendencias.length;i++){
     const l=pendencias[i];
     if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length}…`;
-    const valor=l.valor_saida;
+    let valor=l.valor_saida;
     const anoMes=l.data_pagamento.slice(0,7);
     if(!cachePorMes[anoMes]) cachePorMes[anoMes]=await _lancctbBuscarPdfsTributosDoMes(eid,anoMes);
     const candidatos=cachePorMes[anoMes];
@@ -22551,10 +22564,32 @@ async function _lancctbProcessarTributos(){
         const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
         extraido=await _lancctbExtrairValorPdfTributo(pdfDoc);
       }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); continue; }
-      if(extraido&&Math.abs(extraido.valor-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR){ achou={f,extraido}; break; }
+      if(!extraido) continue;
+      // Bate exato (±2,00) OU o pagamento é MAIOR que o tributo por até 30%
+      // — nesse 2º caso o lançamento é dividido: valor exato do tributo +
+      // a diferença como pendência nova (pedido do usuário 10/09/2026, mesma
+      // ideia do Processar FOPAG). Não aceita pagamento MENOR que o tributo.
+      const dif=valor-extraido.valor;
+      if(Math.abs(dif)<=LANCCTB_MATCH_TOLERANCIA_VALOR){ achou={f,extraido,diferenca:0}; break; }
+      if(dif>0 && dif<=extraido.valor*0.30){ achou={f,extraido,diferenca:Math.round(dif*100)/100}; break; }
     }
     if(!achou){ semAchado++; continue; }
     const info=_lancctbParsearNomeArquivoTributo(achou.f.nome);
+    // Divide o extrato quando o pagamento passou do valor do tributo.
+    if(achou.diferenca>0.01){
+      const valorTributo=Math.round(achou.extraido.valor*100)/100;
+      const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ valor_saida: valorTributo }).eq('id',l.id);
+      if(eUpd){ console.error('Erro ao dividir extrato (tributo):',eUpd); comSugestao++; continue; }
+      const { error: eIns } = await _supaClient.from('lancamentos_extrato').insert({
+        empresa_eid: eid, conta_bancaria_id: contaId, data_pagamento: l.data_pagamento,
+        valor_saida: achou.diferenca, valor_entrada: 0,
+        historico_bancario: `[DIFERENÇA ${info.descricao}] ${l.historico_bancario||''}`.trim(),
+        origem_importacao: 'tributo_diferenca',
+        hash_dedup: `tributo_dif_${l.id}_${Date.now()}`,
+      });
+      if(eIns){ console.error('Erro ao criar linha de diferença (tributo):',eIns); await _supaClient.from('lancamentos_extrato').update({ valor_saida: valor }).eq('id',l.id); comSugestao++; continue; }
+      l.valor_saida=valorTributo; valor=valorTributo; // daqui pra frente as linhas usam o valor do tributo
+    }
     const regra=regras.find(r=>{
       if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
       return r.historico_gatilho&&info.descricao.toLowerCase().includes(r.historico_gatilho.toLowerCase());
@@ -23189,7 +23224,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 6px;font-family:var(--mono);color:var(--slate);font-size:10px;${ellip}" title="${!bancoEhD?esc(contaBancoClassif):''}">${!bancoEhD?esc(contaBancoClassif):''}</td>
     <td style="padding:7px 6px;color:var(--slate);font-size:10.5px;${ellip}" title="${!bancoEhD?esc(contaBancoDesc):''}">${!bancoEhD?esc(contaBancoDesc):'— pendente —'}</td>
     <td style="padding:7px 10px;text-align:right;color:${corValor}">R$ ${_fmt(valor)}</td>
-    <td style="padding:7px 10px;${ellip}" title="${esc(r.historico_bancario||'')}">${esc(r.historico_bancario||'')}</td>
+    <td style="padding:7px 10px;${ellip}" title="${esc(r.historico_bancario||'')}">${(/\bDAS\b/i.test(r.historico_bancario||'')||/simples\s+nacional/i.test(r.historico_bancario||''))?'<span style="background:#0F7B6C;color:#fff;font-size:9px;font-weight:700;padding:1px 5px;border-radius:8px;margin-right:5px" title="Parece pagamento de DAS (Simples Nacional) — clique na linha pra criar a Regra (sem rateio)">DAS</span>':''}${esc(r.historico_bancario||'')}</td>
     <td style="padding:7px 10px;color:var(--slate)">—</td>
     <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${item.comprovanteSugerido?'Sugestão via comprovante (ainda não conciliado): '+esc(item.comprovanteSugerido.cliente_fornecedor_nome||''):''}">${item.comprovanteSugerido?`<span style="font-style:italic;color:var(--slate)">${esc(item.comprovanteSugerido.cliente_fornecedor_nome||'')} ?</span>`:'—'}</td>
     <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);color:var(--slate);white-space:nowrap">${item.comprovanteSugerido?esc(_fmtCnpjCpf(item.comprovanteSugerido.cnpj_cpf)):'—'}</td>
