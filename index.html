@@ -7612,9 +7612,9 @@ const DEMOC_TIPOS_CONTAS={
   balancete:{label:'Balancete', labelPlural:'Balancetes', labelPluralMin:'balancetes', edgeFn:'democ-extrair-balancete'},
   dre:{label:'DRE', labelPlural:'DREs', labelPluralMin:'DREs', edgeFn:'democ-extrair-dre'},
 };
-const DEMOC_TIPOS_ORDEM=['balancete','dre','razao','faturamento'];
-function _democLabelTipo(tipo){ if(tipo==='faturamento') return 'Faturamento'; if(tipo==='razao') return 'Livro Razão'; return DEMOC_TIPOS_CONTAS[tipo].label; }
-function _democLabelPluralTipo(tipo){ if(tipo==='faturamento') return 'Relatórios de Faturamento'; if(tipo==='razao') return 'Livros Razão'; return DEMOC_TIPOS_CONTAS[tipo].labelPlural; }
+const DEMOC_TIPOS_ORDEM=['balancete','dre','razao','faturamento','notas'];
+function _democLabelTipo(tipo){ if(tipo==='faturamento') return 'Faturamento'; if(tipo==='razao') return 'Livro Razão'; if(tipo==='notas') return 'Nota Explicativa'; return DEMOC_TIPOS_CONTAS[tipo].label; }
+function _democLabelPluralTipo(tipo){ if(tipo==='faturamento') return 'Relatórios de Faturamento'; if(tipo==='razao') return 'Livros Razão'; if(tipo==='notas') return 'Notas Explicativas'; return DEMOC_TIPOS_CONTAS[tipo].labelPlural; }
 function _democEdgeFnTipo(tipo){ return tipo==='faturamento'?'luc-extrair-faturamento':DEMOC_TIPOS_CONTAS[tipo].edgeFn; }
 
 // S.s()/S.g() já guardam o valor como veio (o Supabase serializa/desserializa
@@ -8263,7 +8263,7 @@ function _democRenderEmpBody(eid){
     h+='<button onclick="democSelecionarTipo(\''+tipo+'\')" style="padding:8px 16px;font-size:12.5px;font-weight:700;border:none;border-bottom:2px solid '+(ativo?'#1E3558':'transparent')+';margin-bottom:-2px;background:none;color:'+(ativo?'#1E3558':'var(--slate)')+';cursor:pointer">'+_democLabelPluralTipo(tipo)+'</button>';
   });
   h+='</div><div style="padding:0 4px 12px">';
-  h+=(_democTipoAtivo==='faturamento'?_democRenderFaturamentoSecao(eid):_democTipoAtivo==='razao'?_democRenderRazaoSecao(eid):_democRenderContasSecao(_democTipoAtivo,eid));
+  h+=(_democTipoAtivo==='faturamento'?_democRenderFaturamentoSecao(eid):_democTipoAtivo==='razao'?_democRenderRazaoSecao(eid):_democTipoAtivo==='notas'?_democRenderNotasSecao(eid):_democRenderContasSecao(_democTipoAtivo,eid));
   h+='</div>';
   return h;
 }
@@ -8342,6 +8342,212 @@ function _democRenderRazaoSecao(eid){
         +'</tr>';
     });
     h+='</tbody></table>';
+  }
+  h+='</div>';
+  return h;
+}
+// ── Notas Explicativas: geradas por IA a partir do Balancete/DRE já
+// importados + informações que só o contador sabe (contingências, eventos
+// subsequentes, política contábil específica) — pedido do usuário
+// (09/09/2026), baseado na NBC TG 51 (ver [[reference_cfc_normas_contabeis]]).
+// UMA nota por ANO (consolida o exercício inteiro, não por mês/fechamento).
+// Livro Razão NUNCA entra no conteúdo em si (só arquivo registrado, sem
+// texto extraído — ver _democRenderRazaoSecao acima) — a nota só menciona
+// que ele foi recebido, não analisa o que tem dentro.
+function democGetNotasInfo(eid,ano){ return _democVal(S.g('democ_notas_info_'+eid+'_'+ano), {contingencias:'',eventosSubsequentes:'',politicaContabil:''}); }
+function democSetNotasInfo(eid,ano,dados){ S.s('democ_notas_info_'+eid+'_'+ano,dados); }
+function democGetNotasGeradas(eid,ano){ return _democVal(S.g('democ_notas_geradas_'+eid+'_'+ano), null); }
+function democSetNotasGeradas(eid,ano,dados){ S.s('democ_notas_geradas_'+eid+'_'+ano,dados); }
+let _democNotasAnoSel={};
+function _democNotasAnosDisponiveis(eid){
+  var anos={};
+  ['balancete','dre','razao'].forEach(function(tipo){
+    democGetDocsLista(tipo,eid).forEach(function(x){ anos[x.ano]=true; });
+  });
+  var fechAno=(S.fechAtual()||'').split('-')[0];
+  if(fechAno) anos[fechAno]=true;
+  return Object.keys(anos).sort().reverse();
+}
+function _democNotasSetAno(eid,ano){ _democNotasAnoSel[eid]=ano; renderDemoc(); }
+// Balancete é "foto" de um instante — a nota usa a posição do ÚLTIMO mês
+// disponível do ano (não soma meses, isso duplicaria saldos patrimoniais).
+function _democUltimoDocAno(tipo,eid,ano){
+  var meses=democGetDocsLista(tipo,eid).filter(function(x){ return x.ano===ano; }).map(function(x){ return x.mes; }).sort();
+  if(!meses.length) return null;
+  var ultimoMes=meses[meses.length-1];
+  var doc=democGetDoc(tipo,eid,ano,ultimoMes);
+  return doc?{mes:ultimoMes, meses:meses, contas:doc.contas||[]}:null;
+}
+// DRE é resultado DO PERÍODO — soma o saldo_atual de cada conta (por
+// código, ou nome quando não tem código) através de todos os meses
+// disponíveis do ano, pra chegar no total anual daquela linha.
+function _democAgregarContasAno(tipo,eid,ano){
+  var meses=democGetDocsLista(tipo,eid).filter(function(x){ return x.ano===ano; }).map(function(x){ return x.mes; }).sort();
+  var porConta={};
+  meses.forEach(function(mes){
+    var doc=democGetDoc(tipo,eid,ano,mes);
+    if(!doc||!doc.contas) return;
+    doc.contas.forEach(function(c){
+      var chave=c.codigo_analitico||('nome:'+c.nome_conta);
+      if(!porConta[chave]) porConta[chave]={codigo:c.codigo_analitico||'',nome:c.nome_conta||'',tipoConta:c.tipo||'',soma:0};
+      porConta[chave].soma+=(parseFloat(c.saldo_atual)||0);
+    });
+  });
+  return {meses:meses, contas:Object.keys(porConta).map(function(k){ return porConta[k]; })};
+}
+function _democNotasSalvarInfo(eid,ano){
+  var dados={
+    contingencias: document.getElementById('democNotasContingencias_'+eid).value,
+    eventosSubsequentes: document.getElementById('democNotasEventos_'+eid).value,
+    politicaContabil: document.getElementById('democNotasPolitica_'+eid).value
+  };
+  democSetNotasInfo(eid,ano,dados);
+  toast('Informações salvas.','ok');
+}
+async function _democNotasGerar(eid,ano){
+  if(!_supaClient){ toast('Sem conexão com o Supabase.','err'); return; }
+  var balAno=_democUltimoDocAno('balancete',eid,ano);
+  var dreAno=_democAgregarContasAno('dre',eid,ano);
+  if((!balAno||!balAno.contas.length)&&!dreAno.contas.length){
+    toast('Não há Balancete nem DRE deste ano pra basear a nota — importe ao menos um antes.','err');
+    return;
+  }
+  var info=democGetNotasInfo(eid,ano);
+  var emp=(S.emps()||[]).find(function(e){ return String(e.eid)===String(eid); })||{};
+  var razaoMeses=democGetDocsLista('razao',eid).filter(function(x){ return x.ano===ano; }).map(function(x){ return x.mes; });
+  var btn=document.getElementById('democNotasGerarBtn_'+eid);
+  var txtOriginal=btn?btn.textContent:'';
+  if(btn){ btn.disabled=true; btn.textContent='Gerando com IA…'; }
+  try{
+    var body={
+      empresaNome: emp.nome||'',
+      cnpj: emp.cnpj||'',
+      ano: ano,
+      balancete: (balAno&&balAno.contas.length)?{
+        mesReferencia:balAno.mes, mesesDisponiveis:balAno.meses,
+        contas: balAno.contas.filter(function(c){ return c.tipo==='sintetica'; }).map(function(c){ return {codigo:c.codigo_analitico||'', nome:c.nome_conta||'', saldo:c.saldo_atual}; })
+      } : null,
+      dre: dreAno.contas.length?{
+        mesesDisponiveis:dreAno.meses,
+        contas: dreAno.contas.filter(function(c){ return c.tipoConta==='sintetica'; }).map(function(c){ return {codigo:c.codigo||'', nome:c.nome||'', valorAnual:c.soma}; })
+      } : null,
+      temLivroRazao: razaoMeses.length>0,
+      mesesLivroRazao: razaoMeses,
+      contingencias: info.contingencias||'',
+      eventosSubsequentes: info.eventosSubsequentes||'',
+      politicaContabilEspecifica: info.politicaContabil||''
+    };
+    var resp=await _supaClient.functions.invoke('democ-gerar-notas-explicativas',{body:body});
+    if(resp.error) throw new Error(resp.error.message||'Erro ao chamar a IA.');
+    var dados=resp.data;
+    if(dados&&dados.error) throw new Error(dados.error);
+    if(!dados||!Array.isArray(dados.secoes)||!dados.secoes.length) throw new Error('A IA não retornou nenhuma seção.');
+    democSetNotasGeradas(eid,ano,{secoes:dados.secoes, geradoEm:new Date().toLocaleString('pt-BR')});
+    toast('Nota Explicativa gerada — revise o texto antes de baixar.','ok');
+    renderDemoc();
+  }catch(e){
+    toast('Erro ao gerar: '+e.message,'err');
+  }finally{
+    if(btn){ btn.disabled=false; btn.textContent=txtOriginal; }
+  }
+}
+function _democNotasEditarSecao(eid,ano,idx,valor){
+  var dados=democGetNotasGeradas(eid,ano);
+  if(!dados||!dados.secoes[idx]) return;
+  dados.secoes[idx].texto=valor;
+  democSetNotasGeradas(eid,ano,dados);
+}
+function _democNotasDescartar(eid,ano){
+  if(!confirm('Descartar esta Nota Explicativa gerada? Você pode gerar outra depois.')) return;
+  democSetNotasGeradas(eid,ano,null);
+  renderDemoc();
+}
+// RTF é texto puro (sem lib nenhuma) — cp1252 cobre os acentos do
+// português (á,ã,é,ç...) via \'XX em hexadecimal; \par vira quebra de
+// parágrafo. Fallback "?" só pra caractere raríssimo fora do Latin-1.
+function _rtfEscapeTexto(t){
+  var out='', s=String(t||'');
+  for(var i=0;i<s.length;i++){
+    var ch=s[i], code=s.charCodeAt(i);
+    if(ch==='\n'){ out+='\\par\n'; continue; }
+    if(ch==='\\'||ch==='{'||ch==='}'){ out+='\\'+ch; continue; }
+    if(code<128){ out+=ch; continue; }
+    if(code<=255){ out+="\\'"+code.toString(16); continue; }
+    // Fora do Latin-1 (aspas curvas, travessão "—", reticências "…" — comuns
+    // em texto gerado por IA): \uN é o jeito certo no RTF, "?" na sequência
+    // é só o fallback pra leitor sem suporte a Unicode.
+    out+='\\u'+code+'?';
+  }
+  return out;
+}
+function _democNotasBaixarRtf(eid,ano){
+  var dados=democGetNotasGeradas(eid,ano);
+  if(!dados||!dados.secoes||!dados.secoes.length){ toast('Gere a nota antes de baixar.','err'); return; }
+  var emp=(S.emps()||[]).find(function(e){ return String(e.eid)===String(eid); })||{};
+  var linhas=['{\\rtf1\\ansi\\ansicpg1252\\deff0{\\fonttbl{\\f0 Arial;}}\\f0'];
+  linhas.push('{\\b\\fs32 '+_rtfEscapeTexto((emp.nome||'').toUpperCase())+'}\\par');
+  linhas.push('{\\fs22 '+_rtfEscapeTexto('Notas Explicativas às Demonstrações Contábeis — Exercício de '+ano)+'}\\par\\par');
+  dados.secoes.forEach(function(sec){
+    linhas.push('{\\b\\fs26 '+_rtfEscapeTexto(sec.titulo||'')+'}\\par');
+    linhas.push('{\\fs22 '+_rtfEscapeTexto(sec.texto||'')+'}\\par\\par');
+  });
+  linhas.push('}');
+  var blob=new Blob([linhas.join('\n')],{type:'application/rtf'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a'); a.href=url; a.download='Notas_Explicativas_'+(emp.nome||eid).replace(/[^a-zA-Z0-9]/g,'_')+'_'+ano+'.rtf'; a.click();
+  URL.revokeObjectURL(url);
+}
+function _democRenderNotasSecao(eid){
+  var anos=_democNotasAnosDisponiveis(eid);
+  if(!anos.length) anos=[String(new Date().getFullYear())];
+  var ano=_democNotasAnoSel[eid]||anos[0];
+  if(anos.indexOf(ano)<0) ano=anos[0];
+  _democNotasAnoSel[eid]=ano;
+
+  var balAno=_democUltimoDocAno('balancete',eid,ano);
+  var dreAno=_democAgregarContasAno('dre',eid,ano);
+  var razaoMeses=democGetDocsLista('razao',eid).filter(function(x){ return x.ano===ano; }).map(function(x){ return x.mes; });
+  var info=democGetNotasInfo(eid,ano);
+  var geradas=democGetNotasGeradas(eid,ano);
+
+  var h='<div style="max-width:820px">';
+  h+='<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">'
+    +'<label class="fl" style="margin:0">Exercício:</label>'
+    +'<select class="si" style="width:110px" onchange="_democNotasSetAno(\''+eid+'\',this.value)">'
+    +anos.map(function(a){ return '<option value="'+a+'"'+(a===ano?' selected':'')+'>'+a+'</option>'; }).join('')
+    +'</select></div>';
+
+  h+='<div style="background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:12px 14px;margin-bottom:14px;font-size:12.5px;line-height:1.6">'
+    +'<div><strong>Balancete:</strong> '+(balAno?('posição de '+(LUC_MESES_FULL[parseInt(balAno.mes,10)-1]||balAno.mes)+'/'+ano+' ('+balAno.meses.length+' mês(es) recebido(s) no ano: '+balAno.meses.join(', ')+')'):'<span style="color:var(--red)">nenhum recebido em '+ano+'</span>')+'</div>'
+    +'<div><strong>DRE:</strong> '+(dreAno.meses.length?('somando '+dreAno.meses.length+' mês(es) recebido(s): '+dreAno.meses.join(', ')+(dreAno.meses.length<12?' — <span style="color:#b45309">ano incompleto, total pode não refletir o exercício inteiro</span>':'')):'<span style="color:var(--red)">nenhum recebido em '+ano+'</span>')+'</div>'
+    +'<div><strong>Livro Razão:</strong> '+(razaoMeses.length?('registrado para '+razaoMeses.length+' mês(es) ('+razaoMeses.join(', ')+') — só como referência, o conteúdo não é lido automaticamente'):'nenhum registrado')+'</div>'
+    +'</div>';
+
+  h+='<div style="font-weight:700;color:#1E3558;margin-bottom:8px;font-size:13px">Informações que só o contador sabe (opcional, mas melhora a nota)</div>'
+    +'<div class="fg"><div class="fl">Contingências (processos judiciais, garantias, avais...)</div>'
+    +'<textarea class="fi" id="democNotasContingencias_'+eid+'" rows="2" style="width:100%">'+esc(info.contingencias||'')+'</textarea></div>'
+    +'<div class="fg"><div class="fl">Eventos subsequentes (fatos relevantes após o encerramento do exercício)</div>'
+    +'<textarea class="fi" id="democNotasEventos_'+eid+'" rows="2" style="width:100%">'+esc(info.eventosSubsequentes||'')+'</textarea></div>'
+    +'<div class="fg"><div class="fl">Política contábil específica desta empresa (se houver algo fora do padrão)</div>'
+    +'<textarea class="fi" id="democNotasPolitica_'+eid+'" rows="2" style="width:100%">'+esc(info.politicaContabil||'')+'</textarea></div>'
+    +'<button class="btn bo bsm" onclick="_democNotasSalvarInfo(\''+eid+'\',\''+ano+'\')">💾 Salvar informações</button>';
+
+  h+='<div style="height:1px;background:var(--border);margin:16px 0"></div>';
+  h+='<button class="btn bp bsm" id="democNotasGerarBtn_'+eid+'" onclick="_democNotasGerar(\''+eid+'\',\''+ano+'\')">✨ '+(geradas?'Gerar de novo':'Gerar Nota Explicativa')+' com IA</button>';
+  h+=' <span style="font-size:11px;color:var(--slate)">Baseada na NBC TG 51 — sempre revise o texto gerado antes de usar oficialmente.</span>';
+
+  if(geradas){
+    h+='<div style="margin-top:14px;font-size:11px;color:var(--slate)">Gerado em '+esc(geradas.geradoEm||'')+' — os campos abaixo são editáveis antes de baixar.</div>';
+    geradas.secoes.forEach(function(sec,idx){
+      h+='<div style="margin-top:12px">'
+        +'<div class="fl">'+esc(sec.titulo||('Seção '+(idx+1)))+'</div>'
+        +'<textarea class="fi" rows="5" style="width:100%" onchange="_democNotasEditarSecao(\''+eid+'\',\''+ano+'\','+idx+',this.value)">'+esc(sec.texto||'')+'</textarea>'
+        +'</div>';
+    });
+    h+='<div style="margin-top:14px;display:flex;gap:8px">'
+      +'<button class="btn bp bsm" onclick="_democNotasBaixarRtf(\''+eid+'\',\''+ano+'\')">⬇ Baixar em RTF</button>'
+      +'<button class="btn bo bsm" style="color:#dc2626" onclick="_democNotasDescartar(\''+eid+'\',\''+ano+'\')">🗑 Descartar</button>'
+      +'</div>';
   }
   h+='</div>';
   return h;
