@@ -18391,17 +18391,19 @@ async function _lancctbParsearRelatorioLiquidos(file){
 //     reference_contas_padrao_mistercontador); sócio ("Contribuintes") na
 //     1.2.9.x dele (_lancctbAcharSocioPorHistorico/_lancctbContaDoSocio).
 //  2) Saída INDIVIDUAL identificada pelo histórico bancário (nome com 2+
-//     tokens ≥4 letras OU CPF) — pedido do usuário 10/09/2026, algumas
-//     empresas pagam por SISPAG uma transferência por pessoa. Sem limite de
-//     valor: se o histórico identifica a pessoa, confia. Se o valor pago é
-//     MAIOR que o líquido dela, o lançamento de extrato é DIVIDIDO em dois:
-//     o valor exato do líquido (conciliado agora na conta da pessoa) + a
-//     diferença, que vira uma pendência NOVA ("[DIFERENÇA FOLHA ...]") pra
-//     uma Regra tratar depois.
+//     tokens ≥4 letras OU CPF) OU pelo Fluxo de Caixa do cliente (nome na
+//     coluna cliente/fornecedor ou descrição de uma linha do fluxo que bate
+//     valor+data) — pedido do usuário 10/09/2026, algumas empresas pagam
+//     por SISPAG uma transferência por pessoa e o nome só aparece no fluxo.
+//     Sem limite de valor: se identifica a pessoa, confia. Se o valor pago
+//     é MAIOR que o líquido dela, o lançamento de extrato é DIVIDIDO em
+//     dois: o valor exato do líquido (conciliado agora na conta da pessoa)
+//     + a diferença, que vira uma pendência NOVA ("[DIFERENÇA FOLHA ...]")
+//     pra uma Regra tratar depois. A linha do fluxo usada é marcada como
+//     associada.
 // NÃO cobre ainda (deixado pra depois): 2ª fonte "Relatórios FOPAG para
-// Contábil", Recibo de Férias, identificação da pessoa pelo Fluxo de Caixa,
-// combinação Sispag+Distribuição de Lucros. Pendência que não bater fecha
-// sem mexer.
+// Contábil", Recibo de Férias, combinação Sispag+Distribuição de Lucros.
+// Pendência que não bater fecha sem mexer.
 async function _lancctbProcessarFopag(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -18471,6 +18473,17 @@ async function _lancctbProcessarFopag(){
       return null;
     };
 
+    // Fluxo de Caixa do cliente (quando existe) — algumas empresas põem o
+    // NOME do empregado na coluna "cliente/fornecedor" ou "descrição" do
+    // fluxo, e o histórico bancário do SISPAG não traz. Pedido do usuário
+    // (10/09/2026): usa o fluxo também pra identificar a quem foi pago.
+    const { data: fluxoLivre } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,cliente_fornecedor_nome')
+      .eq('empresa_eid',eid).eq('status_associado','nao_associado').gt('valor_saida',0));
+    const acharFluxoDaPendencia=(l)=>(fluxoLivre||[]).find(f=>
+      Math.abs((f.valor_saida||0)-l.valor_saida)<=LANCCTB_MATCH_TOLERANCIA_VALOR &&
+      _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+
     let resolvidos=0, semAchado=0, diferencasAbertas=0;
     for(let i=0;i<pendencias.length;i++){
       const l=pendencias[i];
@@ -18510,13 +18523,16 @@ async function _lancctbProcessarFopag(){
         continue;
       }
 
-      // ── Caminho 2: saída individual identificada pelo histórico (nome/CPF).
-      // Se o valor pago > líquido dessa pessoa, abre em 2 linhas: o líquido
-      // exato (conciliado agora) + a diferença, que vira uma pendência nova
-      // pra uma Regra tratar depois.
+      // ── Caminho 2: saída individual identificada pelo histórico (nome/CPF)
+      // OU pelo Fluxo de Caixa (nome na coluna cliente/fornecedor ou
+      // descrição). Se o valor pago > líquido dessa pessoa, abre em 2
+      // linhas: o líquido exato (conciliado agora) + a diferença, que vira
+      // uma pendência nova pra uma Regra tratar depois.
+      const fluxoDaPend=acharFluxoDaPendencia(l);
+      const textoIdent=[l.historico_bancario, fluxoDaPend&&fluxoDaPend.cliente_fornecedor_nome, fluxoDaPend&&fluxoDaPend.descricao].filter(Boolean).join(' ');
       let matchIndiv=null;
       for(const r of relatorios){
-        const p=identificaPessoa(l.historico_bancario, r.dados.pessoas);
+        const p=identificaPessoa(textoIdent, r.dados.pessoas);
         if(p && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
       }
       if(!matchIndiv){ semAchado++; continue; }
@@ -18555,6 +18571,14 @@ async function _lancctbProcessarFopag(){
       const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
       if(error){ console.error('Erro FOPAG (individual):',error); semAchado++; continue; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+      // Se a identificação veio do Fluxo de Caixa, marca aquela linha como
+      // associada (some da lista de "não associados" e aparece na coluna
+      // Fluxo do Registro Contábil).
+      if(fluxoDaPend){
+        await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxoDaPend.id);
+        const idx=(fluxoLivre||[]).findIndex(f=>f.id===fluxoDaPend.id);
+        if(idx>=0) fluxoLivre.splice(idx,1);
+      }
       resolvidos++;
     }
     toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
