@@ -30371,25 +30371,21 @@ function _aplicfinFingerprint(banco,modelo,marcadores){
 function _aplicfinMk(competence){ // 'AAAA-MM' → 'MM/AAAA'
   const [a,m]=String(competence||'').split('-'); return m&&a?m+'/'+a:null;
 }
-// Normaliza os itens de texto de uma página lidando com page.rotate. Devolve
-// [{s,x,y}] com y crescendo PRA CIMA (igual ao PDF sem rotação) — o resto do
-// parser ordena por y desc = de cima pra baixo.
+// Normaliza os itens de texto de uma página para coordenadas de TELA
+// (x cresce p/ direita, y cresce p/ BAIXO), já aplicando page.rotate via o
+// transform do viewport do pdf.js — funciona pra 0/90/180/270 sem conta na mão.
 function _aplicfinItens(page,content){
-  const rot=((page.rotate%360)+360)%360;
-  const V=page.view; const W=V[2], H=V[3];
+  const vp=page.getViewport({scale:1});
   return content.items.filter(it=>String(it.str).trim()!=='').map(it=>{
-    let x=it.transform[4], y=it.transform[5];
-    if(rot===180){ x=W-x; y=H-y; }
-    else if(rot===90){ const nx=y, ny=x; x=nx; y=W-ny; }
-    else if(rot===270){ const nx=H-y, ny=x; x=nx; y=ny; }
-    return { s:String(it.str).trim(), x:Math.round(x), y:Math.round(y) };
+    const q=pdfjsLib.Util.applyTransform([it.transform[4],it.transform[5]],vp.transform);
+    return { s:String(it.str).trim(), x:Math.round(q[0]), y:Math.round(q[1]) };
   });
 }
 // Agrupa itens em linhas visuais (mesmo y ± tol). Devolve [[itens...]] de cima
-// pra baixo, cada linha ordenada por x.
+// pra baixo (y crescente), cada linha ordenada por x.
 function _aplicfinLinhas(itens,tol){
-  tol=tol||2;
-  const ys=[...itens].sort((a,b)=>b.y-a.y);
+  tol=tol||3;
+  const ys=[...itens].sort((a,b)=>a.y-b.y);
   const linhas=[]; let atual=null, ancoraY=null;
   ys.forEach(it=>{
     if(atual&&Math.abs(it.y-ancoraY)<=tol){ atual.push(it); }
@@ -30457,11 +30453,12 @@ async function _aplicfinParseItauAplicAutMais(pdf){
   });
   iofSum=Math.round(iofSum*100)/100;
 
-  // Última "Posição em Ser no Dia" = linha de MENOR y que tem número na faixa ≥450
+  // Última "Posição em Ser no Dia" = linha MAIS BAIXA (maior y de tela) com
+  // número na faixa ≥450.
   let ultimaPos=null;
   linhas.forEach(L=>{
     if(!L.some(i=>_aplicfinEhNum(i.s)&&i.x>=450)) return;
-    if(!ultimaPos || L[0].y < ultimaPos[0].y) ultimaPos=L;
+    if(!ultimaPos || L[0].y > ultimaPos[0].y) ultimaPos=L;
   });
   const posFinal={};
   if(ultimaPos){
@@ -30503,12 +30500,95 @@ async function _aplicfinParseItauAplicAutMais(pdf){
   };
 }
 
+// ── MODELO 4: Bradesco "Extrato Padrão" (produto ÚNICO, declarado no PDF) ──
+// Máquina de estados por SEÇÃO (Saldo Anterior / Aplicações / Resgates-
+// Vencimentos / Saldo em). Cada seção fecha numa linha "Total" — é dela que
+// saem os valores (nunca soma linha a linha; saldo é posição). "Renda Total"
+// e "Renda Bruta Período" são colunas DIFERENTES.
+async function _aplicfinParseBradescoPadrao(pdf){
+  let itensTodos=[], texto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const its=_aplicfinItens(page,content).map(i=>({...i,y:i.y+p*100000}));
+    itensTodos=itensTodos.concat(its);
+    texto+=' '+its.map(i=>i.s).join(' ');
+  }
+  texto=texto.replace(/\s+/g,' ');
+  if(!/Extrato\s+Padr[ãa]o/i.test(texto)||!/Posi[çc][ãa]o\s+para\s+o\s+produto:/i.test(texto)) return null;
+  const warnings=[];
+  const mProd=texto.match(/Posi[çc][ãa]o\s+para\s+o\s+produto:\s*([^]*?)(?:\s{2,}|Sele[çc][ãa]o|Banco:|$)/i);
+  const produto=mProd?mProd[1].trim():null;
+  const mComp=texto.match(/a\s+partir\s+de:\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  const competence=mComp?(mComp[3]+'-'+mComp[2]):null;
+  if(!competence) warnings.push('Competência não identificada ("Seleção do período a partir de:").');
+
+  const linhas=_aplicfinLinhas(itensTodos,3);
+  const bands=[
+    ['principal',            390, 478],
+    ['bruto',                478, 558],
+    ['renda_total',          558, 668],
+    ['iof',                  668, 745],
+    ['irrf',                 745, 818],
+    ['liquido',              818, 900],
+    ['renda_bruta_periodo',  900, 985],
+  ];
+  const faixa=x=>{ for(const [k,a,b] of bands){ if(x>a&&x<=b) return k; } return null; };
+  const SECOES=[
+    [/^Saldo\s+Anterior\s+em/i,'saldo_anterior'],
+    [/^Aplica[çc][õo]es\b/i,'aplicacoes'],
+    [/^Resgates\s*(\/|e)?\s*Vencimentos/i,'resgates'],
+    [/^Saldo\s+em\b/i,'saldo_final'],
+  ];
+  let secAtual=null; const totais={};
+  linhas.forEach(L=>{
+    const txt=L.map(i=>i.s).join(' ').trim();
+    for(const [re,id] of SECOES){ if(re.test(txt)){ secAtual=id; return; } }
+    const ehTotal=L[0]&&/^Total$/i.test(L[0].s)&&L[0].x<60;
+    if(ehTotal&&secAtual){
+      const o={};
+      L.filter(i=>_aplicfinEhNum(i.s)).forEach(i=>{ const k=faixa(i.x); if(k&&o[k]==null) o[k]=_convCobrParseValor(i.s); });
+      totais[secAtual]=o;
+    }
+  });
+
+  const M='bradesco_padrao';
+  const rot={principal:'Vlr. Princ.',bruto:'Vlr. Bruto',renda_total:'Renda Total',iof:'Vlr. IOF',irrf:'Vlr. IRRF',liquido:'Vlr. Líquido',renda_bruta_periodo:'Renda Bruta Período'};
+  const secRot={saldo_anterior:'Saldo Anterior',aplicacoes:'Aplicações',resgates:'Resgates / Vencimentos',saldo_final:'Saldo em (final)'};
+  const sources=[];
+  ['saldo_anterior','aplicacoes','resgates','saldo_final'].forEach(sec=>{
+    const o=totais[sec]||{};
+    ['principal','bruto','renda_total','iof','irrf','liquido','renda_bruta_periodo'].forEach(col=>{
+      if(o[col]==null&&!(sec==='aplicacoes'&&col==='principal')) return; // só expõe o que existe (+ Aplicações.principal sempre)
+      sources.push({ key:M+'.'+sec+'.'+col, label:secRot[sec]+' → '+rot[col]+' (linha Total)', section:secRot[sec], product:produto,
+        value:o[col]==null?null:Math.round(o[col]*100)/100, calculationType:'DIRECT_TOTAL' });
+    });
+  });
+
+  // Validação: Bruto − IOF − IRRF ≈ Líquido em Resgates
+  const validations=[];
+  const R=totais.resgates||{};
+  if(R.bruto!=null&&R.liquido!=null){
+    const calc=R.bruto-(R.iof||0)-(R.irrf||0);
+    const ok=Math.abs(calc-R.liquido)<=0.05;
+    validations.push({name:'resgates_bruto_menos_impostos',ok,detail:`${R.bruto} − ${R.iof||0} − ${R.irrf||0} = ${calc.toFixed(2)} (esperado ${R.liquido})`});
+    if(!ok) warnings.push('VALIDATION_FAILED: Resgates Bruto − IOF − IRRF ≠ Líquido.');
+  }
+  if(!Object.keys(totais).length) warnings.push('Nenhuma linha "Total" de seção encontrada — layout diferente do esperado.');
+
+  return {
+    bank:'BRADESCO', model:M, competence, account:null,
+    fingerprint:_aplicfinFingerprint('BRADESCO',M,['EXTRATO PADRAO','POSICAO PARA O PRODUTO','SALDO ANTERIOR EM','APLICACOES','RESGATES / VENCIMENTOS','SALDO EM','VLR PRINC','VLR BRUTO','RENDA TOTAL','VLR IOF','VLR IRRF','VLR LIQUIDO','RENDA BRUTA PER']),
+    productMode:'single', products:produto?[produto]:[], productFilter:null, sources, validations, warnings, pageCount:pdf.numPages,
+  };
+}
+
 // Dispatcher SEM IA (contrato padrão). Devolve o objeto do parser ou null.
 async function _aplicfinExtrairSemIA(file){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  const parsers=[_aplicfinParseItauAplicAutMais];
+  const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseBradescoPadrao];
   for(const fn of parsers){
     try{ const r=await fn(pdf); if(r) return r; }catch(e){ console.error('Parser aplicfin sem IA:',e); }
   }
@@ -30532,6 +30612,15 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       resgate:'itau_aplic_aut_mais.month_total.principal_redeemed',
       rendLiq:'itau_aplic_aut_mais.month_total.paid_yield_net',
       saldoBrutoExtrato:'itau_aplic_aut_mais.final_position.gross',
+    },
+    bradesco_padrao:{
+      bruto:'bradesco_padrao.resgates.renda_bruta_periodo',
+      iof:'bradesco_padrao.resgates.iof',
+      irrf:'bradesco_padrao.resgates.irrf',
+      aplic:'bradesco_padrao.aplicacoes.principal',
+      resgate:'bradesco_padrao.resgates.principal',
+      rendLiq:'bradesco_padrao.resgates.liquido',
+      saldoBrutoExtrato:'bradesco_padrao.saldo_final.bruto',
     },
   };
   return (map[model]||{})[siteColId]||'';
