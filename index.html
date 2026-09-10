@@ -23495,8 +23495,10 @@ async function _lancctbParsearITauComprovantePDF(pdf){
 
   const comprovantes=[];
 
-  // Processa página por página — cada página é potencialmente um comprovante
-  for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
+  // Processa página por página — cada página é potencialmente um comprovante.
+  // Sem limite de páginas (achado 09/09/2026: arquivos reais passam fácil
+  // de 100 páginas, ex: Peixoto com 668 — ficavam com o resto descartado).
+  for(let pNum=1;pNum<=pdf.numPages;pNum++){
     const page=await pdf.getPage(pNum);
     const content=await page.getTextContent();
     const textoPagina=content.items.map(it=>it.str).join(' ');
@@ -23528,7 +23530,7 @@ async function _lancctbParsearITauComprovantePDF(pdf){
   // Se não achou nada com abordagem página-por-página, tenta split por autenticação (fallback)
   if(comprovantes.length===0){
     let textoCompleto='';
-    for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
+    for(let pNum=1;pNum<=pdf.numPages;pNum++){
       const page=await pdf.getPage(pNum);
       const content=await page.getTextContent();
       const texto=content.items.map(it=>it.str).join(' ');
@@ -23768,9 +23770,16 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
 
-    // Extrai texto de todas as páginas
+    // Extrai texto de TODAS as páginas — pedido do usuário (09/09/2026),
+    // achado investigando "não leu nenhum comprovante da Peixoto": esse
+    // loop tinha um Math.min(pdf.numPages,100) que descartava tudo além da
+    // página 100 ANTES até de tentar mandar pra IA. Arquivos reais de
+    // comprovantes consolidados passam disso fácil (Peixoto: 668 páginas).
+    // Extração de texto é local/cliente (pdfjsLib), não tem custo de IA —
+    // o limite nunca precisou existir aqui, só no tamanho de cada LOTE
+    // mandado pra Edge Function (isso já é limitado abaixo).
     const paginasTexto=[];
-    for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
+    for(let pNum=1;pNum<=pdf.numPages;pNum++){
       const page=await pdf.getPage(pNum);
       const content=await page.getTextContent();
       const texto=content.items.map(it=>it.str).join(' ');
@@ -23784,35 +23793,44 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
     // tamanho de lote já usado em _lancctbProcessarUmComprovantePdf.
     const lotesPaginas=_lancctbEmLotes(paginasTexto,LANCCTB_COMPROV_PAGINAS_POR_LOTE);
     const todosComprovantes=[];
+    const lotesComErro=[];
     for(let li=0;li<lotesPaginas.length;li++){
       status.textContent=lotesPaginas.length>1
         ? `"${file.name}" — enviando para IA, lote ${li+1}/${lotesPaginas.length} (páginas ${li*LANCCTB_COMPROV_PAGINAS_POR_LOTE+1}-${Math.min((li+1)*LANCCTB_COMPROV_PAGINAS_POR_LOTE,pdf.numPages)})…`
         : `"${file.name}" — enviando para IA (${pdf.numPages} páginas)…`;
 
-      // Chama Edge Function lancctb-parse-comprovante que já funciona com Gemini
-      const response=await fetch(`${SUPABASE_URL}/functions/v1/lancctb-parse-comprovante`,{
-        method:'POST',
-        headers:{'Content-Type':'application/json','Authorization':`Bearer ${SUPABASE_ANON_KEY}`},
-        body:JSON.stringify({texto:lotesPaginas[li].join('\n')})
-      });
-
-      if(!response.ok){
-        try{
-          const errData=await response.json();
-          const errMsg=errData.error||errData.debug_info||response.statusText;
-          throw new Error(`Erro na IA (${response.status}), lote ${li+1}/${lotesPaginas.length}: ${errMsg}`);
-        }catch(e){
-          if(e instanceof Error) throw e;
-          throw new Error(`Erro na IA (lote ${li+1}/${lotesPaginas.length}): ${response.statusText}`);
+      // Um lote com erro (rate limit, timeout) NÃO pode derrubar os outros —
+      // pedido do usuário (09/09/2026): num arquivo de dezenas de lotes
+      // (668 páginas ÷ 15 = 45 lotes na Peixoto), 1 falha no meio antes
+      // jogava fora TUDO que já tinha sido extraído com sucesso nos lotes
+      // anteriores, já que o erro só era pego lá fora em
+      // processarLancctbUploadComprovante — agora cada lote isola seu
+      // próprio erro e os demais continuam normalmente.
+      try{
+        const response=await fetch(`${SUPABASE_URL}/functions/v1/lancctb-parse-comprovante`,{
+          method:'POST',
+          headers:{'Content-Type':'application/json','Authorization':`Bearer ${SUPABASE_ANON_KEY}`},
+          body:JSON.stringify({texto:lotesPaginas[li].join('\n')})
+        });
+        if(!response.ok){
+          let errMsg=response.statusText;
+          try{ const errData=await response.json(); errMsg=errData.error||errData.debug_info||errMsg; }catch(e){}
+          throw new Error(errMsg);
         }
+        const resultadoLote=await response.json();
+        if(Array.isArray(resultadoLote.comprovantes)) todosComprovantes.push(...resultadoLote.comprovantes);
+      }catch(e){
+        console.error(`Lote ${li+1}/${lotesPaginas.length} de "${file.name}" falhou:`,e);
+        lotesComErro.push(li+1);
       }
-      const resultadoLote=await response.json();
-      if(Array.isArray(resultadoLote.comprovantes)) todosComprovantes.push(...resultadoLote.comprovantes);
     }
 
     if(!todosComprovantes.length){
-      throw new Error('Nenhum comprovante encontrado no PDF.');
+      throw new Error(lotesComErro.length
+        ? `Nenhum comprovante encontrado — todos os ${lotesComErro.length} lote(s) falharam na IA.`
+        : 'Nenhum comprovante encontrado no PDF.');
     }
+    if(lotesComErro.length) status.textContent=`"${file.name}" — ${lotesComErro.length} de ${lotesPaginas.length} lote(s) falharam (${lotesComErro.join(', ')}) e foram pulados; os demais foram extraídos normalmente.`;
 
     // Upload do arquivo
     const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
@@ -23873,7 +23891,7 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
     // Layout não reconhecido — usar Gemini via Edge Function lancctb-parse-extrato-cobranca
     status.textContent=`"${file.name}" — enviando para IA (${pdf.numPages} páginas)…`;
     const paginasTexto=[];
-    for(let pNum=1;pNum<=Math.min(pdf.numPages,100);pNum++){
+    for(let pNum=1;pNum<=pdf.numPages;pNum++){
       const page=await pdf.getPage(pNum);
       const content=await page.getTextContent();
       const texto=content.items.map(it=>it.str).join(' ');
