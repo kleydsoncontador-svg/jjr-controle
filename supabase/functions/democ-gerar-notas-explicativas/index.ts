@@ -38,7 +38,7 @@ async function chamarGemini(prompt: string): Promise<string> {
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.3, thinkingConfig: { thinkingBudget: 0 } },
+          generationConfig: { responseMimeType: 'application/json', temperature: 0.3 },
         }),
       }
     );
