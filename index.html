@@ -22548,7 +22548,7 @@ async function _lancctbProcessarTributos(){
   if(!contaBancoInfo?.conta_contabil_id){ if(btn) btn.disabled=false; toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
 
   const cachePorMes={};
-  let resolvidos=0, comSugestao=0, semAchado=0;
+  let resolvidos=0, comSugestao=0, semAchado=0, tributosDivididos=0;
   for(let i=0;i<pendencias.length;i++){
     const l=pendencias[i];
     if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length}…`;
@@ -22594,7 +22594,43 @@ async function _lancctbProcessarTributos(){
       if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
       return r.historico_gatilho&&info.descricao.toLowerCase().includes(r.historico_gatilho.toLowerCase());
     });
-    if(!regra){ comSugestao++; continue; }
+    if(!regra){
+      // Sem Regra ainda: se o Guia tem 2+ impostos na composição (ex: DARF
+      // PIS+COFINS), DIVIDE o lançamento de extrato em uma linha por imposto,
+      // já com o histórico de cada um ("[PIS 08/2026] ...", "[COFINS ...] ..."),
+      // pra o contador clicar em cada linha e criar a Regra sobre o histórico
+      // (pedido do usuário 10/09/2026). Só divide se a soma da composição
+      // bater com o valor da pendência.
+      const comp=achou.extraido.composicao;
+      if(comp && comp.length>=2){
+        const compet=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao)||'';
+        const somaComp=Math.round(comp.reduce((s,c)=>s+(c.valor||0),0)*100)/100;
+        if(Math.abs(somaComp-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR){
+          const histDe=(c)=>`[${c.denominacao}${compet?' '+compet:''}] ${l.historico_bancario||''}`.trim();
+          const criadas=[];
+          let okAll=true;
+          for(let k=1;k<comp.length;k++){
+            const { data: novoRow, error: eI } = await _supaClient.from('lancamentos_extrato').insert({
+              empresa_eid: eid, conta_bancaria_id: contaId, data_pagamento: l.data_pagamento,
+              valor_saida: Math.round((comp[k].valor||0)*100)/100, valor_entrada: 0,
+              historico_bancario: histDe(comp[k]),
+              origem_importacao: 'tributo_composicao',
+              hash_dedup: `tributo_comp_${l.id}_${k}_${Date.now()}`,
+            }).select('id').single();
+            if(eI){ okAll=false; console.error('Erro ao dividir composição do tributo:',eI); break; }
+            criadas.push(novoRow.id);
+          }
+          if(okAll){
+            const { error: eU } = await _supaClient.from('lancamentos_extrato')
+              .update({ valor_saida: Math.round((comp[0].valor||0)*100)/100, historico_bancario: histDe(comp[0]) }).eq('id',l.id);
+            if(eU){ okAll=false; console.error('Erro ao ajustar 1ª linha da composição:',eU); }
+          }
+          if(!okAll && criadas.length){ await _supaClient.from('lancamentos_extrato').delete().in('id',criadas); }
+          if(okAll) tributosDivididos++;
+        }
+      }
+      comSugestao++; continue;
+    }
     // Pedido do usuário 09/09/2026: a Regra foi criada no mês em que a
     // competência era, ex., "07/2026" — reaproveitando ela em agosto, a
     // competência do PDF encontrado ESTE mês pode ser outra. Recalcula a
@@ -22635,7 +22671,7 @@ async function _lancctbProcessarTributos(){
   }
   if(btn) btn.disabled=false;
   if(statusEl) statusEl.textContent='';
-  toast(`Tributos: ${resolvidos} resolvido(s) sozinho(s), ${comSugestao} com PDF encontrado (falta Regra ou confirmação), ${semAchado} sem PDF correspondente no mês.`,'ok');
+  toast(`Tributos: ${resolvidos} resolvido(s) sozinho(s)${tributosDivididos?`, ${tributosDivididos} Guia(s) aberta(s) em linhas por imposto pra criar Regra`:''}, ${comSugestao} com PDF encontrado (falta Regra), ${semAchado} sem PDF no mês.`,'ok');
   renderLancctbRegistroContabil();
 }
 
