@@ -21935,10 +21935,15 @@ async function _lancctbProcessarFluxo(){
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente'));
     if(!pendencias||!pendencias.length){ toast('Nenhuma pendência nesta conta.','ok'); return; }
-    const { data: fluxoPend } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome')
-      .eq('empresa_eid',eid).eq('status_associado','nao_associado'));
-    if(!fluxoPend||!fluxoPend.length){ toast('Nenhuma linha de Fluxo de Caixa livre pra associar — importe o Fluxo de Caixa da empresa primeiro (aba Fluxo de Caixa).','err'); return; }
+    const { data: fluxoTodo } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,status_associado,lancamento_extrato_id')
+      .eq('empresa_eid',eid));
+    if(!fluxoTodo||!fluxoTodo.length){ toast('Nenhuma linha de Fluxo de Caixa importada pra esta empresa — importe o Fluxo de Caixa primeiro (aba Fluxo de Caixa).','err'); return; }
+    const pendIds=new Set(pendencias.map(p=>p.id));
+    // "Livre" = não associada, ou associada a nada, ou associada a um
+    // lançamento que não é mais uma pendência desta conta (associação velha).
+    const fluxoPend=fluxoTodo.filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||!pendIds.has(f.lancamento_extrato_id));
+    if(!fluxoPend.length){ toast('Todas as linhas do Fluxo de Caixa já estão associadas a pendências desta conta.','ok'); return; }
     const usados=new Set();
     let associados=0;
     for(let i=0;i<pendencias.length;i++){
@@ -21946,7 +21951,7 @@ async function _lancctbProcessarFluxo(){
       if(statusEl) statusEl.textContent=`Associando Fluxo ${i+1}/${pendencias.length}…`;
       const ehSaida=l.valor_saida>0;
       const valor=l.valor_saida||l.valor_entrada;
-      const cand=(fluxoPend||[]).filter(f=>!usados.has(f.id))
+      const cand=fluxoPend.filter(f=>!usados.has(f.id))
         .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
         .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; });
       if(!cand.length) continue;
@@ -23122,14 +23127,23 @@ async function renderLancctbRegistroContabil(){
       // aqueles que ainda não estão conciliados" — mostra se já existe uma
       // linha do Fluxo de Caixa do cliente batendo valor+data com essa
       // pendência, e permite abrir o modal de Regra já usando o texto dela.
+      // Pedido do usuário (10/09/2026): a coluna Fluxo deve trazer a
+      // identificação MESMO sem Regra e mesmo que a linha do Fluxo já esteja
+      // marcada como "associada" (import antigo, ou associação a um
+      // lançamento que foi desfeito). Traz TODAS as linhas do Fluxo da
+      // empresa e decide aqui pelo estado de cada pendência.
       _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
         .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem,status_associado,lancamento_extrato_id')
-        .eq('empresa_eid',eid).or('status_associado.eq.nao_associado,lancamento_extrato_id.not.is.null')),
+        .eq('empresa_eid',eid)),
     ]);
-    // Linha do Fluxo JÁ associada a uma pendência (pelo "Processar Fluxo") —
-    // aparece na coluna Fluxo como confirmada (sem "?").
+    const pendenteIds=new Set(pendentes.map(it=>it.extrato.id));
+    // Linha do Fluxo JÁ associada a UMA pendência específica → confirmada.
     const fluxoAssocPorPend={};
-    (fluxoPend||[]).forEach(f=>{ if(f.lancamento_extrato_id) fluxoAssocPorPend[f.lancamento_extrato_id]=f; });
+    (fluxoPend||[]).forEach(f=>{ if(f.lancamento_extrato_id&&pendenteIds.has(f.lancamento_extrato_id)) fluxoAssocPorPend[f.lancamento_extrato_id]=f; });
+    // Linhas "livres" pra sugestão: não associadas, ou associadas a nada,
+    // ou associadas a um lançamento que não é mais uma pendência daqui.
+    const fluxoDisponivel=(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||!pendenteIds.has(f.lancamento_extrato_id));
+    const fluxoUsadoSugestao=new Set(Object.values(fluxoAssocPorPend).map(f=>f.id));
     pendentes.forEach(item=>{
       const r=item.extrato;
       const valor=r.valor_saida||r.valor_entrada;
@@ -23149,7 +23163,7 @@ async function renderLancctbRegistroContabil(){
       // valor+data, desempata por semelhança de texto com o histórico
       // bancário — nunca escolhe uma descrição completamente diferente
       // se existir uma parecida também dentro da tolerância.
-      const candidatosFluxo=item.fluxoConfirmado?[]:(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado').filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
+      const candidatosFluxo=item.fluxoConfirmado?[]:fluxoDisponivel.filter(f=>!fluxoUsadoSugestao.has(f.id)).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
         .filter(f=>{
           const vF=ehSaida?f.valor_saida:f.valor_entrada;
           return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
@@ -23162,6 +23176,7 @@ async function renderLancctbRegistroContabil(){
           return _lancctbDiffDias(a.data,r.data_pagamento)-_lancctbDiffDias(b.data,r.data_pagamento);
         });
         item.fluxoSugerido=candidatosFluxo[0];
+        fluxoUsadoSugestao.add(candidatosFluxo[0].id);
       }
     });
   }
