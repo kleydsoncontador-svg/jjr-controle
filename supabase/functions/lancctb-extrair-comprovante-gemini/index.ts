@@ -76,6 +76,12 @@ RETORNE APENAS O JSON, NADA MAIS.`;
                 ],
               },
             ],
+            // Sem isso, o modelo gera tokens de "thinking" (raciocínio interno,
+            // cobrado como saída) por padrão — essa function chama 1x por
+            // página de PDF, num loop, então isso multiplicava o gasto. Achado
+            // investigando um gasto de R$ 26 em 2 dias na chave Gemini
+            // (09/09/2026). Tarefa é extração direta, não precisa de raciocínio.
+            generationConfig: { thinkingConfig: { thinkingBudget: 0 } },
           }),
         }
       );
