@@ -30,11 +30,14 @@ ALTER TABLE public.comprovantes_bancarios ADD COLUMN IF NOT EXISTS warnings     
 ALTER TABLE public.comprovantes_bancarios ADD COLUMN IF NOT EXISTS page_number              INT;
 ALTER TABLE public.comprovantes_bancarios ADD COLUMN IF NOT EXISTS hash_dedup               TEXT;
 
--- Índice único de deduplicação por empresa. Parcial (só quando hash_dedup
--- está preenchido) pra não colidir com as linhas antigas que ficam NULL.
+-- Índice único de deduplicação por empresa. NÃO-parcial de propósito: o
+-- PostgREST/supabase-js precisa de um índice único simples pra casar o
+-- ON CONFLICT do upsert (um índice PARCIAL "WHERE hash_dedup IS NOT NULL"
+-- dá "there is no unique or exclusion constraint matching the ON CONFLICT
+-- specification"). As linhas antigas com hash_dedup NULL não conflitam
+-- entre si porque no Postgres NULL != NULL num índice único (NULLS DISTINCT).
 CREATE UNIQUE INDEX IF NOT EXISTS uq_comprov_bancarios_hash
-  ON public.comprovantes_bancarios (empresa_eid, hash_dedup)
-  WHERE hash_dedup IS NOT NULL;
+  ON public.comprovantes_bancarios (empresa_eid, hash_dedup);
 
 CREATE INDEX IF NOT EXISTS idx_comprov_bancarios_parser_type
   ON public.comprovantes_bancarios (empresa_eid, parser_type);
