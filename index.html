@@ -27570,6 +27570,145 @@ async function _lancctbParsearExtratoItauMensal(pdf){
   if(!lancamentos.length) return null;
   return {lancamentos,saldoAnteriorDoc,saldoFinalDoc};
 }
+
+// ═══ Extratos de C/C de marketplace/fintech (Mercado Pago, ShopeePay) ═══
+// Todos determinísticos (xlsx.js / pdf.js), sem IA. 1 lançamento por
+// transação. Reconhecimento pelo cabeçalho fixo do arquivo.
+
+// Data "DD-MM-AAAA" ou "AAAA-MM-DD [HH:MM:SS]" → ISO "AAAA-MM-DD".
+function _lancctbDataIsoFlex(s){
+  s=String(s||'').trim();
+  let m=s.match(/^(\d{2})[-\/](\d{2})[-\/](\d{4})/); if(m) return `${m[3]}-${m[2]}-${m[1]}`;
+  m=s.match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return `${m[1]}-${m[2]}-${m[3]}`;
+  return null;
+}
+// Valor solto (com sinal) — aceita BR ("1.234,56" / "-R$ 5,71") e US
+// ("1234.56" / "-500"). Devolve número com sinal.
+function _lancctbParseValorFlex(s){
+  s=String(s==null?'':s).replace(/r\$/i,'').replace(/\s/g,'').trim();
+  if(!s) return 0;
+  const neg=/^-/.test(s)||/-$/.test(s); s=s.replace(/^-|-$/g,'');
+  if(/,\d{2}$/.test(s)) s=s.replace(/\./g,'').replace(',','.');       // BR
+  else s=s.replace(/,/g,'');                                          // US
+  const v=parseFloat(s)||0;
+  return neg?-v:v;
+}
+
+// ── Mercado Pago — "account_statement…xlsx" ──
+function _lancctbParsearExtratoMercadoPagoXlsx(wb){
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:''});
+  const hdrIdx=aoa.findIndex(r=>String(r[0]).trim().toUpperCase()==='RELEASE_DATE'&&r.some(c=>/TRANSACTION_NET_AMOUNT/i.test(c)));
+  if(hdrIdx<0) return null;
+  let saldoAnteriorDoc=null,saldoFinalDoc=null;
+  if(String(aoa[0]&&aoa[0][0]).trim().toUpperCase()==='INITIAL_BALANCE'&&aoa[1]){
+    saldoAnteriorDoc=_lancctbParseValorFlex(aoa[1][0]); saldoFinalDoc=_lancctbParseValorFlex(aoa[1][3]);
+  }
+  const lancamentos=[];
+  for(let i=hdrIdx+1;i<aoa.length;i++){
+    const r=aoa[i]; const dataIso=_lancctbDataIsoFlex(r[0]); if(!dataIso) continue;
+    const tipo=String(r[1]||'').trim(), ref=String(r[2]||'').trim();
+    const v=_lancctbParseValorFlex(r[3]); if(!v) continue;
+    // Histórico bancário = TRANSACTION_TYPE + REFERENCE_ID (pedido do usuário 10/09/2026)
+    const hist=[tipo,ref&&ref!=='-'?ref:''].filter(Boolean).join(' - ');
+    lancamentos.push({ data:dataIso, historico:hist, valor_entrada:v>0?v:0, valor_saida:v<0?-v:0, documento:ref&&ref!=='-'?ref:null });
+  }
+  return lancamentos.length?{lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Mercado Pago (Excel)'}:null;
+}
+
+// ── ShopeePay — "…xlsx" (sheet "Transaction Report") ──
+function _lancctbParsearExtratoShopeePayXlsx(wb){
+  const sn=wb.SheetNames.find(n=>/transaction report/i.test(n))||wb.SheetNames[0];
+  const ws=wb.Sheets[sn]; if(!ws) return null;
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:''});
+  const hdrIdx=aoa.findIndex(r=>/tipo de transa/i.test(r[1]||'')&&/dire[çc][ãa]o do dinheiro/i.test((r||[]).join('|')));
+  if(hdrIdx<0) return null;
+  const H=aoa[hdrIdx].map(c=>String(c||'').trim().toLowerCase());
+  const col=(...ks)=>H.findIndex(h=>ks.some(k=>h.includes(k)));
+  const cData=col('data'),cTipo=col('tipo de transa'),cDesc=col('descri'),cId=col('id do pedido'),
+        cDir=col('dire'),cVal=col('valor')>=0?H.findIndex(h=>h==='valor'):-1,cStatus=col('status');
+  const cValor=cVal>=0?cVal:col('valor');
+  let saldoFinalDoc=null;
+  const lancamentos=[];
+  for(let i=hdrIdx+1;i<aoa.length;i++){
+    const r=aoa[i]; const dataIso=_lancctbDataIsoFlex(r[cData]); if(!dataIso) continue;
+    if(cStatus>=0 && r[cStatus] && !/completa|conclu/i.test(String(r[cStatus]))) continue;
+    let v=_lancctbParseValorFlex(r[cValor]);
+    const dir=String(r[cDir]||'').trim().toLowerCase();
+    if(dir==='saída'||dir==='saida') v=-Math.abs(v);
+    else if(dir==='entrada') v=Math.abs(v);
+    if(!v) continue;
+    const tipo=String(r[cTipo]||'').trim(), desc=String(r[cDesc]||'').trim(), pid=String(r[cId]||'').trim();
+    // Histórico bancário = Tipo de transação + Descrição + ID do pedido (pedido do usuário 10/09/2026)
+    const hist=[tipo,desc,pid&&pid!=='-'?pid:''].filter(Boolean).join(' - ');
+    lancamentos.push({ data:dataIso, historico:hist, valor_entrada:v>0?v:0, valor_saida:v<0?-v:0, documento:pid&&pid!=='-'?pid:null });
+  }
+  return lancamentos.length?{lancamentos,saldoAnteriorDoc:null,saldoFinalDoc,layout:'ShopeePay (Excel)'}:null;
+}
+
+// ── Mercado Pago — PDF "EXTRATO DE CONTA" / "DETALHE DOS MOVIMENTOS" ──
+// Descrição quebra em 2-3 linhas visuais; a linha que tem a DATA também tem
+// ID/Valor/Saldo. Junta os fragmentos de descrição das linhas vizinhas
+// (mesmo bloco) por coluna X.
+async function _lancctbParsearExtratoMercadoPagoPdf(pdf){
+  const t1=(await _lancctbExtrairItensPagina(await pdf.getPage(1))).map(i=>i.str).join(' ');
+  if(!/EXTRATO DE CONTA/i.test(t1)||!/DETALHE DOS MOVIMENTOS/i.test(t1)) return null;
+  let saldoAnteriorDoc=null,saldoFinalDoc=null;
+  const mSi=t1.match(/Saldo inicial:\s*R\$\s*([\d.,-]+)/i); if(mSi) saldoAnteriorDoc=_lancctbParseValorFlex(mSi[1]);
+  const mSf=t1.match(/Saldo final:\s*R\$\s*([\d.,-]+)/i); if(mSf) saldoFinalDoc=_lancctbParseValorFlex(mSf[1]);
+  const lancamentos=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(p===1?await pdf.getPage(1):await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens,3).sort((a,b)=>b.y-a.y);
+    // colunas: Data~41, Descrição~89, ID~198, Valor~300, Saldo~360
+    for(let k=0;k<linhas.length;k++){
+      const L=linhas[k];
+      const itData=L.itens.find(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str));
+      const itId=L.itens.find(i=>/^\d{6,}$/.test(i.str)&&i.x>150&&i.x<260);
+      const itsVal=L.itens.filter(i=>/^R\$/.test(i.str)||/^-?R\$/.test(i.str)||/^-?[\d.]+,\d{2}$/.test(i.str.replace(/R\$\s*/,'')));
+      if(!itData||!itId||itsVal.length<1) continue;
+      const dataIso=_lancctbDataIsoFlex(itData.str); if(!dataIso) continue;
+      // valor = token R$ com x menor; saldo = maior
+      const ordVal=itsVal.slice().sort((a,b)=>a.x-b.x);
+      const v=_lancctbParseValorFlex(ordVal[0].str);
+      if(!v) continue;
+      // descrição: fragmentos na coluna ~89 desta linha + linha de cima + linha de baixo
+      const fragDe=(ln)=>ln?ln.itens.filter(i=>i.x>=70&&i.x<180&&!/^\d{2}-\d{2}-\d{4}$/.test(i.str)).map(i=>i.str).join(' ').trim():'';
+      const acima=linhas[k-1], abaixo=linhas[k+1];
+      const desc=[
+        (acima&&!acima.itens.some(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str))&&!acima.itens.some(i=>/^R\$/.test(i.str)))?fragDe(acima):'',
+        fragDe(L),
+        (abaixo&&!abaixo.itens.some(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str))&&!abaixo.itens.some(i=>/^R\$/.test(i.str)))?fragDe(abaixo):'',
+      ].filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
+      const hist=[desc,itId.str].filter(Boolean).join(' - ');
+      lancamentos.push({ data:dataIso, historico:hist, valor_entrada:v>0?v:0, valor_saida:v<0?-v:0, documento:itId.str });
+    }
+  }
+  return lancamentos.length?{lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Mercado Pago (PDF)'}:null;
+}
+
+// ── ShopeePay — PDF "PERÍODO EXTRATO" ──
+async function _lancctbParsearExtratoShopeePayPdf(pdf){
+  const t1=(await _lancctbExtrairItensPagina(await pdf.getPage(1))).map(i=>i.str).join(' ');
+  if(!/PER[ÍI]ODO EXTRATO/i.test(t1)||!/(SHPP|SHOPEE)/i.test(t1)) return null;
+  const lancamentos=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(p===1?await pdf.getPage(1):await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens,3);
+    for(const L of linhas){
+      const itData=L.itens.find(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str));
+      if(!itData) continue;
+      const dataIso=_lancctbDataIsoFlex(itData.str); if(!dataIso) continue;
+      const itVal=L.itens.find(i=>/^-?R\$\s*[\d.]+,\d{2}$/.test(i.str)||/^-?R\$[\d.]+,\d{2}$/.test(i.str));
+      if(!itVal) continue;
+      const v=_lancctbParseValorFlex(itVal.str); if(!v) continue;
+      const tipo=L.itens.filter(i=>i.x>260&&i.x<450&&i.str!==itVal.str).map(i=>i.str).join(' ').trim();
+      lancamentos.push({ data:dataIso, historico:tipo||'Transação ShopeePay', valor_entrada:v>0?v:0, valor_saida:v<0?-v:0, documento:null });
+    }
+  }
+  return lancamentos.length?{lancamentos,saldoAnteriorDoc:null,saldoFinalDoc:null,layout:'ShopeePay (PDF)'}:null;
+}
+
 // "Extrato de conta corrente" do Banco do Brasil (Consultas do internet
 // banking, confirmado com arquivo real Fast Lube Ag 3050-3 CC 21568-6,
 // 07/2026, 90 páginas). Layout NÃO é tabela por posição X — é uma
@@ -27681,7 +27820,8 @@ async function processarLancctbUploadExtrato(forcarIA){
 
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
-        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoItauMensal(pdf));
+        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
+          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf));
       })();
       if(reconhecido){
         origem='pdf_estruturado';
@@ -27696,7 +27836,7 @@ async function processarLancctbUploadExtrato(forcarIA){
             ? ' ✓ saldo final bate com o do extrato.'
             : ` ⚠ saldo final calculado (R$ ${_fmt(saldoCalculado)}) diverge do impresso no extrato (R$ ${_fmt(reconhecido.saldoFinalDoc)}) — confira antes de salvar.`;
         }
-        const nomeLayout=reconhecido.mesPt?'Mister Contador':(reconhecido.mesRef?'Banco do Brasil':'Itaú');
+        const nomeLayout=reconhecido.layout||(reconhecido.mesPt?'Mister Contador':(reconhecido.mesRef?'Banco do Brasil':'Itaú'));
         status.textContent=`Layout reconhecido (${nomeLayout}, leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}`;
         _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
         renderLancctbExtratoPreview();
@@ -27754,6 +27894,27 @@ async function processarLancctbUploadExtrato(forcarIA){
     } else {
       const buf=await file.arrayBuffer();
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
+      // Formatos de C/C de marketplace/fintech (Mercado Pago, ShopeePay) —
+      // leitura direta, sem IA, antes do mapeador genérico de colunas.
+      const recExcel=_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb);
+      if(recExcel){
+        origem='excel_estruturado';
+        lancamentos=recExcel.lancamentos;
+        let confere='';
+        if(recExcel.saldoAnteriorDoc!=null&&recExcel.saldoFinalDoc!=null){
+          const somaE=lancamentos.reduce((s,l)=>s+(l.valor_entrada||0),0), somaS=lancamentos.reduce((s,l)=>s+(l.valor_saida||0),0);
+          const calc=Math.round((recExcel.saldoAnteriorDoc+somaE-somaS)*100)/100;
+          confere=Math.abs(calc-recExcel.saldoFinalDoc)<0.05?' ✓ saldo final bate.':` ⚠ saldo calculado R$ ${_fmt(calc)} ≠ extrato R$ ${_fmt(recExcel.saldoFinalDoc)} — confira.`;
+        } else if(recExcel.saldoFinalDoc!=null){
+          const somaE=lancamentos.reduce((s,l)=>s+(l.valor_entrada||0),0), somaS=lancamentos.reduce((s,l)=>s+(l.valor_saida||0),0);
+          confere=` (Σ entradas R$ ${_fmt(somaE)} / Σ saídas R$ ${_fmt(somaS)})`;
+        }
+        status.textContent=`Layout reconhecido (${recExcel.layout}, leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}`;
+        _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
+        renderLancctbExtratoPreview();
+        btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; }
+        return;
+      }
       const ws=wb.Sheets[wb.SheetNames[0]];
       const linhas=XLSX.utils.sheet_to_json(ws,{defval:''});
       const acharCampo=(row,nomes)=>{
