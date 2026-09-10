@@ -26182,23 +26182,34 @@ async function associarLancctbFluxoEmLote(){
   let primeiroLancamento=null;
 
   if(_lancctbFluxoSelecionarTodosMode){
-    // Buscar TODOS os registros com os filtros atuais
+    // Buscar TODOS os registros com os filtros atuais — SEM o teto de 1000 do
+    // PostgREST (bug real 10/09/2026: "selecionar todos" só associava as
+    // primeiras 1000 linhas de um lote de 4784).
     const eid=_lancctbEidAtual;
-    let q=_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,port_nom')
-      .eq('empresa_eid',eid);
-    if(_lancctbFluxoContaSel) q=q.eq('conta_bancaria_id',parseInt(_lancctbFluxoContaSel));
-    if(_lancctbFluxoPortNegocioFiltro) q=q.eq('port_nom',_lancctbFluxoPortNegocioFiltro);
-    if(_lancctbFluxoStatus) q=q.eq('status_associado',_lancctbFluxoStatus);
-    if(_lancctbFluxoMes){
-      const [ano,mes]=_lancctbFluxoMes.split('-').map(Number);
-      const ultimoDia=new Date(ano,mes,0).getDate();
-      q=q.gte('data',`${_lancctbFluxoMes}-01`).lte('data',`${_lancctbFluxoMes}-${String(ultimoDia).padStart(2,'0')}`);
-    }
-    const { data: todasAsLinhas, error: erroQuery } = await q;
+    const construir=()=>{
+      let q=_supaClient.from('fluxo_caixa_lancamentos').select('id,port_nom').eq('empresa_eid',eid);
+      if(_lancctbFluxoContaSel) q=q.eq('conta_bancaria_id',parseInt(_lancctbFluxoContaSel));
+      if(_lancctbFluxoPortNegocioFiltro) q=q.eq('port_nom',_lancctbFluxoPortNegocioFiltro);
+      if(_lancctbFluxoStatus) q=q.eq('status_associado',_lancctbFluxoStatus);
+      if(_lancctbFluxoFiltroDescricao) q=q.ilike('descricao',`%${_lancctbFluxoFiltroDescricao}%`);
+      if(_lancctbFluxoFiltroCliente) q=q.ilike('cliente_fornecedor_nome',`%${_lancctbFluxoFiltroCliente}%`);
+      if(_lancctbFluxoFiltroCnpj) q=q.ilike('cnpj_cpf',`%${_lancctbFluxoFiltroCnpj}%`);
+      if(_lancctbFluxoFiltroNumero) q=q.ilike('documento_numero',`%${_lancctbFluxoFiltroNumero}%`);
+      if(_lancctbFluxoFiltroUnidade) q=q.ilike('unidade',`%${_lancctbFluxoFiltroUnidade}%`);
+      if(_lancctbFluxoFiltroDescconta) q=q.ilike('descricao_conta_origem',`%${_lancctbFluxoFiltroDescconta}%`);
+      if(_lancctbFluxoFiltroPortNomTxt) q=q.ilike('port_nom',`%${_lancctbFluxoFiltroPortNomTxt}%`);
+      if(_lancctbFluxoFiltroData){ const d=_lancctbFluxoParseData(_lancctbFluxoFiltroData); if(d) q=q.eq('data',d); }
+      if(_lancctbFluxoMes){
+        const [ano,mes]=_lancctbFluxoMes.split('-').map(Number);
+        const ultimoDia=new Date(ano,mes,0).getDate();
+        q=q.gte('data',`${_lancctbFluxoMes}-01`).lte('data',`${_lancctbFluxoMes}-${String(ultimoDia).padStart(2,'0')}`);
+      }
+      return q.order('id',{ascending:true});
+    };
+    const { data: todasAsLinhas, error: erroQuery } = await _lancctbFetchTudo(construir);
     if(erroQuery){ toast('Erro ao buscar lançamentos: '+erroQuery.message,'err'); return; }
-    ids=todasAsLinhas.map(l=>l.id);
-    primeiroLancamento=todasAsLinhas[0];
+    ids=(todasAsLinhas||[]).map(l=>l.id);
+    primeiroLancamento=(todasAsLinhas||[])[0];
   } else {
     if(_lancctbFluxoSelecionados.size===0){ toast('Nenhum lançamento selecionado.','err'); return; }
     ids=[..._lancctbFluxoSelecionados];
@@ -26207,9 +26218,9 @@ async function associarLancctbFluxoEmLote(){
 
   if(ids.length===0){ toast('Nenhum lançamento para associar.','err'); return; }
 
-  const { error } = await _supaClient.from('fluxo_caixa_lancamentos')
+  const { error } = await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('fluxo_caixa_lancamentos')
     .update({conta_bancaria_id:contaId,status_associado:'associado'})
-    .in('id',ids);
+    .in('id',lote));
 
   if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
 
