@@ -14,6 +14,11 @@
 -- Execute no SQL Editor do Supabase, DEPOIS de já ter feito o deploy do
 -- index.html que remove a aba/botão de Salários (senão nada mais escreve
 -- em comprovantes_salarios, mas o que já tinha lá seguiria invisível).
+--
+-- ✅ EXECUTADO em 10/09/2026: 105 linhas migradas de comprovantes_salarios
+--    para comprovantes_bancarios (714 → 819). comprovantes_salarios
+--    mantida intacta como backup (105 linhas). Tag usada: sem acento,
+--    "[ex-Comprovante de Salarios]".
 -- ═══════════════════════════════════════════════════════════════════════════
 
 INSERT INTO public.comprovantes_bancarios
@@ -27,8 +32,8 @@ SELECT
    juros, multa, desconto,
    -- marca a origem no campo observacao pra não perder o rastro de que veio
    -- do lote de Salários (auditoria) — não interfere em nada da conciliação
-   CASE WHEN observacao IS NULL OR observacao = '' THEN '[ex-Comprovante de Salários]'
-        ELSE observacao || ' [ex-Comprovante de Salários]' END,
+   CASE WHEN observacao IS NULL OR observacao = '' THEN '[ex-Comprovante de Salarios]'
+        ELSE observacao || ' [ex-Comprovante de Salarios]' END,
    arquivo_storage_path, status_conciliacao, lancamento_extrato_id,
    created_at, updated_at
 FROM public.comprovantes_salarios;
