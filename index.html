@@ -30376,9 +30376,14 @@ function _aplicfinMk(competence){ // 'AAAA-MM' → 'MM/AAAA'
 // transform do viewport do pdf.js — funciona pra 0/90/180/270 sem conta na mão.
 function _aplicfinItens(page,content){
   const vp=page.getViewport({scale:1});
+  const T=pdfjsLib.Util.applyTransform;
   return content.items.filter(it=>String(it.str).trim()!=='').map(it=>{
-    const q=pdfjsLib.Util.applyTransform([it.transform[4],it.transform[5]],vp.transform);
-    return { s:String(it.str).trim(), x:Math.round(q[0]), y:Math.round(q[1]) };
+    const tr=it.transform, h=Math.hypot(tr[0],tr[1])||1;
+    const p0=T([tr[4],tr[5]],vp.transform);
+    // ponto final ao longo da direção do texto (funciona com página rotacionada)
+    const p1=T([tr[4]+tr[0]*it.width/h, tr[5]+tr[1]*it.width/h],vp.transform);
+    const xl=Math.min(p0[0],p1[0]), xr=Math.max(p0[0],p1[0]);
+    return { s:String(it.str).trim(), x:Math.round(xl), xr:Math.round(xr), y:Math.round(p0[1]) };
   });
 }
 // Agrupa itens em linhas visuais (mesmo y ± tol). Devolve [[itens...]] de cima
@@ -30583,12 +30588,126 @@ async function _aplicfinParseBradescoPadrao(pdf){
   };
 }
 
+// ── MODELO 3: Bradesco "Extrato de CDBs/LETRAS" MULTIPRODUTO ──
+// Um PDF, vários produtos (ex: 2851 - Invest Facil / CDB Fácil / CDB
+// Fidelidade). SEÇÕES: Saldo Anterior / Aplicações / Resgates / Saldo Atual.
+// REGRA: SEÇÃO → PRODUTO → COLUNA → SOMA das linhas de detalhe. O "Total" de
+// cada seção mistura produtos → serve só pra VALIDAR (soma dos produtos = total
+// oficial ± R$ 0,01). Cabeçalho lido por seção (as colunas mudam entre seções).
+async function _aplicfinParseBradescoCdbMulti(pdf){
+  let itensTodos=[], texto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const its=_aplicfinItens(page,content).map(i=>({...i,y:i.y+p*100000,pg:p}));
+    itensTodos=itensTodos.concat(its);
+    texto+=' '+its.map(i=>i.s).join(' ');
+  }
+  texto=texto.replace(/\s+/g,' ');
+  if(!/Extrato\s+do\s+Cliente\s*-\s*Movimentos/i.test(texto)||!/Extrato\s+de\s+CDBs\/LETRAS/i.test(texto)) return null;
+  const warnings=[];
+  const mComp=texto.match(/Per[íi]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s*[àa]\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  const competence=mComp?(mComp[3]+'-'+mComp[2]):null;
+  if(!competence) warnings.push('Competência não identificada ("Período: dd/mm/aaaa à dd/mm/aaaa").');
+
+  const linhas=_aplicfinLinhas(itensTodos,3);
+  const SECOES=[
+    [/^Saldo\s+Anterior\s+em/i,'saldo_anterior'],
+    [/^Aplica[çc][õo]es:/i,'aplicacoes'],
+    [/^Resgates:/i,'resgates'],
+    [/^Saldo\s+Atual\s+em/i,'saldo_atual'],
+  ];
+  const LABEL2KEY={ 'principal':'principal','atualizado':'atualizado','rendimento':'rendimento','iof':'iof','ir':'ir',
+    'liquido':'liquido','resgate':'resgate','credito':'credito' };
+  const norm=s=>String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim();
+  const ehProdutoTxt=s=>/[A-Za-zÀ-ÿ]/.test(s)&&!/^(produto|total|certificado|emiss|venc|taxa|pagamento|descri|saldo|aplica|resgates)/i.test(norm(s));
+
+  // agrupa por seção
+  let secAtual=null, headerCols=null;
+  const somas={};   // somas[secao][produto][coluna] = valor
+  const totais={};  // totais[secao][coluna] = grand total (validação)
+  const produtosSet=new Set();
+  linhas.forEach(L=>{
+    const txt=L.map(i=>i.s).join(' ').trim();
+    for(const [re,id] of SECOES){ if(re.test(txt)){ secAtual=id; headerCols=null; return; } }
+    if(!secAtual) return;
+    // cabeçalho da seção (tem "Produto" e "Principal")
+    if(/\bProduto\b/i.test(txt)&&/\bPrincipal\b/i.test(txt)){
+      headerCols=L.map(i=>({key:LABEL2KEY[norm(i.s)],xr:i.xr})).filter(c=>c.key);
+      headerCols.sort((a,b)=>a.xr-b.xr);
+      return;
+    }
+    if(!headerCols) return;
+    const primeiro=L[0];
+    const nums=L.filter(i=>_aplicfinEhNum(i.s));
+    // linha "Total" da seção → validação
+    if(primeiro&&/^Total$/i.test(primeiro.s)&&primeiro.x<45){
+      if(!totais[secAtual]) totais[secAtual]={};
+      nums.forEach(i=>{ const k=_aplicfinColPorHeader(headerCols,i.xr); if(k&&totais[secAtual][k]==null) totais[secAtual][k]=_convCobrParseValor(i.s); });
+      return;
+    }
+    // linha de detalhe: 1º item é o nome do produto
+    if(!primeiro||primeiro.x>60||!ehProdutoTxt(primeiro.s)||!nums.length) return;
+    const prod=primeiro.s.trim().replace(/\s+/g,' ');
+    produtosSet.add(prod);
+    if(!somas[secAtual]) somas[secAtual]={};
+    if(!somas[secAtual][prod]) somas[secAtual][prod]={};
+    nums.forEach(i=>{ const k=_aplicfinColPorHeader(headerCols,i.xr); if(!k) return; const v=_convCobrParseValor(i.s); if(v==null) return; somas[secAtual][prod][k]=(somas[secAtual][prod][k]||0)+v; });
+  });
+
+  const produtos=[...produtosSet].sort();
+  const M='bradesco_cdb_multi';
+  const secRot={saldo_anterior:'Saldo Anterior',aplicacoes:'Aplicações',resgates:'Resgates',saldo_atual:'Saldo Atual'};
+  const colRot={principal:'Principal',atualizado:'Atualizado',rendimento:'Rendimento',iof:'IOF',ir:'IR',liquido:'Líquido',resgate:'Resgate',credito:'Crédito'};
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  const sources=[];
+  Object.keys(somas).forEach(sec=>{
+    produtos.forEach(prod=>{
+      const o=(somas[sec]||{})[prod]||{};
+      Object.keys(o).forEach(col=>{
+        sources.push({ key:M+'.'+sec+'.'+col, label:secRot[sec]+' → '+(colRot[col]||col)+' — '+prod+' (soma das linhas)',
+          section:secRot[sec], product:prod, value:r2(o[col]), calculationType:'CONDITIONAL_SUM' });
+      });
+    });
+  });
+
+  // Validação: soma dos produtos = Total oficial da seção (± R$ 0,02)
+  const validations=[];
+  Object.keys(totais).forEach(sec=>{
+    Object.keys(totais[sec]).forEach(col=>{
+      const oficial=totais[sec][col];
+      let somaProd=0, achou=false;
+      produtos.forEach(p=>{ const v=(((somas[sec]||{})[p])||{})[col]; if(v!=null){ somaProd+=v; achou=true; } });
+      if(!achou) return;
+      const ok=Math.abs(somaProd-oficial)<=0.05;
+      validations.push({name:'soma_produtos_'+sec+'_'+col,ok,detail:`${secRot[sec]}/${colRot[col]||col}: Σprodutos ${somaProd.toFixed(2)} vs total ${oficial}`});
+      if(!ok) warnings.push(`SECTION_TOTAL_MISMATCH: ${secRot[sec]} / ${colRot[col]||col} — soma dos produtos ${somaProd.toFixed(2)} ≠ total ${oficial}`);
+    });
+  });
+  if(!produtos.length) warnings.push('Nenhum produto/linha de detalhe reconhecido.');
+
+  return {
+    bank:'BRADESCO', model:M, competence, account:null,
+    fingerprint:_aplicfinFingerprint('BRADESCO',M,['EXTRATO DO CLIENTE - MOVIMENTOS','EXTRATO DE CDBS/LETRAS - PARA SIMPLES CONFERENCIA','SALDO ANTERIOR EM','APLICACOES:','RESGATES:','SALDO ATUAL EM','PRODUTO','PRINCIPAL','ATUALIZADO','RENDIMENTO','IOF','IR','LIQUIDO','RESGATE','CREDITO']),
+    productMode:'multiple', products:produtos, productFilter:null, sources, validations, warnings, pageCount:pdf.numPages,
+  };
+}
+// Colunas numéricas do Bradesco são alinhadas à DIREITA — a borda direita do
+// valor fica ~alinhada com a borda direita do rótulo do cabeçalho. Casa pela
+// menor distância entre a borda direita do valor e a de cada cabeçalho.
+function _aplicfinColPorHeader(headerCols,xr){
+  if(!headerCols||!headerCols.length) return null;
+  let best=null, bd=1e9;
+  for(const h of headerCols){ const d=Math.abs(h.xr-xr); if(d<bd){ bd=d; best=h.key; } }
+  return bd<=45?best:null;
+}
+
 // Dispatcher SEM IA (contrato padrão). Devolve o objeto do parser ou null.
 async function _aplicfinExtrairSemIA(file){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseBradescoPadrao];
+  const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseBradescoPadrao,_aplicfinParseBradescoCdbMulti];
   for(const fn of parsers){
     try{ const r=await fn(pdf); if(r) return r; }catch(e){ console.error('Parser aplicfin sem IA:',e); }
   }
@@ -30622,16 +30741,26 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       rendLiq:'bradesco_padrao.resgates.liquido',
       saldoBrutoExtrato:'bradesco_padrao.saldo_final.bruto',
     },
+    bradesco_cdb_multi:{
+      bruto:'bradesco_cdb_multi.resgates.rendimento',
+      iof:'bradesco_cdb_multi.resgates.iof',
+      irrf:'bradesco_cdb_multi.resgates.ir',
+      aplic:'bradesco_cdb_multi.aplicacoes.principal',
+      resgate:'bradesco_cdb_multi.resgates.principal',
+      rendLiq:'bradesco_cdb_multi.resgates.credito',
+      saldoBrutoExtrato:'bradesco_cdb_multi.saldo_atual.atualizado',
+    },
   };
   return (map[model]||{})[siteColId]||'';
 }
-function _renderAplicfinMapeamentoForm(ganho,parsed){
+function _renderAplicfinMapeamentoForm(ganho,parsed,produtoSel){
   const cols=_aplicfinColunasSite();
   const val=v=>v==null?'—':'R$ '+_fmt(v);
-  const opts=(sel)=>`<option value="">— Ignorar —</option>`+parsed.sources.map(s=>
+  const srcs=parsed.sources.filter(s=>!s.product||!produtoSel||s.product===produtoSel);
+  const opts=(sel)=>`<option value="">— Ignorar —</option>`+srcs.map(s=>
     `<option value="${esc(s.key)}" ${sel===s.key?'selected':''}>${esc(s.label)} — ${val(s.value)}</option>`).join('');
   let html=`<div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:4px">1ª importação deste modelo — associe cada coluna da tela a uma informação do extrato</div>
-  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Banco <b>${esc(parsed.bank)}</b> · modelo <b>${esc(parsed.model)}</b> · competência <b>${esc(_aplicfinMk(parsed.competence)||'?')}</b>. Isso é salvo no Supabase e reaplica sozinho nos próximos meses.</div>`;
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Banco <b>${esc(parsed.bank)}</b> · modelo <b>${esc(parsed.model)}</b>${produtoSel?` · produto <b>${esc(produtoSel)}</b>`:''} · competência <b>${esc(_aplicfinMk(parsed.competence)||'?')}</b>. Isso é salvo no Supabase e reaplica sozinho nos próximos meses.</div>`;
   if(parsed.warnings.length) html+=`<div style="font-size:11px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:6px;margin-bottom:8px">${parsed.warnings.map(esc).join('<br>')}</div>`;
   html+=`<div style="display:grid;gap:7px">`;
   cols.forEach((c,i)=>{
@@ -30665,7 +30794,7 @@ async function _aplicfinSalvarMapeamento(){
   cols.forEach((c,i)=>{
     const key=document.getElementById('aplicfinMap_'+i)?.value||'';
     if(!key) return;
-    const src=parsed.sources.find(s=>s.key===key)||{};
+    const src=_aplicfinAcharSource(parsed,key,produto)||{};
     registros.push({
       empresa_eid:String(eid), modulo:'ganhos', aplicacao_id:String(pid),
       banco:parsed.bank, modelo:parsed.model, fingerprint_hash:parsed.fingerprint,
@@ -30701,6 +30830,10 @@ async function _aplicfinSalvarMapeamento(){
 }
 // Aplica um conjunto de linhas de mapeamento (do Supabase ou recém-criadas) a
 // ganho.dados[mk]. Devolve {aplicados, faltando}.
+function _aplicfinAcharSource(parsed,sourceKey,produtoFiltro){
+  return parsed.sources.find(s=>s.key===sourceKey&&(!s.product||!produtoFiltro||s.product===produtoFiltro))
+      || parsed.sources.find(s=>s.key===sourceKey);
+}
 function _aplicfinAplicar(ganho,parsed,mapRows){
   const mk=_aplicfinMk(parsed.competence);
   if(!ganho.dados) ganho.dados={};
@@ -30708,7 +30841,7 @@ function _aplicfinAplicar(ganho,parsed,mapRows){
   const idsDetalhe=new Set();
   const aplicados=[], faltando=[];
   mapRows.forEach(r=>{
-    const src=parsed.sources.find(s=>s.key===r.source_key);
+    const src=_aplicfinAcharSource(parsed,r.source_key,r.produto_filtro);
     if(!src||src.value==null){ faltando.push(r.site_column); return; }
     ganho.dados[mk][r.site_column]=src.value;
     aplicados.push({col:r.site_column,value:src.value});
@@ -30720,11 +30853,10 @@ function _aplicfinAplicar(ganho,parsed,mapRows){
   if(ganho.docVisaoGeralNome) _lancctbFlagVisaoGeral(ganho._eidFlag||null,ganho.docVisaoGeralNome,mk);
   return {aplicados,faltando};
 }
-async function _aplicfinCarregarMapeamento(eid,modelo,aplicacaoId,produto){
+async function _aplicfinCarregarMapeamento(eid,modelo,aplicacaoId){
   try{
     const { data }=await _supaClient.from('aplicfin_modelo_mapeamento').select('*')
-      .eq('empresa_eid',String(eid)).eq('modulo','ganhos').eq('modelo',modelo)
-      .eq('produto_filtro',produto||'');
+      .eq('empresa_eid',String(eid)).eq('modulo','ganhos').eq('modelo',modelo);
     if(!data||!data.length) return null;
     const rows=data.filter(r=>!r.aplicacao_id||String(r.aplicacao_id)===String(aplicacaoId));
     return rows.length?rows:null;
@@ -30733,7 +30865,7 @@ async function _aplicfinCarregarMapeamento(eid,modelo,aplicacaoId,produto){
 async function _aplicfinGravarAuditoria(eid,pid,parsed,mapRows,arquivo){
   const comp=parsed.competence;
   const regs=mapRows.map(r=>{
-    const src=parsed.sources.find(s=>s.key===r.source_key)||{};
+    const src=_aplicfinAcharSource(parsed,r.source_key,r.produto_filtro)||{};
     return {
       empresa_eid:String(eid), modulo:'ganhos', aplicacao_id:String(pid), competencia:comp,
       banco:parsed.bank, modelo:parsed.model, produto_filtro:r.produto_filtro||'',
@@ -30755,8 +30887,7 @@ async function _ganhoAplicarParserSemIA(eid,pid,parsed,file,statusEl){
   if(!parsed.competence){ toast('Não identifiquei a competência do extrato — use a IA se necessário.','err'); return 'NAO_RECONHECIDO'; }
   const ganhos=getGanhos(eid), ganho=ganhos[pid];
   ganho._eidFlag=eid;
-  const produto=null; // Itaú: produto único (Bradesco multiproduto: fase D)
-  const mapRows=await _aplicfinCarregarMapeamento(eid,parsed.model,pid,produto);
+  const mapRows=await _aplicfinCarregarMapeamento(eid,parsed.model,pid);
   if(mapRows&&mapRows.length){
     const { faltando }=_aplicfinAplicar(ganho,parsed,mapRows);
     setGanhos(eid,ganhos);
@@ -30764,13 +30895,45 @@ async function _ganhoAplicarParserSemIA(eid,pid,parsed,file,statusEl){
     statusEl.textContent='';
     closeModal('mGanhoUploadIA');
     if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
-    toast(`Extrato ${parsed.bank} (sem IA) — ${_aplicfinMk(parsed.competence)} atualizado.`+(faltando.length?` ⚠ ${faltando.length} coluna(s) sem valor neste mês.`:''), faltando.length?'info':'ok');
+    const prodTxt=(mapRows[0].produto_filtro)?` [${mapRows[0].produto_filtro}]`:'';
+    toast(`Extrato ${parsed.bank} (sem IA)${prodTxt} — ${_aplicfinMk(parsed.competence)} atualizado.`+(faltando.length?` ⚠ ${faltando.length} coluna(s) sem valor neste mês.`:''), faltando.length?'info':'ok');
     return 'PROCESSADO';
   }
-  _aplicfinParsedPendente={eid,pid,parsed,produto,arquivo:file.name};
-  document.getElementById('ganhoUploadIABody').innerHTML=_renderAplicfinMapeamentoForm(ganho,parsed);
+  _aplicfinParsedPendente={eid,pid,parsed,produto:'',arquivo:file.name};
+  const body=document.getElementById('ganhoUploadIABody');
+  if(parsed.productMode==='multiple'&&(parsed.products||[]).length>1){
+    body.innerHTML=_renderAplicfinProdutoPicker(parsed);
+  }else{
+    if((parsed.products||[]).length===1) _aplicfinParsedPendente.produto=parsed.products[0];
+    body.innerHTML=_renderAplicfinMapeamentoForm(ganho,parsed,_aplicfinParsedPendente.produto);
+  }
   statusEl.textContent='';
   return 'MAPEAR';
+}
+function _renderAplicfinProdutoPicker(parsed){
+  const opts=parsed.products.map((p,i)=>`<label style="display:flex;gap:6px;align-items:center;padding:6px;background:var(--bg);border-radius:4px;cursor:pointer">
+    <input type="radio" name="aplicfinProd" value="${esc(p)}" ${i===0?'checked':''}> ${esc(p)}</label>`).join('');
+  setTimeout(()=>{
+    const acoes=document.getElementById('ganhoUploadIAAcoes');
+    if(acoes&&!document.getElementById('ganhoUploadIABtnProd')){
+      const b=document.createElement('button');
+      b.className='btn bp'; b.id='ganhoUploadIABtnProd'; b.textContent='Continuar →';
+      b.onclick=_aplicfinEscolherProduto;
+      acoes.appendChild(b);
+    }
+  },0);
+  return `<div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:4px">Este extrato tem vários produtos — qual você quer importar nesta aplicação?</div>
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Competência <b>${esc(_aplicfinMk(parsed.competence)||'?')}</b>. Cada produto vira uma configuração própria (uma aplicação por produto).</div>
+  <div style="display:grid;gap:6px">${opts}</div>`;
+}
+function _aplicfinEscolherProduto(){
+  const ctx=_aplicfinParsedPendente;
+  const sel=document.querySelector('input[name="aplicfinProd"]:checked');
+  if(!ctx||!sel){ toast('Escolha um produto.','err'); return; }
+  ctx.produto=sel.value;
+  document.getElementById('ganhoUploadIABtnProd')?.remove();
+  const ganho=(getGanhos(ctx.eid)||{})[ctx.pid]||{};
+  document.getElementById('ganhoUploadIABody').innerHTML=_renderAplicfinMapeamentoForm(ganho,ctx.parsed,ctx.produto);
 }
 
 // Dispatcher dos leitores SEM IA de Ganhos/Rendimentos. Tenta cada parser
