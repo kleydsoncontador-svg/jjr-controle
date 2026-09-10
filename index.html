@@ -18357,12 +18357,16 @@ async function _lancctbParsearRelatorioLiquidos(file){
   if(!/RELA[ÇC][ÃA]O GERAL DOS L[ÍI]QUIDOS/i.test(texto)) return null;
   const mComp=texto.match(/Compet[êe]ncia:\s*(\d{2}\/\d{4})/i);
   const competencia=mComp?mComp[1].replace('/','-'):null;
-  const mTotal=texto.match(/Total da Empresa:\s*([\d.,]+)/i);
-  if(!mTotal) return null;
-  const total=_convCobrParseValor(mTotal[1]);
-  // Linhas de pessoa: "{código} {NOME}{espaços}{CPF} {valor}" — o nome pode
-  // ter várias palavras, então captura tudo até o CPF (padrão fixo
-  // 999.999.999-99) como delimitador confiável.
+  // Total: layout antigo tem o valor DEPOIS de "Total da Empresa:"; o layout
+  // novo do Domínio (sem coluna de CPF) põe o valor ANTES e depois só a data.
+  const mTotalVelho=texto.match(/Total da Empresa:\s*([\d.]*\d,\d{2})/i);
+  const mTotalNovo=texto.match(/([\d.]*\d,\d{2})\s+Total da Empresa:/i);
+  let total = mTotalVelho ? _convCobrParseValor(mTotalVelho[1])
+            : mTotalNovo  ? _convCobrParseValor(mTotalNovo[1]) : null;
+  // Linhas de pessoa. Dois layouts:
+  //  A) antigo: "{código} {NOME}{espaços}{CPF} {valor}"
+  //  B) novo (Domínio sem CPF): "{código} {NOME} {valor}" — nome pode vir em
+  //     maiúsculas (empregado) ou capitalizado (sócio/"Contribuinte").
   const idxEmpregados=texto.search(/\bEmpregados\b/i);
   const idxContribuintes=texto.search(/\bContribuintes\b/i);
   const idxFim=texto.search(/Empregados:\s*\d+\s*Estagi[áa]rios/i);
@@ -18378,6 +18382,18 @@ async function _lancctbParsearRelatorioLiquidos(file){
   };
   extrairBloco(idxEmpregados,idxContribuintes>=0?idxContribuintes:idxFim,'empregado');
   extrairBloco(idxContribuintes,idxFim,'contribuinte');
+  // Layout B (sem CPF): só cai aqui se o layout A não achou ninguém.
+  if(!pessoas.length){
+    const reSem=/(\d+)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ.'\s]+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})(?=\s|$)/g;
+    const fim=idxFim>=0?idxFim:texto.length;
+    const bloEmp=idxEmpregados>=0?texto.slice(idxEmpregados,idxContribuintes>=0?idxContribuintes:fim):'';
+    const bloCon=idxContribuintes>=0?texto.slice(idxContribuintes,fim):'';
+    let m;
+    while((m=reSem.exec(bloEmp))) pessoas.push({ codigo:m[1], nome:m[2].trim().replace(/\s+/g,' '), cpf:null, valor:_convCobrParseValor(m[3]), tipo:'empregado' });
+    while((m=reSem.exec(bloCon))) pessoas.push({ codigo:m[1], nome:m[2].trim().replace(/\s+/g,' '), cpf:null, valor:_convCobrParseValor(m[3]), tipo:'contribuinte' });
+  }
+  if(total==null && pessoas.length) total=Math.round(pessoas.reduce((s,p)=>s+(p.valor||0),0)*100)/100;
+  if(total==null) return null;
   return { competencia, total, pessoas };
 }
 // Botão "📋 Processar FOPAG" (Registro Contábil) — pra cada pendência de
