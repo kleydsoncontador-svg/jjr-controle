@@ -14,6 +14,9 @@
 --
 -- aplicacao_id / produto_filtro são NOT NULL DEFAULT '' (não NULL) só pra que
 -- o UNIQUE simples e o upsert por on_conflict funcionem — '' = "sem produto".
+--
+-- ✅ EXECUTADO no Supabase em 10/09/2026 — 2 tabelas criadas, RLS auth_all
+--    (authenticated / ALL) confirmada nas duas.
 -- ═══════════════════════════════════════════════════════════════════════════
 
 CREATE TABLE IF NOT EXISTS public.aplicfin_modelo_mapeamento (
