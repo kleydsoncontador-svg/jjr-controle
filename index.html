@@ -2519,7 +2519,8 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
       <div id="ganhoUploadIABody" style="margin-top:10px"></div>
       <div class="ma" id="ganhoUploadIAAcoes">
         <button class="btn bo" onclick="closeModal('mGanhoUploadIA')">Cancelar</button>
-        <button class="btn bp" id="ganhoUploadIABtnExtrair" onclick="_ganhoUploadIAExtrair()">▶ Extrair</button>
+        <button class="btn bsm btn-ia-gemini" id="ganhoUploadIABtnExtrairIA" onclick="_ganhoUploadIAExtrair(true)" title="Usa a IA Gemini (API paga) pra ler o PDF. Só use se o extrair sem IA não reconhecer o modelo.">🤖 Usar IA Gemini</button>
+        <button class="btn bp" id="ganhoUploadIABtnExtrair" onclick="_ganhoUploadIAExtrair(false)">▶ Extrair sem IA</button>
       </div>
     </div>
   </div>
@@ -30277,7 +30278,9 @@ function abrirGanhoUploadIAModal(eid,pid){
   const btn=document.getElementById('ganhoUploadIABtnExtrair');
   btn.style.display='';
   btn.disabled=false;
-  btn.textContent='▶ Extrair';
+  btn.textContent='▶ Extrair sem IA';
+  const btnIA=document.getElementById('ganhoUploadIABtnExtrairIA');
+  if(btnIA){ btnIA.style.display=''; btnIA.disabled=false; btnIA.textContent='🤖 Usar IA Gemini'; }
   document.getElementById('ganhoUploadIABtnSalvar')?.remove();
   openModal('mGanhoUploadIA');
 }
@@ -30343,30 +30346,400 @@ async function _ganhoExtrairBBRendeFacil(file){
     resgate: pegarResumo('Resgates\\s+l[íi]quidos\\s+no\\s+m[êe]s'),
   };
 }
-async function _ganhoUploadIAExtrair(){
+// ═══════════════════════════════════════════════════════════════════════════
+// IMPORTAÇÃO SEM IA de Extratos de Aplicações Financeiras (Ganhos/Rendimentos)
+// pdf.js + coordenadas, sem IA/LLM/OCR. Cada parser reconhece o modelo pelo
+// FINGERPRINT (título/cabeçalhos fixos, NUNCA o nome do arquivo) e devolve o
+// contrato padrão { bank, model, competence, fingerprint, productMode,
+// products, sources:[{key,label,section,product,value,calculationType}],
+// validations, warnings }. O mapeamento coluna-do-site → source_key fica no
+// Supabase (aplicfin_modelo_mapeamento) e é reaplicado sozinho nos meses
+// seguintes. Ver supabase-schema-aplicfin-mapeamento.sql.
+// ═══════════════════════════════════════════════════════════════════════════
+const APLICFIN_PARSER_VERSION='v1';
+let _aplicfinParsedPendente=null; // {eid,pid,parsed,produto,arquivo}
+
+function _aplicfinHash(str){ // hash curto e estável (djb2) → hex
+  let h=5381; const s=String(str);
+  for(let i=0;i<s.length;i++){ h=((h<<5)+h+s.charCodeAt(i))>>>0; }
+  return h.toString(16);
+}
+function _aplicfinFingerprint(banco,modelo,marcadores){
+  const norm=marcadores.map(m=>String(m||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim()).join('|');
+  return banco+':'+modelo+':'+_aplicfinHash(norm);
+}
+function _aplicfinMk(competence){ // 'AAAA-MM' → 'MM/AAAA'
+  const [a,m]=String(competence||'').split('-'); return m&&a?m+'/'+a:null;
+}
+// Normaliza os itens de texto de uma página lidando com page.rotate. Devolve
+// [{s,x,y}] com y crescendo PRA CIMA (igual ao PDF sem rotação) — o resto do
+// parser ordena por y desc = de cima pra baixo.
+function _aplicfinItens(page,content){
+  const rot=((page.rotate%360)+360)%360;
+  const V=page.view; const W=V[2], H=V[3];
+  return content.items.filter(it=>String(it.str).trim()!=='').map(it=>{
+    let x=it.transform[4], y=it.transform[5];
+    if(rot===180){ x=W-x; y=H-y; }
+    else if(rot===90){ const nx=y, ny=x; x=nx; y=W-ny; }
+    else if(rot===270){ const nx=H-y, ny=x; x=nx; y=ny; }
+    return { s:String(it.str).trim(), x:Math.round(x), y:Math.round(y) };
+  });
+}
+// Agrupa itens em linhas visuais (mesmo y ± tol). Devolve [[itens...]] de cima
+// pra baixo, cada linha ordenada por x.
+function _aplicfinLinhas(itens,tol){
+  tol=tol||2;
+  const ys=[...itens].sort((a,b)=>b.y-a.y);
+  const linhas=[]; let atual=null, ancoraY=null;
+  ys.forEach(it=>{
+    if(atual&&Math.abs(it.y-ancoraY)<=tol){ atual.push(it); }
+    else { atual=[it]; linhas.push(atual); ancoraY=it.y; }
+  });
+  linhas.forEach(L=>L.sort((a,b)=>a.x-b.x));
+  return linhas;
+}
+const _aplicfinEhNum=s=>/^-?\d[\d.]*,\d{2}$/.test(String(s).trim());
+const _aplicfinEhData=s=>/^\d{2}\/\d{2}\/\d{4}$/.test(String(s).trim());
+
+// ── MODELO 1: Itaú "APLIC AUT MAIS - EXTRATO CONSOLIDADO DE MOVIMENTAÇÃO" ──
+// Colunas por FAIXA DE X (o gerador do Itaú é estável). "Acum. Mês" traz os
+// totais de quase tudo; IOF Retido não tem total no Acum. Mês → soma a coluna
+// dia a dia. Saldo Bruto = ÚLTIMA linha de "Posição em Ser no Dia" (nunca soma).
+async function _aplicfinParseItauAplicAutMais(pdf){
+  const page=await pdf.getPage(1);
+  const content=await page.getTextContent();
+  const itens=_aplicfinItens(page,content);
+  const texto=itens.map(i=>i.s).join(' ').replace(/\s+/g,' ');
+  if(!/APLIC AUT MAIS\s*-\s*EXTRATO CONSOLIDADO DE MOVIMENTA[ÇC][ÃA]O/i.test(texto)) return null;
+  const warnings=[];
+  const rot=((page.rotate%360)+360)%360;
+  if(rot!==0) warnings.push('Página rotacionada ('+rot+'°) — coordenadas normalizadas; confira os valores.');
+  const meses={janeiro:1,fevereiro:2,marco:3,abril:4,maio:5,junho:6,julho:7,agosto:8,setembro:9,outubro:10,novembro:11,dezembro:12};
+  const mC=texto.match(/Movimenta[çc][ãa]o em ([A-Za-zç]+)\/(\d{4})/i);
+  let competence=null;
+  if(mC){ const mn=meses[mC[1].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')]; if(mn) competence=mC[2]+'-'+String(mn).padStart(2,'0'); }
+  const mAcc=texto.match(/Ag[êe]ncia\/conta:\s*([\d.\-\/]+)/i);
+  const account=mAcc?mAcc[1]:null;
+  const num=_convCobrParseValor;
+  const linhas=_aplicfinLinhas(itens,2);
+
+  // Faixas de X (left-edge do item, que no Itaú é right-aligned mas estável)
+  const bandMes=[
+    ['applications',       -1,   118],
+    ['principal_redeemed', 118,  170],
+    ['gross_redeemed',     170,  218],
+    ['iof_retido',         220,  262],
+    ['irrf_retido',        262,  305],
+    ['net_redeemed',       305,  358],
+    ['paid_yield_gross',   358,  402],
+    ['paid_yield_net',     402,  448],
+  ];
+  const bandPos=[
+    ['principal', 450, 500],
+    ['gross',     500, 548],
+    ['iof',       548, 605],
+    ['irrf',      605, 645],
+    ['net',       645, 760],
+  ];
+  const faixa=(bands,x)=>{ for(const [k,a,b] of bands){ if(x>a&&x<=b) return k; } return null; };
+
+  // Linha "Acum. Mês"
+  const linhaAcum=linhas.find(L=>/acum\.?\s*m[êe]s/i.test(L.map(i=>i.s).join(' ')));
+  const mesTot={};
+  if(linhaAcum){
+    linhaAcum.filter(i=>_aplicfinEhNum(i.s)).forEach(i=>{ const k=faixa(bandMes,i.x); if(k&&mesTot[k]==null) mesTot[k]=num(i.s); });
+  }
+  // IOF Retido: soma da coluna nas linhas com data
+  let iofSum=0, iofCount=0;
+  linhas.forEach(L=>{
+    if(!L.some(i=>_aplicfinEhData(i.s))) return;
+    L.filter(i=>_aplicfinEhNum(i.s)&&i.x>220&&i.x<=262).forEach(i=>{ const v=num(i.s); if(v!=null){ iofSum+=v; iofCount++; } });
+  });
+  iofSum=Math.round(iofSum*100)/100;
+
+  // Última "Posição em Ser no Dia" = linha de MENOR y que tem número na faixa ≥450
+  let ultimaPos=null;
+  linhas.forEach(L=>{
+    if(!L.some(i=>_aplicfinEhNum(i.s)&&i.x>=450)) return;
+    if(!ultimaPos || L[0].y < ultimaPos[0].y) ultimaPos=L;
+  });
+  const posFinal={};
+  if(ultimaPos){
+    ultimaPos.filter(i=>_aplicfinEhNum(i.s)&&i.x>=450).forEach(i=>{ const k=faixa(bandPos,i.x); if(k&&posFinal[k]==null) posFinal[k]=num(i.s); });
+  }
+
+  const M='itau_aplic_aut_mais';
+  const mk=(sec,k,lbl,val,ct)=>({key:M+'.'+sec+'.'+k,label:lbl,section:sec==='month_total'?'Acum. Mês':'Posição em Ser no Dia (final)',product:null,value:(val==null?null:Math.round(val*100)/100),calculationType:ct});
+  const sources=[
+    mk('month_total','applications','Acum. Mês → Aplicações',mesTot.applications,'DIRECT_TOTAL'),
+    mk('month_total','principal_redeemed','Acum. Mês → Valor Principal Resgatado',mesTot.principal_redeemed,'DIRECT_TOTAL'),
+    mk('month_total','gross_redeemed','Acum. Mês → Valor Bruto Resgatado',mesTot.gross_redeemed,'DIRECT_TOTAL'),
+    mk('month_total','iof_retido','Soma da coluna IOF Retido (dia a dia) — '+iofCount+' linha(s)',iofSum,'SUM'),
+    mk('month_total','irrf_retido','Acum. Mês → IRRF Retido',mesTot.irrf_retido,'DIRECT_TOTAL'),
+    mk('month_total','net_redeemed','Acum. Mês → Valor Líquido Resgatado',mesTot.net_redeemed,'DIRECT_TOTAL'),
+    mk('month_total','paid_yield_gross','Acum. Mês → Rendimento Pago (Bruto)',mesTot.paid_yield_gross,'DIRECT_TOTAL'),
+    mk('month_total','paid_yield_net','Acum. Mês → Rendimento Pago (Líquido)',mesTot.paid_yield_net,'DIRECT_TOTAL'),
+    mk('final_position','principal','Última Posição → Saldo Principal',posFinal.principal,'LAST_POSITION'),
+    mk('final_position','gross','Última Posição → Saldo Bruto',posFinal.gross,'LAST_POSITION'),
+    mk('final_position','iof','Última Posição → Provisão de IOF',posFinal.iof,'LAST_POSITION'),
+    mk('final_position','irrf','Última Posição → Provisão de IRRF',posFinal.irrf,'LAST_POSITION'),
+    mk('final_position','net','Última Posição → Saldo Líquido',posFinal.net,'LAST_POSITION'),
+  ];
+
+  // Validação: Bruto Resgatado − IOF − IRRF = Líquido Resgatado
+  const validations=[];
+  if(mesTot.gross_redeemed!=null&&mesTot.net_redeemed!=null){
+    const calc=mesTot.gross_redeemed-(iofSum||0)-(mesTot.irrf_retido||0);
+    const ok=Math.abs(calc-mesTot.net_redeemed)<=0.02;
+    validations.push({name:'bruto_menos_impostos_igual_liquido',ok,detail:`${mesTot.gross_redeemed} − ${iofSum} − ${mesTot.irrf_retido||0} = ${calc.toFixed(2)} (esperado ${mesTot.net_redeemed})`});
+    if(!ok) warnings.push('VALIDATION_FAILED: Bruto Resgatado − IOF − IRRF ≠ Líquido Resgatado ('+calc.toFixed(2)+' vs '+mesTot.net_redeemed+')');
+  }
+  if(!competence) warnings.push('Competência não identificada ("Movimentação em Mês/Ano").');
+
+  return {
+    bank:'ITAU', model:M, competence, account,
+    fingerprint:_aplicfinFingerprint('ITAU',M,['APLIC AUT MAIS - EXTRATO CONSOLIDADO DE MOVIMENTAÇÃO','DATA','APLICAÇÕES','RESGATES ANTECIPADOS/VENCIMENTOS','POSIÇÃO EM SER NO DIA']),
+    productMode:'single', products:[], sources, validations, warnings, pageCount:pdf.numPages,
+  };
+}
+
+// Dispatcher SEM IA (contrato padrão). Devolve o objeto do parser ou null.
+async function _aplicfinExtrairSemIA(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const parsers=[_aplicfinParseItauAplicAutMais];
+  for(const fn of parsers){
+    try{ const r=await fn(pdf); if(r) return r; }catch(e){ console.error('Parser aplicfin sem IA:',e); }
+  }
+  return null;
+}
+
+// ── Colunas da tela de Ganhos que aceitam mapeamento de source_key ──
+function _aplicfinColunasSite(){
+  return COLS_RF_DEFAULT.filter(c=>c.id!=='trib'&&c.id!=='aliq')
+    .concat([{id:'saldoBrutoExtrato',nome:'Saldo Bruto do Extrato (fecha o mês / base do Rendimento)'}]);
+}
+// Palpite de source_key default por coluna do site (o usuário confirma/troca)
+function _aplicfinSugestaoSourceKey(model,siteColId){
+  const map={
+    itau_aplic_aut_mais:{
+      bruto:'itau_aplic_aut_mais.month_total.paid_yield_gross',
+      iof:'itau_aplic_aut_mais.month_total.iof_retido',
+      irrf:'itau_aplic_aut_mais.month_total.irrf_retido',
+      rendMes:'itau_aplic_aut_mais.month_total.paid_yield_gross',
+      aplic:'itau_aplic_aut_mais.month_total.applications',
+      resgate:'itau_aplic_aut_mais.month_total.principal_redeemed',
+      rendLiq:'itau_aplic_aut_mais.month_total.paid_yield_net',
+      saldoBrutoExtrato:'itau_aplic_aut_mais.final_position.gross',
+    },
+  };
+  return (map[model]||{})[siteColId]||'';
+}
+function _renderAplicfinMapeamentoForm(ganho,parsed){
+  const cols=_aplicfinColunasSite();
+  const val=v=>v==null?'—':'R$ '+_fmt(v);
+  const opts=(sel)=>`<option value="">— Ignorar —</option>`+parsed.sources.map(s=>
+    `<option value="${esc(s.key)}" ${sel===s.key?'selected':''}>${esc(s.label)} — ${val(s.value)}</option>`).join('');
+  let html=`<div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:4px">1ª importação deste modelo — associe cada coluna da tela a uma informação do extrato</div>
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Banco <b>${esc(parsed.bank)}</b> · modelo <b>${esc(parsed.model)}</b> · competência <b>${esc(_aplicfinMk(parsed.competence)||'?')}</b>. Isso é salvo no Supabase e reaplica sozinho nos próximos meses.</div>`;
+  if(parsed.warnings.length) html+=`<div style="font-size:11px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:6px;margin-bottom:8px">${parsed.warnings.map(esc).join('<br>')}</div>`;
+  html+=`<div style="display:grid;gap:7px">`;
+  cols.forEach((c,i)=>{
+    const sug=_aplicfinSugestaoSourceKey(parsed.model,c.id);
+    html+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px;background:var(--bg);border-radius:4px">
+      <b style="font-size:11.5px;min-width:210px">${esc(c.nome)}</b>
+      <select class="si" id="aplicfinMap_${i}" data-col="${esc(c.id)}" style="min-width:340px;font-size:11px">${opts(sug)}</select>
+    </div>`;
+  });
+  html+=`</div>`;
+  const valids=parsed.validations||[];
+  if(valids.length) html+=`<div style="font-size:10.5px;color:var(--slate);margin-top:8px">Validações: ${valids.map(v=>`${v.ok?'✅':'⚠️'} ${esc(v.detail)}`).join(' · ')}</div>`;
+  setTimeout(()=>{
+    const acoes=document.getElementById('ganhoUploadIAAcoes');
+    if(acoes&&!document.getElementById('ganhoUploadIABtnSalvar')){
+      const b=document.createElement('button');
+      b.className='btn bp'; b.id='ganhoUploadIABtnSalvar';
+      b.textContent='✓ Salvar mapeamento (Supabase) e aplicar';
+      b.onclick=_aplicfinSalvarMapeamento;
+      acoes.appendChild(b);
+    }
+  },0);
+  return html;
+}
+async function _aplicfinSalvarMapeamento(){
+  const ctx=_aplicfinParsedPendente;
+  if(!ctx){ toast('Extração não encontrada — tente de novo.','err'); return; }
+  const {eid,pid,parsed,produto,arquivo}=ctx;
+  const cols=_aplicfinColunasSite();
+  const registros=[];
+  cols.forEach((c,i)=>{
+    const key=document.getElementById('aplicfinMap_'+i)?.value||'';
+    if(!key) return;
+    const src=parsed.sources.find(s=>s.key===key)||{};
+    registros.push({
+      empresa_eid:String(eid), modulo:'ganhos', aplicacao_id:String(pid),
+      banco:parsed.bank, modelo:parsed.model, fingerprint_hash:parsed.fingerprint,
+      produto_filtro:produto||'', site_column:c.id, source_key:key,
+      source_label:src.label||null, calc_type:src.calculationType||'DIRECT_TOTAL',
+      parser_version:APLICFIN_PARSER_VERSION, created_by:(currentUser&&currentUser.login)||null,
+    });
+  });
+  if(!registros.length){ toast('Mapeie ao menos uma coluna.','err'); return; }
+  const btn=document.getElementById('ganhoUploadIABtnSalvar');
+  if(btn){ btn.disabled=true; btn.textContent='Salvando…'; }
+  try{
+    await _supaClient.from('aplicfin_modelo_mapeamento').delete()
+      .eq('empresa_eid',String(eid)).eq('modulo','ganhos').eq('modelo',parsed.model)
+      .eq('aplicacao_id',String(pid)).eq('produto_filtro',produto||'');
+    const { error }=await _supaClient.from('aplicfin_modelo_mapeamento').insert(registros);
+    if(error) throw error;
+  }catch(e){
+    console.error(e); toast('Erro ao salvar no Supabase: '+e.message,'err');
+    if(btn){ btn.disabled=false; btn.textContent='✓ Salvar mapeamento (Supabase) e aplicar'; }
+    return;
+  }
+  const ganhos=getGanhos(eid), ganho=ganhos[pid];
+  ganho._eidFlag=eid;
+  const { faltando }=_aplicfinAplicar(ganho,parsed,registros);
+  setGanhos(eid,ganhos);
+  _aplicfinGravarAuditoria(eid,pid,parsed,registros,arquivo).catch(e=>console.error('auditoria:',e));
+  _aplicfinParsedPendente=null;
+  document.getElementById('ganhoUploadIABtnSalvar')?.remove();
+  closeModal('mGanhoUploadIA');
+  if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
+  toast(`Mapeamento salvo — ${_aplicfinMk(parsed.competence)} aplicado. Próximos meses entram sozinhos.`+(faltando.length?` ⚠ ${faltando.length} sem valor.`:''),'ok');
+}
+// Aplica um conjunto de linhas de mapeamento (do Supabase ou recém-criadas) a
+// ganho.dados[mk]. Devolve {aplicados, faltando}.
+function _aplicfinAplicar(ganho,parsed,mapRows){
+  const mk=_aplicfinMk(parsed.competence);
+  if(!ganho.dados) ganho.dados={};
+  if(!ganho.dados[mk]) ganho.dados[mk]={};
+  const idsDetalhe=new Set();
+  const aplicados=[], faltando=[];
+  mapRows.forEach(r=>{
+    const src=parsed.sources.find(s=>s.key===r.source_key);
+    if(!src||src.value==null){ faltando.push(r.site_column); return; }
+    ganho.dados[mk][r.site_column]=src.value;
+    aplicados.push({col:r.site_column,value:src.value});
+    if(r.site_column!=='rendMes'&&r.site_column!=='saldoBrutoExtrato') idsDetalhe.add(r.site_column);
+  });
+  // promove pro layout completo se usou colunas de detalhe
+  const jaDetalhado=(ganho.cols||[]).some(c=>c.id!=='rendMes');
+  if(!jaDetalhado&&idsDetalhe.size) ganho.cols=JSON.parse(JSON.stringify(COLS_RF_DEFAULT));
+  if(ganho.docVisaoGeralNome) _lancctbFlagVisaoGeral(ganho._eidFlag||null,ganho.docVisaoGeralNome,mk);
+  return {aplicados,faltando};
+}
+async function _aplicfinCarregarMapeamento(eid,modelo,aplicacaoId,produto){
+  try{
+    const { data }=await _supaClient.from('aplicfin_modelo_mapeamento').select('*')
+      .eq('empresa_eid',String(eid)).eq('modulo','ganhos').eq('modelo',modelo)
+      .eq('produto_filtro',produto||'');
+    if(!data||!data.length) return null;
+    const rows=data.filter(r=>!r.aplicacao_id||String(r.aplicacao_id)===String(aplicacaoId));
+    return rows.length?rows:null;
+  }catch(e){ console.error('carregar mapeamento aplicfin:',e); return null; }
+}
+async function _aplicfinGravarAuditoria(eid,pid,parsed,mapRows,arquivo){
+  const comp=parsed.competence;
+  const regs=mapRows.map(r=>{
+    const src=parsed.sources.find(s=>s.key===r.source_key)||{};
+    return {
+      empresa_eid:String(eid), modulo:'ganhos', aplicacao_id:String(pid), competencia:comp,
+      banco:parsed.bank, modelo:parsed.model, produto_filtro:r.produto_filtro||'',
+      site_column:r.site_column, source_key:r.source_key, source_label:src.label||null,
+      source_section:src.section||null, raw_value:src.value==null?null:src.value,
+      calculated_value:src.value==null?null:src.value, calculation_type:src.calculationType||null,
+      page_number:null, parser_version:APLICFIN_PARSER_VERSION, arquivo_nome:arquivo||null,
+    };
+  });
+  if(!regs.length) return;
+  await _supaClient.from('aplicfin_import_auditoria').delete()
+    .eq('empresa_eid',String(eid)).eq('modulo','ganhos').eq('aplicacao_id',String(pid))
+    .eq('competencia',comp).eq('produto_filtro',(mapRows[0]||{}).produto_filtro||'');
+  await _supaClient.from('aplicfin_import_auditoria').insert(regs);
+}
+// Chamado pelo dispatcher quando um parser SEM IA reconheceu o extrato.
+async function _ganhoAplicarParserSemIA(eid,pid,parsed,file,statusEl){
+  (parsed.warnings||[]).forEach(w=>toast('Aviso: '+w,'info'));
+  if(!parsed.competence){ toast('Não identifiquei a competência do extrato — use a IA se necessário.','err'); return 'NAO_RECONHECIDO'; }
+  const ganhos=getGanhos(eid), ganho=ganhos[pid];
+  ganho._eidFlag=eid;
+  const produto=null; // Itaú: produto único (Bradesco multiproduto: fase D)
+  const mapRows=await _aplicfinCarregarMapeamento(eid,parsed.model,pid,produto);
+  if(mapRows&&mapRows.length){
+    const { faltando }=_aplicfinAplicar(ganho,parsed,mapRows);
+    setGanhos(eid,ganhos);
+    _aplicfinGravarAuditoria(eid,pid,parsed,mapRows,file.name).catch(e=>console.error('auditoria:',e));
+    statusEl.textContent='';
+    closeModal('mGanhoUploadIA');
+    if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
+    toast(`Extrato ${parsed.bank} (sem IA) — ${_aplicfinMk(parsed.competence)} atualizado.`+(faltando.length?` ⚠ ${faltando.length} coluna(s) sem valor neste mês.`:''), faltando.length?'info':'ok');
+    return 'PROCESSADO';
+  }
+  _aplicfinParsedPendente={eid,pid,parsed,produto,arquivo:file.name};
+  document.getElementById('ganhoUploadIABody').innerHTML=_renderAplicfinMapeamentoForm(ganho,parsed);
+  statusEl.textContent='';
+  return 'MAPEAR';
+}
+
+// Dispatcher dos leitores SEM IA de Ganhos/Rendimentos. Tenta cada parser
+// determinístico; o 1º que reconhecer o modelo grava e devolve 'PROCESSADO'
+// (ou 'MAPEAR' se abriu a tela de mapeamento coluna-do-site → informação-do-
+// PDF na 1ª importação). Devolve 'NAO_RECONHECIDO' se nenhum for compatível.
+async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
+  // BB Rende Fácil — resumo do mês pronto, sem mapeamento manual.
+  const bb=await _ganhoExtrairBBRendeFacil(file);
+  if(bb){
+    const ganhos=getGanhos(eid),ganho=ganhos[pid];
+    if(!ganho.dados)ganho.dados={};
+    if(!ganho.dados[bb.mk])ganho.dados[bb.mk]={};
+    Object.assign(ganho.dados[bb.mk],{bruto:bb.bruto,iof:bb.iof,irrf:bb.irrf,aplic:bb.aplic,resgate:bb.resgate});
+    setGanhos(eid,ganhos);
+    statusEl.textContent='';
+    toast(`Extrato BB Rende Fácil (sem IA) processado — ${bb.mk} atualizado.`,'ok');
+    closeModal('mGanhoUploadIA');
+    if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
+    return 'PROCESSADO';
+  }
+  // Itaú APLIC AUT MAIS — parser determinístico com tela de mapeamento
+  // (source_key → coluna do site) salva no Supabase. Fase B.
+  const itau=await _aplicfinExtrairSemIA(file);
+  if(itau){
+    return await _ganhoAplicarParserSemIA(eid,pid,itau,file,statusEl);
+  }
+  return 'NAO_RECONHECIDO';
+}
+async function _ganhoUploadIAExtrair(forcarIA){
   const {eid,pid}=_ganhoUploadIAContexto;
   const file=document.getElementById('ganhoUploadIAArquivo').files[0];
   if(!file){ toast('Selecione um arquivo','err'); return; }
   const statusEl=document.getElementById('ganhoUploadIAStatus');
   const btn=document.getElementById('ganhoUploadIABtnExtrair');
-  btn.disabled=true;
+  const btnIA=document.getElementById('ganhoUploadIABtnExtrairIA');
+  btn.disabled=true; if(btnIA) btnIA.disabled=true;
+  if(forcarIA&&btnIA) btnIA.textContent='Extraindo…'; else btn.textContent='Extraindo…';
   statusEl.textContent='Lendo arquivo (pode levar alguns segundos)…';
+  const _resetBtns=()=>{
+    statusEl.textContent='';
+    btn.disabled=false; btn.style.display=''; btn.textContent='▶ Extrair sem IA';
+    if(btnIA){ btnIA.disabled=false; btnIA.textContent='🤖 Usar IA Gemini'; }
+  };
   try{
-    // Modelo fixo "BB Rende Fácil" — reconhece sozinho, sem pedir mapeamento
-    // de coluna nenhum (pedido do usuário 09/09/2026).
-    const bb=await _ganhoExtrairBBRendeFacil(file);
-    if(bb){
-      const ganhos=getGanhos(eid),ganho=ganhos[pid];
-      if(!ganho.dados)ganho.dados={};
-      if(!ganho.dados[bb.mk])ganho.dados[bb.mk]={};
-      Object.assign(ganho.dados[bb.mk],{bruto:bb.bruto,iof:bb.iof,irrf:bb.irrf,aplic:bb.aplic,resgate:bb.resgate});
-      setGanhos(eid,ganhos);
-      statusEl.textContent='';
-      toast(`Extrato BB Rende Fácil processado — ${bb.mk} atualizado.`,'ok');
-      closeModal('mGanhoUploadIA');
-      if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
+    if(!forcarIA){
+      // ── Leitores DETERMINÍSTICOS (pdf.js, sem IA/LLM/OCR). Cada um
+      // reconhece seu modelo pelo fingerprint (título/cabeçalhos) e devolve
+      // null se o PDF não for dele. Se NENHUM reconhecer, NÃO cai pra IA
+      // sozinho — o usuário decide clicando em "🤖 Usar IA Gemini".
+      const semIA=await _ganhoExtrairDeterministico(file,eid,pid,statusEl);
+      if(semIA==='PROCESSADO') return;             // leitor gravou e fechou
+      if(semIA==='MAPEAR') { btn.style.display='none'; if(btnIA) btnIA.style.display='none'; return; }
+      _resetBtns();
+      toast('Modelo não reconhecido pelo leitor sem IA. Se quiser, clique em "🤖 Usar IA Gemini" (API paga).','err');
       return;
     }
+    // ── forcarIA: motor de IA (Gemini) — só quando o usuário escolhe.
     const extraido=await _convAplicFinExtrairGenerico(file);
     _ganhoUploadIAExtraido=extraido;
     const ganhos=getGanhos(eid),ganho=ganhos[pid];
@@ -30383,10 +30756,12 @@ async function _ganhoUploadIAExtrair(){
     }
     document.getElementById('ganhoUploadIABody').innerHTML=_renderGanhoMapeamentoForm(ganho,extraido,mapSalvo);
     btn.style.display='none';
+    if(btnIA) btnIA.style.display='none';
   }catch(e){
     statusEl.textContent='Erro: '+e.message;
     toast('Erro ao extrair: '+e.message,'err');
-    btn.disabled=false;
+    btn.disabled=false; btn.textContent='▶ Extrair sem IA';
+    if(btnIA){ btnIA.disabled=false; btnIA.textContent='🤖 Usar IA Gemini'; }
   }
 }
 // Determina, pra cada coluna mapeável, se ela precisa de UM mapeamento
