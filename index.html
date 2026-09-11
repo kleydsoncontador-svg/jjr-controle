@@ -30574,6 +30574,20 @@ async function _ganhoExtrairBBRendeFacil(file){
     // diferente de "Rendimento Bruto s/ Resgates" acima, que só soma o
     // Rendimento* das linhas Resgate do Histórico).
     rendimentosNoMesResumo: pegarResumo('Rendimentos\\s+no\\s+m[êe]s'),
+    // "Saldo bruto em dd/mm/aaaa" (anterior e final) — faltava capturar,
+    // então "Saldo Bruto do Extrato" nunca tinha de onde vir pro BB e ficava
+    // sempre em "— Ignorar —" (bug real 11/09/2026: sem isso mapeado, a
+    // coluna calculada acumulava rolando o mês anterior, e um valor de
+    // OUTRA aplicação que tinha ficado gravado em ganho.dados vazou pra cá).
+    saldoBrutoAnteriorResumo: (function(){
+      const ms=[...textoCompleto.matchAll(/Saldo\s+bruto\s+em\s+(\d{2}\/\d{2}\/\d{4})\s*:?\s*(?:R\$)?\s*([\d.,]+)/gi)];
+      // A 1ª ocorrência é o saldo ANTERIOR (início do período), a 2ª é o FINAL.
+      return ms.length?num(ms[0][2]):0;
+    })(),
+    saldoBrutoFinalResumo: (function(){
+      const ms=[...textoCompleto.matchAll(/Saldo\s+bruto\s+em\s+(\d{2}\/\d{2}\/\d{4})\s*:?\s*(?:R\$)?\s*([\d.,]+)/gi)];
+      return ms.length>=2?num(ms[1][2]):(ms.length===1?num(ms[0][2]):0);
+    })(),
   };
 }
 // Empacota o resultado de _ganhoExtrairBBRendeFacil no contrato padrão
@@ -30593,6 +30607,8 @@ async function _aplicfinParseBbRendeFacil(file){
     mk('summary.redemption_iof','Resumo do mês → IOF sobre resgates no mês',bb.iof),
     {key:M+'.history.redemption_yield_sum',label:'Histórico de movimentação → soma de Rendimento* (só linhas Resgate)',section:'Histórico de movimentação',product:null,value:r2(bb.bruto),calculationType:'CONDITIONAL_SUM'},
     mk('summary.month_yield','Resumo do mês → Rendimentos no mês',bb.rendimentosNoMesResumo),
+    mk('summary.previous_gross_balance','Resumo do mês → Saldo bruto anterior',bb.saldoBrutoAnteriorResumo),
+    mk('summary.final_gross_balance','Resumo do mês → Saldo bruto final',bb.saldoBrutoFinalResumo),
   ];
   return {
     bank:'BB', model:M, competence:aaaa+'-'+mm, account:null,
@@ -30988,7 +31004,7 @@ function _aplicfinColunasSite(ganho){
   (ganho&&ganho.cols||[]).forEach(c=>{ if(c.id) porId[c.id]=c.nome; });
   return COLS_RF_DEFAULT.filter(c=>c.id!=='trib'&&c.id!=='aliq')
     .map(c=>({id:c.id,nome:porId[c.id]||c.nome}))
-    .concat([{id:'saldoBrutoExtrato',nome:porId['saldoBrutoExtrato']||'Saldo Bruto do Extrato (fecha o mês / base do Rendimento)'}]);
+    .concat([{id:'saldoBrutoExtrato',nome:porId['saldoBrutoExtrato']||'Saldo Bruto do Extrato (conferência — não substitui o calculado)'}]);
 }
 // Palpite de source_key default por coluna do site (o usuário confirma/troca)
 function _aplicfinSugestaoSourceKey(model,siteColId){
@@ -31028,6 +31044,7 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       aplic:'bb_rende_facil.summary.applications',
       resgate:'bb_rende_facil.summary.net_redemptions',
       rendMes:'bb_rende_facil.summary.month_yield',
+      saldoBrutoExtrato:'bb_rende_facil.summary.final_gross_balance',
     },
   };
   return (map[model]||{})[siteColId]||'';
@@ -31572,7 +31589,7 @@ function calcSaldosGanho(ganho){
   const anos=[...new Set(Object.keys(dados).map(k=>k.split('/')[1]).filter(Boolean))].sort();
   const mks=[];
   anos.forEach(ano=>{for(let m=1;m<=12;m++)mks.push(String(m).padStart(2,'0')+'/'+ano);});
-  const ants={},ats={},ants_r2={},ats_r2={};
+  const ants={},ats={},ants_r2={},ats_r2={},confer={};
   const isXP=isXPProduct(ganho);
   mks.forEach((mk,i)=>{
     const d=dados[mk]||{};
@@ -31586,16 +31603,18 @@ function calcSaldosGanho(ganho){
         else if(c.op==='-')s-=v;
       }
     });
-    // Quando o extrato trouxe o Saldo Bruto real daquele mês (mapeado como
-    // "Saldo Bruto do Extrato" no upload PDF/IA), o saldo exibido é o valor
-    // que o banco reportou, não o acumulado por soma das colunas — senão dá
-    // contagem em dobro do efeito de Aplicação/Resgate quando essas colunas
-    // TAMBÉM estão mapeadas (bug real relatado 08/09/2026 pelo usuário: saldo
-    // ficou em 226.111,92 em vez dos 123.445,16 reais do extrato, porque a
-    // diferença de saldo — que já embute aplicações e resgates do mês — foi
-    // somada de novo às colunas Aplicação/Resgate). O mês seguinte encadeia a
-    // partir desse valor correto, não do acumulado.
-    if(d.saldoBrutoExtrato!=null) s=parseFloat(d.saldoBrutoExtrato)||s;
+    // "Saldo Bruto (Atualizado)" é SEMPRE calculado (saldo anterior + soma
+    // das colunas do mês) — nunca substituído pelo valor do extrato. Quando
+    // o usuário mapeia "Saldo Bruto do Extrato" no upload, isso serve só
+    // pra CONFERÊNCIA (o saldo que deveria fechar), não pra sobrescrever a
+    // coluna — pedido do usuário 11/09/2026: "quando te dou o saldo bruto
+    // atualizado ... é apenas pra vc saber o saldo que deveria fechar".
+    // (Reverte o comportamento de 08/09/2026, que sobrescrevia e um valor
+    // de outra aplicação acabou vazando pra cá por causa disso.)
+    if(d.saldoBrutoExtrato!=null){
+      const esperado=parseFloat(d.saldoBrutoExtrato);
+      confer[mk]={esperado,calculado:s,ok:!isNaN(esperado)&&Math.abs(esperado-s)<=0.05};
+    }
     ats[mk]=s;
 
     if(isXP){
@@ -31612,7 +31631,7 @@ function calcSaldosGanho(ganho){
       ats_r2[mk]=s_r2;
     }
   });
-  return{ants,ats,ants_r2,ats_r2,mks};
+  return{ants,ats,ants_r2,ats_r2,mks,confer};
 }
 function renderGanhoTrimestral(eid,id,ganho){
   // Migração: se 'codigo' ainda está nas colunas, move para campo do cabeçalho
@@ -31629,7 +31648,7 @@ function renderGanhoTrimestral(eid,id,ganho){
   const isCDBEspecial=!isDemais&&_isCDBEspecial(ganho.nome);
   const anos=[...new Set(Object.keys(dados).map(k=>k.split('/')[1]).filter(Boolean))].sort();
   if(!anos.length){const a=String(new Date().getFullYear());ganho.dados=ganho.dados||{};for(let m=1;m<=12;m++)ganho.dados[String(m).padStart(2,'0')+'/'+a]={}; anos.push(a);}
-  const{ants,ats,ants_r2,ats_r2,mks}=calcSaldosGanho(ganho);
+  const{ants,ats,ants_r2,ats_r2,mks,confer}=calcSaldosGanho(ganho);
   const firstMk=mks[0]||'';
   const pid=String(id),eid2=String(eid);
   const btnOp=(cid,op,cur)=>{
@@ -31733,7 +31752,7 @@ function renderGanhoTrimestral(eid,id,ganho){
             }
             const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial);
             h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id+colIdSuffix}" ${!isEditable?'disabled':''} oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','${c.id+colIdSuffix}',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id+colIdSuffix}',n);${c.tipo==='num'?`this.value=n?_fmt(n):''`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:90px" placeholder="0"></td>`;});
-          h+=`<td ${r===1?`id="grf-${pid}-s-${mKey}"`:''} style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}</td>
+          h+=`<td ${r===1?`id="grf-${pid}-s-${mKey}"`:''} style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}${(r===1&&confer[mk]&&!confer[mk].ok)?`<span title="Conferência do extrato: deveria fechar em R$ ${_fmt(confer[mk].esperado)} (calculado aqui: R$ ${_fmt(sal)})" style="color:#b45309;margin-left:4px;cursor:help">⚠️</span>`:''}</td>
             <td style="padding:2px;border:1px solid var(--border)">
               ${r===1&&isFirst?`<input type="text" value="${ant?_fmt(ant):''}" data-mk="${mk}" data-col="saldoAnt" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','saldoAnt',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','saldoAnt',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="Saldo inicial">`:(r===1?`<span id="grf-${pid}-a-${mKey}" style="display:block;padding:5px 7px;text-align:right;color:var(--slate)">${_fmt(ant)}</span>`:'')}</td>${isCDBEspecial?`<td style="padding:2px;border:1px solid var(--border)">${r===1?`<input type="text" value="${d.resgateValor?_fmt(parseFloat(d.resgateValor)||0):''}" data-mk="${mk}" data-col="resgateValor" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgateValor',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgateValor',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0">`:''}</td><td style="padding:2px;border:1px solid var(--border)">${r===1?`<input type="text" value="${d.resgatePrincipal?_fmt(parseFloat(d.resgatePrincipal)||0):''}" data-mk="${mk}" data-col="resgatePrincipal" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgatePrincipal',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgatePrincipal',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0">`:''}</td>`:''}</tr>`;
         });
@@ -31773,7 +31792,7 @@ function renderGanhoAnual(eid,id,ganho){
   const isCDBEspecial=!isDemaisA&&_isCDBEspecial(ganho.nome);
   const anos=[...new Set(Object.keys(dados).map(k=>k.split('/')[1]).filter(Boolean))].sort();
   if(!anos.length){const a=String(new Date().getFullYear());ganho.dados=ganho.dados||{};for(let m=1;m<=12;m++)ganho.dados[String(m).padStart(2,'0')+'/'+a]={};anos.push(a);}
-  const{ants,ats,ants_r2,ats_r2,mks}=calcSaldosGanho(ganho);
+  const{ants,ats,ants_r2,ats_r2,mks,confer}=calcSaldosGanho(ganho);
   const firstMk=mks[0]||'';
   const pid=String(id),eid2=String(eid);
   const btnOp=(cid,op,cur)=>{const a=cur===op,c=op==='+'?'#16a34a':'#dc2626';
@@ -31864,7 +31883,7 @@ function renderGanhoAnual(eid,id,ganho){
         }
         const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial);
         h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id}" ${!isEditable?'disabled':''} oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','${c.id}',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id}',n);${c.tipo==='num'?`this.value=n?_fmt(n):''`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:90px" placeholder="0"></td>`;});
-      h+=`<td id="grf-${pid}-s-${mKey}" style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}</td>
+      h+=`<td id="grf-${pid}-s-${mKey}" style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}${confer[mk]&&!confer[mk].ok?`<span title="Conferência do extrato: deveria fechar em R$ ${_fmt(confer[mk].esperado)} (calculado aqui: R$ ${_fmt(sal)})" style="color:#b45309;margin-left:4px;cursor:help">⚠️</span>`:''}</td>
         <td style="padding:2px;border:1px solid var(--border)">
           ${isFirst?`<input type="text" value="${ant?_fmt(ant):''}" data-mk="${mk}" data-col="saldoAnt" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','saldoAnt',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','saldoAnt',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="Saldo inicial">`:`<span id="grf-${pid}-a-${mKey}" style="display:block;padding:5px 7px;text-align:right;color:var(--slate)">${_fmt(ant)}</span>`}
         </td>${isCDBEspecial?`<td style="padding:2px;border:1px solid var(--border)"><input type="text" value="${d.resgateValor?_fmt(parseFloat(d.resgateValor)||0):''}" data-mk="${mk}" data-col="resgateValor" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgateValor',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgateValor',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0"></td><td style="padding:2px;border:1px solid var(--border)"><input type="text" value="${d.resgatePrincipal?_fmt(parseFloat(d.resgatePrincipal)||0):''}" data-mk="${mk}" data-col="resgatePrincipal" oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','resgatePrincipal',_parseInput(this.value))" onblur="var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','resgatePrincipal',n);this.value=n?_fmt(n):'';" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:transparent;min-width:100px" placeholder="0"></td>`:''}</tr>`;
