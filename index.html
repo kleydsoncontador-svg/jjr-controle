@@ -4220,6 +4220,18 @@ let _rufatoBancoAtual=null;
 let _rufatoEstado=null;
 function getRufatoBancos(){return S.g('convRufato_bancos')||[];}
 function setRufatoBancos(arr){S.s('convRufato_bancos',arr);}
+// Contas bancárias (Agência Bancária) da Rufato — pra gerar o resultado do
+// Conversor direto como Extrato Bancário (pedido do usuário 11/09/2026:
+// "depois que eu converter ele vira um extrato bancário, pra depois eu
+// processar em registro contábil"). Cache simples, a Rufato é sempre eid 4.
+let _rufatoAgenciasCache=null;
+async function _rufatoGarantirAgencias(){
+  if(_rufatoAgenciasCache) return _rufatoAgenciasCache;
+  if(!_supaClient) return [];
+  const { data } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente').eq('empresa_eid','4').eq('ativo',true).order('banco_nome');
+  _rufatoAgenciasCache=data||[];
+  return _rufatoAgenciasCache;
+}
 function _rufatoNorm(s){return String(s==null?'':s).trim().normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();}
 
 function renderConvRufato(){
@@ -5229,7 +5241,7 @@ async function _rufatoProcessar(bancoId){
   }
 }
 
-function _rufatoRenderAreaBaixar(){
+async function _rufatoRenderAreaBaixar(){
   var el=document.getElementById('rufatoAreaBaixar');
   if(!el||!_rufatoEstado)return;
   var est=_rufatoEstado;
@@ -5239,6 +5251,12 @@ function _rufatoRenderAreaBaixar(){
       '<button class="btn bd bsm" onclick="_rufatoRemoverLinhaManual('+i+')">✕</button>'+
     '</div>';
   }).join(''):'<div style="padding:8px 0;color:var(--slate);font-size:12px">Nenhuma linha manual adicionada ainda.</div>';
+
+  var agencias=await _rufatoGarantirAgencias();
+  var contaSalva=est.banco&&est.banco.contaBancariaId;
+  var opcoesConta='<option value="">— Selecione —</option>'+agencias.map(function(a){
+    return '<option value="'+a.id+'" '+(String(contaSalva)===String(a.id)?'selected':'')+'>'+esc(a.banco_nome||'')+' Ag '+esc(a.agencia||'')+' Cc '+esc(a.conta_corrente||'')+'</option>';
+  }).join('');
 
   el.innerHTML=`
     <div style="margin-top:18px;border:1px solid var(--border);border-radius:8px;padding:14px">
@@ -5252,7 +5270,13 @@ function _rufatoRenderAreaBaixar(){
       </div>
       <div style="margin-top:10px;max-height:200px;overflow:auto">${listaHtml}</div>
     </div>
-    <button class="btn bp" style="margin-top:14px" onclick="_rufatoGerarEBaixarExcel()">📥 Baixar Excel (${est.linhasFinal.length+est.linhasManuais.length} lançamento(s))</button>
+    <div style="margin-top:14px;display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <button class="btn bp" onclick="_rufatoGerarEBaixarExcel()">📥 Baixar Excel (${est.linhasFinal.length+est.linhasManuais.length} lançamento(s))</button>
+      <div class="fg" style="margin:0"><label class="fl">Conta bancária (Agência Bancária) correspondente</label>
+        <select id="rufatoContaBancariaSel" class="fi" style="min-width:280px">${opcoesConta}</select>
+      </div>
+      <button class="btn bo" onclick="_rufatoGerarExtratoBancario()" title="Manda esses lançamentos pra tela de Extrato Bancário pra você conferir e salvar — depois é só processar em Registro Contábil, igual qualquer outro extrato importado">📤 Gerar como Extrato Bancário</button>
+    </div>
   `;
 }
 
@@ -5322,6 +5346,56 @@ async function _rufatoGerarEBaixarExcel(){
   a.href=url; a.download='Rufato - '+(est.banco?est.banco.nome:'Banco')+' - Fluxo de Caixa corrigido.xlsx'; a.click();
   URL.revokeObjectURL(url);
   toast('Excel gerado ✓','ok');
+}
+// Manda o resultado do Conversor Rufato direto pra conferência de Extrato
+// Bancário — reaproveita a MESMA tela/modal e o MESMO "✓ Salvar" que um
+// upload normal de extrato usa (_lancctbExtratoPreview/ContaSel,
+// renderLancctbExtratoPreview, confirmarLancctbImportExtrato), só que os
+// lançamentos já vêm prontos do Conversor em vez de um arquivo. Depois de
+// salvo, é só ir em "Processar Pagamentos/Recebimentos" no Registro
+// Contábil normalmente. Pedido do usuário 11/09/2026.
+function _rufatoGerarExtratoBancario(){
+  if(!_rufatoEstado){ toast('Processe o Fluxo de Caixa antes.','warn'); return; }
+  const contaId=document.getElementById('rufatoContaBancariaSel')?.value||'';
+  if(!contaId){ toast('Selecione a conta bancária (Agência Bancária) correspondente a este banco.','err'); return; }
+  const est=_rufatoEstado;
+  // lembra a escolha pra este banco da Rufato, pros próximos meses
+  const bancos=getRufatoBancos();
+  const idxB=bancos.findIndex(b=>b.id===est.banco.id);
+  if(idxB>=0){ bancos[idxB].contaBancariaId=contaId; setRufatoBancos(bancos); }
+
+  var linhasCompletas=est.linhasFinal.slice();
+  est.linhasManuais.forEach(function(m){
+    linhasCompletas.push({data:m.data,valor:m.tipo==='pagamento'?-Math.abs(m.valor):Math.abs(m.valor),descr:m.historico});
+  });
+  if(!linhasCompletas.length){ toast('Nenhum lançamento pra gerar.','err'); return; }
+  linhasCompletas.sort(function(a,b){
+    var da=_rufatoDataParaDate(a.data),db=_rufatoDataParaDate(b.data);
+    if(!da&&!db)return 0; if(!da)return 1; if(!db)return -1;
+    return da-db;
+  });
+
+  _lancctbExtratoContaSel=String(contaId);
+  _lancctbExtratoPreview=linhasCompletas.map(function(l){
+    const p=String(l.data).split('/'); // DD/MM/AAAA -> AAAA-MM-DD
+    const iso=p.length===3?(p[2]+'-'+p[1]+'-'+p[0]):'';
+    return {
+      data:iso, historico:String(l.descr||'').trim(),
+      valor_saida:l.valor<0?Math.abs(l.valor):0,
+      valor_entrada:l.valor>0?l.valor:0,
+      documento:null, _incluir:true, _origem:'excel',
+    };
+  }).filter(l=>l.data);
+
+  _lancctbAbaAtiva='extrato';
+  renderLancctbAbas();
+  document.getElementById('lancctbUploadTitulo').textContent='Conferir lançamentos do Conversor Rufato';
+  document.getElementById('lancctbUploadBody').innerHTML=`
+    <div style="font-size:12.5px;color:var(--slate);margin-bottom:8px">Gerado pelo Conversor Rufato (${esc(est.banco?est.banco.nome:'')}) — ${_lancctbExtratoPreview.length} lançamento(s). Revise abaixo (desmarque o que não quiser) e clique em Salvar.</div>
+    <div id="lancctbExtratoPreviewArea"></div>
+    <div class="ma"><button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button></div>`;
+  openModal('mLancctbUpload');
+  renderLancctbExtratoPreview();
 }
 
 // ─── EXCEL PARA CONCILIAÇÃO (Razão → Base para Conciliação) ───
