@@ -30542,6 +30542,29 @@ async function _ganhoExtrairBBRendeFacil(file){
     resgate: pegarResumo('Resgates\\s+l[íi]quidos\\s+no\\s+m[êe]s'),
   };
 }
+// Empacota o resultado de _ganhoExtrairBBRendeFacil no contrato padrão
+// (source_keys) pra passar pela MESMA tela de mapeamento dos outros bancos —
+// pedido do usuário 11/09/2026, antes escrevia direto sem perguntar nada.
+async function _aplicfinParseBbRendeFacil(file){
+  const bb=await _ganhoExtrairBBRendeFacil(file);
+  if(!bb) return null;
+  const [mm,aaaa]=bb.mk.split('/');
+  const M='bb_rende_facil';
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  const mk=(k,label,v)=>({key:M+'.'+k,label,section:'Resumo do mês',product:null,value:r2(v),calculationType:'DIRECT_TOTAL'});
+  const sources=[
+    mk('summary.applications','Resumo do mês → Aplicações no mês',bb.aplic),
+    mk('summary.net_redemptions','Resumo do mês → Resgates líquidos no mês',bb.resgate),
+    mk('summary.redemption_ir','Resumo do mês → IR sobre resgates no mês',bb.irrf),
+    mk('summary.redemption_iof','Resumo do mês → IOF sobre resgates no mês',bb.iof),
+    {key:M+'.history.redemption_yield_sum',label:'Histórico de movimentação → soma de Rendimento* (só linhas Resgate)',section:'Histórico de movimentação',product:null,value:r2(bb.bruto),calculationType:'CONDITIONAL_SUM'},
+  ];
+  return {
+    bank:'BB', model:M, competence:aaaa+'-'+mm, account:null,
+    fingerprint:_aplicfinFingerprint('BB',M,['BB RENDE FACIL','RESUMO DO MES','HISTORICO DE MOVIMENTACAO']),
+    productMode:'single', products:[], sources, validations:[], warnings:[], pageCount:null,
+  };
+}
 // ═══════════════════════════════════════════════════════════════════════════
 // IMPORTAÇÃO SEM IA de Extratos de Aplicações Financeiras (Ganhos/Rendimentos)
 // pdf.js + coordenadas, sem IA/LLM/OCR. Cada parser reconhece o modelo pelo
@@ -30920,9 +30943,17 @@ async function _aplicfinExtrairSemIA(file){
 }
 
 // ── Colunas da tela de Ganhos que aceitam mapeamento de source_key ──
-function _aplicfinColunasSite(){
+// Pedido do usuário 11/09/2026: "deveria listar as colunas exatamente como
+// aparece no site". Colunas podem ter sido renomeadas por aplicação
+// (editarColNome) — usa o NOME ATUAL de ganho.cols quando existe, só cai no
+// nome padrão (COLS_RF_DEFAULT) pras colunas que essa aplicação ainda não
+// tem (ex: 1ª vez que sobe um extrato detalhado).
+function _aplicfinColunasSite(ganho){
+  const porId={};
+  (ganho&&ganho.cols||[]).forEach(c=>{ if(c.id) porId[c.id]=c.nome; });
   return COLS_RF_DEFAULT.filter(c=>c.id!=='trib'&&c.id!=='aliq')
-    .concat([{id:'saldoBrutoExtrato',nome:'Saldo Bruto do Extrato (fecha o mês / base do Rendimento)'}]);
+    .map(c=>({id:c.id,nome:porId[c.id]||c.nome}))
+    .concat([{id:'saldoBrutoExtrato',nome:porId['saldoBrutoExtrato']||'Saldo Bruto do Extrato (fecha o mês / base do Rendimento)'}]);
 }
 // Palpite de source_key default por coluna do site (o usuário confirma/troca)
 function _aplicfinSugestaoSourceKey(model,siteColId){
@@ -30955,11 +30986,18 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       rendLiq:'bradesco_cdb_multi.resgates.credito',
       saldoBrutoExtrato:'bradesco_cdb_multi.saldo_atual.atualizado',
     },
+    bb_rende_facil:{
+      bruto:'bb_rende_facil.history.redemption_yield_sum',
+      iof:'bb_rende_facil.summary.redemption_iof',
+      irrf:'bb_rende_facil.summary.redemption_ir',
+      aplic:'bb_rende_facil.summary.applications',
+      resgate:'bb_rende_facil.summary.net_redemptions',
+    },
   };
   return (map[model]||{})[siteColId]||'';
 }
 function _renderAplicfinMapeamentoForm(ganho,parsed,produtoSel){
-  const cols=_aplicfinColunasSite();
+  const cols=_aplicfinColunasSite(ganho);
   const val=v=>v==null?'—':'R$ '+_fmt(v);
   const srcs=parsed.sources.filter(s=>!s.product||!produtoSel||s.product===produtoSel);
   const opts=(sel)=>`<option value="">— Ignorar —</option>`+srcs.map(s=>
@@ -30971,7 +31009,7 @@ function _renderAplicfinMapeamentoForm(ganho,parsed,produtoSel){
   cols.forEach((c,i)=>{
     const sug=_aplicfinSugestaoSourceKey(parsed.model,c.id);
     html+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px;background:var(--bg);border-radius:4px">
-      <b style="font-size:11.5px;min-width:210px">${esc(c.nome)}</b>
+      <b style="font-size:11.5px;min-width:210px;text-transform:uppercase">${esc(c.nome)}</b>
       <select class="si" id="aplicfinMap_${i}" data-col="${esc(c.id)}" style="min-width:340px;font-size:11px">${opts(sug)}</select>
     </div>`;
   });
@@ -30994,7 +31032,8 @@ async function _aplicfinSalvarMapeamento(){
   const ctx=_aplicfinParsedPendente;
   if(!ctx){ toast('Extração não encontrada — tente de novo.','err'); return; }
   const {eid,pid,parsed,produto,arquivo}=ctx;
-  const cols=_aplicfinColunasSite();
+  const ganhoAtual=(getGanhos(eid)||{})[pid];
+  const cols=_aplicfinColunasSite(ganhoAtual);
   const registros=[];
   cols.forEach((c,i)=>{
     const key=document.getElementById('aplicfinMap_'+i)?.value||'';
@@ -31146,22 +31185,14 @@ function _aplicfinEscolherProduto(){
 // (ou 'MAPEAR' se abriu a tela de mapeamento coluna-do-site → informação-do-
 // PDF na 1ª importação). Devolve 'NAO_RECONHECIDO' se nenhum for compatível.
 async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
-  // BB Rende Fácil — resumo do mês pronto, sem mapeamento manual.
-  const bb=await _ganhoExtrairBBRendeFacil(file);
-  if(bb){
-    const ganhos=getGanhos(eid),ganho=ganhos[pid];
-    if(!ganho.dados)ganho.dados={};
-    if(!ganho.dados[bb.mk])ganho.dados[bb.mk]={};
-    Object.assign(ganho.dados[bb.mk],{bruto:bb.bruto,iof:bb.iof,irrf:bb.irrf,aplic:bb.aplic,resgate:bb.resgate});
-    setGanhos(eid,ganhos);
-    statusEl.textContent='';
-    toast(`Extrato BB Rende Fácil (sem IA) processado — ${bb.mk} atualizado.`,'ok');
-    closeModal('mGanhoUploadIA');
-    if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
-    return 'PROCESSADO';
-  }
-  // Itaú APLIC AUT MAIS — parser determinístico com tela de mapeamento
-  // (source_key → coluna do site) salva no Supabase. Fase B.
+  // BB Rende Fácil, Itaú APLIC AUT MAIS, Bradesco (Padrão/CDB multi) — todos
+  // pelo mesmo contrato (source_keys) e a mesma tela de mapeamento na 1ª
+  // importação. Pedido do usuário 11/09/2026: "no BB Rende Fácil nem foi me
+  // perguntado como eu queria amarrar" — antes o BB escrevia direto nas
+  // colunas, sem perguntar nem guardar no Supabase; agora pergunta 1x igual
+  // aos outros bancos e reaplica sozinho nos meses seguintes.
+  const bb=await _aplicfinParseBbRendeFacil(file);
+  if(bb) return await _ganhoAplicarParserSemIA(eid,pid,bb,file,statusEl);
   const itau=await _aplicfinExtrairSemIA(file);
   if(itau){
     return await _ganhoAplicarParserSemIA(eid,pid,itau,file,statusEl);
