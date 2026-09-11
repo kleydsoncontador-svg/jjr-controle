@@ -18508,6 +18508,7 @@ function _lancctbRenderBotoesAcessoPastas(){
     ${btn('lancctbAcessoConfiBackupBtn','_lancctbConcederAcessoPastaConfiBackup','ConfiBackup')}
     ${btn('lancctbAcessoTributosBtn','_lancctbConcederAcessoPastaTributos','Tributos do Mês')}
     ${btn('lancctbAcessoFopagBtn','_lancctbConcederAcessoPastaFopag','Relatórios FOPAG para Contábil')}
+    ${btn('lancctbAcessoTransfRedeBtn','_lancctbConcederAcessoPastaTransfRede','Arquivos de Transferência de Rede')}
   </div>`;
 }
 async function _lancctbAtualizarEstadoBotoesAcesso(){
@@ -18521,6 +18522,62 @@ async function _lancctbAtualizarEstadoBotoesAcesso(){
   try{ marca('lancctbAcessoConfiBackupBtn','ConfiBackup', await _lancctbTemAcessoPastaConfiBackup()); }catch{}
   try{ marca('lancctbAcessoTributosBtn','Tributos do Mês', await _lancctbTemAcessoPastaTributos()); }catch{}
   try{ marca('lancctbAcessoFopagBtn','Relatórios FOPAG para Contábil', await _lancctbTemAcessoPastaFopag()); }catch{}
+  try{ marca('lancctbAcessoTransfRedeBtn','Arquivos de Transferência de Rede', await _lancctbTemAcessoPastaTransfRede()); }catch{}
+}
+// ─── Arquivos de Transferência de Rede — X:\03 - CONTABIL\Arquivos de
+// Transferência de Rede. Pedido do usuário 11/09/2026: "sempre que a gente
+// gerar o txt, mande para essa pasta de forma automática" (Registro
+// Contábil, botão "Gerar TXT"). Mesmo padrão de handle 1x guardado no
+// IndexedDB, MAS com permissão 'readwrite' (as outras pastas acima são só
+// leitura) — é a única pasta local em que o site GRAVA arquivo.
+async function _lancctbSalvarHandleTransfRede(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readwrite');
+    tx.objectStore('handles').put(handle,'raizTransfRede');
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function _lancctbCarregarHandleTransfRede(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readonly');
+    const req=tx.objectStore('handles').get('raizTransfRede');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _lancctbTemAcessoPastaTransfRede(){
+  if(!window.showDirectoryPicker) return false;
+  try{
+    const handle=await _lancctbCarregarHandleTransfRede();
+    if(!handle) return false;
+    return (await handle.queryPermission({mode:'readwrite'}))==='granted';
+  } catch { return false; }
+}
+async function _lancctbConcederAcessoPastaTransfRede(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker({mode:'readwrite'});
+    await _lancctbSalvarHandleTransfRede(handle);
+    toast('Acesso à pasta "Arquivos de Transferência de Rede" concedido! Todo "Gerar TXT" do Registro Contábil já salva uma cópia lá sozinho.','ok');
+    _lancctbAtualizarEstadoBotoesAcesso();
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+// Grava (ou sobrescreve) o TXT direto na pasta concedida, além do download
+// normal — silencioso quando o acesso ainda não foi concedido (não trava o
+// fluxo de quem não usa isso, só avisa 1x depois do toast de sucesso normal).
+async function _lancctbSalvarTxtNaPastaTransfRede(nomeArquivo,conteudo){
+  if(!(await _lancctbTemAcessoPastaTransfRede())) return false;
+  try{
+    const raiz=await _lancctbCarregarHandleTransfRede();
+    const fileHandle=await raiz.getFileHandle(nomeArquivo,{create:true});
+    const writable=await fileHandle.createWritable();
+    await writable.write(conteudo);
+    await writable.close();
+    return true;
+  } catch(e){ toast('TXT baixado, mas não deu pra salvar na pasta de rede: '+e.message,'warn'); return false; }
 }
 
 // ─── ConfiBackup (Folha de Pagamento/Adiantamento Mensal) — pedido do
@@ -23953,8 +24010,14 @@ async function exportarLancctbRegistroContabilTxt(){
   // descrição, tipo 2026-07" — usa o mês filtrado na tela (competência),
   // pra identificar de qual período é aquele arquivo sem precisar abrir.
   const competencia=_lancctbRegistroDataDe?_lancctbRegistroDataDe.slice(0,7):'';
-  baixarTxtMisterContador(cnpjLimpo,linhasTxt,`lancamento_${nomeEmpSlug}_${bancoSlug}_${agConta}${competencia?'_'+competencia:''}.txt`);
-  toast(`TXT gerado com ${lotesMap.size} lançamento(s).`,'ok');
+  const nomeArquivoTxt=`lancamento_${nomeEmpSlug}_${bancoSlug}_${agConta}${competencia?'_'+competencia:''}.txt`;
+  baixarTxtMisterContador(cnpjLimpo,linhasTxt,nomeArquivoTxt);
+  // Pedido do usuário 11/09/2026: além do download normal, salva
+  // automaticamente uma cópia em X:\03 - CONTABIL\Arquivos de Transferência
+  // de Rede (acesso concedido 1x via botão no topo da listagem de empresas)
+  // — silencioso se ainda não concedeu, não trava quem não usa isso.
+  const salvouNaRede=await _lancctbSalvarTxtNaPastaTransfRede(nomeArquivoTxt,gerarTxtMisterContador(cnpjLimpo,linhasTxt));
+  toast(`TXT gerado com ${lotesMap.size} lançamento(s).${salvouNaRede?' Salvo também em Arquivos de Transferência de Rede.':''}`,'ok');
 }
 
 // ─── Comprovantes bancários (upload PDF → IA → preview → confirmar) ───────
