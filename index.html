@@ -4792,10 +4792,31 @@ async function _rufatoParsearExtratoPDF(files){
 // Princ. — o quanto saiu da conta corrente); "Resgates / Vencimentos" tem 3
 // datas (aplicação/vencimento/resgate) e até 7 valores, o 6º sendo o "Vlr
 // Líquido" que é o que efetivamente volta pra conta corrente.
+// Esse é o layout "Extrato Padrão" (produto ÚNICO). Alguns bancos também
+// mandam o Bradesco "Extrato do Cliente - Movimentos" MULTIPRODUTO (mesmo
+// modelo lido em Ganhos/Rendimentos — 2851-Invest Facil/CDB Fácil/CDB
+// Fidelidade no mesmo PDF) — nesse caso _rufatoParsearAplicacaoMultiprodutoPDF
+// abaixo filtra só as linhas do Invest Fácil, ignorando os outros produtos
+// (pedido do usuário 11/09/2026: aqui só interessam Resgates/Crédito e
+// Aplicações/Principal do Invest Fácil).
 async function _rufatoParsearAplicacaoPDF(files){
   var aplicacoes=[],resgates=[];
   for(var f=0;f<files.length;f++){
-    var paginas=await _rufatoExtrairPaginasPDF(files[f]);
+    var file=files[f];
+    var buf0=await file.arrayBuffer();
+    var pdf0=await pdfjsLib.getDocument({data:buf0}).promise;
+    var t1='';
+    for(var pp=1;pp<=Math.min(pdf0.numPages,2);pp++){
+      var c0=await (await pdf0.getPage(pp)).getTextContent();
+      t1+=' '+c0.items.map(function(it){return it.str;}).join(' ');
+    }
+    if(/Extrato\s+do\s+Cliente\s*-\s*Movimentos/i.test(t1)&&/Extrato\s+de\s+CDBs\/LETRAS/i.test(t1)){
+      var rMulti=await _rufatoParsearAplicacaoMultiprodutoPDF(pdf0,'invest facil');
+      aplicacoes=aplicacoes.concat(rMulti.aplicacoes);
+      resgates=resgates.concat(rMulti.resgates);
+      continue;
+    }
+    var paginas=await _rufatoExtrairPaginasPDF(file);
     var secao=null;
     for(var p=0;p<paginas.length;p++){
       var linhas=_convItauAgruparLinhas(paginas[p].itens).map(function(l){return l.texto;});
@@ -4823,6 +4844,62 @@ async function _rufatoParsearAplicacaoPDF(files){
       }
     }
   }
+  return {aplicacoes:aplicacoes,resgates:resgates};
+}
+// Extrato Bradesco MULTIPRODUTO — mesma leitura determinística usada em
+// Ganhos/Rendimentos (_aplicfinParseBradescoCdbMulti: máquina de estados por
+// seção, coluna casada pela borda direita do valor x cabeçalho, funciona com
+// a página rotate 90). Aqui só interessa "Aplicações → Principal" e
+// "Resgates → Crédito" das linhas cujo produto contém `produtoFiltroNorm`
+// (comparação sem acento/maiúscula, por substring — "invest facil" casa com
+// "2851 - Invest Facil" de qualquer empresa). Devolve 1 linha por
+// transação (não soma), no mesmo formato de _rufatoParsearAplicacaoPDF.
+async function _rufatoParsearAplicacaoMultiprodutoPDF(pdf,produtoFiltroNorm){
+  var aplicacoes=[],resgates=[];
+  var itensTodos=[];
+  for(var p=1;p<=pdf.numPages;p++){
+    var page=await pdf.getPage(p);
+    var content=await page.getTextContent();
+    var its=_aplicfinItens(page,content).map(function(i){ return {s:i.s,x:i.x,xr:i.xr,y:i.y+p*100000}; });
+    itensTodos=itensTodos.concat(its);
+  }
+  var linhas=_aplicfinLinhas(itensTodos,3);
+  var norm=function(s){return String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim();};
+  var LABEL2KEY={principal:'principal',atualizado:'atualizado',rendimento:'rendimento',iof:'iof',ir:'ir',liquido:'liquido',resgate:'resgate',credito:'credito'};
+  var ehProdutoTxt=function(s){return /[A-Za-zÀ-ÿ]/.test(s)&&!/^(produto|total|certificado|emiss|venc|taxa|pagamento|descri|saldo|aplica|resgates)/i.test(norm(s));};
+  var secAtual=null, headerCols=null;
+  linhas.forEach(function(L){
+    var txt=L.map(function(i){return i.s;}).join(' ').trim();
+    if(/^Saldo\s+Anterior\s+em/i.test(txt)){secAtual='saldo_anterior';headerCols=null;return;}
+    if(/^Aplica[çc][õo]es:/i.test(txt)){secAtual='aplicacoes';headerCols=null;return;}
+    if(/^Resgates:/i.test(txt)){secAtual='resgates';headerCols=null;return;}
+    if(/^Saldo\s+Atual\s+em/i.test(txt)){secAtual='saldo_atual';headerCols=null;return;}
+    if(!secAtual)return;
+    if(/\bProduto\b/i.test(txt)&&/\bPrincipal\b/i.test(txt)){
+      headerCols=L.map(function(i){return {key:LABEL2KEY[norm(i.s)],xr:i.xr};}).filter(function(c){return c.key;});
+      headerCols.sort(function(a,b){return a.xr-b.xr;});
+      return;
+    }
+    if(!headerCols||(secAtual!=='aplicacoes'&&secAtual!=='resgates'))return;
+    var primeiro=L[0];
+    if(!primeiro||primeiro.x>60||!ehProdutoTxt(primeiro.s))return;
+    if(norm(primeiro.s).indexOf(produtoFiltroNorm)<0)return; // produto diferente do alvo
+    var nums=L.filter(function(i){return _aplicfinEhNum(i.s);});
+    if(!nums.length)return;
+    var datas=L.filter(function(i){return /^\d{2}\/\d{2}\/\d{4}$/.test(i.s);}).map(function(i){return i.s;});
+    if(!datas.length)return;
+    if(secAtual==='aplicacoes'){
+      var valPrinc=null;
+      nums.forEach(function(i){ if(_aplicfinColPorHeader(headerCols,i.xr)==='principal') valPrinc=i.s; });
+      if(valPrinc) aplicacoes.push({data:datas[0],valor:_rufatoParseValorBR(valPrinc)});
+    } else {
+      var valCred=null;
+      nums.forEach(function(i){ if(_aplicfinColPorHeader(headerCols,i.xr)==='credito') valCred=i.s; });
+      // "Pagamento" (data do resgate em si) é a 3ª data da linha (Emissão/Vencimento/Pagamento)
+      var dataResg=datas.length>=3?datas[2]:datas[datas.length-1];
+      if(valCred) resgates.push({data:dataResg,valor:_rufatoParseValorBR(valCred)});
+    }
+  });
   return {aplicacoes:aplicacoes,resgates:resgates};
 }
 
