@@ -18305,6 +18305,14 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
         nf_id:nfInserida.id, empresa_eid:eid, numero_parcela:p.numero_parcela,
         data_vencimento:p.data_vencimento||nf.data_emissao, valor_parcela:p.valor_parcela,
         data_emissao:nf.data_emissao||dataCorte||hoje_(),
+        // tipo/direcao duplicados aqui (mesmo motivo do data_emissao acima:
+        // ver comentário em renderLancctbNotas) — sem essas colunas próprias,
+        // o filtro por tipo/direção obriga o join com notas_fiscais mesmo pra
+        // contar, e a contagem "estimated" do PostgREST fica muito errada
+        // nessa combinação, escondendo NFs além da última página calculada
+        // (achado real 11/09/2026: NF 45320 da Kajuna existia mas nunca
+        // aparecia — "Última página" mostrava só 24 quando na real eram ~140).
+        tipo:ehNFSe?'nfse':'nfe', direcao,
       },{onConflict:'nf_id,numero_parcela'});
     }
     return 'importada';
@@ -19726,23 +19734,27 @@ async function renderLancctbNotas(aba){
   const campoCnpjTerc=aba.direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
   let q=_supaClient
     .from('notas_fiscais_parcelas')
-    // count:'estimated' em vez de 'exact' — o filtro base (tipo/direcao) só
-    // existe na tabela ligada via !inner (join), então um count exato aqui
-    // obriga o Postgres a materializar o join inteiro só pra contar, o que
-    // travava empresas com muitas NFs (relatado: "Transforme o Educar" e
-    // já documentado antes com "MD 2 Comércio"/statement timeout). Estimado
-    // usa o plano de consulta em vez de contar linha a linha — muito mais
-    // rápido, só perde precisão no total de páginas exibido (aceitável).
-    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor)', { count: 'estimated' })
-    // Filtra pela coluna PRÓPRIA de notas_fiscais_parcelas (duplicada,
-    // indexada em idx_nfp_empresa_emissao) em vez de notas_fiscais.empresa_eid
+    // count:'exact' — antes era 'estimated', mas a estimativa do PostgREST
+    // pra essa combinação de filtros ficava MUITO errada (achado real
+    // 11/09/2026: Kajuna tinha 6972 parcelas reais e o estimado dizia 1199
+    // — 24 "páginas" quando existiam ~140; a NF 45320, que existia e estava
+    // com data certa, nunca aparecia porque ficava além da última página
+    // calculada errado). Agora que tipo/direcao também são colunas PRÓPRIAS
+    // (duplicadas, ver insert em _lancctbSalvarNotaFiscalArquivo), o filtro
+    // inteiro roda por índice sem precisar materializar o join, então exact
+    // volta a ser rápido — o problema de timeout de antes era causado por
+    // filtrar tipo/direcao do lado de dentro do join (!inner), não pelo
+    // count em si.
+    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor)', { count: 'exact' })
+    // Filtra pelas colunas PRÓPRIAS de notas_fiscais_parcelas (duplicadas,
+    // indexadas em idx_nfp_empresa_tipo_direcao) em vez de notas_fiscais.*
     // (via join !inner) — filtrar pelo lado relacionado ignora esse índice e
     // força o Postgres a materializar o join inteiro antes de filtrar,
     // causando "canceling statement due to statement timeout" em empresas
     // com muitas NFs (bug real, MD 2 Comércio #53, 08/09/2026).
     .eq('empresa_eid', eid)
-    .eq('notas_fiscais.tipo', aba.tipoDoc)
-    .eq('notas_fiscais.direcao', aba.direcaoNf);
+    .eq('tipo', aba.tipoDoc)
+    .eq('direcao', aba.direcaoNf);
   if(_lancctbNfeBuscaNome.trim()) q=q.ilike(campoNomeTerc,`%${_lancctbNfeBuscaNome.trim().replace(/[%_]/g,'')}%`);
   if(_lancctbNfeBuscaNumero.trim()) q=q.ilike('notas_fiscais.numero',`%${_lancctbNfeBuscaNumero.trim().replace(/[%_]/g,'')}%`);
   if(_lancctbNfeBuscaCnpj.trim()) q=q.ilike(campoCnpjTerc,`%${_lancctbNfeBuscaCnpj.replace(/\D/g,'')}%`);
