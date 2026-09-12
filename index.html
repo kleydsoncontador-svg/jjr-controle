@@ -19869,6 +19869,54 @@ async function _lancctbCorrigirParcelasPorFluxo(){
     if(btn){ btn.disabled=false; btn.textContent='🔀 Dividir Parcelas via Fluxo'; }
   }
 }
+// Filtros de servidor compartilhados entre a listagem (renderLancctbNotas)
+// e a exclusão em massa (excluirLancctbNotasFiltradas) — extraído pra
+// garantir que "excluir todas as filtradas" apague EXATAMENTE o mesmo
+// conjunto que está sendo mostrado na tela, nunca um filtro divergente.
+function _lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc){
+  if(_lancctbNfeBuscaNome.trim()) q=q.ilike(campoNomeTerc,`%${_lancctbNfeBuscaNome.trim().replace(/[%_]/g,'')}%`);
+  if(_lancctbNfeBuscaNumero.trim()) q=q.ilike('notas_fiscais.numero',`%${_lancctbNfeBuscaNumero.trim().replace(/[%_]/g,'')}%`);
+  if(_lancctbNfeBuscaCnpj.trim()) q=q.ilike(campoCnpjTerc,`%${_lancctbNfeBuscaCnpj.replace(/\D/g,'')}%`);
+  // data_emissao vive DUPLICADA em notas_fiscais_parcelas (cópia gravada na
+  // importação — ver Fase 15) porque o PostgREST não ordena a query externa
+  // por uma coluna de uma tabela embutida many-to-one (embed !inner só
+  // reordenaria um array um-pra-muitos, que não é o caso aqui); sem essa
+  // cópia a ordenação abaixo seria silenciosamente ignorada.
+  if(_lancctbNfeEmissaoDe) q=q.gte('data_emissao',_lancctbNfeEmissaoDe);
+  if(_lancctbNfeEmissaoAte) q=q.lte('data_emissao',_lancctbNfeEmissaoAte);
+  if(_lancctbNfeParcelaDe) q=q.gte('data_vencimento',_lancctbNfeParcelaDe);
+  if(_lancctbNfeParcelaAte) q=q.lte('data_vencimento',_lancctbNfeParcelaAte);
+  if(_lancctbNfeFiltroStatus) q=q.eq('status_conciliacao',_lancctbNfeFiltroStatus);
+  if(_lancctbNfeFiltroValorBruto.trim()){
+    const v=parseFloat(_lancctbNfeFiltroValorBruto.replace(',','.'));
+    if(!isNaN(v)) q=q.gte('notas_fiscais.valor_total',v-0.01).lte('notas_fiscais.valor_total',v+0.01);
+  }
+  if(_lancctbNfeFiltroValorParcela.trim()){
+    const v=parseFloat(_lancctbNfeFiltroValorParcela.replace(',','.'));
+    if(!isNaN(v)) q=q.gte('valor_parcela',v-0.01).lte('valor_parcela',v+0.01);
+  }
+  if(_lancctbNfeFiltroNumParcela.trim()){
+    const v=parseInt(_lancctbNfeFiltroNumParcela,10);
+    if(!isNaN(v)) q=q.eq('numero_parcela',v);
+  }
+  if(_lancctbNfeFiltroModelo.trim()) q=q.ilike('notas_fiscais.modelo',`%${_lancctbNfeFiltroModelo.trim().replace(/[%_]/g,'')}%`);
+  return q;
+}
+// Filtros client-side (Qtd Parcelas / Natureza da Operação — derivados,
+// não dá pra filtrar direto na query) — também compartilhado com a
+// exclusão em massa.
+function _lancctbNotasAplicarFiltrosCliente(lista,ehServico){
+  let out=lista;
+  if(_lancctbNfeFiltroQtdParcelas.trim()){
+    const v=parseInt(_lancctbNfeFiltroQtdParcelas,10);
+    if(!isNaN(v)) out=out.filter(l=>l.qtdParcelas===v);
+  }
+  if(!ehServico&&_lancctbNfeFiltroNatureza.trim()){
+    const t=_convMpRemoverAcentos(_lancctbNfeFiltroNatureza.trim().toLowerCase());
+    out=out.filter(l=>_convMpRemoverAcentos((l.nf.natureza_operacao||'').toLowerCase()).includes(t));
+  }
+  return out;
+}
 async function renderLancctbNotas(aba){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
@@ -19880,6 +19928,19 @@ async function renderLancctbNotas(aba){
 
   const from=_lancctbNfePagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
+
+  // Sugestões pro filtro de Natureza da Operação (pedido do usuário
+  // 12/09/2026: "quando eu clicar em natureza, deve me sugerir as que já
+  // existem de todas as NF que estão importada") — busca só essa 1 coluna
+  // (leve) de TODAS as NFs desta aba, não só da página atual, e monta um
+  // <datalist> com os textos distintos já vistos.
+  let naturezasSugeridas=[];
+  if(!ehServico){
+    const { data: naturezasRows } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais')
+      .select('natureza_operacao').eq('empresa_eid',eid).eq('tipo',aba.tipoDoc).eq('direcao',aba.direcaoNf)
+      .not('natureza_operacao','is',null));
+    naturezasSugeridas=[...new Set((naturezasRows||[]).map(r=>r.natureza_operacao))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  }
 
   // Última nota capturada (destaque no topo, respondendo "quando a SIEG
   // trouxe a última NF" — o próprio sistema mostra isso na prática).
@@ -19918,32 +19979,7 @@ async function renderLancctbNotas(aba){
     .eq('empresa_eid', eid)
     .eq('tipo', aba.tipoDoc)
     .eq('direcao', aba.direcaoNf);
-  if(_lancctbNfeBuscaNome.trim()) q=q.ilike(campoNomeTerc,`%${_lancctbNfeBuscaNome.trim().replace(/[%_]/g,'')}%`);
-  if(_lancctbNfeBuscaNumero.trim()) q=q.ilike('notas_fiscais.numero',`%${_lancctbNfeBuscaNumero.trim().replace(/[%_]/g,'')}%`);
-  if(_lancctbNfeBuscaCnpj.trim()) q=q.ilike(campoCnpjTerc,`%${_lancctbNfeBuscaCnpj.replace(/\D/g,'')}%`);
-  // data_emissao vive DUPLICADA em notas_fiscais_parcelas (cópia gravada na
-  // importação — ver Fase 15) porque o PostgREST não ordena a query externa
-  // por uma coluna de uma tabela embutida many-to-one (embed !inner só
-  // reordenaria um array um-pra-muitos, que não é o caso aqui); sem essa
-  // cópia a ordenação abaixo seria silenciosamente ignorada.
-  if(_lancctbNfeEmissaoDe) q=q.gte('data_emissao',_lancctbNfeEmissaoDe);
-  if(_lancctbNfeEmissaoAte) q=q.lte('data_emissao',_lancctbNfeEmissaoAte);
-  if(_lancctbNfeParcelaDe) q=q.gte('data_vencimento',_lancctbNfeParcelaDe);
-  if(_lancctbNfeParcelaAte) q=q.lte('data_vencimento',_lancctbNfeParcelaAte);
-  if(_lancctbNfeFiltroStatus) q=q.eq('status_conciliacao',_lancctbNfeFiltroStatus);
-  if(_lancctbNfeFiltroValorBruto.trim()){
-    const v=parseFloat(_lancctbNfeFiltroValorBruto.replace(',','.'));
-    if(!isNaN(v)) q=q.gte('notas_fiscais.valor_total',v-0.01).lte('notas_fiscais.valor_total',v+0.01);
-  }
-  if(_lancctbNfeFiltroValorParcela.trim()){
-    const v=parseFloat(_lancctbNfeFiltroValorParcela.replace(',','.'));
-    if(!isNaN(v)) q=q.gte('valor_parcela',v-0.01).lte('valor_parcela',v+0.01);
-  }
-  if(_lancctbNfeFiltroNumParcela.trim()){
-    const v=parseInt(_lancctbNfeFiltroNumParcela,10);
-    if(!isNaN(v)) q=q.eq('numero_parcela',v);
-  }
-  if(_lancctbNfeFiltroModelo.trim()) q=q.ilike('notas_fiscais.modelo',`%${_lancctbNfeFiltroModelo.trim().replace(/[%_]/g,'')}%`);
+  q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc);
   const { data: parcelas, error, count } = await q
     .order('data_emissao', { ascending: true })
     .order('numero_parcela', { ascending: true })
@@ -19973,19 +20009,10 @@ async function renderLancctbNotas(aba){
   // Qtd Parcelas só existe depois de calculada acima (não é coluna própria
   // pra filtrar direto na query) — filtra aqui, só dentro da página já
   // carregada (pode sobrar menos linhas que o normal numa página filtrada).
-  if(_lancctbNfeFiltroQtdParcelas.trim()){
-    const v=parseInt(_lancctbNfeFiltroQtdParcelas,10);
-    if(!isNaN(v)) _lancctbUltimaLeitura=_lancctbUltimaLeitura.filter(l=>l.qtdParcelas===v);
-  }
-  // Natureza da Operação (pedido do usuário 12/09/2026) — mesmo espírito do
-  // filtro de Qtd Parcelas acima: derivado, filtrado client-side dentro da
-  // página já carregada, não é coluna própria pra filtrar direto na query.
-  // Texto livre, contém-match (não bucket automático) — ver comentário na
-  // declaração de _lancctbNfeFiltroNatureza.
-  if(!ehServico&&_lancctbNfeFiltroNatureza.trim()){
-    const t=_convMpRemoverAcentos(_lancctbNfeFiltroNatureza.trim().toLowerCase());
-    _lancctbUltimaLeitura=_lancctbUltimaLeitura.filter(l=>_convMpRemoverAcentos((l.nf.natureza_operacao||'').toLowerCase()).includes(t));
-  }
+  // Qtd Parcelas/Natureza: derivados, não dá pra filtrar direto na query —
+  // filtra aqui, só dentro da página já carregada (pode sobrar menos linhas
+  // que o normal numa página filtrada). Ver _lancctbNotasAplicarFiltrosCliente.
+  _lancctbUltimaLeitura=_lancctbNotasAplicarFiltrosCliente(_lancctbUltimaLeitura,ehServico);
 
   const totalPaginas=Math.max(1, Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const destaqueUltima=ultimaNf?`<div style="background:var(--teal-bg);border-left:3px solid var(--teal);border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px">
@@ -19995,6 +20022,7 @@ async function renderLancctbNotas(aba){
   let html=`<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:10px">
       ${!ehServico?`<span id="lancctbPreencherNaturezaStatus" style="font-size:11px;color:var(--slate)"></span>
       <button class="btn bo bsm" id="lancctbPreencherNaturezaBtn" onclick="_lancctbPreencherNaturezaOperacao('${aba.tipoDoc}','${aba.direcaoNf}')" title="Reabre o XML já salvo de cada NF sem Natureza da Operação preenchida e completa sozinho">🔄 Preencher Natureza (NFs já importadas)</button>`:''}
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico})" title="Apaga todas as NFs que batem com os filtros ativos acima — NFs já conciliadas (com lançamento contábil gerado) nunca são apagadas">🗑️ Excluir todas as filtradas</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
     <div style="margin-bottom:8px">${_lancctbPagGenericaHtml(_lancctbNfePagina,count,from,to,totalPaginas,'_lancctbNfePagina','renderLancctbConteudo')}</div>
@@ -20025,7 +20053,7 @@ async function renderLancctbNotas(aba){
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-valor-parcela" placeholder="🔎 valor" inputmode="decimal" value="${esc(_lancctbNfeFiltroValorParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('valorParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-num-parcela" placeholder="🔎 nº" inputmode="numeric" value="${esc(_lancctbNfeFiltroNumParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('numParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-qtd-parcelas" placeholder="🔎 qtd" inputmode="numeric" value="${esc(_lancctbNfeFiltroQtdParcelas)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('qtdParcelas',this.value)"></th>
-        ${ehServico?'<th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><input class="si" data-filtro="nf-natureza" placeholder="🔎 filtrar" value="${esc(_lancctbNfeFiltroNatureza)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('natureza',this.value)"></th>`}
+        ${ehServico?'<th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><input class="si" list="lancctbNfeNaturezaDatalist" data-filtro="nf-natureza" placeholder="🔎 filtrar" value="${esc(_lancctbNfeFiltroNatureza)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('natureza',this.value)"><datalist id="lancctbNfeNaturezaDatalist">${naturezasSugeridas.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></th>`}
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-modelo" placeholder="🔎 modelo" value="${esc(_lancctbNfeFiltroModelo)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('modelo',this.value)"></th>
         <th style="padding:4px 6px"><select class="si" data-filtro="nf-status" style="width:100%;font-size:11px" onchange="_lancctbNfeFiltroStatusMudar(this.value)">
           <option value="" ${!_lancctbNfeFiltroStatus?'selected':''}>Todos</option>
@@ -20123,6 +20151,80 @@ async function _lancctbPreencherNaturezaOperacao(tipoDoc,direcaoNf){
   if(semNatOp) partes.push(`${semNatOp} sem <natOp> no XML`);
   if(erroDownload) partes.push(`${erroDownload} com erro ao reabrir o XML`);
   toast(partes.join(' — ')+'.','ok');
+  renderLancctbConteudo();
+}
+// Excluir todas as NFs que batem com os filtros ativos (data, número, CNPJ,
+// nome, valor, status, Natureza da Operação, etc.) — pedido do usuário
+// 12/09/2026: "quero filtar um tipo e ter um botão excluir, todas as
+// filtradas" (ex: filtrar Natureza = "REMESSA" e apagar tudo daquele tipo
+// de uma vez). Reaproveita _lancctbNotasAplicarFiltrosServidor/Cliente —
+// os MESMOS filtros da tela, nunca um conjunto divergente.
+//
+// NUNCA apaga uma NF que já tem alguma parcela conciliada (= gerou
+// lançamento contábil de verdade) — protege dado histórico real, mesmo
+// espírito do "Excluir todas as contas" do Plano de Contas.
+let _lancctbExclusaoNotasFiltro=null; // {tipoDoc,direcaoNf,idsApagar,qtdBloqueadas}
+async function excluirLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico){
+  const eid=_lancctbEidAtual;
+  const btn=event?.target;
+  if(btn) btn.disabled=true;
+  toast('Verificando NFs que batem com os filtros…','info');
+  try{
+    const campoNomeTerc=direcaoNf==='venda'?'notas_fiscais.nome_destinatario':'notas_fiscais.nome_emitente';
+    const campoCnpjTerc=direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
+    let q=_supaClient.from('notas_fiscais_parcelas')
+      .select('id,nf_id,numero_parcela,status_conciliacao,notas_fiscais!inner(natureza_operacao,empresa_eid,tipo,direcao)')
+      .eq('empresa_eid',eid).eq('tipo',tipoDoc).eq('direcao',direcaoNf);
+    q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc);
+    const { data: parcelasFiltradas } = await _lancctbFetchTudo(()=>q);
+    if(!parcelasFiltradas||!parcelasFiltradas.length){ toast('Nenhuma NF bate com os filtros ativos.','err'); return; }
+
+    // Qtd Parcelas TOTAL de cada NF encontrada (não só as que bateram no
+    // filtro) — mesmo cálculo da listagem, necessário pro filtro de Qtd
+    // Parcelas fechar igual ao que está na tela.
+    const nfIds=[...new Set(parcelasFiltradas.map(p=>p.nf_id))];
+    const { data: todasParcelasDestasNf } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas').select('nf_id,status_conciliacao').in('nf_id',nfIds));
+    const qtdParcelasPorNf={}, temConciliadaPorNf={};
+    (todasParcelasDestasNf||[]).forEach(r=>{
+      qtdParcelasPorNf[r.nf_id]=(qtdParcelasPorNf[r.nf_id]||0)+1;
+      if(r.status_conciliacao==='conciliado') temConciliadaPorNf[r.nf_id]=true;
+    });
+
+    const linhasParaFiltroCliente=parcelasFiltradas.map(p=>({ nf:p.notas_fiscais, qtdParcelas:qtdParcelasPorNf[p.nf_id]||1, _nfId:p.nf_id }));
+    const filtradas=_lancctbNotasAplicarFiltrosCliente(linhasParaFiltroCliente,ehServico);
+    const idsEncontrados=[...new Set(filtradas.map(l=>l._nfId))];
+    if(!idsEncontrados.length){ toast('Nenhuma NF bate com os filtros ativos.','err'); return; }
+
+    const idsApagar=idsEncontrados.filter(id=>!temConciliadaPorNf[id]);
+    const qtdBloqueadas=idsEncontrados.length-idsApagar.length;
+    if(!idsApagar.length){
+      toast(`Nenhuma NF pôde ser apagada — todas as ${idsEncontrados.length} encontradas já têm parcela conciliada (lançamento contábil gerado).`,'err');
+      return;
+    }
+    _lancctbExclusaoNotasFiltro={tipoDoc,direcaoNf,idsApagar,qtdBloqueadas};
+    _lancctbExclusaoTipo='notas-filtradas';
+    document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
+      `Isso vai <strong>apagar permanentemente</strong> <strong>${idsApagar.length}</strong> NF(s) que batem com os filtros ativos na tela.${qtdBloqueadas?` (${qtdBloqueadas} outra(s) encontrada(s) já têm parcela conciliada — NÃO serão apagadas.)`:''} Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${idsApagar.length}</strong>:`;
+    document.getElementById('lancctbConfirmarExclusaoInput').value='';
+    openModal('mLancctbConfirmarExclusao');
+  } finally {
+    if(btn) btn.disabled=false;
+  }
+}
+async function _lancctbExecutarExclusaoNotasFiltradas(){
+  const {idsApagar,qtdBloqueadas}=_lancctbExclusaoNotasFiltro;
+  const input=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
+  if(input!==String(idsApagar.length)){ toast('Número digitado não confere.','err'); return; }
+  const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
+  btn.disabled=true; btn.textContent='Apagando…';
+  // notas_fiscais_parcelas.nf_id tem ON DELETE CASCADE — apagar a NF já
+  // remove as parcelas dela sozinho.
+  const { error } = await _lancctbEmLotesDb(idsApagar,200,lote=>_supaClient.from('notas_fiscais').delete().in('id',lote));
+  btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  toast(`${idsApagar.length} NF(s) apagada(s)${qtdBloqueadas?` — ${qtdBloqueadas} mantida(s) por já ter parcela conciliada`:''}.`,'ok');
+  closeModal('mLancctbConfirmarExclusao');
+  _lancctbNfePagina=0;
   renderLancctbConteudo();
 }
 function exportarLancctbNotasExcel(abaId){
@@ -27698,6 +27800,7 @@ function _lancctbExecutarExclusaoGenerica(){
   if(_lancctbExclusaoTipo==='comprovantes-salarios') return _lancctbExecutarExclusaoComprovantesSalarios();
   if(_lancctbExclusaoTipo==='fluxo') return _lancctbExecutarExclusaoFluxo();
   if(_lancctbExclusaoTipo==='plano-contas') return _lancctbExecutarExclusaoPlanoContas();
+  if(_lancctbExclusaoTipo==='notas-filtradas') return _lancctbExecutarExclusaoNotasFiltradas();
   return _lancctbExecutarExclusaoExtrato();
 }
 let _lancctbExclusaoComprovQtd=0;
