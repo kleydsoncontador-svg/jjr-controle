@@ -17606,6 +17606,11 @@ const LANCCTB_ABAS=[
   {id:'nfe-saida',     label:'NF-e Saída',   tipoDoc:'nfe',  direcaoNf:'venda'},
   {id:'nfse-tomado',   label:'NFS-e Tomado', tipoDoc:'nfse', direcaoNf:'compra'},
   {id:'nfse-prestado', label:'NFS-e Prestado', tipoDoc:'nfse', direcaoNf:'venda'},
+  // NFC-e (Nota Fiscal de Consumidor Eletrônica, modelo 65) — pedido do
+  // usuário 11/09/2026. Só Saída: é documento de venda ao consumidor final,
+  // a empresa não "recebe" NFC-e como compradora cadastrada. Mesmo parser
+  // XML da NF-e (_lancctbParsearNFeXml), só reclassificado pelo <mod>65</mod>.
+  {id:'nfce-saida',    label:'NFC-e Saída', tipoDoc:'nfce', direcaoNf:'venda'},
   {id:'comprovantes', label:'Comprovantes de Pagamentos'},
   {id:'comprovantes-receb', label:'Comprovantes de Recebimentos'},
   // Exclusiva da Rufato (eid 4) — pedido do usuário 11/09/2026. Conteúdo
@@ -18311,6 +18316,10 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
     const ehNFSe=/xmlns="http:\/\/www\.sped\.fazenda\.gov\.br\/nfse"|<NFSe[ >]/.test(xml);
     const nf=ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml);
     if(!nf||!nf.cnpj_emitente||!direcao) return 'naoReconhecido';
+    // NFC-e usa o MESMO schema XML da NF-e (infNFe), só muda o modelo (mod
+    // 65 em vez de 55) — acrescentado 11/09/2026, sem parser novo nenhum,
+    // só reclassifica pelo campo já extraído por _lancctbParsearNFeXml.
+    const tipo=ehNFSe?'nfse':(nf.modelo==='65'?'nfce':'nfe');
     if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte) return 'ignoradaData';
     // Já capturada antes (mesma chave de acesso) — pula upload+upsert, que
     // são os passos caros (rede). Achado real (05/09/2026): "Importar mês"
@@ -18319,11 +18328,11 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
     // zero toda vez, bem mais lento do que precisa ser.
     if(chavesConhecidas&&nf.chave_acesso&&chavesConhecidas.has(nf.chave_acesso)) return 'jaExistente';
 
-    const storagePath=`${eid}/${ehNFSe?'nfse':'nfe'}/${nf.chave_acesso||`${nf.cnpj_emitente}-${nf.numero}-${indice||Date.now()}`}.xml`;
+    const storagePath=`${eid}/${tipo}/${nf.chave_acesso||`${nf.cnpj_emitente}-${nf.numero}-${indice||Date.now()}`}.xml`;
     await _supaClient.storage.from('nf-xmls').upload(storagePath,file,{upsert:true});
 
     const { data: nfInserida, error: nfErro } = await _supaClient.from('notas_fiscais').upsert({
-      empresa_eid:eid, tipo:ehNFSe?'nfse':'nfe', chave_acesso:nf.chave_acesso, numero:nf.numero,
+      empresa_eid:eid, tipo, chave_acesso:nf.chave_acesso, numero:nf.numero,
       serie:nf.serie, modelo:nf.modelo, cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
       cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao,
       data_emissao:nf.data_emissao||dataCorte||hoje_(), valor_total:nf.valor_total, iss_valor:nf.iss_valor,
@@ -18343,7 +18352,7 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
         // nessa combinação, escondendo NFs além da última página calculada
         // (achado real 11/09/2026: NF 45320 da Kajuna existia mas nunca
         // aparecia — "Última página" mostrava só 24 quando na real eram ~140).
-        tipo:ehNFSe?'nfse':'nfe', direcao,
+        tipo, direcao,
       },{onConflict:'nf_id,numero_parcela'});
     }
     return 'importada';
@@ -19457,6 +19466,31 @@ async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onSt
             arquivos.push({ file:await fh.getFile(), direcao:alvo.direcao });
           }
         } catch(e){ /* pasta não existe pra esse CNPJ/papel/mês — ok, próximo */ }
+      }
+      // NFC-e (pedido do usuário 11/09/2026): pasta própria "NFC-es" ao lado
+      // de "NF-es"/"NFS-es", sempre venda (documento de consumidor final).
+      // A estrutura exata de subpastas dentro de {cnpj} não foi confirmada
+      // com certeza (pode ou não ter um nível "Saida" antes do ano/mês,
+      // igual às outras) — tenta as duas, silenciosamente, sem duplicar se
+      // as duas existirem por engano (usa a 1ª que encontrar arquivos).
+      for(const cnpj of cnpjs){
+        let dirMesNfce=null;
+        try{
+          dirMesNfce=await dirXml.getDirectoryHandle('NFC-es')
+            .then(d=>d.getDirectoryHandle(cnpj)).then(d=>d.getDirectoryHandle('Saida'))
+            .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+        } catch(e){
+          try{
+            dirMesNfce=await dirXml.getDirectoryHandle('NFC-es')
+              .then(d=>d.getDirectoryHandle(cnpj)).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+          } catch(e2){ /* pasta NFC-es não existe pra esse CNPJ/mês — ok, empresa pode não emitir NFC-e */ }
+        }
+        if(!dirMesNfce) continue;
+        for await (const [nome,fh] of dirMesNfce.entries()){
+          if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
+          if(chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
+          arquivos.push({ file:await fh.getFile(), direcao:'venda' });
+        }
       }
     }
 
