@@ -28335,11 +28335,19 @@ async function processarLancctbUploadExtrato(forcarIA){
     btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; }
   }
 }
+// Extratos gigantes (achado real 11/09/2026, Mercado Pago Fast Lube:
+// 13441 lançamentos num arquivo só) travavam o navegador renderizando um
+// <tr> pra cada linha — limita o preview visual, mas a seleção "Selecionar
+// todos"/soma/salvar continuam valendo pro array INTEIRO, não só pro que
+// aparece na tela.
+const LANCCTB_EXTRATO_PREVIEW_MAX_LINHAS=500;
 function renderLancctbExtratoPreview(){
   const el=document.getElementById('lancctbExtratoPreviewArea');
   const somaSaida=_lancctbExtratoPreview.reduce((s,l)=>s+(l.valor_saida||0),0);
   const somaEntrada=_lancctbExtratoPreview.reduce((s,l)=>s+(l.valor_entrada||0),0);
+  const truncado=_lancctbExtratoPreview.length>LANCCTB_EXTRATO_PREVIEW_MAX_LINHAS;
   let html=`<div style="font-size:12px;color:var(--slate);margin-bottom:6px">Soma total: <strong style="color:#dc2626">R$ ${_fmt(somaSaida)}</strong> saída / <strong style="color:var(--teal)">R$ ${_fmt(somaEntrada)}</strong> entrada — confira contra o saldo do extrato original.</div>
+    ${truncado?`<div style="font-size:11.5px;color:var(--slate);margin-bottom:6px">Mostrando as primeiras ${LANCCTB_EXTRATO_PREVIEW_MAX_LINHAS} de ${_lancctbExtratoPreview.length} linhas (só pra não travar o navegador) — todas serão salvas normalmente ao clicar em Salvar.</div>`:''}
     <div style="overflow-x:auto;max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
@@ -28349,7 +28357,7 @@ function renderLancctbExtratoPreview(){
         <th style="padding:6px 8px;text-align:right">Saída</th>
         <th style="padding:6px 8px;text-align:right">Entrada</th>
       </tr></thead><tbody>`;
-  _lancctbExtratoPreview.forEach((l,i)=>{
+  _lancctbExtratoPreview.slice(0,LANCCTB_EXTRATO_PREVIEW_MAX_LINHAS).forEach((l,i)=>{
     html+=`<tr style="border-bottom:1px solid var(--border);opacity:${l._incluir?1:.4}">
       <td style="padding:5px 8px"><input type="checkbox" ${l._incluir?'checked':''} onclick="_lancctbExtratoPreview[${i}]._incluir=this.checked;renderLancctbExtratoPreview()"></td>
       <td style="padding:5px 8px">${l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
@@ -28360,8 +28368,9 @@ function renderLancctbExtratoPreview(){
   });
   html+='</tbody></table></div>';
   const qtd=_lancctbExtratoPreview.filter(l=>l._incluir).length;
-  html+=`<div style="display:flex;justify-content:flex-end;margin-top:10px">
-    <button class="btn bp" onclick="confirmarLancctbImportExtrato()">✓ Salvar ${qtd} lançamento(s)</button>
+  html+=`<div style="display:flex;justify-content:flex-end;align-items:center;gap:10px;margin-top:10px">
+    <span id="lancctbExtratoSalvarStatus" style="font-size:11.5px;color:var(--slate)"></span>
+    <button class="btn bp" id="lancctbExtratoSalvarBtn" onclick="confirmarLancctbImportExtrato()">✓ Salvar ${qtd} lançamento(s)</button>
   </div>`;
   el.innerHTML=html;
 }
@@ -28405,20 +28414,38 @@ async function confirmarLancctbImportExtrato(){
       hash_dedup: _lancctbHashLancamento(contaId,l,ocorrencia),
     };
   });
-  // Confere ANTES quantos hashes já existem, pra dar um aviso preciso — o
-  // toast antigo sempre dizia "(duplicados foram ignorados)" mesmo quando
-  // NENHUM lançamento era duplicado de verdade, causando alarme falso
-  // (relatado pelo usuário 08/09/2026: reimportou depois de excluir tudo e
-  // achou que tinha dado duplicado de novo, quando na real os 12 entraram
-  // normalmente — a mensagem só era mal escrita).
-  const hashesNovos=registros.map(r=>r.hash_dedup);
-  const { data: hashesExistentes } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
-    .select('hash_dedup').eq('conta_bancaria_id',contaId).in('hash_dedup',hashesNovos));
-  const jaExistiam=new Set((hashesExistentes||[]).map(h=>h.hash_dedup));
+  const btn=document.getElementById('lancctbExtratoSalvarBtn');
+  const statusEl=document.getElementById('lancctbExtratoSalvarStatus');
+  if(btn) btn.disabled=true;
+  // Extratos grandes (achado real 11/09/2026, Mercado Pago Fast Lube: 13441
+  // lançamentos num arquivo só) davam "TypeError: Failed to fetch" tanto na
+  // checagem de duplicados quanto no upsert final — os dois eram 1 request
+  // só com TODOS os registros, e uma URL com 13441 hashes no .in() (ou um
+  // corpo de upsert desse tamanho) estoura limite de URL/tamanho do
+  // navegador/servidor. Corrigido rodando em lotes de 300, igual ao padrão
+  // já usado em _lancctbEmLotesDb pra outras operações grandes do módulo.
+  const TAM_LOTE=300;
+  const jaExistiam=new Set();
+  for(let i=0;i<registros.length;i+=TAM_LOTE){
+    if(statusEl) statusEl.textContent=`Conferindo duplicados… ${Math.min(i+TAM_LOTE,registros.length)}/${registros.length}`;
+    const lote=registros.slice(i,i+TAM_LOTE).map(r=>r.hash_dedup);
+    const { data } = await _supaClient.from('lancamentos_extrato').select('hash_dedup').eq('conta_bancaria_id',contaId).in('hash_dedup',lote);
+    (data||[]).forEach(h=>jaExistiam.add(h.hash_dedup));
+  }
   const qtdDuplicados=registros.filter(r=>jaExistiam.has(r.hash_dedup)).length;
   const qtdNovos=registros.length-qtdDuplicados;
-  const { error } = await _supaClient.from('lancamentos_extrato').upsert(registros,{onConflict:'conta_bancaria_id,hash_dedup',ignoreDuplicates:true});
-  if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+  for(let i=0;i<registros.length;i+=TAM_LOTE){
+    if(statusEl) statusEl.textContent=`Salvando… ${Math.min(i+TAM_LOTE,registros.length)}/${registros.length}`;
+    const lote=registros.slice(i,i+TAM_LOTE);
+    const { error } = await _supaClient.from('lancamentos_extrato').upsert(lote,{onConflict:'conta_bancaria_id,hash_dedup',ignoreDuplicates:true});
+    if(error){
+      if(btn) btn.disabled=false;
+      if(statusEl) statusEl.textContent='';
+      toast(`Erro ao salvar (parou em ${i}/${registros.length}): ${error.message}`,'err');
+      return;
+    }
+  }
+  if(statusEl) statusEl.textContent='';
   toast(qtdDuplicados
     ? `${qtdNovos} lançamento(s) importado(s) — ${qtdDuplicados} já existiam e foram ignorados.`
     : `${qtdNovos} lançamento(s) importado(s) com sucesso.`,'ok');
