@@ -19251,7 +19251,7 @@ function _lancctbNomeTributoLegivel(descricaoOuNome){
   const s=String(descricaoOuNome||'');
   const mGuia=s.match(/Guia\s+(?:de\s+)?([A-Za-zÀ-Ü0-9]+)/i);
   if(mGuia) return { nomeCompleto:`Guia de ${mGuia[1].toUpperCase()}`, token:mGuia[1].toUpperCase() };
-  const mSigla=s.match(/\b(GNRE|DARF|DCTFWEB|DCTF|DAS|DAE|FGTS|GPS|GFIP|IPTU|ISS|ITBI|SIMPLES)\b/i);
+  const mSigla=s.match(/\b(GNRE|DARF|DCTFWEB|DCTF|DAS|DAE|FGTS|GPS|GFIP|IPTU|ISS|ITBI|SIMPLES|TFE)\b/i);
   if(mSigla) return { nomeCompleto:mSigla[1].toUpperCase(), token:mSigla[1].toUpperCase() };
   return { nomeCompleto:s, token:null };
 }
@@ -23399,7 +23399,7 @@ async function _lancctbProcessarTributos(){
   // correta. Linha nascida de tributo_composicao/tributo_diferenca só se
   // resolve clicando nela e criando a Regra, nunca de novo por este botão.
   const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
-    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
+    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,origem_importacao')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)
     .not('origem_importacao','in','(tributo_composicao,tributo_diferenca)'));
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
@@ -23445,17 +23445,29 @@ async function _lancctbProcessarTributos(){
     // Divide o extrato quando o pagamento passou do valor do tributo.
     if(achou.diferenca>0.01){
       const valorTributo=Math.round(achou.extraido.valor*100)/100;
-      const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ valor_saida: valorTributo }).eq('id',l.id);
+      // Bug real 12/09/2026 (Accurare: guia de TFE 236,35+multa 14,03): a
+      // linha PRINCIPAL ficava só com valor ajustado, sem NENHUMA marca de
+      // qual tributo era ("o valor original você não identificou ser TFE")
+      // — e por não ter origem_importacao própria, "Processar Tributos"
+      // rodava de novo nela nos meses seguintes e podia casar por engano
+      // com outro PDF cuja folga de 30% coincidisse (aconteceu com a linha
+      // de IRPJ, 262,93, batendo por acaso contra a guia de TFE, 236,35).
+      // Marca com o mesmo colchete + origem_importacao de tributo, igual
+      // já acontece pra composição de 2+ impostos — e exclui pra sempre da
+      // busca de pendências deste botão.
+      const histPrincipal=`[${_lancctbNomeTributoLegivel(info.descricao).nomeCompleto||info.descricao}] ${l.historico_bancario||''}`.trim();
+      const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ valor_saida: valorTributo, historico_bancario: histPrincipal, origem_importacao: 'tributo_composicao' }).eq('id',l.id);
       if(eUpd){ console.error('Erro ao dividir extrato (tributo):',eUpd); comSugestao++; continue; }
       const { error: eIns } = await _supaClient.from('lancamentos_extrato').insert({
         empresa_eid: eid, conta_bancaria_id: contaId, data_pagamento: l.data_pagamento,
         valor_saida: achou.diferenca, valor_entrada: 0,
-        historico_bancario: `[DIFERENÇA ${info.descricao}] ${l.historico_bancario||''}`.trim(),
+        historico_bancario: `[MULTA/JUROS ${info.descricao}] ${l.historico_bancario||''}`.trim(),
         origem_importacao: 'tributo_diferenca',
         hash_dedup: `tributo_dif_${l.id}_${Date.now()}`,
       });
-      if(eIns){ console.error('Erro ao criar linha de diferença (tributo):',eIns); await _supaClient.from('lancamentos_extrato').update({ valor_saida: valor }).eq('id',l.id); comSugestao++; continue; }
+      if(eIns){ console.error('Erro ao criar linha de diferença (tributo):',eIns); await _supaClient.from('lancamentos_extrato').update({ valor_saida: valor, historico_bancario: l.historico_bancario, origem_importacao: l.origem_importacao }).eq('id',l.id); comSugestao++; continue; }
       l.valor_saida=valorTributo; valor=valorTributo; // daqui pra frente as linhas usam o valor do tributo
+      l.historico_bancario=histPrincipal;
     }
     const regra=regras.find(r=>{
       if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
@@ -23501,7 +23513,7 @@ async function _lancctbProcessarTributos(){
           }
           if(okAll){
             const { error: eU } = await _supaClient.from('lancamentos_extrato')
-              .update({ valor_saida: Math.round((comp[0].valor||0)*100)/100, historico_bancario: histDe(comp[0]) }).eq('id',l.id);
+              .update({ valor_saida: Math.round((comp[0].valor||0)*100)/100, historico_bancario: histDe(comp[0]), origem_importacao: 'tributo_composicao' }).eq('id',l.id);
             if(eU){ okAll=false; console.error('Erro ao ajustar 1ª linha da composição:',eU); }
           }
           if(!okAll && criadas.length){ await _supaClient.from('lancamentos_extrato').delete().in('id',criadas); }
