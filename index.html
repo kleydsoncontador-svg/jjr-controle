@@ -17762,6 +17762,10 @@ let _lancctbNfeParcelaDe='';
 let _lancctbNfeParcelaAte='';
 let _lancctbNfeFiltroStatus='';
 function _lancctbNfeFiltroStatusMudar(v){ _lancctbNfeFiltroStatus=v; _lancctbNfePagina=0; renderLancctbConteudo(); }
+// '' (Todas) | 'financeira' (compra/venda/devolução) | 'outras' (remessa,
+// transferência, bonificação etc — pedido do usuário 12/09/2026).
+let _lancctbNfeFiltroNatureza='';
+function _lancctbNfeFiltroNaturezaMudar(v){ _lancctbNfeFiltroNatureza=v; _lancctbNfePagina=0; renderLancctbConteudo(); }
 // Pedido do usuário 09/09/2026: "aqui vc não colocou filtro" (Valor Bruto/
 // Valor Parcela/Parcela/Qtd Parcelas/Modelo) — mesma linha de filtros,
 // faltavam essas 5 colunas.
@@ -18232,6 +18236,19 @@ function _lancctbExtrairBloco(xml,tag){
   const m=xml.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`,'i'));
   return m?m[1]:null;
 }
+// Classifica a Natureza da Operação (texto livre do <natOp>) em "financeira"
+// (compra/venda/devolução — gera pagamento ou recebimento de verdade) ou
+// não — pedido do usuário 12/09/2026. Contém-match (não igualdade exata)
+// porque a redação varia muito entre emitentes ("VENDA DE PRODUCAO DO
+// ESTABELECIMENTO", "VENDA DE MERCADORIA ADQUIRIDA/RECEBIDA DE TERCEIROS",
+// "COMPRA PARA COMERCIALIZACAO", "DEVOLUCAO DE VENDA"/"DEVOLUÇÃO DE COMPRA"
+// etc.) — sem lista fechada de CFOP porque o <natOp> já é o texto que o
+// próprio emitente escolheu, mais direto de checar que decodificar CFOP.
+function _lancctbNaturezaEhFinanceira(natOp){
+  if(!natOp) return true; // sem essa informação, nunca esconde/exclui por segurança
+  const t=_convMpRemoverAcentos(String(natOp).toUpperCase());
+  return /VENDA|COMPRA/.test(t);
+}
 function _lancctbDirecaoDoCaminho(caminho){
   if(/\/Entrada\//i.test(caminho)||/\/Servico Tomado\//i.test(caminho)||/\/Serviço Tomado\//i.test(caminho)) return 'compra';
   if(/\/Saida\//i.test(caminho)||/\/Servico Prestado\//i.test(caminho)||/\/Serviço Prestado\//i.test(caminho)) return 'venda';
@@ -18264,6 +18281,12 @@ function _lancctbParsearNFeXml(xml){
     cnpj_destinatario:(_lancctbExtrairTag(destBloco,'CNPJ')||_lancctbExtrairTag(destBloco,'CPF')||'').replace(/\D/g,'')||null,
     nome_destinatario:_lancctbExtrairTag(destBloco,'xNome'),
     data_emissao:dataEmissaoBruta.slice(0,10),
+    // Natureza da Operação (<natOp>, texto livre do emitente — "VENDA DE
+    // MERCADORIA", "DEVOLUCAO DE COMPRA", "REMESSA PARA CONSERTO" etc.)
+    // pedido do usuário 12/09/2026: mostrar essa coluna e poder filtrar só
+    // compra/venda/devolução, já que remessa/transferência/bonificação/
+    // amostra grátis etc. nunca geram pagamento nem recebimento de verdade.
+    natureza_operacao: _lancctbExtrairTag(xml,'natOp'),
     valor_total:valorTotal, iss_valor:null, parcelas,
   };
 }
@@ -18338,7 +18361,7 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
       serie:nf.serie, modelo:nf.modelo, cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
       cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao,
       data_emissao:nf.data_emissao||dataCorte||hoje_(), valor_total:nf.valor_total, iss_valor:nf.iss_valor,
-      xml_storage_path:storagePath, status_captura:'xml_completo',
+      xml_storage_path:storagePath, status_captura:'xml_completo', natureza_operacao:nf.natureza_operacao||null,
     },{onConflict: nf.chave_acesso?'empresa_eid,tipo,chave_acesso':'empresa_eid,tipo,cnpj_emitente,numero,serie'}).select('id').single();
     if(nfErro||!nfInserida) return 'erro';
 
@@ -19869,7 +19892,7 @@ async function renderLancctbNotas(aba){
     // volta a ser rápido — o problema de timeout de antes era causado por
     // filtrar tipo/direcao do lado de dentro do join (!inner), não pelo
     // count em si.
-    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor)', { count: 'exact' })
+    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,natureza_operacao)', { count: 'exact' })
     // Filtra pelas colunas PRÓPRIAS de notas_fiscais_parcelas (duplicadas,
     // indexadas em idx_nfp_empresa_tipo_direcao) em vez de notas_fiscais.*
     // (via join !inner) — filtrar pelo lado relacionado ignora esse índice e
@@ -19938,6 +19961,15 @@ async function renderLancctbNotas(aba){
     const v=parseInt(_lancctbNfeFiltroQtdParcelas,10);
     if(!isNaN(v)) _lancctbUltimaLeitura=_lancctbUltimaLeitura.filter(l=>l.qtdParcelas===v);
   }
+  // Natureza da Operação (pedido do usuário 12/09/2026) — mesmo espírito do
+  // filtro de Qtd Parcelas acima: derivado, filtrado client-side dentro da
+  // página já carregada, não é coluna própria pra filtrar direto na query.
+  if(!ehServico&&_lancctbNfeFiltroNatureza){
+    _lancctbUltimaLeitura=_lancctbUltimaLeitura.filter(l=>{
+      const ehFin=_lancctbNaturezaEhFinanceira(l.nf.natureza_operacao);
+      return _lancctbNfeFiltroNatureza==='financeira'?ehFin:!ehFin;
+    });
+  }
 
   const totalPaginas=Math.max(1, Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const destaqueUltima=ultimaNf?`<div style="background:var(--teal-bg);border-left:3px solid var(--teal);border-radius:6px;padding:10px 14px;margin-bottom:14px;font-size:13px">
@@ -19960,7 +19992,7 @@ async function renderLancctbNotas(aba){
         <th style="padding:8px 10px;text-align:right">Valor Parcela</th>
         <th style="padding:8px 10px;text-align:center">Parcela</th>
         <th style="padding:8px 10px;text-align:center">Qtd Parcelas</th>
-        ${ehServico?'<th style="padding:8px 10px;text-align:right">ISS</th>':''}
+        ${ehServico?'<th style="padding:8px 10px;text-align:right">ISS</th>':'<th style="padding:8px 10px;text-align:left">Natureza da Operação</th>'}
         <th style="padding:8px 10px;text-align:left">Modelo</th>
         <th style="padding:8px 10px;text-align:center">Status</th>
         <th style="padding:8px 10px;text-align:center"></th>
@@ -19975,7 +20007,11 @@ async function renderLancctbNotas(aba){
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-valor-parcela" placeholder="🔎 valor" inputmode="decimal" value="${esc(_lancctbNfeFiltroValorParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('valorParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-num-parcela" placeholder="🔎 nº" inputmode="numeric" value="${esc(_lancctbNfeFiltroNumParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('numParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-qtd-parcelas" placeholder="🔎 qtd" inputmode="numeric" value="${esc(_lancctbNfeFiltroQtdParcelas)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('qtdParcelas',this.value)"></th>
-        ${ehServico?'<th style="padding:4px 6px"></th>':''}
+        ${ehServico?'<th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><select class="si" style="width:100%;font-size:11px" onchange="_lancctbNfeFiltroNaturezaMudar(this.value)">
+          <option value="" ${!_lancctbNfeFiltroNatureza?'selected':''}>Todas</option>
+          <option value="financeira" ${_lancctbNfeFiltroNatureza==='financeira'?'selected':''}>Compra/Venda/Devolução</option>
+          <option value="outras" ${_lancctbNfeFiltroNatureza==='outras'?'selected':''}>Outras (remessa, transferência...)</option>
+        </select></th>`}
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-modelo" placeholder="🔎 modelo" value="${esc(_lancctbNfeFiltroModelo)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('modelo',this.value)"></th>
         <th style="padding:4px 6px"><select class="si" data-filtro="nf-status" style="width:100%;font-size:11px" onchange="_lancctbNfeFiltroStatusMudar(this.value)">
           <option value="" ${!_lancctbNfeFiltroStatus?'selected':''}>Todos</option>
@@ -19987,7 +20023,7 @@ async function renderLancctbNotas(aba){
       </tr></thead>
       <tbody>`;
   if(!_lancctbUltimaLeitura.length){
-    html+=`<tr><td colspan="${ehServico?13:12}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
+    html+=`<tr><td colspan="13" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
   } else {
     _lancctbUltimaLeitura.forEach(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
       const statusCor=p.status_conciliacao==='conciliado'?'var(--teal)':p.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
@@ -20001,7 +20037,7 @@ async function renderLancctbNotas(aba){
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(p.valor_parcela||0)}</td>
         <td style="padding:7px 10px;text-align:center">${p.numero_parcela}</td>
         <td style="padding:7px 10px;text-align:center">${qtdParcelas}</td>
-        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:''}
+        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
         <td style="padding:7px 10px;text-align:center"><button class="btn bo bsm" style="font-size:10.5px;padding:3px 6px" title="Editar/dividir a(s) parcela(s) desta NF — use quando o XML veio sem abertura de parcela mas o pagamento real foi parcelado" onclick="abrirLancctbDividirParcelaModal(${p.nf_id})">✂️ Parcela</button></td>
@@ -22500,7 +22536,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
-    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero)')
+    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao)')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
@@ -22798,6 +22834,10 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       // pelo usuário 05/09/2026, Fast Lube). Direção tem que bater sempre,
       // com ou sem CNPJ âncora.
       if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
+      // Pedido do usuário 12/09/2026: remessa/transferência/bonificação/
+      // amostra grátis etc. nunca geram pagamento nem recebimento de
+      // verdade — não pode virar candidata do matching automático.
+      if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao)) return false;
       if(Math.abs(p.valor_parcela-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR_NF) return false;
       if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
       if(cnpjAncora){
@@ -22837,6 +22877,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
+        if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao)) return false;
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
         const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
         return cnpjNf===cnpjAncora;
