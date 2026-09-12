@@ -18790,6 +18790,22 @@ async function _lancctbParsearRelatorioLiquidos(file){
 // NÃO cobre ainda (deixado pra depois): 2ª fonte "Relatórios FOPAG para
 // Contábil", Recibo de Férias, combinação Sispag+Distribuição de Lucros.
 // Pendência que não bater fecha sem mexer.
+// Pedido do usuário 12/09/2026: "esses botões só podem processar o período
+// que estiver ali, estou em agosto então não pode processar 07/2026 dentro
+// do site" — todo botão "Processar..." do Registro Contábil só pode agir
+// nas pendências do período (Data De/Até) que a TELA está mostrando; sem
+// isso, trocar de mês só muda o que é EXIBIDO mas o botão continuava
+// varrendo a conta inteira, resolvendo pendências de outro mês sem o
+// contador estar olhando pra elas. Usa os mesmos _lancctbRegistroDataDe/
+// _lancctbRegistroDataAte já ligados aos campos de filtro da tela.
+function _lancctbAplicarFiltroPeriodo(q,coluna='data_pagamento'){
+  if(_lancctbRegistroDataDe) q=q.gte(coluna,_lancctbRegistroDataDe);
+  if(_lancctbRegistroDataAte) q=q.lte(coluna,_lancctbRegistroDataAte);
+  return q;
+}
+function _lancctbAplicarFiltroPeriodoSe(condicao,q,coluna='data_pagamento'){
+  return condicao?_lancctbAplicarFiltroPeriodo(q,coluna):q;
+}
 async function _lancctbProcessarFopag(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -18808,10 +18824,10 @@ async function _lancctbProcessarFopag(){
     const pastaEmpresa=await _lancctbAcharPastaEmpresaConfiBackup(handleRaiz,eid);
     if(!pastaEmpresa){ toast(`Não achei a pasta "(${eid}) ..." dentro do ConfiBackup.`,'err'); return; }
 
-    const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,historico_bancario')
-      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0));
-    if(!pendencias||!pendencias.length){ toast('Nenhuma pendência de saída nesta conta.','ok'); return; }
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)));
+    if(!pendencias||!pendencias.length){ toast('Nenhuma pendência de saída no período filtrado nesta conta.','ok'); return; }
 
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
@@ -19839,9 +19855,9 @@ async function _lancctbCorrigirParcelasPorFluxo(){
   const btn=document.getElementById('lancctbDividirParcelasFluxoBtn');
   if(btn){ btn.disabled=true; btn.textContent='Verificando…'; }
   try{
-    const { data: fluxoRows } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    const { data: fluxoRows } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('fluxo_caixa_lancamentos')
       .select('id,data,documento_numero,valor_saida,valor_entrada')
-      .eq('empresa_eid',eid).not('documento_numero','is',null));
+      .eq('empresa_eid',eid).not('documento_numero','is',null),'data'));
     const grupos={};
     (fluxoRows||[]).forEach(f=>{
       const m=String(f.documento_numero||'').match(/(\d{3,})\s*\/\s*(\d{1,3})\b/);
@@ -22712,10 +22728,10 @@ async function _lancctbProcessarFluxo(){
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn){ btn.disabled=true; }
   try{
-    const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
-      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente'));
-    if(!pendencias||!pendencias.length){ toast('Nenhuma pendência nesta conta.','ok'); return; }
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')));
+    if(!pendencias||!pendencias.length){ toast('Nenhuma pendência no período filtrado nesta conta.','ok'); return; }
     const { data: fluxoTodo } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
       .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,status_associado,lancamento_extrato_id')
       .eq('empresa_eid',eid));
@@ -22838,14 +22854,20 @@ function _lancctbPopcount(m){ let c=0; while(m){c+=m&1;m>>=1;} return c; }
 // (só tenta NF 1:1 direto, sem usar comprovante como âncora nem cair pra
 // Regra) — os 2 últimos são os botões "Processar Comprovantes"/"Processar
 // Notas Fiscais" do Registro Contábil, pra rodar cada fonte isoladamente.
-async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
+async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restringirPeriodo=false){
   const log=(msg)=>{ if(statusCb) statusCb(msg); };
   log('Carregando pendências…');
 
-  const { data: lancamentos } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+  // restringirPeriodo=true pros botões "Processar..." do Registro Contábil
+  // (pedido do usuário 12/09/2026: trocar de mês na tela não pode deixar o
+  // botão resolver pendência de outro mês sem o contador estar olhando) —
+  // fica false quando quem chama é o reaprendizado automático depois de
+  // salvar uma Regra nova (linha ~22522), que precisa mesmo varrer a conta
+  // inteira pra aplicar a regra recém-criada em qualquer mês pendente.
+  const { data: lancamentos } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
-    .order('data_pagamento',{ascending:true}));
+    .order('data_pagamento',{ascending:true})));
   // Comprovante de Pagamento (saída) e de Recebimento (entrada) vivem em
   // tabelas separadas (decisão do usuário — ver Fase 9) — cada lançamento só
   // pode usar a fonte do seu próprio lado (saída→pagamento, entrada→
@@ -23354,7 +23376,7 @@ async function _lancctbProcessarFonteRegistro(modo){
   const btn=document.getElementById(info.btn);
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn) btn.disabled=true;
-  const resultado=await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,(msg)=>{ if(statusEl) statusEl.textContent=msg; },modo);
+  const resultado=await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,(msg)=>{ if(statusEl) statusEl.textContent=msg; },modo,true);
   // Aplica também as Regras com gatilho de Fluxo de Caixa (antes ficava num
   // botão à parte "Processar Fluxo (Regras)" — o botão "Processar Fluxo"
   // agora só associa, sem aplicar Regra). Silencioso: o toast é do matching.
@@ -23398,10 +23420,10 @@ async function _lancctbProcessarTributos(){
   // 236,35) — reabrindo uma "diferença" em cima de uma linha que já estava
   // correta. Linha nascida de tributo_composicao/tributo_diferenca só se
   // resolve clicando nela e criando a Regra, nunca de novo por este botão.
-  const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+  const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,origem_importacao')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)
-    .not('origem_importacao','in','(tributo_composicao,tributo_diferenca)'));
+    .not('origem_importacao','in','(tributo_composicao,tributo_diferenca)')));
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
     .eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico'));
@@ -23592,9 +23614,9 @@ async function _lancctbCorrigirDataParcelaExistente(){
   const btn=document.getElementById('lancctbCorrigirParcelaBtn');
   if(btn){ btn.disabled=true; btn.textContent='Corrigindo…'; }
   try{
-    const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
+    const { data: linhas } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_contabeis')
       .select('id,cnpj_cpf,historico')
-      .eq('empresa_eid',eid).eq('estornado',false).is('nf_parcela_id',null).not('cnpj_cpf','is',null));
+      .eq('empresa_eid',eid).eq('estornado',false).is('nf_parcela_id',null).not('cnpj_cpf','is',null),'data'));
     const alvo=(linhas||[]).map(l=>{
       const m=(l.historico||'').match(/NF\s+(\S+)\s*-\s*parcela\s*(\d+)/i);
       return m?{ id:l.id, cnpj:l.cnpj_cpf, numero:m[1].replace(/[.,]$/,''), parcela:+m[2] }:null;
@@ -23627,11 +23649,11 @@ async function _lancctbProcessarViaIA(){
   if(btn) btn.disabled=true;
   try{
     if(statusEl) statusEl.textContent='Carregando pendências…';
-    const { data: pendentes } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    const { data: pendentes } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
-      .order('data_pagamento',{ascending:true}));
-    if(!pendentes||!pendentes.length){ toast('Nenhuma pendência nesta conta.','ok'); return; }
+      .order('data_pagamento',{ascending:true})));
+    if(!pendentes||!pendentes.length){ toast('Nenhuma pendência no período filtrado nesta conta.','ok'); return; }
     const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
       .select('id,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero)')
       .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
