@@ -17762,10 +17762,13 @@ let _lancctbNfeParcelaDe='';
 let _lancctbNfeParcelaAte='';
 let _lancctbNfeFiltroStatus='';
 function _lancctbNfeFiltroStatusMudar(v){ _lancctbNfeFiltroStatus=v; _lancctbNfePagina=0; renderLancctbConteudo(); }
-// '' (Todas) | 'financeira' (compra/venda/devolução) | 'outras' (remessa,
-// transferência, bonificação etc — pedido do usuário 12/09/2026).
+// Texto livre (não um bucket fixo) — pedido do usuário 12/09/2026: "esse
+// filtro deve filtrar o que está exatamente escrito, pois não está pegando
+// algumas operações" — a redação do <natOp> varia demais entre emitentes
+// pra um classificador automático de 2 opções dar conta bem; digitando o
+// texto exato (ou um pedaço dele) o contador decide na hora o que quer ver,
+// igual a todo outro filtro de texto desta mesma tabela.
 let _lancctbNfeFiltroNatureza='';
-function _lancctbNfeFiltroNaturezaMudar(v){ _lancctbNfeFiltroNatureza=v; _lancctbNfePagina=0; renderLancctbConteudo(); }
 // Pedido do usuário 09/09/2026: "aqui vc não colocou filtro" (Valor Bruto/
 // Valor Parcela/Parcela/Qtd Parcelas/Modelo) — mesma linha de filtros,
 // faltavam essas 5 colunas.
@@ -17784,6 +17787,7 @@ function _lancctbNfeFiltroDebounced(campo,v){
   else if(campo==='numParcela') _lancctbNfeFiltroNumParcela=v;
   else if(campo==='qtdParcelas') _lancctbNfeFiltroQtdParcelas=v;
   else if(campo==='modelo') _lancctbNfeFiltroModelo=v;
+  else if(campo==='natureza') _lancctbNfeFiltroNatureza=v;
   _lancctbNfePagina=0;
   clearTimeout(_lancctbNfeFiltroTimer);
   _lancctbNfeFiltroTimer=setTimeout(renderLancctbConteudo,350);
@@ -18246,7 +18250,16 @@ function _lancctbExtrairBloco(xml,tag){
 // "COMPRA PARA COMERCIALIZACAO", "DEVOLUCAO DE VENDA"/"DEVOLUÇÃO DE COMPRA"
 // etc.) — sem lista fechada de CFOP porque o <natOp> já é o texto que o
 // próprio emitente escolheu, mais direto de checar que decodificar CFOP.
-function _lancctbNaturezaEhFinanceira(natOp){
+function _lancctbNaturezaEhFinanceira(natOp,modelo){
+  // NFC-e (modelo 65) é SEMPRE venda de verdade ao consumidor final — não
+  // existe NFC-e de remessa/transferência/bonificação (esse tipo de
+  // documento só existe em modelo 55). O <natOp> de NFC-e emitida por
+  // SAT/PDV costuma vir com um texto padronizado genérico tipo "Lançamento
+  // Efetivo de emissão do documento Fiscal Relativo à Operação. Doc Fiscal
+  // Varejo", que nunca contém literalmente "VENDA" — sem essa checagem de
+  // modelo, TODA NFC-e caía errada em "não financeira" (achado real
+  // 12/09/2026, Adelpe).
+  if(String(modelo)==='65') return true;
   if(!natOp) return true; // sem essa informação, nunca esconde/exclui por segurança
   const t=_convMpRemoverAcentos(String(natOp).toUpperCase());
   return /VENDA|COMPRA/.test(t);
@@ -19966,11 +19979,11 @@ async function renderLancctbNotas(aba){
   // Natureza da Operação (pedido do usuário 12/09/2026) — mesmo espírito do
   // filtro de Qtd Parcelas acima: derivado, filtrado client-side dentro da
   // página já carregada, não é coluna própria pra filtrar direto na query.
-  if(!ehServico&&_lancctbNfeFiltroNatureza){
-    _lancctbUltimaLeitura=_lancctbUltimaLeitura.filter(l=>{
-      const ehFin=_lancctbNaturezaEhFinanceira(l.nf.natureza_operacao);
-      return _lancctbNfeFiltroNatureza==='financeira'?ehFin:!ehFin;
-    });
+  // Texto livre, contém-match (não bucket automático) — ver comentário na
+  // declaração de _lancctbNfeFiltroNatureza.
+  if(!ehServico&&_lancctbNfeFiltroNatureza.trim()){
+    const t=_convMpRemoverAcentos(_lancctbNfeFiltroNatureza.trim().toLowerCase());
+    _lancctbUltimaLeitura=_lancctbUltimaLeitura.filter(l=>_convMpRemoverAcentos((l.nf.natureza_operacao||'').toLowerCase()).includes(t));
   }
 
   const totalPaginas=Math.max(1, Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
@@ -19978,7 +19991,9 @@ async function renderLancctbNotas(aba){
     <strong>Última ${ehServico?'NFS-e':'NF-e'} capturada:</strong> nº ${esc(ultimaNf.numero)} — em ${new Date(ultimaNf.created_at).toLocaleDateString('pt-BR')} às ${new Date(ultimaNf.created_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
   </div>`:'';
 
-  let html=`<div style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px">
+  let html=`<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:10px">
+      ${!ehServico?`<span id="lancctbPreencherNaturezaStatus" style="font-size:11px;color:var(--slate)"></span>
+      <button class="btn bo bsm" id="lancctbPreencherNaturezaBtn" onclick="_lancctbPreencherNaturezaOperacao('${aba.tipoDoc}','${aba.direcaoNf}')" title="Reabre o XML já salvo de cada NF sem Natureza da Operação preenchida e completa sozinho">🔄 Preencher Natureza (NFs já importadas)</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
     <div style="margin-bottom:8px">${_lancctbPagGenericaHtml(_lancctbNfePagina,count,from,to,totalPaginas,'_lancctbNfePagina','renderLancctbConteudo')}</div>
@@ -20009,11 +20024,7 @@ async function renderLancctbNotas(aba){
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-valor-parcela" placeholder="🔎 valor" inputmode="decimal" value="${esc(_lancctbNfeFiltroValorParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('valorParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-num-parcela" placeholder="🔎 nº" inputmode="numeric" value="${esc(_lancctbNfeFiltroNumParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('numParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-qtd-parcelas" placeholder="🔎 qtd" inputmode="numeric" value="${esc(_lancctbNfeFiltroQtdParcelas)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('qtdParcelas',this.value)"></th>
-        ${ehServico?'<th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><select class="si" style="width:100%;font-size:11px" onchange="_lancctbNfeFiltroNaturezaMudar(this.value)">
-          <option value="" ${!_lancctbNfeFiltroNatureza?'selected':''}>Todas</option>
-          <option value="financeira" ${_lancctbNfeFiltroNatureza==='financeira'?'selected':''}>Compra/Venda/Devolução</option>
-          <option value="outras" ${_lancctbNfeFiltroNatureza==='outras'?'selected':''}>Outras (remessa, transferência...)</option>
-        </select></th>`}
+        ${ehServico?'<th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><input class="si" data-filtro="nf-natureza" placeholder="🔎 filtrar" value="${esc(_lancctbNfeFiltroNatureza)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('natureza',this.value)"></th>`}
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-modelo" placeholder="🔎 modelo" value="${esc(_lancctbNfeFiltroModelo)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('modelo',this.value)"></th>
         <th style="padding:4px 6px"><select class="si" data-filtro="nf-status" style="width:100%;font-size:11px" onchange="_lancctbNfeFiltroStatusMudar(this.value)">
           <option value="" ${!_lancctbNfeFiltroStatus?'selected':''}>Todos</option>
@@ -20039,7 +20050,7 @@ async function renderLancctbNotas(aba){
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(p.valor_parcela||0)}</td>
         <td style="padding:7px 10px;text-align:center">${p.numero_parcela}</td>
         <td style="padding:7px 10px;text-align:center">${qtdParcelas}</td>
-        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
+        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
         <td style="padding:7px 10px;text-align:center"><button class="btn bo bsm" style="font-size:10.5px;padding:3px 6px" title="Editar/dividir a(s) parcela(s) desta NF — use quando o XML veio sem abertura de parcela mas o pagamento real foi parcelado" onclick="abrirLancctbDividirParcelaModal(${p.nf_id})">✂️ Parcela</button></td>
@@ -20062,6 +20073,57 @@ async function renderLancctbNotas(aba){
 // já usado no site: XLSX.utils.aoa_to_sheet + XLSX.writeFile), já aberto
 // pra edição no Excel — não é o hack de HTML disfarçado de .xls usado por
 // exportarPagina() nas telas antigas.
+// Preenche natureza_operacao nas NFs já importadas ANTES dessa coluna
+// existir — pedido do usuário 12/09/2026: "dá pra colocar informação de
+// forma automática naquelas NF que eu já tinha importado?". Reabre o XML
+// já salvo no Storage (nf-xmls) de cada NF sem natureza_operacao, extrai o
+// <natOp> (mesmo parser de sempre) e atualiza só essa coluna — não mexe em
+// mais nada da NF. Roda por empresa+aba (não é um job global tocando todo
+// mundo de uma vez), baixa em lotes de 10 em paralelo pra não travar.
+async function _lancctbPreencherNaturezaOperacao(tipoDoc,direcaoNf){
+  const eid=_lancctbEidAtual;
+  const btn=document.getElementById('lancctbPreencherNaturezaBtn');
+  const statusEl=document.getElementById('lancctbPreencherNaturezaStatus');
+  if(btn) btn.disabled=true;
+  if(statusEl) statusEl.textContent='Buscando NFs sem Natureza da Operação…';
+  const { data: faltantes } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais')
+    .select('id,xml_storage_path').eq('empresa_eid',eid).eq('tipo',tipoDoc).eq('direcao',direcaoNf)
+    .is('natureza_operacao',null).not('xml_storage_path','is',null));
+  if(!faltantes||!faltantes.length){
+    if(btn) btn.disabled=false;
+    if(statusEl) statusEl.textContent='';
+    toast('Todas as NFs já têm Natureza da Operação preenchida.','ok');
+    return;
+  }
+  let atualizadas=0, semNatOp=0, erroDownload=0;
+  const TAM_LOTE=10;
+  for(let i=0;i<faltantes.length;i+=TAM_LOTE){
+    if(statusEl) statusEl.textContent=`Processando ${Math.min(i+TAM_LOTE,faltantes.length)}/${faltantes.length}…`;
+    const lote=faltantes.slice(i,i+TAM_LOTE);
+    const resultados=await Promise.all(lote.map(async nf=>{
+      try{
+        const { data: blob, error } = await _supaClient.storage.from('nf-xmls').download(nf.xml_storage_path);
+        if(error||!blob) return null;
+        const xml=await blob.text();
+        const natOp=_lancctbExtrairTag(xml,'natOp');
+        return natOp?{id:nf.id,natureza_operacao:natOp}:{id:nf.id,natureza_operacao:null,semNatOp:true};
+      } catch(e){ return {id:nf.id,erro:true}; }
+    }));
+    const paraAtualizar=resultados.filter(r=>r&&r.natureza_operacao);
+    resultados.forEach(r=>{ if(r&&r.semNatOp) semNatOp++; if(r&&r.erro) erroDownload++; if(!r) erroDownload++; });
+    if(paraAtualizar.length){
+      await Promise.all(paraAtualizar.map(r=>_supaClient.from('notas_fiscais').update({natureza_operacao:r.natureza_operacao}).eq('id',r.id)));
+      atualizadas+=paraAtualizar.length;
+    }
+  }
+  if(btn) btn.disabled=false;
+  if(statusEl) statusEl.textContent='';
+  const partes=[`${atualizadas} NF(s) atualizada(s)`];
+  if(semNatOp) partes.push(`${semNatOp} sem <natOp> no XML`);
+  if(erroDownload) partes.push(`${erroDownload} com erro ao reabrir o XML`);
+  toast(partes.join(' — ')+'.','ok');
+  renderLancctbConteudo();
+}
 function exportarLancctbNotasExcel(abaId){
   const aba=LANCCTB_ABAS.find(a=>a.id===abaId);
   if(!aba||!_lancctbUltimaLeitura.length){ toast('Nada para exportar nesta página.','err'); return; }
@@ -22622,7 +22684,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
     .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
-    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao)')
+    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo)')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
@@ -22923,7 +22985,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       // Pedido do usuário 12/09/2026: remessa/transferência/bonificação/
       // amostra grátis etc. nunca geram pagamento nem recebimento de
       // verdade — não pode virar candidata do matching automático.
-      if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao)) return false;
+      if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
       if(Math.abs(p.valor_parcela-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR_NF) return false;
       if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
       if(cnpjAncora){
@@ -22963,7 +23025,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo'){
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
-        if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao)) return false;
+        if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
         const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
         return cnpjNf===cnpjAncora;
