@@ -17876,11 +17876,13 @@ function renderLancctbLista(){
 
 function abrirLancctbEmpresa(eid){
   _lancctbEidAtual=String(eid);
-  // Se "NF-e Entrada" estiver oculta pra essa empresa (config de abas
+  // Se "Registro Contábil" estiver oculta pra essa empresa (config de abas
   // visíveis), abre na 1ª aba que sobrou visível em vez de tentar mostrar
-  // uma aba escondida.
+  // uma aba escondida. Pedido do usuário 12/09/2026: abrir direto em
+  // "Registro Contábil" (era "NF-e Entrada") — é a tela que ele realmente
+  // usa toda vez que entra numa empresa.
   const ocultasAbertura=new Set(_lancctbAbasOcultasGet(String(eid)));
-  _lancctbAbaAtiva=ocultasAbertura.has('nfe-entrada')?(LANCCTB_ABAS.find(a=>!ocultasAbertura.has(a.id))?.id||'nfe-entrada'):'nfe-entrada';
+  _lancctbAbaAtiva=ocultasAbertura.has('registro')?(LANCCTB_ABAS.find(a=>!ocultasAbertura.has(a.id))?.id||'registro'):'registro';
   // Ponto de partida dos filtros de mês = Fechamento Atual (pedido do
   // usuário, 05/09/2026: não quer ter que selecionar o período toda vez
   // que abre a empresa) — navegação livre ‹ › continua funcionando normal
@@ -20160,6 +20162,7 @@ async function renderLancctbPlanoContas(){
       <button class="btn bp bsm" onclick="abrirLancctbContaModal()">➕ Nova Conta</button>
       <button class="btn bo bsm" onclick="abrirLancctbImportPlanoModal()">⬆ Importar Excel</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbPlanoExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbPlanoContas()" title="Apaga TODAS as contas desta empresa — só as que não têm nenhum vínculo (agência bancária, regra ou lançamento já gerado)">🗑️ Excluir todas as contas</button>
     </div>
   </div>
   <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:12px;flex-wrap:wrap">
@@ -20332,6 +20335,89 @@ function exportarLancctbPlanoExcel(){
   XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Plano de Contas');
   const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
   XLSX.writeFile(wb,`PlanoContas_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+}
+// Excluir TODAS as contas do Plano (pedido do usuário 12/09/2026: "quero
+// poder excluir todas as contas do plano de contas, e poder subir um
+// novo" — hoje "Importar Excel" só faz upsert por número de conta, nunca
+// remove as que não existem mais no arquivo novo).
+//
+// NUNCA apaga uma conta com vínculo real (agência bancária, regra, linha
+// de regra rateada ou lançamento contábil já gerado) — isso quebraria
+// dados históricos de verdade. Em vez de travar tudo por causa de 1 conta
+// vinculada, calcula sozinho o que PODE ser apagado com segurança e avisa
+// quantas ficaram de fora e por quê; contas-pai de alguma conta vinculada
+// também ficam de fora (senão a FK de hierarquia quebraria).
+let _lancctbExclusaoPlanoContasQtd=0;
+async function excluirLancctbPlanoContas(){
+  const eid=_lancctbEidAtual;
+  const { count } = await _supaClient.from('plano_contas').select('id',{count:'exact',head:true}).eq('empresa_eid',eid);
+  if(!count){ toast('Nenhuma conta cadastrada nesta empresa.','err'); return; }
+  _lancctbExclusaoTipo='plano-contas';
+  _lancctbExclusaoPlanoContasQtd=count;
+  document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
+    `Isso vai <strong>apagar permanentemente</strong> as contas do Plano de Contas desta empresa (até <strong>${count}</strong> conta(s)) — contas com agência bancária, regra ou lançamento contábil já vinculado NÃO são apagadas (o site avisa quantas ficaram de fora). Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${count}</strong>:`;
+  document.getElementById('lancctbConfirmarExclusaoInput').value='';
+  openModal('mLancctbConfirmarExclusao');
+}
+async function _lancctbExecutarExclusaoPlanoContas(){
+  const input=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
+  if(input!==String(_lancctbExclusaoPlanoContasQtd)){ toast('Número digitado não confere.','err'); return; }
+  const eid=_lancctbEidAtual;
+  const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
+  btn.disabled=true; btn.textContent='Verificando vínculos…';
+
+  const { data: todasContas } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,conta_pai_id,grau').eq('empresa_eid',eid));
+  const contas=todasContas||[];
+  const todosIds=contas.map(c=>c.id);
+  const bloqueados=new Set();
+  if(todosIds.length){
+    const marcarBloqueados=async(tabela,coluna)=>{
+      for(let i=0;i<todosIds.length;i+=200){
+        const lote=todosIds.slice(i,i+200);
+        const { data } = await _supaClient.from(tabela).select(coluna).in(coluna,lote);
+        (data||[]).forEach(r=>{ if(r[coluna]!=null) bloqueados.add(r[coluna]); });
+      }
+    };
+    await marcarBloqueados('agencias_bancarias','conta_contabil_id');
+    await marcarBloqueados('regras_matching','conta_contabil_id');
+    await marcarBloqueados('regras_matching_linhas','conta_contabil_id');
+    await marcarBloqueados('lancamentos_contabeis','conta_contabil_id');
+  }
+  // Propaga o bloqueio pra cima na hierarquia: apagar uma conta-pai enquanto
+  // uma conta-filha vinculada continua existindo quebraria a FK de
+  // conta_pai_id — então toda ANCESTRAL de uma conta bloqueada também fica
+  // de fora, por segurança (nunca o contrário: filha de conta bloqueada
+  // pode ser apagada normalmente, ela não impede nada).
+  const paiPorId={}; contas.forEach(c=>{ paiPorId[c.id]=c.conta_pai_id; });
+  let mudou=true;
+  while(mudou){
+    mudou=false;
+    bloqueados.forEach(id=>{
+      const pai=paiPorId[id];
+      if(pai!=null&&!bloqueados.has(pai)){ bloqueados.add(pai); mudou=true; }
+    });
+  }
+  const paraApagar=contas.filter(c=>!bloqueados.has(c.id)).sort((a,b)=>(b.grau||0)-(a.grau||0));
+  if(!paraApagar.length){
+    btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
+    toast(`Nenhuma conta pôde ser apagada — todas as ${contas.length} têm algum vínculo (direto ou como conta-pai de uma vinculada).`,'err');
+    return;
+  }
+  btn.textContent=`Apagando 0/${paraApagar.length}…`;
+  const idsParaApagar=paraApagar.map(c=>c.id);
+  const { error } = await _lancctbEmLotesDb(idsParaApagar,200,async lote=>{
+    btn.textContent=`Apagando…`;
+    return _supaClient.from('plano_contas').delete().in('id',lote);
+  });
+  btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
+  if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
+  const qtdBloqueadas=contas.length-paraApagar.length;
+  toast(qtdBloqueadas
+    ? `${paraApagar.length} conta(s) apagada(s) — ${qtdBloqueadas} mantida(s) por ter vínculo (agência/regra/lançamento) ou ser conta-pai de uma vinculada.`
+    : `${paraApagar.length} conta(s) apagada(s) com sucesso.`,'ok');
+  closeModal('mLancctbConfirmarExclusao');
+  _lancctbPlanoPagina=0;
+  renderLancctbPlanoContas();
 }
 function abrirLancctbImportPlanoModal(){
   document.getElementById('lancctbPlanoArquivo').value='';
@@ -27520,6 +27606,7 @@ function _lancctbExecutarExclusaoGenerica(){
   if(_lancctbExclusaoTipo==='comprovantes-receb') return _lancctbExecutarExclusaoComprovantesReceb();
   if(_lancctbExclusaoTipo==='comprovantes-salarios') return _lancctbExecutarExclusaoComprovantesSalarios();
   if(_lancctbExclusaoTipo==='fluxo') return _lancctbExecutarExclusaoFluxo();
+  if(_lancctbExclusaoTipo==='plano-contas') return _lancctbExecutarExclusaoPlanoContas();
   return _lancctbExecutarExclusaoExtrato();
 }
 let _lancctbExclusaoComprovQtd=0;
