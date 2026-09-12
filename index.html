@@ -19308,7 +19308,7 @@ async function _lancctbAtualizarSugestoesTributos(){
   // botão de sugestão. Aplica sozinho (mesmo caminho de _lancctbUsarSugestaoTributo)
   // e só mostra o box de sugestões quando há 2+ (aí sim precisa escolher).
   if(encontrados.length===1){
-    area.innerHTML='<div style="font-size:12px;color:var(--slate);margin-bottom:10px">📄 Guia de tributo encontrada — aplicando rateio automaticamente…</div>';
+    area.innerHTML='<div style="font-size:12px;color:var(--slate);margin-bottom:10px">📄 Guia de tributo encontrada — aplicando automaticamente…</div>';
     await _lancctbUsarSugestaoTributo(0);
     area.innerHTML='';
     return;
@@ -19372,36 +19372,54 @@ async function _lancctbUsarSugestaoTributo(idx){
   };
 
   if(darf&&darf.itens.length>1){
-    // Guia com 2+ impostos: liga o rateio e recria as linhas do zero (uma
-    // por imposto encontrado), já com histórico e valor preenchidos — só
-    // falta o usuário escolher a Conta Contábil de cada um.
-    _lancctbRateioAtivo=true;
-    document.getElementById('lancctbRegraRateioCheckbox').checked=true;
-    document.getElementById('lancctbRegraContaUnicaWrap').style.display='none';
-    document.getElementById('lancctbRegraRateioWrap').style.display='';
-    _lancctbRateioRowIds=[];
-    darf.itens.forEach(()=>{ _lancctbRateioRowIds.push(_lancctbRateioProximoId++); });
-    _lancctbRateioRenderLinhas();
-    darf.itens.forEach((item,i)=>{
-      const rowId=_lancctbRateioRowIds[i];
-      const hist=document.getElementById('lancctbRateioHistorico_'+rowId);
-      if(hist) hist.value=textoHistoricoTributo(item.denominacao,item.codigo);
-      const val=document.getElementById('lancctbRateioValor_'+rowId);
-      if(val) val.value=String(item.valor).replace('.',',');
-    });
-    _lancctbRateioAtualizarTotal();
-    document.getElementById('lancctbRegraDescricao').value=`Tributos${competenciaPdf?' '+competenciaPdf:''} - ${darf.itens.map(i=>i.denominacao).join('/')}`;
-    // Pedido do usuário 09/09/2026: o campo "Texto que deve aparecer no
-    // histórico bancário" ficava com o texto CRU do banco (ex: "SISPAG TRIB
-    // COD BARRAS... CB 00.394.460/0058-87" — código de barras único daquela
-    // guia, muda todo mês) — e o botão "Processar Tributos" nem compara
-    // contra o histórico bancário, compara contra o NOME DO ARQUIVO do PDF
-    // (ver _lancctbProcessarTributos). Sobrescreve aqui com um token
-    // estável do nome do arquivo (ex: "DCTFWEB"), que SIM se repete todo
-    // mês — sem isso, a regra nunca mais batia sozinha.
-    const nomeLegivelDarf=_lancctbNomeTributoLegivel(info.descricao);
-    if(nomeLegivelDarf.token) document.getElementById('lancctbRegraHistoricoGatilho').value=nomeLegivelDarf.token;
-    toast(`${darf.itens.length} impostos encontrados no PDF — histórico e valor já preenchidos. Escolha a Conta Contábil de cada linha.`,'ok');
+    // Pedido do usuário 12/09/2026: "sem rateio por dentro... já faça na
+    // tela de registro" — em vez de ligar o rateio DENTRO deste modal,
+    // divide o próprio lançamento do extrato em N linhas pendentes (uma
+    // por imposto), igual ao que "Processar Tributos" já faz quando ainda
+    // não existe Regra (ver _lancctbProcessarTributos) — assim cada
+    // imposto vira uma linha própria e clicável no Registro Contábil, e o
+    // usuário cria uma Regra SIMPLES pra cada uma (clica na linha do PIS,
+    // cria a regra; clica na linha do COFINS, cria a outra).
+    const r=_lancctbRegraExtratoAlvo;
+    const valorLinha=r.valor_saida||r.valor_entrada;
+    const somaItens=Math.round(darf.itens.reduce((s,it)=>s+it.valor,0)*100)/100;
+    if(Math.abs(somaItens-valorLinha)>LANCCTB_MATCH_TOLERANCIA_VALOR){
+      toast('A soma dos impostos do PDF não bate com o valor do lançamento — confira manualmente.','err');
+      return;
+    }
+    const histDe=(it)=>`[${textoHistoricoTributo(it.denominacao,it.codigo)}] ${r.historico_bancario||''}`.trim();
+    const criadas=[];
+    let okAll=true;
+    for(let k=1;k<darf.itens.length;k++){
+      const it=darf.itens[k];
+      const { data: novoRow, error: eI } = await _supaClient.from('lancamentos_extrato').insert({
+        empresa_eid:_lancctbEidAtual, conta_bancaria_id:r.conta_bancaria_id, data_pagamento:r.data_pagamento,
+        valor_saida: r.valor_saida>0?Math.round(it.valor*100)/100:0,
+        valor_entrada: r.valor_entrada>0?Math.round(it.valor*100)/100:0,
+        historico_bancario: histDe(it),
+        origem_importacao:'tributo_composicao',
+        hash_dedup:`tributo_comp_${r.id}_${k}_${Date.now()}`,
+      }).select('id').single();
+      if(eI){ okAll=false; console.error('Erro ao dividir composição do tributo:',eI); break; }
+      criadas.push(novoRow.id);
+    }
+    if(okAll){
+      const primeiro=darf.itens[0];
+      const { error: eU } = await _supaClient.from('lancamentos_extrato').update({
+        valor_saida: r.valor_saida>0?Math.round(primeiro.valor*100)/100:0,
+        valor_entrada: r.valor_entrada>0?Math.round(primeiro.valor*100)/100:0,
+        historico_bancario: histDe(primeiro),
+      }).eq('id',r.id);
+      if(eU){ okAll=false; console.error('Erro ao ajustar 1ª linha da composição:',eU); }
+    }
+    if(!okAll){
+      if(criadas.length) await _supaClient.from('lancamentos_extrato').delete().in('id',criadas);
+      toast('Erro ao dividir a Guia em linhas — veja o console.','err');
+      return;
+    }
+    toast(`Guia dividida em ${darf.itens.length} linhas (uma por imposto) — clique em cada uma pra criar a Regra.`,'ok');
+    closeModal('mLancctbRegra');
+    renderLancctbRegistroContabil();
     return;
   }
 
