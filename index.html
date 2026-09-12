@@ -2386,7 +2386,8 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     </div>
     <div class="ma" id="lancctbAplicUploadAcoes">
       <button class="btn bo" onclick="_lancctbAplicUploadFechar()">Cancelar</button>
-      <button class="btn bp" id="lancctbAplicUploadBtnExtrair" onclick="_lancctbAplicUploadExtrair()">▶ Extrair</button>
+      <button class="btn bo bsm btn-ia-gemini" id="lancctbAplicUploadBtnIa" onclick="_lancctbAplicUploadExtrair(true)">🤖 Usar IA Gemini</button>
+      <button class="btn bp" id="lancctbAplicUploadBtnExtrair" onclick="_lancctbAplicUploadExtrair(false)">▶ Extrair (padrão, sem IA)</button>
     </div>
   </div>
 </div>
@@ -20951,7 +20952,7 @@ async function renderLancctbAplicacoes(){
         </div>
         <div style="display:flex;gap:6px;flex-wrap:wrap">
           <button class="btn bp bsm" onclick="abrirLancctbAplicacaoMovimentoModal(${a.id})">+ Lançar Movimento</button>
-          <button class="btn bo bsm btn-ia-gemini" onclick="abrirLancctbAplicUploadModal(${a.id})" title="Sobe um PDF com várias Aplicações e Resgates (ex: extrato de aplicações do banco) e lança tudo de uma vez, com IA Gemini">⬆ Importar PDF (IA Gemini)</button>
+          <button class="btn bo bsm" onclick="abrirLancctbAplicUploadModal(${a.id})" title="Sobe um PDF com várias Aplicações e Resgates (ex: extrato de aplicações do banco) e lança tudo de uma vez — sem IA por padrão, com opção de tentar com IA Gemini">⬆ Importar PDF</button>
           <button class="btn bo bsm" onclick="abrirLancctbAplicacaoModal(${a.id})">✎ Editar</button>
           <button class="btn bo bsm" style="color:#dc2626" onclick="excluirLancctbAplicacao(${a.id})">🗑️ Excluir</button>
         </div>
@@ -21156,11 +21157,13 @@ function abrirLancctbAplicUploadModal(aplicacaoId){
   document.getElementById('lancctbAplicUploadTitulo').textContent=`Importar PDF — ${a.nome}`;
   document.getElementById('lancctbAplicUploadArquivo').value='';
   document.getElementById('lancctbAplicUploadStatus').textContent='';
-  document.getElementById('lancctbAplicUploadBody').innerHTML=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Sobe o extrato de aplicações do banco (ex: modelo Bradesco, com as seções "Aplicações" e "Resgates/Vencimentos") — a IA lê a tabela e você aponta qual coluna é qual. Da 2ª vez em diante, um arquivo do mesmo padrão entra sozinho.</div>
+  document.getElementById('lancctbAplicUploadBody').innerHTML=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Aceita o "Extrato Padrão" do Bradesco (leitura direta, sem IA — ex: modelo Invest Fácil, com as seções "Aplicações" e "Resgates/Vencimentos") ou, se não reconhecer, use "IA Gemini" e aponte qual coluna é qual. Da 2ª vez em diante, um arquivo do mesmo padrão entra sozinho.</div>
     <input type="file" id="lancctbAplicUploadArquivo" accept=".pdf" class="fi">
     <div id="lancctbAplicUploadStatus" style="font-size:12px;color:var(--slate);margin-top:8px"></div>`;
   const btnExtrair=document.getElementById('lancctbAplicUploadBtnExtrair');
   if(btnExtrair){ btnExtrair.style.display=''; btnExtrair.disabled=false; }
+  const btnIa=document.getElementById('lancctbAplicUploadBtnIa');
+  if(btnIa){ btnIa.style.display=''; btnIa.disabled=false; }
   const btnSalvar=document.getElementById('lancctbAplicUploadBtnSalvar');
   if(btnSalvar) btnSalvar.remove();
   const btnConfirmarValor=document.getElementById('lancctbAplicUploadBtnConfirmarValor');
@@ -21188,16 +21191,39 @@ function _lancctbAplicUploadFechar(){
   document.getElementById('lancctbAplicUploadChip').style.display='none';
   _lancctbAplicUploadFechar();
 }
-async function _lancctbAplicUploadExtrair(){
+async function _lancctbAplicUploadExtrair(usarIA){
   const {aplicacaoId}=_lancctbAplicUploadContexto;
   const file=document.getElementById('lancctbAplicUploadArquivo').files[0];
   if(!file){ toast('Selecione um arquivo','err'); return; }
   const statusEl=document.getElementById('lancctbAplicUploadStatus');
   const btn=document.getElementById('lancctbAplicUploadBtnExtrair');
-  btn.disabled=true;
-  statusEl.textContent='Lendo arquivo (pode levar alguns segundos)…';
+  const btnIa=document.getElementById('lancctbAplicUploadBtnIa');
+  if(btn) btn.disabled=true;
+  if(btnIa) btnIa.disabled=true;
+  statusEl.textContent=usarIA?'Chamando IA Gemini (pode levar alguns segundos)…':'Lendo arquivo (padrão, sem IA)…';
   try{
-    const extraido=await _convAplicFinExtrairGenerico(file);
+    // Pedido do usuário 12/09/2026: "precisa ler sem IA, mesmo esquema um
+    // botão, e dentro com opção sem e com IA" — mesmo padrão já usado no
+    // Extrato Bancário (leitor determinístico primeiro, IA como alternativa
+    // explícita, nunca automática). _lancctbAplicParseBradescoPadraoDet
+    // reaproveita a mesma extração de itens/coluna já validada em
+    // _aplicfinParseBradescoPadrao (Ganhos/Rendimentos), devolvendo cada
+    // linha de Aplicação/Resgate no mesmo formato {colunas,linhas} que a
+    // IA produzia — o resto do pipeline abaixo (auto-mapeamento, etc.)
+    // continua idêntico, não precisou mudar nada.
+    let extraido;
+    if(usarIA){
+      extraido=await _convAplicFinExtrairGenerico(file);
+    } else {
+      extraido=await _lancctbAplicParseBradescoPadraoDet(file);
+      if(!extraido){
+        statusEl.textContent='';
+        if(btn) btn.disabled=false;
+        if(btnIa) btnIa.disabled=false;
+        toast('Não reconheci esse layout automaticamente (só "Extrato Padrão" Bradesco por enquanto) — tente "Usar IA Gemini".','err');
+        return;
+      }
+    }
     _lancctbAplicUploadExtraido=extraido;
     const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
     const mapSalvo=a?.mapeamento_colunas_ia;
@@ -21235,7 +21261,8 @@ async function _lancctbAplicUploadExtrair(){
       if(colBrutoNome||colLiquidoNome){
         statusEl.textContent='';
         document.getElementById('lancctbAplicUploadBody').innerHTML=_renderLancctbAplicConfirmarValorForm(a,colBrutoNome,colLiquidoNome);
-        btn.style.display='none';
+        if(btn) btn.style.display='none';
+        if(btnIa) btnIa.style.display='none';
         return;
       }
       statusEl.textContent='Modelo de PDF reconhecido automaticamente — lançando…';
@@ -21243,11 +21270,13 @@ async function _lancctbAplicUploadExtrair(){
       return;
     }
     document.getElementById('lancctbAplicUploadBody').innerHTML=_renderLancctbAplicMapeamentoForm(a,extraido,mapSalvo);
-    btn.style.display='none';
+    if(btn) btn.style.display='none';
+    if(btnIa) btnIa.style.display='none';
   }catch(e){
     statusEl.textContent='Erro: '+e.message;
     toast('Erro ao extrair: '+e.message,'err');
-    btn.disabled=false;
+    if(btn) btn.disabled=false;
+    if(btnIa) btnIa.disabled=false;
   }
 }
 // Reconhece o padrão "Aplic. Invest Fácil" (Bradesco) e modelos parecidos
@@ -31468,6 +31497,79 @@ async function _aplicfinParseBradescoPadrao(pdf){
     fingerprint:_aplicfinFingerprint('BRADESCO',M,['EXTRATO PADRAO','POSICAO PARA O PRODUTO','SALDO ANTERIOR EM','APLICACOES','RESGATES / VENCIMENTOS','SALDO EM','VLR PRINC','VLR BRUTO','RENDA TOTAL','VLR IOF','VLR IRRF','VLR LIQUIDO','RENDA BRUTA PER']),
     productMode:'single', products:produto?[produto]:[], productFilter:null, sources, validations, warnings, pageCount:pdf.numPages,
   };
+}
+
+// Leitor SEM IA do "Extrato Padrão" Bradesco (Invest Fácil e afins) pro
+// módulo "Aplicações Financeiras" de Lançamentos Contábeis — pedido do
+// usuário 12/09/2026: "aqui, precisa ler sem IA, mesmo esquema um botão, e
+// dentro com opção sem e com IA". Reaproveita a MESMA extração de itens/
+// linhas/faixas de coluna já validada acima em _aplicfinParseBradescoPadrao
+// (usado em Ganhos/Rendimentos pra esse layout) — só que em vez de agregar
+// os TOTAIS de cada seção, devolve CADA linha de Aplicação/Resgate, no
+// mesmo formato {colunas,linhas} que o extrator genérico via IA
+// (_convAplicFinExtrairGenerico) já produzia. Como as colunas usam os
+// nomes REAIS do PDF ("Dt. Aplicação", "Vlr Princ. (R$)" etc.),
+// _lancctbAplicDetectarMapeamentoAutomatico já reconhece tudo sozinho —
+// nenhuma mudança precisou entrar no resto do pipeline (mapear/aplicar).
+async function _lancctbAplicParseBradescoPadraoDet(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let itensTodos=[], texto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const its=_aplicfinItens(page,content).map(i=>({...i,y:i.y+p*100000}));
+    itensTodos=itensTodos.concat(its);
+    texto+=' '+its.map(i=>i.s).join(' ');
+  }
+  texto=texto.replace(/\s+/g,' ');
+  if(!/Extrato\s+Padr[ãa]o/i.test(texto)||!/Posi[çc][ãa]o\s+para\s+o\s+produto:/i.test(texto)) return null;
+
+  const bands=[
+    ['Vlr Princ. (R$)',   390, 478],
+    ['Vlr. Bruto (R$)',   478, 558],
+    ['Renda Total(R$)',   558, 668],
+    ['Vlr. IOF (R$)',     668, 745],
+    ['Vlr. IRRF (R$)',    745, 818],
+    ['Vlr Líquido(R$)',   818, 900],
+  ];
+  const faixa=x=>{ for(const [k,a,b] of bands){ if(x>a&&x<=b) return k; } return null; };
+  const SECOES=[
+    [/^Saldo\s+Anterior\s+em/i,'ignorar'],
+    [/^Aplica[çc][õo]es\b/i,'aplicacoes'],
+    [/^Resgates\s*(\/|e)?\s*Vencimentos/i,'resgates'],
+    [/^Saldo\s+em\b/i,'ignorar'],
+  ];
+  const colunas=['Dt. Aplicação','Dt. Vencto','Dt. Resgate / Carência','Taxa (%)',...bands.map(b=>b[0])];
+  const linhasPdf=_aplicfinLinhas(itensTodos,3);
+  let secAtual=null;
+  const resultado=[];
+  linhasPdf.forEach(L=>{
+    const txt=L.map(i=>i.s).join(' ').trim();
+    for(const [re,id] of SECOES){ if(re.test(txt)){ secAtual=id; return; } }
+    // Só Aplicações/Resgates viram movimento de verdade — Saldo Anterior/
+    // Saldo Final são posição (foto do saldo), não uma transação.
+    if(secAtual!=='aplicacoes'&&secAtual!=='resgates') return;
+    if(L[0]&&/^Total$/i.test(L[0].s)&&L[0].x<60) return; // linha de agregado da seção, não um lançamento
+    // As 3 datas + Taxa vêm sempre nessa ordem da esquerda pra direita,
+    // antes da faixa de valores (x<390) — "Dt. Resgate/Carência" aparece
+    // como "-" literal quando a linha é de Aplicação (ainda não resgatada).
+    const preValor=L.filter(i=>i.x<390).sort((a,b)=>a.x-b.x);
+    if(preValor.length<4) return; // linha incompleta/ruído (ex: cabeçalho repetido) — ignora
+    const linha={
+      'Dt. Aplicação': preValor[0].s,
+      'Dt. Vencto': preValor[1].s,
+      'Dt. Resgate / Carência': preValor[2].s==='-'?'':preValor[2].s,
+      'Taxa (%)': _convCobrParseValor(preValor[3].s),
+    };
+    L.filter(i=>i.x>390&&_aplicfinEhNum(i.s)).forEach(i=>{
+      const k=faixa(i.x);
+      if(k) linha[k]=_convCobrParseValor(i.s);
+    });
+    resultado.push(linha);
+  });
+  if(!resultado.length) return null;
+  return { colunas, linhas: resultado };
 }
 
 // ── MODELO 3: Bradesco "Extrato de CDBs/LETRAS" MULTIPRODUTO ──
