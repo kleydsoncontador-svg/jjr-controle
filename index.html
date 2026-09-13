@@ -19227,17 +19227,56 @@ async function _lancctbExtrairComposicaoDamsp(pdf){
   const valorTotal=_lancctbParseValorBR2(total.str);
   return { itens:itensComp, valorTotal, competencia:null };
 }
+// Pedido do usuário 13/09/2026: guia de tributo escaneada (imagem, sem
+// texto selecionável — achado real: "GuiaPagamento_072026_PIS_COFINS" de
+// agosto/2026 da Accurare, 331KB só de imagem) não tinha nenhum caminho de
+// leitura — nem sem IA (nada pra extrair) nem com IA (não existia). Mesmo
+// padrão já usado no Extrato Bancário/Aplicações Financeiras: renderiza as
+// páginas como imagem e manda pra uma Edge Function Gemini dedicada, que
+// devolve a MESMA composição por imposto (código/denominação/valor) que o
+// DARF estruturado devolveria — o resto do pipeline (rateio, Regra,
+// Histórico Utilizado) não precisa saber se veio de texto ou de IA.
+async function _lancctbExtrairComposicaoTributoViaIA(pdf){
+  const imagens=[];
+  for(let p=1;p<=Math.min(pdf.numPages,5);p++){
+    const page=await pdf.getPage(p);
+    const viewport=page.getViewport({scale:2});
+    const canvas=document.createElement('canvas');
+    canvas.width=viewport.width;canvas.height=viewport.height;
+    const ctx=canvas.getContext('2d');
+    await page.render({canvasContext:ctx,viewport}).promise;
+    imagens.push(canvas.toDataURL('image/jpeg',0.85));
+  }
+  const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-guia-tributo',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY},
+    body:JSON.stringify({imagens}),
+  });
+  if(!resp.ok) throw new Error('A extração via IA retornou status '+resp.status);
+  const d=await resp.json();
+  if(d.error) throw new Error(d.error);
+  if(!d.itens||!d.itens.length||!d.valorTotal) return null;
+  return { itens:d.itens, valorTotal:d.valorTotal, competencia:d.competencia||null };
+}
 // Ponto único de extração de valor de um PDF de tributo — tenta o DARF
 // estruturado primeiro (mais confiável e já vem com a composição por
 // imposto, útil pra regra multi-linha), depois a composição DAMSP
 // (Valor/Multa/Juros/Atualização/Encargos), senão cai pro rótulo genérico.
-async function _lancctbExtrairValorPdfTributo(pdf){
+// `permitirIA` (opt-in explícito — nunca automático, ver checkbox do botão
+// "Processar Tributos") faz uma última tentativa via IA Gemini quando o PDF
+// não tem texto nenhum pra ler (guia escaneada).
+async function _lancctbExtrairValorPdfTributo(pdf,permitirIA){
   const darf=await _lancctbExtrairComposicaoDarf(pdf);
-  if(darf) return { valor:darf.valorTotal, composicao:darf.itens };
+  if(darf) return { valor:darf.valorTotal, composicao:darf.itens, competencia:darf.competencia };
   const damsp=await _lancctbExtrairComposicaoDamsp(pdf);
-  if(damsp) return { valor:damsp.valorTotal, composicao:damsp.itens.length>1?damsp.itens:null };
+  if(damsp) return { valor:damsp.valorTotal, composicao:damsp.itens.length>1?damsp.itens:null, competencia:damsp.competencia };
   const generico=await _lancctbExtrairValorTotalGenerico(pdf);
-  return generico!=null?{ valor:generico, composicao:null }:null;
+  if(generico!=null) return { valor:generico, composicao:null };
+  if(permitirIA){
+    const viaIA=await _lancctbExtrairComposicaoTributoViaIA(pdf);
+    if(viaIA) return { valor:viaIA.valorTotal, composicao:viaIA.itens.length>1?viaIA.itens:null, competencia:viaIA.competencia, viaIA:true };
+  }
+  return null;
 }
 function _lancctbExtrairCompetenciaDoNome(descricao){
   const s=String(descricao||'');
@@ -19286,6 +19325,12 @@ function _lancctbSubstituirCompetenciaTexto(texto,novaCompetencia){
 // próprio lançamento. Não bloqueia o resto do modal (roda em paralelo,
 // sem await no chamador).
 let _lancctbTributosSugeridosAtual=[];
+// Pedido do usuário 13/09/2026: "SIM, com certeza" — habilita OCR via IA
+// Gemini pra guias de tributo escaneadas (imagem, sem texto selecionável),
+// mas sempre por escolha explícita do contador (checkbox desmarcado por
+// padrão) — nunca automático, mesma regra de "quero ter certeza que não
+// usei IA no processo que fizer" já aplicada no resto do módulo.
+let _lancctbTributosPermitirIA=false;
 async function _lancctbAtualizarSugestoesTributos(){
   const area=document.getElementById('lancctbRegraTributosArea');
   if(!area||!_lancctbRegraExtratoAlvo) return;
@@ -19312,7 +19357,7 @@ async function _lancctbAtualizarSugestoesTributos(){
     try{
       const arquivo=await f.fileHandle.getFile();
       const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
-      const extraido=await _lancctbExtrairValorPdfTributo(pdfDoc);
+      const extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
       if(extraido&&Math.abs(extraido.valor-valorAlvo)<=LANCCTB_MATCH_TOLERANCIA_VALOR) encontrados.push(f);
     }catch(e){ console.error('Falha ao conferir valor do PDF de tributo '+f.nome+':',e); }
   }
@@ -19366,7 +19411,8 @@ async function _lancctbUsarSugestaoTributo(idx){
   try{
     const arquivo=await f.fileHandle.getFile();
     const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
-    darf=await _lancctbExtrairComposicaoDarf(pdfDoc)||await _lancctbExtrairComposicaoDamsp(pdfDoc);
+    darf=await _lancctbExtrairComposicaoDarf(pdfDoc)||await _lancctbExtrairComposicaoDamsp(pdfDoc)
+      ||(_lancctbTributosPermitirIA?await _lancctbExtrairComposicaoTributoViaIA(pdfDoc):null);
   }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); }
   // Descarta o rótulo genérico "Tributo" (não achou o campo "Receita" no
   // PDF) em favor do nome tirado do arquivo, sempre mais específico.
@@ -23451,7 +23497,7 @@ async function _lancctbProcessarTributos(){
       try{
         const arquivo=await f.fileHandle.getFile();
         const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
-        extraido=await _lancctbExtrairValorPdfTributo(pdfDoc);
+        extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
       }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); continue; }
       if(!extraido) continue;
       // Bate exato (±2,00) OU o pagamento é MAIOR que o tributo por até 30%
@@ -24233,6 +24279,9 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
       <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbProcessarFopag()" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
+      <label style="font-size:11px;color:var(--slate);display:flex;align-items:center;gap:4px;white-space:nowrap" title="Quando marcado, guias de tributo ESCANEADAS (imagem, sem texto pra ler) também são tentadas via IA Gemini — sem marcar, essas guias continuam sem PDF encontrado (leitura sem IA, custo zero).">
+        <input type="checkbox" id="lancctbTributosIaCheckbox" onchange="_lancctbTributosPermitirIA=this.checked">🤖 IA em guias escaneadas
+      </label>
       <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
       <button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>
       <button class="btn bsm btn-ia-gemini" id="lancctbProcessarIaBtn" onclick="_lancctbProcessarViaIA()" title="Último recurso — usa IA Gemini pra tentar amarrar Pagamento/Recebimento × Nota Fiscal, e depois tenta casar pelo Fluxo de Caixa (se a empresa tiver) com uma Regra por histórico. Sempre grava uma explicação do porquê (coluna IA) pra você conferir.">🤖 Processar via IA Gemini + Fluxo</button>
