@@ -14349,10 +14349,14 @@ function renderConvLmaProcessForm(eid,cfg){
       <button class="btn bo bsm" onclick="editarConvLmaConfig('${eid}')" style="font-size:11px">&#9998; Editar conta crédito</button>
     </div>
     ${_convLmaRegrasAbertas[eid]?renderConvLmaRegrasPanel(eid,regras):''}
-    <div class="fg"><label class="fl">Fatura de Cobrança LMA (PDF)</label><input type="file" id="convLmaArquivo_${eid}" accept=".pdf" class="fi"></div>
+    <div class="fg"><label class="fl">Fatura de Cobrança LMA (PDF — pode selecionar mais de uma)</label><input type="file" id="convLmaArquivo_${eid}" accept=".pdf" multiple class="fi"></div>
     <div style="margin-top:8px"><label style="font-size:11px;color:var(--slate);display:block">Mês de fechamento contábil</label><input type="month" id="convLmaFechamento_${eid}" class="fi" style="font-size:12px;width:160px"></div>
-    <button class="btn bp bsm" id="convLmaBtnProcessar_${eid}" onclick="processarConvLma('${eid}')" style="margin-top:10px">&#9881; Processar Arquivo</button>
+    <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
+      <button class="btn bp bsm" id="convLmaBtnProcessar_${eid}" onclick="processarConvLma('${eid}')">&#9881; Processar Arquivo (lançamento com conta)</button>
+      <button class="action-btn action-btn-excel" id="convLmaBtnExcel_${eid}" onclick="processarConvLmaExcelPadrao('${eid}')">📊 Gerar Excel (Data/Valor/Histórico)</button>
+    </div>
     <div id="convLmaStatus_${eid}" style="margin-top:8px;font-size:12px"></div>
+    <div id="convLmaStatusExcel_${eid}" style="margin-top:8px;font-size:12px;white-space:pre-wrap"></div>
     ${pendentes?renderConvLmaPendentesForm(eid,pendentes):''}
     <div id="convLmaResultado_${eid}">${resultado?renderConvLmaResultado(eid,resultado):''}</div>
   </div>`;
@@ -14397,7 +14401,11 @@ function _convLmaLimparDescricao(desc){
   d=d.replace(/PRESTA[ÇC][ÃA]O DE SERVI[ÇC]OS DE\b\.?/gi,'');
   d=d.replace(/PRESTA[ÇC][ÃA]O DE SERVI[ÇC]OS\b\.?/gi,'');
   d=d.replace(/\s+/g,' ').trim();
-  d=d.replace(/^[-.\s]+/,'').replace(/[-.\s]+$/,'').trim();
+  // Só remove hífen/espaço solto que sobrou de a frase removida ficar bem no
+  // início/fim (ex: "- ASSESSORIA..." quando a remoção comeu o texto antes do
+  // hífen) — NUNCA remove ponto final: pontuação da descrição original deve
+  // ser preservada (regra do usuário: "preserve números, pontuação...").
+  d=d.replace(/^[-\s]+/,'').replace(/[-\s]+$/,'').trim();
   return d;
 }
 // Separador " - " (não "|") de propósito: "|" é o delimitador de CAMPO do
@@ -14413,6 +14421,41 @@ function _convLmaMontarHistorico(numero,item,descricaoLimpa,tomadorNome){
 }
 function _convLmaChaveClassificacao(item,descricaoLimpa){
   return _convMpRemoverAcentos(`${item.tipo} | ${descricaoLimpa}`);
+}
+
+// ─ Exportação "padrão LMA" (Data / Valor Positivo / Valor Negativo /
+// Histórico Concatenado) — formato fixo pedido pelo usuário, sem depender de
+// conta contábil/regra nenhuma: cada item da Discriminação de Despesas vira
+// uma linha, com a data de EMISSÃO da fatura repetida em todas as linhas
+// (nunca a data original da despesa, que só entra dentro do histórico).
+// Histórico: "Fat. <número> - <código projeto> - <nome projeto> | <data
+// original> | <tipo> | <descrição completa concatenada>", sempre sem acento.
+function _convLmaHistoricoPadrao(numero,item,descricaoLimpa){
+  const base=`Fat. ${numero} - ${item.projetoCodigo} - ${item.projetoNome} | ${item.data} | ${item.tipo} | ${descricaoLimpa}`;
+  return _convMpRemoverAcentos(base);
+}
+// Sigla de quem está sendo cobrado, pro nome do arquivo (ex: "SDV
+// PARTICIPAÇÕES LTDA." -> "SDV") — primeira palavra do tomador, sem pontuação.
+function _convLmaSigla(tomadorNome){
+  return _convMpRemoverAcentos(String(tomadorNome||'').trim().split(/\s+/)[0]||'').replace(/[.,]/g,'');
+}
+// Confere a soma dos itens extraídos contra os subtotais por projeto e o
+// total geral que o PRÓPRIO PDF informa — nunca considerar concluída uma
+// extração cuja soma não bate exatamente com o que a fatura diz (regra
+// obrigatória pedida pelo usuário: pega descrição perdida em quebra de
+// página, item duplicado por causa de comprovante anexo, etc.).
+function _convLmaValidarSomas(dados){
+  const porProjeto={};
+  dados.itens.forEach(it=>{ porProjeto[it.projetoCodigo]=(porProjeto[it.projetoCodigo]||0)+it.valor; });
+  const diffsProjeto=(dados.projetosInfo||[]).map(p=>{
+    const somado=Math.round((porProjeto[p.codigo]||0)*100)/100;
+    const esperado=Math.round(p.subtotal*100)/100;
+    return {codigo:p.codigo,nome:p.nome,somado,esperado,ok:Math.abs(somado-esperado)<0.01};
+  });
+  const somaGeral=Math.round(Object.values(porProjeto).reduce((s,v)=>s+v,0)*100)/100;
+  const totalEsperado=dados.totalGeralExtraido!=null?Math.round(dados.totalGeralExtraido*100)/100:null;
+  const totalOk=totalEsperado!=null&&Math.abs(somaGeral-totalEsperado)<0.01;
+  return {diffsProjeto, somaGeral, totalEsperado, ok:totalOk&&diffsProjeto.every(d=>d.ok)};
 }
 // Lê a fatura inteira (todas as páginas já concatenadas em linhas de texto,
 // ver processarConvLma) e devolve {numero, cnpj, dataEmissaoBr, itens[]}.
@@ -14446,11 +14489,15 @@ function _convLmaParsearFatura(linhasTexto){
   }
 
   const itens=[];
+  const projetosInfo=[]; // {codigo,nome,subtotal} — subtotal extraído do próprio PDF, pra validação
+  let totalGeralExtraido=null;
   let projetoAtual=null;
   let itemAtual=null;
   const RE_DATA_INICIO=/^(\d{2}\/\d{2}\/\d{4})\s+(.+)$/;
   const RE_VALOR_FIM=/([\d.]+,\d{2})\s*$/;
   const RE_PROJETO=/^(\d{6})\s*-\s*(.+)$/;
+  const RE_SUBTOTAL=/^SUBTOTAL\s*\(R\$\):\s*([\d.]+,\d{2})/i;
+  const RE_TOTAL_GERAL=/^TOTAL GERAL:\s*([\d.]+,\d{2})/i;
   const RE_IGNORAR=[
     /^Discrimina[çc][ãa]o de Despesas$/i,
     /^DESPESAS$/i,
@@ -14460,18 +14507,36 @@ function _convLmaParsearFatura(linhasTexto){
     /^LML-/i,
     /^\(cid:\d+\)$/i,
     /^\d{2}\/\d{2}\/\d{4}$/,
-    /^SUBTOTAL\s*\(R\$\)/i,
     /^TOTAL\s*\(R\$\)/i,
     /^TOTAL DA FATURA/i,
     /^DESPESAS:\s*[\d.,]+$/i,
-    /^TOTAL GERAL:/i,
   ];
   function fecharItemAtual(){ if(itemAtual) itens.push(itemAtual); itemAtual=null; }
+  function parseValorBr(s){ return parseFloat(String(s).replace(/\./g,'').replace(',','.'))||0; }
 
+  linhasPara:
   for(let i=0;i<linhasTexto.length;i++){
     const linha=(linhasTexto[i]||'').trim();
     if(!linha) continue;
+
+    // Fim da "Discriminação de Despesas": tudo depois disso (comprovantes,
+    // notas fiscais, recibos anexados) é só documento comprobatório e NUNCA
+    // deve virar lançamento novo — por isso a leitura para completamente aqui,
+    // em vez de só ignorar a linha e seguir lendo o resto do PDF.
+    const mTotalGeral=linha.match(RE_TOTAL_GERAL);
+    if(mTotalGeral){
+      fecharItemAtual();
+      totalGeralExtraido=parseValorBr(mTotalGeral[1]);
+      break linhasPara;
+    }
+
     if(RE_IGNORAR.some(rx=>rx.test(linha))) continue;
+
+    const mSub=linha.match(RE_SUBTOTAL);
+    if(mSub){
+      if(projetoAtual) projetosInfo.push({codigo:projetoAtual.codigo,nome:projetoAtual.nome,subtotal:parseValorBr(mSub[1])});
+      continue;
+    }
 
     const mProj=linha.match(RE_PROJETO);
     if(mProj){
@@ -14487,7 +14552,7 @@ function _convLmaParsearFatura(linhasTexto){
       const resto=mIni[2];
       const mVal=resto.match(RE_VALOR_FIM);
       if(!mVal) continue; // linha estranha (não é item de despesa de verdade)
-      const valor=parseFloat(mVal[1].replace(/\./g,'').replace(',','.'));
+      const valor=parseValorBr(mVal[1]);
       const tipoNome=resto.slice(0,mVal.index).trim();
       let tipo=null, nome='';
       for(const t of tipos){
@@ -14520,7 +14585,7 @@ function _convLmaParsearFatura(linhasTexto){
   }
   fecharItemAtual();
 
-  return {numero,cnpj,tomadorNome,dataEmissaoBr,itens};
+  return {numero,cnpj,tomadorNome,dataEmissaoBr,itens,projetosInfo,totalGeralExtraido};
 }
 async function processarConvLma(eid){
   const btn=document.getElementById('convLmaBtnProcessar_'+eid);
@@ -14585,6 +14650,83 @@ async function processarConvLma(eid){
     _convLmaSetStatus(eid,'Erro ao processar o PDF: '+e.message,'err');
     toast('Erro ao processar o PDF: '+e.message,'err');
     _convLmaResetBotao(eid);
+  }
+}
+// Exportação "padrão LMA" independente de conta/regra: gera um Excel com só
+// 4 colunas (Data de emissão fixa / Valor Positivo / Valor Negativo /
+// Histórico Concatenado), um arquivo por PDF selecionado + um consolidado
+// quando for mais de um. Nunca lê os comprovantes anexados (a leitura já
+// para no "TOTAL GERAL" da Discriminação de Despesas, ver
+// _convLmaParsearFatura) e sempre confere a soma contra os subtotais/total
+// que o próprio PDF informa antes de considerar a extração válida.
+async function processarConvLmaExcelPadrao(eid){
+  const btn=document.getElementById('convLmaBtnExcel_'+eid);
+  const statusEl=document.getElementById('convLmaStatusExcel_'+eid);
+  const setStatus=(msg,cor)=>{ if(statusEl){statusEl.style.color=cor||'var(--slate)';statusEl.textContent=msg;} };
+  setStatus('','');
+  const fileInput=document.getElementById('convLmaArquivo_'+eid);
+  const files=fileInput?Array.from(fileInput.files||[]):[];
+  if(!files.length){ setStatus('Selecione ao menos um PDF de fatura.','#dc2626'); toast('Selecione o(s) arquivo(s) da fatura.','err'); return; }
+
+  if(btn){btn.disabled=true;btn.textContent='Processando…';}
+  toast('Processando fatura(s)…','');
+  try{
+    const resumos=[];
+    const todasLinhas=[['Data','Valor Positivo','Valor Negativo','Histórico Concatenado']];
+    for(const file of files){
+      const paginas=await _convItauExtrairPaginas(file);
+      const linhasTexto=[];
+      paginas.forEach(pagina=>{ _convItauAgruparLinhas(pagina.itens).forEach(l=>linhasTexto.push(l.texto)); });
+      const dados=_convLmaParsearFatura(linhasTexto);
+      if(!dados.itens.length){
+        resumos.push({arquivo:file.name,erro:'Nenhum lançamento encontrado no PDF — verifique se é uma fatura LMA válida.'});
+        continue;
+      }
+      const validacao=_convLmaValidarSomas(dados);
+      if(!validacao.ok){
+        const problemas=[];
+        validacao.diffsProjeto.filter(d=>!d.ok).forEach(d=>problemas.push(`Projeto ${d.codigo} - ${d.nome}: somei R$ ${_fmt(d.somado)}, PDF diz R$ ${_fmt(d.esperado)}`));
+        if(validacao.totalEsperado!=null&&Math.abs(validacao.somaGeral-validacao.totalEsperado)>=0.01) problemas.push(`Total geral: somei R$ ${_fmt(validacao.somaGeral)}, PDF diz R$ ${_fmt(validacao.totalEsperado)}`);
+        resumos.push({arquivo:file.name,erro:'A soma não bateu com o PDF — nada foi gerado pra esta fatura. '+problemas.join(' | ')});
+        continue;
+      }
+      const linhasFatura=dados.itens.map(item=>{
+        const descricaoLimpa=_convLmaLimparDescricao(item.descricaoLinhas.join(' '));
+        const historico=_convLmaHistoricoPadrao(dados.numero,item,descricaoLimpa);
+        return [dados.dataEmissaoBr,item.valor,-item.valor,historico];
+      });
+      linhasFatura.forEach(l=>todasLinhas.push(l));
+      // arquivo individual
+      const wb=XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(linhasFatura.length?[todasLinhas[0],...linhasFatura]:todasLinhas),'Lançamentos');
+      const dataArq=(dados.dataEmissaoBr||'').split('/').join('-');
+      const sigla=_convLmaSigla(dados.tomadorNome);
+      XLSX.writeFile(wb,`${dataArq} - Fatura ${dados.numero} - ${sigla}.xlsx`);
+      resumos.push({arquivo:file.name,fatura:dados.numero,tomador:dados.tomadorNome,totalGeral:validacao.somaGeral,projetos:validacao.diffsProjeto});
+    }
+
+    if(files.length>1){
+      const wbCons=XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wbCons,XLSX.utils.aoa_to_sheet(todasLinhas),'Lançamentos');
+      XLSX.writeFile(wbCons,'Faturas Consolidadas.xlsx');
+    }
+
+    const linhasResumo=[];
+    resumos.forEach(r=>{
+      if(r.erro){ linhasResumo.push(`❌ ${r.arquivo}: ${r.erro}`); return; }
+      linhasResumo.push(`✓ Fatura ${r.fatura} – ${r.tomador}`);
+      r.projetos.forEach(p=>linhasResumo.push(`   ${p.codigo} – ${p.nome}: R$ ${_fmt(p.esperado)}`));
+      linhasResumo.push(`   Total geral: R$ ${_fmt(r.totalGeral)}`);
+    });
+    const teveErro=resumos.some(r=>r.erro);
+    setStatus(linhasResumo.join('\n'),teveErro?'#dc2626':'#16a34a');
+    toast(teveErro?'Concluído com pendências — confira o resumo.':'Excel gerado com sucesso!',teveErro?'err':'ok');
+  }catch(e){
+    console.error(e);
+    setStatus('Erro ao processar: '+e.message,'#dc2626');
+    toast('Erro ao processar o PDF: '+e.message,'err');
+  }finally{
+    if(btn){btn.disabled=false;btn.textContent='📊 Gerar Excel (Data/Valor/Histórico)';}
   }
 }
 function renderConvLmaPendentesForm(eid,pendentes){
