@@ -14384,7 +14384,7 @@ const CONV_LMA_TIPOS_BASE=[
   'ACOMPANHAMENTO DE PUBLICAÇÕES','DESPESAS COM OCUPAÇÃO','SERVIÇOS DE TERCEIROS',
   'BRINDES COLABORADORES','SERVIÇOS PRESTADOS','PASSAGEM AÉREA','ALIMENTAÇÃO',
   'HOSPEDAGEM','TÁXI/UBER','DILIGÊNCIA','CUSTAS','OUTROS','TRANSPORTE','PEDÁGIO',
-  'HONORÁRIOS'
+  'HONORÁRIOS','IPTU','ESTACIONAMENTO'
 ];
 // Tipo cujo nome quebra em duas linhas no PDF (a 1ª parte fica colada no fim
 // da linha da data+valor, a 2ª parte vem sozinha na linha seguinte, antes da
@@ -14432,7 +14432,10 @@ function _convLmaChaveClassificacao(item,descricaoLimpa){
 // Histórico: "Fat. <número> - <código projeto> - <nome projeto> | <data
 // original> | <tipo> | <descrição completa concatenada>", sempre sem acento.
 function _convLmaHistoricoPadrao(numero,item,descricaoLimpa){
-  const base=`Fat. ${numero} - ${item.projetoCodigo} - ${item.projetoNome} | ${item.data} | ${item.tipo} | ${descricaoLimpa}`;
+  // Tipo não reconhecido nunca fica em branco no histórico — melhor sinalizar
+  // claramente pra revisão do que deixar "| |" passando despercebido.
+  const tipoExibido=item.tipo||'(TIPO NAO IDENTIFICADO)';
+  const base=`Fat. ${numero} - ${item.projetoCodigo} - ${item.projetoNome} | ${item.data} | ${tipoExibido} | ${descricaoLimpa}`;
   return _convMpRemoverAcentos(base);
 }
 // Sigla de quem está sendo cobrado, pro nome do arquivo (ex: "SDV
@@ -14617,10 +14620,14 @@ function _convLmaParsearFatura(linhasTexto){
           }
         }
       }
+      // Tipo não reconhecido: NUNCA descarta o texto (ex: "IPTU MUNICIPIO DE
+      // SÃO BERNARDO" antes de "IPTU" entrar na lista de tipos conhecidos) —
+      // guarda o trecho inteiro na descrição mesmo sem saber separar
+      // tipo/nome, pra não perder nenhuma informação do item.
       itemAtual={
         projetoCodigo:projetoAtual?projetoAtual.codigo:'',
         projetoNome:projetoAtual?projetoAtual.nome:'',
-        data, tipo:tipo||'', descricaoLinhas:nome?[nome]:[], valor,
+        data, tipo:tipo||'', descricaoLinhas:tipo?(nome?[nome]:[]):(tipoNome?[tipoNome]:[]), valor,
         semTipo:!tipo
       };
       continue;
@@ -14765,7 +14772,11 @@ async function processarConvLmaTxtPadrao(eid){
       const dataArq=(dados.dataEmissaoBr||'').split('/').join('-');
       const sigla=_convLmaSigla(dados.tomadorNome);
       baixarTxt([cabecalho,...linhasFaturaTxt],`${dataArq} - Fatura ${dados.numero} - ${sigla}.txt`);
-      resumos.push({arquivo:file.name,fatura:dados.numero,tomador:dados.tomadorNome,totalGeral:validacao.somaGeral,projetos:validacao.diffsProjeto});
+      // Tipo de despesa não reconhecido não impede a geração (o valor e a
+      // descrição já estão preservados no histórico), mas precisa ficar
+      // visível — senão passa despercebido até alguém abrir o TXT.
+      const semTipo=dados.itens.filter(it=>it.semTipo);
+      resumos.push({arquivo:file.name,fatura:dados.numero,tomador:dados.tomadorNome,totalGeral:validacao.somaGeral,projetos:validacao.diffsProjeto,semTipoQtd:semTipo.length});
     }
 
     if(files.length>1){
@@ -14778,10 +14789,12 @@ async function processarConvLmaTxtPadrao(eid){
       linhasResumo.push(`✓ Fatura ${r.fatura} – ${r.tomador}`);
       r.projetos.forEach(p=>linhasResumo.push(`   ${p.codigo} – ${p.nome}: R$ ${_fmt(p.esperado)}`));
       linhasResumo.push(`   Total geral: R$ ${_fmt(r.totalGeral)}`);
+      if(r.semTipoQtd) linhasResumo.push(`   ⚠ ${r.semTipoQtd} item(ns) com tipo de despesa não reconhecido — gerado mesmo assim (nada foi perdido), mas confira o histórico marcado "(TIPO NAO IDENTIFICADO)" no TXT.`);
     });
     const teveErro=resumos.some(r=>r.erro);
-    setStatus(linhasResumo.join('\n'),teveErro?'#dc2626':'#16a34a');
-    toast(teveErro?'Concluído com pendências — confira o resumo.':'TXT gerado com sucesso!',teveErro?'err':'ok');
+    const teveSemTipo=resumos.some(r=>r.semTipoQtd);
+    setStatus(linhasResumo.join('\n'),teveErro?'#dc2626':teveSemTipo?'#b45309':'#16a34a');
+    toast(teveErro?'Concluído com pendências — confira o resumo.':teveSemTipo?'TXT gerado, mas com tipo(s) não reconhecido(s) — confira o resumo.':'TXT gerado com sucesso!',teveErro?'err':'ok');
   }catch(e){
     console.error(e);
     setStatus('Erro ao processar: '+e.message,'#dc2626');
