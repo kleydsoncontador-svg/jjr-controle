@@ -14383,7 +14383,8 @@ const CONV_LMA_MESES_NOME={janeiro:1,fevereiro:2,'março':3,marco:3,abril:4,maio
 const CONV_LMA_TIPOS_BASE=[
   'ACOMPANHAMENTO DE PUBLICAÇÕES','DESPESAS COM OCUPAÇÃO','SERVIÇOS DE TERCEIROS',
   'BRINDES COLABORADORES','SERVIÇOS PRESTADOS','PASSAGEM AÉREA','ALIMENTAÇÃO',
-  'HOSPEDAGEM','TÁXI/UBER','DILIGÊNCIA','CUSTAS','OUTROS','TRANSPORTE','PEDÁGIO'
+  'HOSPEDAGEM','TÁXI/UBER','DILIGÊNCIA','CUSTAS','OUTROS','TRANSPORTE','PEDÁGIO',
+  'HONORÁRIOS'
 ];
 // Tipo cujo nome quebra em duas linhas no PDF (a 1ª parte fica colada no fim
 // da linha da data+valor, a 2ª parte vem sozinha na linha seguinte, antes da
@@ -14465,13 +14466,17 @@ function _convLmaValidarSomas(dados){
 function _convLmaParsearFatura(linhasTexto){
   const tipos=_convLmaTiposConhecidos();
   const textoCompleto=linhasTexto.join('\n');
-  const mNum=textoCompleto.match(/FATURA DE DESPESAS\s*N[º°o]\s*([\d.]+)/i);
+  // Existem dois layouts de fatura da LMA: "FATURA DE DESPESAS" (item por
+  // item, com data própria — a maioria) e "FATURA DE HONORÁRIOS" (um único
+  // valor de honorário por projeto/processo, sem data individual — só
+  // "HONORÁRIOS:" seguido da descrição e do SUBTOTAL do projeto).
+  const mNum=textoCompleto.match(/FATURA DE (?:DESPESAS|HONOR[ÁA]RIOS)\s*N[º°o]\s*([\d.]+)/i);
   const numero=mNum?mNum[1].replace(/\./g,''):'';
   // Tomador (quem está sendo cobrado) é sempre a primeira linha não-vazia
-  // depois de "FATURA DE DESPESAS Nº..." — pode ser empresa (CNPJ) ou
-  // pessoa física/espólio (CPF), por isso captura os dois documentos.
+  // depois de "FATURA DE DESPESAS/HONORÁRIOS Nº..." — pode ser empresa (CNPJ)
+  // ou pessoa física/espólio (CPF), por isso captura os dois documentos.
   let tomadorNome='';
-  const idxFatura=linhasTexto.findIndex(l=>/^FATURA DE DESPESAS/i.test((l||'').trim()));
+  const idxFatura=linhasTexto.findIndex(l=>/^FATURA DE (?:DESPESAS|HONOR[ÁA]RIOS)/i.test((l||'').trim()));
   if(idxFatura>=0){
     for(let i=idxFatura+1;i<linhasTexto.length;i++){
       const cand=(linhasTexto[i]||'').trim();
@@ -14496,10 +14501,17 @@ function _convLmaParsearFatura(linhasTexto){
   const RE_DATA_INICIO=/^(\d{2}\/\d{2}\/\d{4})\s+(.+)$/;
   const RE_VALOR_FIM=/([\d.]+,\d{2})\s*$/;
   const RE_PROJETO=/^(\d{6})\s*-\s*(.+)$/;
-  const RE_SUBTOTAL=/^SUBTOTAL\s*\(R\$\):\s*([\d.]+,\d{2})/i;
+  // "SUBTOTAL (R$):" na Fatura de Despesas, "SUBTOTAL (R$)" (sem dois-pontos)
+  // na Fatura de Honorários — os dois-pontos viram opcionais pra cobrir ambas.
+  const RE_SUBTOTAL=/^SUBTOTAL\s*\(R\$\):?\s*([\d.]+,\d{2})/i;
   const RE_TOTAL_GERAL=/^TOTAL GERAL:\s*([\d.]+,\d{2})/i;
+  // Fatura de Honorários: o tipo aparece sozinho numa linha (ex: "HONORÁRIOS:"),
+  // sem data nem valor — o valor só vem depois, no SUBTOTAL do projeto, e não
+  // existe uma data original por item (usa-se a data de emissão da fatura).
+  const RE_TIPO_SOZINHO=/^([A-ZÀ-Ÿ][A-ZÀ-Ÿ\/ ]*):\s*$/;
   const RE_IGNORAR=[
     /^Discrimina[çc][ãa]o de Despesas$/i,
+    /^Relat[óo]rio de Fatura de Honor[áa]rios$/i,
     /^DESPESAS$/i,
     /^DATA TIPO DESPESA/i,
     /^Fatura:\s/i,
@@ -14507,11 +14519,13 @@ function _convLmaParsearFatura(linhasTexto){
     /^LML-/i,
     /^\(cid:\d+\)$/i,
     /^\d{2}\/\d{2}\/\d{4}$/,
+    /^\d{1,2}\/[A-Za-zçÇãÃéÉ]+\/\d{4}$/, // "08/julho/2026" no topo da Fatura de Honorários
     /^TOTAL\s*\(R\$\)/i,
     /^TOTAL DA FATURA/i,
     /^DESPESAS:\s*[\d.,]+$/i,
+    /^HONOR[ÁA]RIOS:\s*[\d.,]+$/i,
   ];
-  function fecharItemAtual(){ if(itemAtual) itens.push(itemAtual); itemAtual=null; }
+  function fecharItemAtual(){ if(itemAtual&&itemAtual.valor!=null) itens.push(itemAtual); itemAtual=null; }
   function parseValorBr(s){ return parseFloat(String(s).replace(/\./g,'').replace(',','.'))||0; }
 
   linhasPara:
@@ -14534,7 +14548,14 @@ function _convLmaParsearFatura(linhasTexto){
 
     const mSub=linha.match(RE_SUBTOTAL);
     if(mSub){
-      if(projetoAtual) projetosInfo.push({codigo:projetoAtual.codigo,nome:projetoAtual.nome,subtotal:parseValorBr(mSub[1])});
+      const valorSub=parseValorBr(mSub[1]);
+      // Fatura de Honorários: o item ficou "aberto" esperando esse valor
+      // (ver RE_TIPO_SOZINHO abaixo) — fecha ele com o subtotal do projeto.
+      if(itemAtual&&itemAtual.valorPendenteDoSubtotal&&itemAtual.valor==null){
+        itemAtual.valor=valorSub;
+        fecharItemAtual();
+      }
+      if(projetoAtual) projetosInfo.push({codigo:projetoAtual.codigo,nome:projetoAtual.nome,subtotal:valorSub});
       continue;
     }
 
@@ -14545,8 +14566,32 @@ function _convLmaParsearFatura(linhasTexto){
       continue;
     }
 
+    const mTipoSozinho=linha.match(RE_TIPO_SOZINHO);
+    if(mTipoSozinho){
+      const candidato=mTipoSozinho[1].trim();
+      const tipoAchado=tipos.find(t=>t.toUpperCase()===candidato.toUpperCase());
+      if(tipoAchado){
+        fecharItemAtual();
+        itemAtual={
+          projetoCodigo:projetoAtual?projetoAtual.codigo:'',
+          projetoNome:projetoAtual?projetoAtual.nome:'',
+          data:dataEmissaoBr||'', tipo:tipoAchado, descricaoLinhas:[], valor:null,
+          semTipo:false, valorPendenteDoSubtotal:true
+        };
+        continue;
+      }
+    }
+
     const mIni=linha.match(RE_DATA_INICIO);
-    if(mIni){
+    // Uma descrição de item às vezes menciona uma data no meio do texto
+    // seguida de um valor em R$ (ex: "...PERÍODO DE 26/05/2026 A 25/06/2026 -
+    // R$ 1.991,19", quebrado assim: "25/06/2026 - R$ 1.991,19" cai sozinho
+    // numa linha, e bateria com RE_DATA_INICIO por acidente, duplicando o
+    // valor do item real). Só trata como INÍCIO de item de verdade se, entre
+    // a data e o valor, houver uma palavra de verdade (2+ letras seguidas) —
+    // "- R$" sozinho não tem isso, então vira continuação da descrição atual.
+    const tipoNomePreliminar=mIni?mIni[2].replace(RE_VALOR_FIM,'').trim():'';
+    if(mIni&&/[A-Za-zÀ-ÿ]{2,}/.test(tipoNomePreliminar)){
       fecharItemAtual();
       const data=mIni[1];
       const resto=mIni[2];
