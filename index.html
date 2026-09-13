@@ -14353,10 +14353,10 @@ function renderConvLmaProcessForm(eid,cfg){
     <div style="margin-top:8px"><label style="font-size:11px;color:var(--slate);display:block">Mês de fechamento contábil</label><input type="month" id="convLmaFechamento_${eid}" class="fi" style="font-size:12px;width:160px"></div>
     <div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">
       <button class="btn bp bsm" id="convLmaBtnProcessar_${eid}" onclick="processarConvLma('${eid}')">&#9881; Processar Arquivo (lançamento com conta)</button>
-      <button class="action-btn action-btn-excel" id="convLmaBtnExcel_${eid}" onclick="processarConvLmaExcelPadrao('${eid}')">📊 Gerar Excel (Data/Valor/Histórico)</button>
+      <button class="action-btn action-btn-txt" id="convLmaBtnTxtPadrao_${eid}" onclick="processarConvLmaTxtPadrao('${eid}')">📄 Gerar TXT (Data/Valor/Histórico)</button>
     </div>
     <div id="convLmaStatus_${eid}" style="margin-top:8px;font-size:12px"></div>
-    <div id="convLmaStatusExcel_${eid}" style="margin-top:8px;font-size:12px;white-space:pre-wrap"></div>
+    <div id="convLmaStatusTxtPadrao_${eid}" style="margin-top:8px;font-size:12px;white-space:pre-wrap"></div>
     ${pendentes?renderConvLmaPendentesForm(eid,pendentes):''}
     <div id="convLmaResultado_${eid}">${resultado?renderConvLmaResultado(eid,resultado):''}</div>
   </div>`;
@@ -14652,16 +14652,28 @@ async function processarConvLma(eid){
     _convLmaResetBotao(eid);
   }
 }
-// Exportação "padrão LMA" independente de conta/regra: gera um Excel com só
+// Formata valor pro TXT (vírgula decimal, sem separador de milhar, igual ao
+// resto dos geradores de TXT do site).
+function _convLmaValorTxt(v){ return (parseFloat(v)||0).toFixed(2).replace('.',','); }
+// Monta uma linha do TXT de lançamento (Data;Valor Positivo;Valor
+// Negativo;Histórico) — ";" como separador porque, ao contrário do TXT de
+// partida dobrada (gerarTxtMisterContador), aqui não tem campo de conta
+// nenhum pra reservar "|" como delimitador; ainda assim tira qualquer ";" ou
+// quebra de linha que apareça dentro do histórico, pra não quebrar a coluna.
+function _convLmaLinhaTxt(data,valorPos,valorNeg,historico){
+  const hist=String(historico||'').replace(/;/g,',').replace(/[\r\n]+/g,' ').trim();
+  return [data||'',_convLmaValorTxt(valorPos),_convLmaValorTxt(valorNeg),hist].join(';');
+}
+// Exportação "padrão LMA" independente de conta/regra: gera um TXT com só
 // 4 colunas (Data de emissão fixa / Valor Positivo / Valor Negativo /
 // Histórico Concatenado), um arquivo por PDF selecionado + um consolidado
 // quando for mais de um. Nunca lê os comprovantes anexados (a leitura já
 // para no "TOTAL GERAL" da Discriminação de Despesas, ver
 // _convLmaParsearFatura) e sempre confere a soma contra os subtotais/total
 // que o próprio PDF informa antes de considerar a extração válida.
-async function processarConvLmaExcelPadrao(eid){
-  const btn=document.getElementById('convLmaBtnExcel_'+eid);
-  const statusEl=document.getElementById('convLmaStatusExcel_'+eid);
+async function processarConvLmaTxtPadrao(eid){
+  const btn=document.getElementById('convLmaBtnTxtPadrao_'+eid);
+  const statusEl=document.getElementById('convLmaStatusTxtPadrao_'+eid);
   const setStatus=(msg,cor)=>{ if(statusEl){statusEl.style.color=cor||'var(--slate)';statusEl.textContent=msg;} };
   setStatus('','');
   const fileInput=document.getElementById('convLmaArquivo_'+eid);
@@ -14672,7 +14684,15 @@ async function processarConvLmaExcelPadrao(eid){
   toast('Processando fatura(s)…','');
   try{
     const resumos=[];
-    const todasLinhas=[['Data','Valor Positivo','Valor Negativo','Histórico Concatenado']];
+    const cabecalho='Data;Valor Positivo;Valor Negativo;Histórico Concatenado';
+    const todasLinhasTxt=[cabecalho];
+    function baixarTxt(linhas,nomeArquivo){
+      const blob=new Blob([_convMpRemoverAcentos(linhas.join('\r\n'))],{type:'text/plain;charset=utf-8'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');
+      a.href=url;a.download=nomeArquivo;a.click();
+      URL.revokeObjectURL(url);
+    }
     for(const file of files){
       const paginas=await _convItauExtrairPaginas(file);
       const linhasTexto=[];
@@ -14690,25 +14710,21 @@ async function processarConvLmaExcelPadrao(eid){
         resumos.push({arquivo:file.name,erro:'A soma não bateu com o PDF — nada foi gerado pra esta fatura. '+problemas.join(' | ')});
         continue;
       }
-      const linhasFatura=dados.itens.map(item=>{
+      const linhasFaturaTxt=dados.itens.map(item=>{
         const descricaoLimpa=_convLmaLimparDescricao(item.descricaoLinhas.join(' '));
         const historico=_convLmaHistoricoPadrao(dados.numero,item,descricaoLimpa);
-        return [dados.dataEmissaoBr,item.valor,-item.valor,historico];
+        return _convLmaLinhaTxt(dados.dataEmissaoBr,item.valor,-item.valor,historico);
       });
-      linhasFatura.forEach(l=>todasLinhas.push(l));
+      linhasFaturaTxt.forEach(l=>todasLinhasTxt.push(l));
       // arquivo individual
-      const wb=XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(linhasFatura.length?[todasLinhas[0],...linhasFatura]:todasLinhas),'Lançamentos');
       const dataArq=(dados.dataEmissaoBr||'').split('/').join('-');
       const sigla=_convLmaSigla(dados.tomadorNome);
-      XLSX.writeFile(wb,`${dataArq} - Fatura ${dados.numero} - ${sigla}.xlsx`);
+      baixarTxt([cabecalho,...linhasFaturaTxt],`${dataArq} - Fatura ${dados.numero} - ${sigla}.txt`);
       resumos.push({arquivo:file.name,fatura:dados.numero,tomador:dados.tomadorNome,totalGeral:validacao.somaGeral,projetos:validacao.diffsProjeto});
     }
 
     if(files.length>1){
-      const wbCons=XLSX.utils.book_new();
-      XLSX.utils.book_append_sheet(wbCons,XLSX.utils.aoa_to_sheet(todasLinhas),'Lançamentos');
-      XLSX.writeFile(wbCons,'Faturas Consolidadas.xlsx');
+      baixarTxt(todasLinhasTxt,'Faturas Consolidadas.txt');
     }
 
     const linhasResumo=[];
@@ -14720,13 +14736,13 @@ async function processarConvLmaExcelPadrao(eid){
     });
     const teveErro=resumos.some(r=>r.erro);
     setStatus(linhasResumo.join('\n'),teveErro?'#dc2626':'#16a34a');
-    toast(teveErro?'Concluído com pendências — confira o resumo.':'Excel gerado com sucesso!',teveErro?'err':'ok');
+    toast(teveErro?'Concluído com pendências — confira o resumo.':'TXT gerado com sucesso!',teveErro?'err':'ok');
   }catch(e){
     console.error(e);
     setStatus('Erro ao processar: '+e.message,'#dc2626');
     toast('Erro ao processar o PDF: '+e.message,'err');
   }finally{
-    if(btn){btn.disabled=false;btn.textContent='📊 Gerar Excel (Data/Valor/Histórico)';}
+    if(btn){btn.disabled=false;btn.textContent='📄 Gerar TXT (Data/Valor/Histórico)';}
   }
 }
 function renderConvLmaPendentesForm(eid,pendentes){
