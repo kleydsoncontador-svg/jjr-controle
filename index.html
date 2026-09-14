@@ -31889,6 +31889,137 @@ async function _aplicfinParseBbRendeFacil(file){
     productMode:'single', products:[], sources, validations:[], warnings:[], pageCount:null,
   };
 }
+
+// ── "Extrato de Fundos de Investimento" (Itaú) — pode trazer VÁRIOS fundos
+// no mesmo PDF, cada um com seu próprio quadro (nome + CNPJ + "Resumo do
+// Período - Total (R$)"). O CNPJ da aplicação já cadastrado no site (campo
+// CNPJ da tela de Ganhos) é a CHAVE que escolhe qual quadro ler — nunca o
+// primeiro fundo do PDF, nunca soma fundos diferentes. Pedido do usuário
+// 14/09/2026, com teste obrigatório de isolamento por CNPJ (3 fundos
+// sintéticos) e teste com o modelo real (Instituto LMA/Itaú, 08/2026) —
+// ambos batendo exatamente antes de considerar pronto.
+function _ganhoNormalizarCnpj(v){ return String(v||'').replace(/\D/g,''); }
+// Cada valor de "Resumo do Período" é sempre o ÚLTIMO número da linha (nunca
+// posição fixa — algumas linhas trazem só Valor (R$), outras trazem
+// Quantidade de cotas + Valor (R$); usar a posição fixa confundiria as
+// duas). A descrição é tudo antes desse número, normalizada (maiúsculas,
+// sem acento, sem asterisco, sem nenhum dígito/vírgula/ponto — isso também
+// remove uma eventual Quantidade de cotas que tenha ficado colada no texto
+// da descrição) pra bater com a lista de rótulos conhecidos.
+const GANHO_ITAU_FUNDO_DESCRICOES={
+  'SALDO BRUTO ANTERIOR':'summary.previous_gross_balance',
+  'APLICACOES':'summary.applications',
+  'RESGATES':'summary.redemptions',
+  'RENDIMENTO-BASE CALC IR':'summary.taxable_yield_base',
+  'SALDO BRUTO ATUAL':'summary.current_gross_balance',
+  'TOTAL LIVRE DE IOF':'summary.iof_exempt_total',
+  'TOTAL SUJEITO A IOF':'summary.iof_taxable_total',
+  'TOTAL LIQUIDO P/RESGATE':'summary.net_redemption_total',
+  'IR RETIDO NO PERIODO':'summary.ir_withheld_period',
+  'RENDIMENTO BRUTO NO MES':'summary.gross_yield_month',
+};
+function _ganhoNormalizarDescricaoFundo(s){
+  return String(s||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\*/g,'').replace(/[0-9.,]+/g,'').replace(/\s+/g,' ').trim();
+}
+// Lê TODOS os fundos do PDF (não só o do CNPJ procurado) — devolve
+// {fundos:[{nome,cnpjRaw,cnpjNorm,resumo:[{key,value,raw_description,
+// raw_value,page}],competence}], competence} ou null se o PDF não for desse
+// layout (título "Extrato de Fundos de Investimento" ausente).
+async function _ganhoExtrairItauFundoConsolidado(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const todasLinhas=[];
+  let textoCompleto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const itens=await _lancctbExtrairItensPagina(page);
+    const linhas=_lancctbAgruparLinhasPorY(itens).map(l=>l.itens.map(i=>i.str).join(' ').trim()).filter(t=>t);
+    linhas.forEach(t=>todasLinhas.push({texto:t,pagina:p}));
+    textoCompleto+=' '+linhas.join(' ');
+  }
+  if(!/Extrato de Fundos de Investimento/i.test(textoCompleto)) return null;
+
+  // Competência pelo FIM do período ("Período: 03/08 a 31/08/2026" → 08/2026),
+  // nunca pela emissão nem pelo início — pedido explícito do usuário.
+  const mPeriodo=textoCompleto.match(/Per[íi]odo:\s*\d{2}\/\d{2}\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/i);
+  const competence=mPeriodo?(mPeriodo[3]+'-'+mPeriodo[2]):null;
+  const RE_NUM_FIM=/(-?[\d.]+,\d{2})\s*$/;
+
+  // Um fundo pode ocupar várias páginas — currentFund só troca quando surge
+  // uma NOVA linha "Ag./Conta/Subconta ... CNPJ ...", nunca por mudança de
+  // página. Cuidado: "Gestor:"/"Administrado por:" no rodapé também trazem
+  // um CNPJ (da gestora, não do fundo) — só reconhece como início de bloco
+  // quando a linha também tiver "Ag./Conta/Subconta".
+  const fundos=[];
+  let fundoAtual=null, dentroResumo=false, linhaAnterior='';
+  for(const {texto:linha,pagina} of todasLinhas){
+    const mCnpj=linha.match(/CNPJ\s+([\d.\/-]{14,20})/i);
+    if(mCnpj&&/Ag\.\/Conta\/Subconta/i.test(linha)){
+      fundoAtual={nome:linhaAnterior.trim(),cnpjRaw:mCnpj[1],cnpjNorm:_ganhoNormalizarCnpj(mCnpj[1]),resumo:[],competence,pagina};
+      fundos.push(fundoAtual);
+      dentroResumo=false; linhaAnterior=linha; continue;
+    }
+    if(/^Resumo do Per[íi]odo/i.test(linha)){ dentroResumo=!!fundoAtual; linhaAnterior=linha; continue; }
+    if(/^Movimenta[çc][ãa]o no Per[íi]odo/i.test(linha)){ dentroResumo=false; linhaAnterior=linha; continue; }
+    if(dentroResumo&&fundoAtual){
+      const mVal=linha.match(RE_NUM_FIM);
+      if(mVal){
+        const descRaw=linha.slice(0,mVal.index).trim();
+        const key=GANHO_ITAU_FUNDO_DESCRICOES[_ganhoNormalizarDescricaoFundo(descRaw)];
+        if(key) fundoAtual.resumo.push({key,value:_lancctbParseValorBR(mVal[1]),raw_description:descRaw,raw_value:mVal[1],page:pagina});
+      }
+    }
+    linhaAnterior=linha;
+  }
+  if(!fundos.length) return {error:'NO_FUND_BLOCKS_FOUND'};
+  return {fundos,competence};
+}
+// Empacota no contrato padrão {sources[...]} — seleciona o fundo pelo CNPJ
+// já cadastrado na aplicação (targetCnpjRaw); nunca usa o primeiro fundo do
+// PDF, nunca soma fundos diferentes. Devolve {error:...} (não null) quando o
+// documento É desse layout mas algo impede seguir (CNPJ não configurado,
+// não encontrado, duplicado, ou sem "Resumo do Período" legível) — nesses
+// casos o chamador NÃO deve tentar outro parser nem cair pra IA sozinho,
+// só avisar e permitir revisão manual, exatamente como pedido.
+async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw){
+  const extraido=await _ganhoExtrairItauFundoConsolidado(file);
+  if(!extraido) return null;
+  if(extraido.error) return {error:extraido.error};
+  if(!targetCnpjRaw) return {error:'SITE_CNPJ_NOT_CONFIGURED'};
+  const targetNorm=_ganhoNormalizarCnpj(targetCnpjRaw);
+  const encontrados=extraido.fundos.filter(f=>f.cnpjNorm===targetNorm);
+  if(!encontrados.length) return {error:'FUND_CNPJ_NOT_FOUND'};
+  if(encontrados.length>1) return {error:'DUPLICATE_FUND_CNPJ_BLOCK'};
+  const fundo=encontrados[0];
+  if(!fundo.competence) return {error:'COMPETENCE_NOT_FOUND'};
+  if(!fundo.resumo.length) return {error:'SOURCE_NOT_FOUND'};
+  const M='itau_fundo_'+_aplicfinHash(targetNorm);
+  const r2=v=>v==null?null:Math.round(Number(v)*100)/100;
+  const ROTULOS={
+    'summary.previous_gross_balance':'Resumo do Período → SALDO BRUTO ANTERIOR',
+    'summary.applications':'Resumo do Período → APLICAÇÕES',
+    'summary.redemptions':'Resumo do Período → RESGATES',
+    'summary.taxable_yield_base':'Resumo do Período → RENDIMENTO-BASE CALC. IR',
+    'summary.current_gross_balance':'Resumo do Período → SALDO BRUTO ATUAL',
+    'summary.iof_exempt_total':'Resumo do Período → TOTAL LIVRE DE IOF',
+    'summary.iof_taxable_total':'Resumo do Período → TOTAL SUJEITO A IOF',
+    'summary.net_redemption_total':'Resumo do Período → TOTAL LÍQUIDO P/RESGATE',
+    'summary.ir_withheld_period':'Resumo do Período → IR RETIDO NO PERÍODO',
+    'summary.gross_yield_month':'Resumo do Período → RENDIMENTO BRUTO NO MÊS',
+  };
+  const sources=fundo.resumo.map(it=>({
+    key:M+'.'+it.key, label:ROTULOS[it.key]||it.raw_description, section:'Resumo do Período', product:null,
+    value:r2(it.value), calculationType:'DIRECT_TOTAL',
+    fund_cnpj:fundo.cnpjNorm, fund_name:fundo.nome, raw_description:it.raw_description, raw_value:it.raw_value, page_number:it.page,
+  }));
+  return {
+    bank:'ITAU', model:M, competence:fundo.competence, account:null,
+    fund:{name:fundo.nome,cnpj:fundo.cnpjNorm},
+    fingerprint:_aplicfinFingerprint('ITAU',M,[fundo.cnpjNorm,'RESUMO DO PERIODO ITAU FUNDO']),
+    productMode:'single', products:[], sources, validations:[], warnings:[], pageCount:null,
+  };
+}
 // Empacota o "resumo" que a IA (convaplicfin-extrair-tabela) devolveu — só
 // quando o extrato tem um bloco de Resumo do Mês separado da tabela (ver
 // prompt da Edge Function) — no MESMO contrato {sources[...]} que os
@@ -32669,6 +32800,32 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
   // aos outros bancos e reaplica sozinho nos meses seguintes.
   const bb=await _aplicfinParseBbRendeFacil(file);
   if(bb) return await _ganhoAplicarParserSemIA(eid,pid,bb,file,statusEl);
+
+  // "Extrato de Fundos de Investimento" Itaú — pode ter vários fundos no
+  // mesmo PDF; o CNPJ já cadastrado nesta aplicação (ganho.cnpj) escolhe qual
+  // quadro ler. Reconhece o layout mesmo sem esse CNPJ resolver (documento é
+  // desse tipo mas o quadro certo não foi achado) — nesse caso NÃO tenta
+  // outro parser nem cai pra IA sozinho, só avisa e para (pedido do usuário:
+  // nunca chutar outro fundo parecido).
+  const ganhoAtual=(getGanhos(eid)||{})[pid]||{};
+  const itauFundo=await _aplicfinParseItauFundoConsolidado(file,ganhoAtual.cnpj);
+  if(itauFundo){
+    if(itauFundo.error){
+      const MSGS_ITAU_FUNDO={
+        FUND_CNPJ_NOT_FOUND:'Não foi encontrado no extrato um fundo com o CNPJ cadastrado nesta aplicação (campo CNPJ, acima).',
+        DUPLICATE_FUND_CNPJ_BLOCK:'O extrato tem mais de um quadro com o mesmo CNPJ desta aplicação — precisa de revisão manual.',
+        SITE_CNPJ_NOT_CONFIGURED:'Informe o CNPJ do fundo nesta aplicação (campo CNPJ, acima) antes de importar este extrato.',
+        COMPETENCE_NOT_FOUND:'Não consegui identificar o período (competência) deste extrato.',
+        SOURCE_NOT_FOUND:'Não encontrei o quadro "Resumo do Período" dentro do fundo com esse CNPJ.',
+        NO_FUND_BLOCKS_FOUND:'Não encontrei nenhum fundo com CNPJ neste extrato.',
+      };
+      toast(MSGS_ITAU_FUNDO[itauFundo.error]||('Erro ao ler o extrato: '+itauFundo.error),'err');
+      if(statusEl) statusEl.textContent='';
+      return 'NAO_RECONHECIDO';
+    }
+    return await _ganhoAplicarParserSemIA(eid,pid,itauFundo,file,statusEl);
+  }
+
   const itau=await _aplicfinExtrairSemIA(file);
   if(itau){
     return await _ganhoAplicarParserSemIA(eid,pid,itau,file,statusEl);
