@@ -8,6 +8,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.31/jspdf.plugin.autotable.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/tesseract.js/5.1.1/tesseract.min.js"></script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230F7B6C'/%3E%3Crect x='12' y='8' width='40' height='48' rx='5' fill='white'/%3E%3Crect x='16' y='12' width='32' height='12' rx='2' fill='%230F7B6C'/%3E%3Crect x='16' y='30' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='28' y='30' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='40' y='30' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='16' y='42' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='28' y='42' width='8' height='7' rx='2' fill='%230F7B6C'/%3E%3Crect x='40' y='42' width='8' height='14' rx='2' fill='%230F7B6C'/%3E%3C/svg%3E">
 <meta name="theme-color" content="#0F7B6C">
 <meta name="color-scheme" content="light dark">
@@ -31921,44 +31922,74 @@ const GANHO_ITAU_FUNDO_DESCRICOES={
 function _ganhoNormalizarDescricaoFundo(s){
   return String(s||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\*/g,'').replace(/[0-9.,]+/g,'').replace(/\s+/g,' ').trim();
 }
-// Lê TODOS os fundos do PDF (não só o do CNPJ procurado) — devolve
-// {fundos:[{nome,cnpjRaw,cnpjNorm,resumo:[{key,value,raw_description,
-// raw_value,page}],competence}], competence} ou null se o PDF não for desse
-// layout (título "Extrato de Fundos de Investimento" ausente).
-async function _ganhoExtrairItauFundoConsolidado(file){
-  _convItauGarantirWorker();
-  const buf=await file.arrayBuffer();
-  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  const todasLinhas=[];
-  let textoCompleto='';
-  for(let p=1;p<=pdf.numPages;p++){
-    const page=await pdf.getPage(p);
-    const itens=await _lancctbExtrairItensPagina(page);
-    const linhas=_lancctbAgruparLinhasPorY(itens).map(l=>l.itens.map(i=>i.str).join(' ').trim()).filter(t=>t);
-    linhas.forEach(t=>todasLinhas.push({texto:t,pagina:p}));
-    textoCompleto+=' '+linhas.join(' ');
-  }
+// Validação de dígitos verificadores de CNPJ (algoritmo padrão) — usada
+// tanto pra rejeitar CNPJ "candidato" ilegível (OCR) quanto, na origem OCR,
+// como corretivo de letra↔dígito parecidos (§10 do pedido do usuário: O→0,
+// Q→0, I→1, L→1, |→1) antes de validar.
+function _ganhoCnpjDigitosValidos(cnpj14){
+  if(!/^\d{14}$/.test(cnpj14)) return false;
+  if(/^(\d)\1{13}$/.test(cnpj14)) return false;
+  const calc=base=>{
+    const pesos=base.length===12?[5,4,3,2,9,8,7,6,5,4,3,2]:[6,5,4,3,2,9,8,7,6,5,4,3,2];
+    let soma=0; for(let i=0;i<base.length;i++) soma+=parseInt(base[i],10)*pesos[i];
+    const resto=soma%11; return resto<2?0:11-resto;
+  };
+  const d1=calc(cnpj14.slice(0,12));
+  const d2=calc(cnpj14.slice(0,12)+String(d1));
+  return cnpj14.slice(12)===String(d1)+String(d2);
+}
+// Normaliza um CNPJ "candidato" extraído do PDF (texto nativo OU OCR) —
+// corrige confusões comuns de OCR só DENTRO desse trecho já isolado (nunca
+// em texto livre) e devolve null se não fechar em exatamente 14 dígitos.
+// Usado só pro CNPJ do FUNDO (achado no PDF); o CNPJ digitado pelo usuário
+// no site usa _ganhoNormalizarCnpj (sem essa correção de letras, que não
+// faz sentido pra um campo digitado à mão).
+// NÃO exige dígito verificador válido como bloqueio: a comparação exata
+// contra o CNPJ já cadastrado no site (targetCnpjRaw, em
+// _aplicfinParseItauFundoConsolidado) já é a proteção real contra escolher
+// o fundo errado — um CNPJ com dígito verificador "inválido" pelo cálculo
+// padrão ainda pode ser o valor real impresso no documento (_ganhoCnpjDigitosValidos
+// fica disponível como sinal auxiliar, não como portão obrigatório).
+function _ganhoCnpjCandidatoValido(raw){
+  const corrigido=String(raw||'').toUpperCase()
+    .replace(/O/g,'0').replace(/Q/g,'0').replace(/I/g,'1').replace(/L/g,'1').replace(/\|/g,'1')
+    .replace(/\D/g,'');
+  return /^\d{14}$/.test(corrigido)?corrigido:null;
+}
+// Interpretação COMPARTILHADA entre a versão com texto nativo (pdf.js) e a
+// versão escaneada (OCR/Tesseract.js) — as duas produzem a MESMA forma
+// {texto,pagina}[] + texto concatenado, então a partir daqui a leitura do
+// modelo é idêntica nas duas. Devolve {fundos:[{nome,cnpjRaw,cnpjNorm,
+// resumo:[{key,value,raw_description,raw_value,page}],competence}],
+// competence} ou null se o texto não bater com esse layout.
+function _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto){
   if(!/Extrato de Fundos de Investimento/i.test(textoCompleto)) return null;
 
   // Competência pelo FIM do período ("Período: 03/08 a 31/08/2026" → 08/2026),
-  // nunca pela emissão nem pelo início — pedido explícito do usuário.
+  // nunca pela emissão, pelo início do período nem pelo nome do arquivo.
   const mPeriodo=textoCompleto.match(/Per[íi]odo:\s*\d{2}\/\d{2}\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/i);
   const competence=mPeriodo?(mPeriodo[3]+'-'+mPeriodo[2]):null;
   const RE_NUM_FIM=/(-?[\d.]+,\d{2})\s*$/;
+  // "Ag./Conta/Subconta" tolerante a ruído de OCR (pontuação/espaço podem
+  // sair diferentes) — exige as 3 palavras próximas, não a pontuação exata.
+  const RE_MARCA_CONTA=/AG[^A-Z0-9]{0,3}CONTA[^A-Z0-9]{0,3}SUBCONTA/i;
 
   // Um fundo pode ocupar várias páginas — currentFund só troca quando surge
-  // uma NOVA linha "Ag./Conta/Subconta ... CNPJ ...", nunca por mudança de
-  // página. Cuidado: "Gestor:"/"Administrado por:" no rodapé também trazem
-  // um CNPJ (da gestora, não do fundo) — só reconhece como início de bloco
-  // quando a linha também tiver "Ag./Conta/Subconta".
+  // uma NOVA linha com CNPJ válido junto da marca de agência/conta/subconta,
+  // nunca por mudança de página. Cuidado: "Gestor:"/"Administrado por:" no
+  // rodapé também trazem um CNPJ (da gestora/administradora, não do fundo)
+  // — não têm a marca de agência/conta/subconta, então não viram blocos.
   const fundos=[];
   let fundoAtual=null, dentroResumo=false, linhaAnterior='';
   for(const {texto:linha,pagina} of todasLinhas){
-    const mCnpj=linha.match(/CNPJ\s+([\d.\/-]{14,20})/i);
-    if(mCnpj&&/Ag\.\/Conta\/Subconta/i.test(linha)){
-      fundoAtual={nome:linhaAnterior.trim(),cnpjRaw:mCnpj[1],cnpjNorm:_ganhoNormalizarCnpj(mCnpj[1]),resumo:[],competence,pagina};
-      fundos.push(fundoAtual);
-      dentroResumo=false; linhaAnterior=linha; continue;
+    const mCnpj=linha.match(/CNPJ\s*[:\s]?\s*([0-9OQIL|.\/-]{14,22})/i);
+    if(mCnpj&&RE_MARCA_CONTA.test(linha)){
+      const cnpjValido=_ganhoCnpjCandidatoValido(mCnpj[1]);
+      if(cnpjValido){
+        fundoAtual={nome:linhaAnterior.trim(),cnpjRaw:mCnpj[1],cnpjNorm:cnpjValido,resumo:[],competence,pagina};
+        fundos.push(fundoAtual);
+        dentroResumo=false; linhaAnterior=linha; continue;
+      }
     }
     if(/^Resumo do Per[íi]odo/i.test(linha)){ dentroResumo=!!fundoAtual; linhaAnterior=linha; continue; }
     if(/^Movimenta[çc][ãa]o no Per[íi]odo/i.test(linha)){ dentroResumo=false; linhaAnterior=linha; continue; }
@@ -31975,6 +32006,87 @@ async function _ganhoExtrairItauFundoConsolidado(file){
   if(!fundos.length) return {error:'NO_FUND_BLOCKS_FOUND'};
   return {fundos,competence};
 }
+// Lê o PDF via pdf.js (texto nativo) — devolve null se o layout não bater
+// OU se não houver texto nativo suficiente (PDF escaneado; nesse caso quem
+// chama deve tentar a versão OCR, ver _ganhoExtrairItauFundoConsolidadoOCR).
+async function _ganhoExtrairItauFundoConsolidado(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const todasLinhas=[];
+  let textoCompleto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const itens=await _lancctbExtrairItensPagina(page);
+    const linhas=_lancctbAgruparLinhasPorY(itens).map(l=>l.itens.map(i=>i.str).join(' ').trim()).filter(t=>t);
+    linhas.forEach(t=>todasLinhas.push({texto:t,pagina:p}));
+    textoCompleto+=' '+linhas.join(' ');
+  }
+  // Menos de 50 caracteres úteis = PDF sem camada de texto (escaneado) —
+  // não tenta interpretar como se fosse texto nativo, devolve null pra
+  // quem chama decidir se tenta OCR.
+  if(textoCompleto.trim().length<50) return null;
+  return _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto);
+}
+// ── Versão ESCANEADA (sem texto selecionável) do mesmo modelo — OCR local
+// via Tesseract.js (roda inteiramente no navegador; NUNCA envia o PDF/
+// imagens pra nenhum serviço de IA generativa/LLM). Só é chamada quando
+// _ganhoExtrairItauFundoConsolidado devolveu null por falta de texto nativo.
+const GANHO_ITAU_FUNDO_ANCORAS=[/EXTRATO DE FUNDOS DE INVESTIMENTO/i,/RESUMO DO PER[IÍ]ODO/i,/INFORMA[ÇC][ÕO]ES COMPLEMENTARES DO FUNDO/i,/CNPJ/i];
+function _ganhoItauFundoScoreAncoras(texto){
+  return GANHO_ITAU_FUNDO_ANCORAS.reduce((s,rx)=>s+(rx.test(texto||'')?1:0),0);
+}
+async function _ganhoItauFundoRenderizarPagina(page,rotacao,scale){
+  const viewport=page.getViewport({scale,rotation:((page.rotate||0)+rotacao)%360});
+  const canvas=document.createElement('canvas');
+  canvas.width=viewport.width;canvas.height=viewport.height;
+  const ctx=canvas.getContext('2d');
+  await page.render({canvasContext:ctx,viewport}).promise;
+  return canvas;
+}
+let _ganhoOcrWorkerPromise=null;
+function _ganhoOcrWorker(){
+  if(typeof Tesseract==='undefined') throw new Error('Biblioteca de OCR (Tesseract.js) não carregou — verifique sua conexão e recarregue a página.');
+  if(!_ganhoOcrWorkerPromise) _ganhoOcrWorkerPromise=Tesseract.createWorker('por');
+  return _ganhoOcrWorkerPromise;
+}
+async function _ganhoExtrairItauFundoConsolidadoOCR(file,statusCb){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const worker=await _ganhoOcrWorker();
+
+  // 1) Detecta a orientação testando 0°/90°/180°/270° na 1ª página (baixa
+  // resolução, mais rápido) e escolhendo a que reconhece mais âncoras
+  // conhecidas do layout — nunca confia só no page.rotate do PDF, porque
+  // neste arquivo real o conteúdo pode estar girado dentro da própria
+  // imagem escaneada. A MESMA rotação é aplicada a todas as páginas
+  // seguintes (não cria um fingerprint por rotação).
+  const page1=await pdf.getPage(1);
+  let melhorRotacao=0, melhorScore=-1;
+  for(const rot of [0,90,180,270]){
+    if(statusCb) statusCb(`Detectando orientação da página (testando ${rot}°)…`);
+    const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,1.3);
+    const {data}=await worker.recognize(canvas);
+    const score=_ganhoItauFundoScoreAncoras(data.text);
+    if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; }
+  }
+
+  // 2) OCR de todas as páginas já na orientação certa, em resolução maior
+  // (suficiente pra ler CNPJ/valores/títulos de seção com qualidade).
+  const todasLinhas=[];
+  let textoCompleto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    if(statusCb) statusCb(`Lendo página ${p}/${pdf.numPages} via OCR (pode levar um tempo)…`);
+    const page=p===1?page1:await pdf.getPage(p);
+    const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,2.3);
+    const {data}=await worker.recognize(canvas);
+    const linhas=String(data.text||'').split('\n').map(t=>t.trim()).filter(Boolean);
+    linhas.forEach(t=>todasLinhas.push({texto:t,pagina:p}));
+    textoCompleto+=' '+linhas.join(' ');
+  }
+  return _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto);
+}
 // Empacota no contrato padrão {sources[...]} — seleciona o fundo pelo CNPJ
 // já cadastrado na aplicação (targetCnpjRaw); nunca usa o primeiro fundo do
 // PDF, nunca soma fundos diferentes. Devolve {error:...} (não null) quando o
@@ -31982,8 +32094,17 @@ async function _ganhoExtrairItauFundoConsolidado(file){
 // não encontrado, duplicado, ou sem "Resumo do Período" legível) — nesses
 // casos o chamador NÃO deve tentar outro parser nem cair pra IA sozinho,
 // só avisar e permitir revisão manual, exatamente como pedido.
-async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw){
-  const extraido=await _ganhoExtrairItauFundoConsolidado(file);
+async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw,statusCb){
+  // Ordem obrigatória: tenta texto nativo primeiro; só usa OCR (Tesseract.js,
+  // local, sem LLM/IA generativa) quando o PDF não tem camada de texto
+  // suficiente pra ler (ex: extrato escaneado — caso real: CA Marketing).
+  let extraido=await _ganhoExtrairItauFundoConsolidado(file);
+  let viaOcr=false;
+  if(!extraido){
+    if(statusCb) statusCb('PDF sem texto selecionável — lendo via OCR local (Tesseract.js)…');
+    extraido=await _ganhoExtrairItauFundoConsolidadoOCR(file,statusCb);
+    viaOcr=true;
+  }
   if(!extraido) return null;
   if(extraido.error) return {error:extraido.error};
   if(!targetCnpjRaw) return {error:'SITE_CNPJ_NOT_CONFIGURED'};
@@ -31994,7 +32115,11 @@ async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw){
   const fundo=encontrados[0];
   if(!fundo.competence) return {error:'COMPETENCE_NOT_FOUND'};
   if(!fundo.resumo.length) return {error:'SOURCE_NOT_FOUND'};
-  const M='itau_fundo_'+_aplicfinHash(targetNorm);
+  // Modelo (e portanto o mapeamento salvo) fica separado por CNPJ+origem —
+  // a versão OCR desse mesmo fundo pede mapeamento próprio na 1ª vez (pedido
+  // do usuário: modelo "ITAU_FUNDOS_INVESTIMENTO_IMAGEM" distinto do modelo
+  // de texto nativo), mas a partir daí reaplica sozinha igual às outras.
+  const M=(viaOcr?'itau_fundo_img_':'itau_fundo_')+_aplicfinHash(targetNorm);
   const r2=v=>v==null?null:Math.round(Number(v)*100)/100;
   const ROTULOS={
     'summary.previous_gross_balance':'Resumo do Período → SALDO BRUTO ANTERIOR',
@@ -32016,8 +32141,10 @@ async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw){
   return {
     bank:'ITAU', model:M, competence:fundo.competence, account:null,
     fund:{name:fundo.nome,cnpj:fundo.cnpjNorm},
-    fingerprint:_aplicfinFingerprint('ITAU',M,[fundo.cnpjNorm,'RESUMO DO PERIODO ITAU FUNDO']),
-    productMode:'single', products:[], sources, validations:[], warnings:[], pageCount:null,
+    fingerprint:_aplicfinFingerprint('ITAU',M,[fundo.cnpjNorm,viaOcr?'ITAU_FUNDOS_INVESTIMENTO_IMAGEM':'RESUMO DO PERIODO ITAU FUNDO']),
+    productMode:'single', products:[], sources, validations:[],
+    warnings:viaOcr?['Lido via OCR local (Tesseract.js) — o PDF não tinha texto selecionável. Confira os valores antes de salvar o mapeamento.']:[],
+    pageCount:null,
   };
 }
 // Empacota o "resumo" que a IA (convaplicfin-extrair-tabela) devolveu — só
@@ -32808,7 +32935,7 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
   // outro parser nem cai pra IA sozinho, só avisa e para (pedido do usuário:
   // nunca chutar outro fundo parecido).
   const ganhoAtual=(getGanhos(eid)||{})[pid]||{};
-  const itauFundo=await _aplicfinParseItauFundoConsolidado(file,ganhoAtual.cnpj);
+  const itauFundo=await _aplicfinParseItauFundoConsolidado(file,ganhoAtual.cnpj,msg=>{ if(statusEl) statusEl.textContent=msg; });
   if(itauFundo){
     if(itauFundo.error){
       const MSGS_ITAU_FUNDO={
