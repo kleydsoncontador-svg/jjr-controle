@@ -38,8 +38,21 @@ Responda SOMENTE com um JSON válido, exatamente neste formato:
   "linhas": [
     { "_secao": "nome da seção/tabela de onde essa linha veio", "nome da 1ª coluna": "valor", "nome da 2ª coluna": "valor", "...": "..." }
   ],
-  "observacoes": "1-2 frases em português caso haja ambiguidade, seções que não ficaram claras, ou linhas de total que você excluiu"
+  "observacoes": "1-2 frases em português caso haja ambiguidade, seções que não ficaram claras, ou linhas de total que você excluiu",
+  "banco": "nome do banco/instituição ou do layout do extrato, se identificável no documento (ex: 'BB Rende Fácil', 'Itaú Aplic Aut Mais'), senão null",
+  "resumo": {
+    "competencia": "mês/ano do resumo no formato MM/AAAA, ou null",
+    "aplicacoesNoMes": 0,
+    "resgatesLiquidosNoMes": 0,
+    "irSobreResgatesNoMes": 0,
+    "iofSobreResgatesNoMes": 0,
+    "rendimentosNoMes": 0,
+    "saldoBrutoAnterior": 0,
+    "saldoBrutoFinal": 0
+  }
 }
+
+O campo "resumo" só deve ser preenchido quando o documento tiver uma seção de RESUMO MENSAL separada da tabela de movimentação (ex: um bloco "Resumo do mês" com linhas tipo "Aplicações no mês", "Resgates líquidos no mês", "IR sobre resgates no mês", "IOF sobre resgates no mês", "Rendimentos no mês", "Saldo bruto em <data>") — NUNCA calcule/estime esses valores somando a tabela de movimentação você mesmo. Se o documento não tiver essa seção de resumo separada, omita o campo "resumo" inteiro (ou mande null). Dentro de "resumo", cada valor individual que não aparecer no documento fica null (não zero) — só "competencia" pode ficar null junto com os demais se o mês não estiver identificável.
 
 Regras:
 - "Data" é sempre a primeira coluna e é obrigatória em toda linha — nunca null. Se o documento tiver mais de uma coluna de data (ex: "Dt. Aplicação", "Dt. Vencto", "Dt. Resgate"), inclua TODAS como colunas separadas, na ordem em que aparecem — a primeira coluna do JSON continua sendo a que representa a data efetiva daquele movimento (data da aplicação numa linha de aplicação; data do resgate numa linha de resgate).

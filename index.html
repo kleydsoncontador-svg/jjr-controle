@@ -15886,10 +15886,11 @@ async function _convAplicFinExtrairGenerico(file){
   if(!resp.ok)throw new Error('A extração retornou status '+resp.status);
   const d=await resp.json();
   if(d.error)throw new Error(d.error);
-  if(!Array.isArray(d.colunas)||!Array.isArray(d.linhas)||!d.linhas.length){
+  const temResumo=d.resumo&&typeof d.resumo==='object'&&Object.keys(d.resumo).some(k=>k!=='competencia'&&d.resumo[k]!=null);
+  if((!Array.isArray(d.colunas)||!Array.isArray(d.linhas)||!d.linhas.length)&&!temResumo){
     throw new Error('Não foi possível identificar uma tabela de movimentação neste extrato.');
   }
-  return d; // {colunas, linhas, observacoes}
+  return d; // {colunas, linhas, observacoes, banco, resumo}
 }
 // Gera os lançamentos a partir do mapeamento configurado pelo usuário
 // (renderConvAplicFinMapeamentoForm) — mesma estrutura de saída que o parser
@@ -31888,6 +31889,42 @@ async function _aplicfinParseBbRendeFacil(file){
     productMode:'single', products:[], sources, validations:[], warnings:[], pageCount:null,
   };
 }
+// Empacota o "resumo" que a IA (convaplicfin-extrair-tabela) devolveu — só
+// quando o extrato tem um bloco de Resumo do Mês separado da tabela (ver
+// prompt da Edge Function) — no MESMO contrato {sources[...]} que os
+// parsers fixos sem IA usam, pra passar pela MESMA tela de mapeamento
+// (1x por modelo/banco, depois reaplica sozinho). "model" é derivado do
+// nome do banco que a própria IA identificou, pra lembrar o mapeamento nas
+// próximas vezes que o MESMO banco vier sem texto selecionável de novo.
+function _ganhoResumoIAParaParsed(extraido){
+  const r=extraido&&extraido.resumo;
+  if(!r) return null;
+  const camposComValor=['aplicacoesNoMes','resgatesLiquidosNoMes','irSobreResgatesNoMes','iofSobreResgatesNoMes','rendimentosNoMes','saldoBrutoAnterior','saldoBrutoFinal'].filter(k=>r[k]!=null);
+  if(!camposComValor.length) return null;
+  const mComp=String(r.competencia||'').match(/^(\d{2})\/(\d{4})$/);
+  if(!mComp) return null; // sem competência não dá pra saber em qual mês gravar
+  const [,mm,aaaa]=mComp;
+  const banco=extraido.banco||'Genérico (IA)';
+  const M='ia_resumo_'+_aplicfinHash(String(banco).toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim());
+  const r2=v=>v==null?null:Math.round(Number(v)*100)/100;
+  const mk=(k,label,v)=>({key:M+'.'+k,label,section:'Resumo do mês',product:null,value:r2(v),calculationType:'DIRECT_TOTAL'});
+  const sources=[
+    mk('summary.applications','Resumo do mês → Aplicações no mês',r.aplicacoesNoMes),
+    mk('summary.net_redemptions','Resumo do mês → Resgates líquidos no mês',r.resgatesLiquidosNoMes),
+    mk('summary.redemption_ir','Resumo do mês → IR sobre resgates no mês',r.irSobreResgatesNoMes),
+    mk('summary.redemption_iof','Resumo do mês → IOF sobre resgates no mês',r.iofSobreResgatesNoMes),
+    mk('summary.month_yield','Resumo do mês → Rendimentos no mês',r.rendimentosNoMes),
+    mk('summary.previous_gross_balance','Resumo do mês → Saldo bruto anterior',r.saldoBrutoAnterior),
+    mk('summary.final_gross_balance','Resumo do mês → Saldo bruto final',r.saldoBrutoFinal),
+  ];
+  return {
+    bank:banco, model:M, competence:aaaa+'-'+mm, account:null,
+    fingerprint:_aplicfinFingerprint(banco,M,[banco,'RESUMO DO MES (VIA IA)']),
+    productMode:'single', products:[], sources,
+    validations:[], warnings:['Lido via IA (OCR) — o PDF não tinha texto selecionável pro leitor sem IA reconhecer sozinho.'],
+    pageCount:null,
+  };
+}
 // ═══════════════════════════════════════════════════════════════════════════
 // IMPORTAÇÃO SEM IA de Extratos de Aplicações Financeiras (Ganhos/Rendimentos)
 // pdf.js + coordenadas, sem IA/LLM/OCR. Cada parser reconhece o modelo pelo
@@ -32653,13 +32690,38 @@ async function _ganhoUploadIAExtrair(forcarIA){
     }
     // ── forcarIA: motor de IA (Gemini) — só quando o usuário escolhe.
     const extraido=await _convAplicFinExtrairGenerico(file);
+    // Extrato com "Resumo do mês" (ex: BB Rende Fácil escaneado, sem texto
+    // selecionável — o leitor sem IA nunca consegue ler esse tipo de arquivo,
+    // só a IA via OCR): já tem sempre um bloco de resumo com significado
+    // claro (Aplicações no mês/Resgates líquidos/IR/IOF/Rendimentos/Saldo
+    // bruto), igual ao que o leitor sem IA extrai pra bancos com parser fixo
+    // — pedido do usuário 14/09/2026: "já tem o padrão sem IA, repete com IA,
+    // na leitura". Em vez de jogar isso fora e pedir pro usuário mapear a
+    // tabela de movimentação crua (perdendo o significado que a IA já
+    // identificou), monta o MESMO contrato {sources[...]} que o parser fixo
+    // usa e passa pela MESMA tela de mapeamento (1x por modelo, depois
+    // reaplica sozinho) — via _ganhoAplicarParserSemIA.
+    const parsedResumo=_ganhoResumoIAParaParsed(extraido);
+    if(parsedResumo){
+      statusEl.textContent='';
+      const resultado=await _ganhoAplicarParserSemIA(eid,pid,parsedResumo,file,statusEl);
+      if(resultado==='PROCESSADO') return;
+      if(resultado==='MAPEAR'){ btn.style.display='none'; if(btnIA) btnIA.style.display='none'; return; }
+      // NAO_RECONHECIDO (ex: sem competência identificável) — cai pro
+      // mapeamento genérico de tabela abaixo, se houver uma tabela pra mapear.
+    }
     _ganhoUploadIAExtraido=extraido;
     const ganhos=getGanhos(eid),ganho=ganhos[pid];
-    const colunasMapeaveis=extraido.colunas.filter(c=>!_ehColunaData(c));
+    const colunasMapeaveis=(extraido.colunas||[]).filter(c=>!_ehColunaData(c));
     const mapSalvo=ganho.mapeamentoColunasIA;
-    const entradasNecessarias=_lancctbGanhoEntradasMapeamento(colunasMapeaveis,extraido.linhas);
+    const entradasNecessarias=_lancctbGanhoEntradasMapeamento(colunasMapeaveis,extraido.linhas||[]);
     const cobreTudo=mapSalvo&&entradasNecessarias.every(({col,secao})=>(secao?col+'␟'+secao:col) in mapSalvo);
     statusEl.textContent='';
+    if(!colunasMapeaveis.length){
+      toast('Não encontrei uma tabela de movimentação nem um resumo do mês legível neste extrato.','err');
+      _resetBtns();
+      return;
+    }
     if(cobreTudo){
       const qtdMeses=_ganhoAplicarMapeamento(eid,pid,extraido,mapSalvo);
       toast(`Extrato processado — ${qtdMeses} mês(es) atualizado(s).`,'ok');
