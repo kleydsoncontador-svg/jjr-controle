@@ -32116,11 +32116,19 @@ async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw,statusCb){
   }
   if(!extraido) return null;
   if(extraido.error) return {error:extraido.error};
-  if(!targetCnpjRaw) return {error:'SITE_CNPJ_NOT_CONFIGURED'};
+  // Lista enxuta dos fundos achados no PDF (nome+CNPJ+um valor de conferência)
+  // pra oferecer escolha manual quando o CNPJ desta aplicação ainda não
+  // resolve sozinho — pedido do usuário 14/09/2026: "deveria me perguntar o
+  // CNPJ que vai relacionar no PDF, porque se tiver mais de um eu escolho".
+  const fundosDisponiveis=extraido.fundos.map(f=>({
+    nome:f.nome,cnpjNorm:f.cnpjNorm,
+    saldoAtual:(f.resumo.find(it=>it.key==='summary.current_gross_balance')||{}).value??null,
+  }));
+  if(!targetCnpjRaw) return {error:'SITE_CNPJ_NOT_CONFIGURED',fundosDisponiveis};
   const targetNorm=_ganhoNormalizarCnpj(targetCnpjRaw);
   const encontrados=extraido.fundos.filter(f=>f.cnpjNorm===targetNorm);
-  if(!encontrados.length) return {error:'FUND_CNPJ_NOT_FOUND'};
-  if(encontrados.length>1) return {error:'DUPLICATE_FUND_CNPJ_BLOCK'};
+  if(!encontrados.length) return {error:'FUND_CNPJ_NOT_FOUND',fundosDisponiveis};
+  if(encontrados.length>1) return {error:'DUPLICATE_FUND_CNPJ_BLOCK',fundosDisponiveis};
   const fundo=encontrados[0];
   if(!fundo.competence) return {error:'COMPETENCE_NOT_FOUND'};
   if(!fundo.resumo.length) return {error:'SOURCE_NOT_FOUND'};
@@ -32147,6 +32155,22 @@ async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw,statusCb){
     value:r2(it.value), calculationType:'DIRECT_TOTAL',
     fund_cnpj:fundo.cnpjNorm, fund_name:fundo.nome, raw_description:it.raw_description, raw_value:it.raw_value, page_number:it.page,
   }));
+  // Fonte derivada: RESGATES já líquido do IR retido no período — pedido do
+  // usuário 14/09/2026 ("no campo resgate, precisa informar o resultado de
+  // RESGATE DO PDF MENOS IR RETIDO NO PERIODO DO PDF"). Só existe quando os
+  // dois valores de origem existem nesse fundo (nunca inventa um dos dois).
+  const vResgates=fundo.resumo.find(it=>it.key==='summary.redemptions');
+  const vIr=fundo.resumo.find(it=>it.key==='summary.ir_withheld_period');
+  if(vResgates&&vIr){
+    sources.push({
+      key:M+'.summary.redemptions_net_of_ir',
+      label:'Resumo do Período → RESGATES − IR RETIDO NO PERÍODO (líquido)',
+      section:'Resumo do Período', product:null,
+      value:r2(vResgates.value-vIr.value), calculationType:'DERIVED_SUBTRACTION',
+      fund_cnpj:fundo.cnpjNorm, fund_name:fundo.nome,
+      raw_description:'RESGATES − IR RETIDO NO PERÍODO', raw_value:null, page_number:vResgates.page,
+    });
+  }
   return {
     bank:'ITAU', model:M, competence:fundo.competence, account:null,
     fund:{name:fundo.nome,cnpj:fundo.cnpjNorm},
@@ -32711,6 +32735,24 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       saldoBrutoExtrato:'bb_rende_facil.summary.final_gross_balance',
     },
   };
+  // Modelos "Extrato de Fundos de Investimento" Itaú têm um M diferente por
+  // CNPJ+origem (itau_fundo_<hash>/itau_fundo_img_<hash>) — não dá pra usar
+  // o nome do modelo inteiro como chave do mapa acima, só o prefixo.
+  if(/^itau_fundo_(img_)?/.test(model)){
+    const sug={
+      bruto:model+'.summary.gross_yield_month',
+      irrf:model+'.summary.ir_withheld_period',
+      rendMes:model+'.summary.gross_yield_month',
+      aplic:model+'.summary.applications',
+      // Pedido do usuário 14/09/2026: "no campo resgate, precisa informar o
+      // resultado de RESGATE DO PDF MENOS IR RETIDO NO PERIODO DO PDF" —
+      // sugere direto a fonte já derivada (RESGATES − IR RETIDO), não a
+      // RESGATES crua.
+      resgate:model+'.summary.redemptions_net_of_ir',
+      saldoBrutoExtrato:model+'.summary.current_gross_balance',
+    };
+    return sug[siteColId]||'';
+  }
   return (map[model]||{})[siteColId]||'';
 }
 function _renderAplicfinMapeamentoForm(ganho,parsed,produtoSel){
@@ -32801,9 +32843,30 @@ function _aplicfinAplicar(ganho,parsed,mapRows){
   if(!ganho.dados[mk]) ganho.dados[mk]={};
   const idsDetalhe=new Set();
   const aplicados=[], faltando=[];
+  // "Rendimento do Mês"/"Perda no Mês" (rendMes/rendLiq — rendLiq costuma
+  // ser renomeado pra "Perda no Mês" nessas aplicações) vindos da MESMA
+  // fonte do PDF representam um único valor com sinal, não dois valores
+  // independentes: positivo é rendimento, negativo é perda (gravada
+  // positiva). Pedido do usuário 14/09/2026, achado ao ver os dois campos
+  // recebendo o mesmo valor positivo — "SE FOR POSITIVO É Rendimento do Mês
+  // SE FOR NEGATIVO NO PDF NO SITE INFORMA EM Perda no Mês". Só ativa esse
+  // comportamento quando as DUAS linhas do mapeamento apontam
+  // explicitamente pra mesma source_key — mapear cada uma pra uma fonte
+  // DIFERENTE continua funcionando como dois valores independentes de sempre.
+  const rowRendMes=mapRows.find(r=>r.site_column==='rendMes');
+  const rowRendLiq=mapRows.find(r=>r.site_column==='rendLiq');
+  const parSinalAtivo=rowRendMes&&rowRendLiq&&rowRendMes.source_key===rowRendLiq.source_key;
+
   mapRows.forEach(r=>{
+    if(parSinalAtivo&&r.site_column==='rendLiq') return; // tratado junto com rendMes abaixo
     const src=_aplicfinAcharSource(parsed,r.source_key,r.produto_filtro);
     if(!src||src.value==null){ faltando.push(r.site_column); return; }
+    if(parSinalAtivo&&r.site_column==='rendMes'){
+      if(src.value>=0){ ganho.dados[mk].rendMes=src.value; ganho.dados[mk].rendLiq=0; }
+      else { ganho.dados[mk].rendLiq=Math.abs(src.value); ganho.dados[mk].rendMes=0; }
+      aplicados.push({col:'rendMes',value:ganho.dados[mk].rendMes},{col:'rendLiq',value:ganho.dados[mk].rendLiq});
+      return;
+    }
     ganho.dados[mk][r.site_column]=src.value;
     aplicados.push({col:r.site_column,value:src.value});
     if(r.site_column!=='rendMes'&&r.site_column!=='saldoBrutoExtrato') idsDetalhe.add(r.site_column);
@@ -32922,6 +32985,56 @@ function _aplicfinEscolherProduto(){
   const ganho=(getGanhos(ctx.eid)||{})[ctx.pid]||{};
   document.getElementById('ganhoUploadIABody').innerHTML=_renderAplicfinMapeamentoForm(ganho,ctx.parsed,ctx.produto);
 }
+// "Extrato de Fundos de Investimento" Itaú com mais de um fundo no mesmo PDF
+// e o CNPJ desta aplicação ainda não resolveu sozinho (campo vazio, ou não
+// achou aquele CNPJ neste PDF) — pergunta qual fundo usar em vez de chutar.
+// A escolha é salva no campo CNPJ da aplicação, então nos próximos meses
+// resolve sozinho de novo (mesmo fluxo dos outros bancos).
+let _ganhoItauFundoEscolhaCtx=null;
+function _ganhoItauFundoFormatarCnpj(digits){
+  const d=String(digits||'').padStart(14,'0');
+  return d.slice(0,2)+'.'+d.slice(2,5)+'.'+d.slice(5,8)+'/'+d.slice(8,12)+'-'+d.slice(12,14);
+}
+function _renderGanhoItauFundoEscolhaCnpj(msgTopo,fundos){
+  const opts=fundos.map((f,i)=>`<label style="display:flex;gap:8px;align-items:flex-start;padding:8px;background:var(--bg);border-radius:4px;cursor:pointer">
+    <input type="radio" name="ganhoItauFundoEscolha" value="${esc(f.cnpjNorm)}" ${i===0?'checked':''} style="margin-top:2px">
+    <span><b style="font-size:12px">${esc(f.nome)}</b><br>
+    <span style="font-size:11px;color:var(--slate)">CNPJ ${esc(_ganhoItauFundoFormatarCnpj(f.cnpjNorm))}${f.saldoAtual!=null?' · Saldo Bruto Atual R$ '+_fmt(f.saldoAtual):''}</span></span>
+  </label>`).join('');
+  setTimeout(()=>{
+    const acoes=document.getElementById('ganhoUploadIAAcoes');
+    if(acoes&&!document.getElementById('ganhoUploadIABtnEscolhaFundo')){
+      const b=document.createElement('button');
+      b.className='btn bp'; b.id='ganhoUploadIABtnEscolhaFundo'; b.textContent='Continuar →';
+      b.onclick=_ganhoItauFundoConfirmarEscolha;
+      acoes.appendChild(b);
+    }
+  },0);
+  return `<div style="font-size:12px;font-weight:700;color:#1E3558;margin-bottom:4px">${esc(msgTopo)}</div>
+  <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Escolha o fundo pelo CNPJ — isso é salvo no campo CNPJ desta aplicação, então nos próximos meses o sistema acha esse fundo sozinho.</div>
+  <div style="display:grid;gap:6px;max-height:280px;overflow:auto">${opts}</div>`;
+}
+async function _ganhoItauFundoConfirmarEscolha(){
+  const ctx=_ganhoItauFundoEscolhaCtx;
+  const sel=document.querySelector('input[name="ganhoItauFundoEscolha"]:checked');
+  if(!ctx||!sel){ toast('Escolha um fundo.','err'); return; }
+  const cnpjEscolhido=_ganhoItauFundoFormatarCnpj(sel.value);
+  const ganhos=getGanhos(ctx.eid); const ganho=ganhos[ctx.pid];
+  ganho.cnpj=cnpjEscolhido;
+  setGanhos(ctx.eid,ganhos);
+  document.getElementById('ganhoUploadIABtnEscolhaFundo')?.remove();
+  const statusEl=document.getElementById('ganhoUploadIAStatus');
+  if(statusEl) statusEl.textContent='CNPJ salvo — lendo o fundo escolhido…';
+  const itauFundo=await _aplicfinParseItauFundoConsolidado(ctx.file,cnpjEscolhido,msg=>{ if(statusEl) statusEl.textContent=msg; });
+  if(!itauFundo||itauFundo.error){
+    toast('Não consegui ler esse fundo depois de escolhido — tente novamente.','err');
+    if(statusEl) statusEl.textContent='';
+    return;
+  }
+  const resultado=await _ganhoAplicarParserSemIA(ctx.eid,ctx.pid,itauFundo,ctx.file,statusEl);
+  if(resultado==='PROCESSADO') return;
+  // 'MAPEAR' já deixou a tela de mapeamento renderizada por _ganhoAplicarParserSemIA.
+}
 
 // Dispatcher dos leitores SEM IA de Ganhos/Rendimentos. Tenta cada parser
 // determinístico; o 1º que reconhecer o modelo grava e devolve 'PROCESSADO'
@@ -32947,6 +33060,21 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
   const itauFundo=await _aplicfinParseItauFundoConsolidado(file,ganhoAtual.cnpj,msg=>{ if(statusEl) statusEl.textContent=msg; });
   if(itauFundo){
     if(itauFundo.error){
+      // CNPJ não configurado, ou configurado mas não achado neste PDF — se
+      // o PDF tem algum fundo pra escolher, pergunta em vez de só avisar e
+      // parar (pedido do usuário 14/09/2026). Duplicado (mesmo CNPJ em 2
+      // quadros) continua exigindo revisão manual de verdade.
+      const podeEscolher=(itauFundo.error==='SITE_CNPJ_NOT_CONFIGURED'||itauFundo.error==='FUND_CNPJ_NOT_FOUND')
+        &&Array.isArray(itauFundo.fundosDisponiveis)&&itauFundo.fundosDisponiveis.length;
+      if(podeEscolher){
+        _ganhoItauFundoEscolhaCtx={eid,pid,file};
+        const msgTopo=itauFundo.error==='SITE_CNPJ_NOT_CONFIGURED'
+          ?'Este extrato tem fundo(s) — qual é o desta aplicação?'
+          :'O CNPJ cadastrado nesta aplicação não apareceu neste extrato — qual fundo é o certo?';
+        document.getElementById('ganhoUploadIABody').innerHTML=_renderGanhoItauFundoEscolhaCnpj(msgTopo,itauFundo.fundosDisponiveis);
+        if(statusEl) statusEl.textContent='';
+        return 'MAPEAR';
+      }
       const MSGS_ITAU_FUNDO={
         FUND_CNPJ_NOT_FOUND:'Não foi encontrado no extrato um fundo com o CNPJ cadastrado nesta aplicação (campo CNPJ, acima).',
         DUPLICATE_FUND_CNPJ_BLOCK:'O extrato tem mais de um quadro com o mesmo CNPJ desta aplicação — precisa de revisão manual.',
