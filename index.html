@@ -28929,6 +28929,113 @@ async function _lancctbParsearExtratoBBMensal(pdf){
   lancamentos.forEach(l=>delete l._saldoLinha);
   return {lancamentos,saldoAnteriorDoc,saldoFinalDoc,mesRef:mPeriodo?parseInt(mPeriodo[1],10):null,anoRef:mPeriodo?parseInt(mPeriodo[2],10):null};
 }
+// Extrato de conta corrente (C/C) do Nubank Pagamentos — confirmado com
+// arquivo real (Coufal Engtech, Ag 0001 CC 776234361-3, 06/2026). Layout bem
+// diferente do de conta corrente comum: os lançamentos ficam agrupados por
+// DIA e, dentro de cada dia, por DIREÇÃO ("Total de entradas +X" / "Total de
+// saídas -X") — só a PRIMEIRA dessas linhas de um dia novo traz a data
+// ("05 JUN 2026 Total de entradas..."); se o mesmo dia tiver as duas
+// direções, a 2ª vem sem data ("Total de saídas - 21.056,49"), então o valor
+// individual de CADA transação embaixo não carrega sinal nenhum — o sinal
+// vem inteiramente de qual cabeçalho (entradas/saídas) está "ativo" no
+// momento. Descrição pode quebrar em várias linhas de continuação (sem valor
+// no fim) antes do próximo cabeçalho ou de "Saldo do dia".
+const LANCCTB_MESES_ABREV_PT={JAN:1,FEV:2,MAR:3,ABR:4,MAI:5,JUN:6,JUL:7,AGO:8,SET:9,OUT:10,NOV:11,DEZ:12};
+async function _lancctbParsearExtratoNubankMensal(pdf){
+  const paginasLinhas=[];
+  let textoTudo='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens).map(l=>l.itens.map(i=>i.str).join(' ').trim()).filter(t=>t);
+    paginasLinhas.push(linhas);
+    textoTudo+=' '+linhas.join(' ');
+  }
+  // "nubank.com.br"/"Nu Pagamentos S.A." também aparecem na Fatura Cartão
+  // Nubank (layout bem diferente, já tem parser próprio em convNubank) — só
+  // reconhece como extrato de C/C se também tiver "Movimentações" (título da
+  // seção de lançamentos, exclusivo desse layout).
+  if(!/nubank\.com\.br|Nu Pagamentos S\.A\./i.test(textoTudo)) return null;
+  if(!/Movimenta[çc][õo]es/i.test(textoTudo)) return null;
+
+  const RE_DIA_COM_DATA=/^(\d{2})\s+([A-ZÇ]{3})\s+(\d{4})\s+Total de (entradas|sa[ií]das)\s*[+-]?\s*([\d.]+,\d{2})$/i;
+  const RE_TOTAL_SEM_DATA=/^Total de (entradas|sa[ií]das)\s*[+-]?\s*([\d.]+,\d{2})$/i;
+  const RE_SALDO_DIA=/^Saldo do dia\s+-?[\d.]+,\d{2}$/i;
+  const RE_SALDO_INICIAL=/^Saldo inicial\s+(-?[\d.]+,\d{2})$/i;
+  const RE_SALDO_FINAL=/^Saldo final do per[íi]odo\s+(-?[\d.]+,\d{2})$/i;
+  const RE_VALOR_FIM=/([\d.]+,\d{2})\s*$/;
+  const RE_IGNORAR=[
+    /^Movimenta[çc][õo]es$/i,
+    /^Rendimento l[íi]quido\s/i,
+    /^Saldo final do per[íi]odo$/i,
+    /^R\$\s*-?[\d.,]+$/i,
+    /^CNPJ[\s:]/i,
+    /^Ag[êe]ncia\s/i,
+    /^\d{2}\s+DE\s+[A-ZÇ]+\s+DE\s+\d{4}\s+a\s+\d{2}\s+DE/i,
+    /VALORES EM R\$/i,
+    /^Tem alguma d[úu]vida/i,
+    /^metropolitanas\)/i,
+    /^Caso a solu[çc][ãa]o/i,
+    /^dispon[íi]veis em nubank/i,
+    /^Extrato gerado dia/i,
+    /^O saldo l[íi]quido corresponde/i,
+    /^N[ãa]o nos responsabilizamos/i,
+    /^Asseguramos a autenticidade/i,
+    /^Nu Financeira S\.A\./i,
+    /^Nu Pagamentos S\.A\./i,
+    /^e Investimento$/i,
+  ];
+
+  const lancamentos=[];
+  let dataAtual=null, sinalAtual=null;
+  let saldoAnteriorDoc=null, saldoFinalDoc=null;
+
+  paginasLinhas.forEach(linhas=>{
+    linhas.forEach(linha=>{
+      if(RE_IGNORAR.some(rx=>rx.test(linha))) return;
+
+      const mSi=linha.match(RE_SALDO_INICIAL);
+      if(mSi){ saldoAnteriorDoc=_lancctbParseValorBR(mSi[1]); return; }
+      const mSf=linha.match(RE_SALDO_FINAL);
+      if(mSf){ saldoFinalDoc=_lancctbParseValorBR(mSf[1]); return; }
+
+      const mDia=linha.match(RE_DIA_COM_DATA);
+      if(mDia){
+        const mesNum=LANCCTB_MESES_ABREV_PT[mDia[2].toUpperCase()];
+        if(mesNum) dataAtual={dd:mDia[1],mm:String(mesNum).padStart(2,'0'),aaaa:mDia[3]};
+        sinalAtual=/entradas/i.test(mDia[4])?'entrada':'saida';
+        return;
+      }
+      const mTotal=linha.match(RE_TOTAL_SEM_DATA);
+      if(mTotal){
+        sinalAtual=/entradas/i.test(mTotal[1])?'entrada':'saida';
+        return;
+      }
+      if(RE_SALDO_DIA.test(linha)) return;
+
+      const mVal=linha.match(RE_VALOR_FIM);
+      if(mVal&&dataAtual&&sinalAtual){
+        const historico=linha.slice(0,mVal.index).trim();
+        if(historico){
+          const valor=_lancctbParseValorBR(mVal[1]);
+          lancamentos.push({
+            data:`${dataAtual.aaaa}-${dataAtual.mm}-${dataAtual.dd}`,
+            historico,
+            valor_entrada:sinalAtual==='entrada'?valor:0,
+            valor_saida:sinalAtual==='saida'?valor:0,
+            documento:null,
+          });
+          return;
+        }
+      }
+      // Linha de continuação (sem valor no fim) — anexa ao histórico do
+      // último lançamento aberto.
+      if(lancamentos.length) lancamentos[lancamentos.length-1].historico=(lancamentos[lancamentos.length-1].historico+' '+linha).trim();
+    });
+  });
+
+  if(!lancamentos.length) return null;
+  return {lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Nubank'};
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -28955,7 +29062,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
-          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf));
+          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf));
       })();
       if(reconhecido){
         origem='pdf_estruturado';
