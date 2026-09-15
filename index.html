@@ -29043,6 +29043,125 @@ async function _lancctbParsearExtratoNubankMensal(pdf){
   if(!lancamentos.length) return null;
   return {lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Nubank'};
 }
+// ── BB "Extrato de Conta Corrente" (2º modelo, distinto do "dt. balancete"
+// já suportado em _lancctbParsearExtratoBBMensal) — pedido do usuário
+// 15/09/2026, confirmado com arquivo real (SGP Participações, Ag 2936-0
+// C/C 51482-9, 07/2026). Cabeçalho "Cliente / Agência: X Conta: Y" e tabela
+// "Dia | Lote | Documento | Histórico | Valor". Achado real (confirmado
+// item a item): cada registro fica espalhado em 2 bandas de Y bem próximas
+// — o Valor (col. mais à direita) vem PRIMEIRO no stream do pdf.js, x>450;
+// só DEPOIS vêm a Data (x<80), Lote/Documento (dígitos, 85≤x<230) e o
+// Histórico (x≥260, pode quebrar em 2 linhas) do MESMO registro — ou seja,
+// o registro fecha logo ANTES do próximo token de Valor, nunca no de Data.
+// Não dá pra agrupar por linha (Y) nem fechar ao ver a Data (testado e
+// deu tudo com 1 registro de atraso — Valor de um lançamento caindo no
+// lançamento seguinte).
+async function _lancctbParsearExtratoBBContaCorrente(pdf){
+  const itens1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(!/extrato de conta corrente/i.test(textoPagina1)) return null;
+  if(!/dia\s+lote\s+documento\s+hist[oó]rico\s+valor/i.test(textoPagina1)) return null;
+
+  const RE_DATA=/^(\d{2})\/(\d{2})\/(\d{4})$/;
+  const RE_VALOR_DC=/^([\d.]+,\d{2})\s*\(([+-])\)$/;
+  const registros=[];
+  let pendingValor=null, pendingDc=null;
+  let buf={dataStr:undefined,historico:[]};
+  const flush=()=>{
+    if(pendingValor!=null) registros.push({dataStr:buf.dataStr,valorStr:pendingValor,dc:pendingDc,historico:buf.historico});
+    buf={dataStr:undefined,historico:[]};
+  };
+
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    for(const it of itens){
+      const t=it.str.trim();
+      if(!t) continue;
+      if(/^Extrato de Conta Corrente$|^Cliente$|^Ag[êe]ncia:|^Lan[çc]amentos$|^Dia$|^Lote$|^Documento$|^Hist[óo]rico$|^Valor$|^Total Aplica[çc][õo]es Financeiras$|^\*\s*Saldos por dia|^Sujeitos a confirma[çc][ãa]o/i.test(t)) continue;
+
+      const mVal=t.match(RE_VALOR_DC);
+      if(mVal&&it.x>450){
+        flush(); // fecha o registro anterior ANTES de guardar este novo Valor
+        pendingValor=mVal[1]; pendingDc=mVal[2];
+        continue;
+      }
+      if(RE_DATA.test(t)&&it.x<80){
+        const [,dd,mm,aaaa]=t.match(RE_DATA);
+        buf.dataStr=`${aaaa}-${mm}-${dd}`;
+        continue;
+      }
+      if(t==='00/00/0000'&&it.x<80){ buf.dataStr=null; continue; } // "Saldo do dia" — sem data real
+      if(it.x>=85&&it.x<230&&/^\d+$/.test(t)) continue; // Lote/Documento — não usado no histórico
+      // Ignora números soltos fora da tabela (ex: "0,00" de "Total Aplicações
+      // Financeiras" no rodapé) — histórico de verdade sempre tem letra.
+      if(it.x>=260&&/[A-Za-zÀ-ú]/.test(t)) buf.historico.push(t);
+    }
+  }
+  flush();
+
+  let saldoAnteriorDoc=null, saldoFinalDoc=null;
+  const lancamentos=[];
+  for(const r of registros){
+    if(!r.valorStr||r.dataStr===undefined) continue; // sem Valor OU sem nenhum token de data = lixo de cabeçalho/rodapé
+    const historico=r.historico.join(' ').replace(/\s+/g,' ').trim();
+    const historicoNorm=historico.replace(/^s\s+a\s+l\s+d\s+o$/i,'SALDO');
+    const valor=_lancctbParseValorBR(r.valorStr);
+    const valorAssinado=r.dc==='-'?-valor:valor;
+    if(r.dataStr===null) continue; // "Saldo do dia" — só um marcador de saldo corrente, não é lançamento.
+    if(/^saldo anterior$/i.test(historico)){ saldoAnteriorDoc=valorAssinado; continue; }
+    if(/^SALDO$/i.test(historicoNorm)){ saldoFinalDoc=valorAssinado; continue; }
+    if(!historico) continue;
+    lancamentos.push({
+      data:r.dataStr,
+      historico,
+      valor_entrada:r.dc==='+'?valor:0,
+      valor_saida:r.dc==='-'?valor:0,
+      documento:null,
+    });
+  }
+  if(!lancamentos.length) return null;
+  return {lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Banco do Brasil (Extrato C/C)'};
+}
+// ── BB "Extrato de Conta Corrente" — mesmo modelo acima, versão Excel
+// (sheet "Extrato Conta", colunas Data/Lançamento/Detalhes/N° documento/
+// Valor/Tipo Lançamento — valor vem com sufixo " C"/" D"). Confirmado com
+// arquivo real (SGP Participações, 08/2026).
+function _lancctbParsearExtratoBBContaCorrenteXlsx(wb){
+  const sn=wb.SheetNames.find(n=>/extrato conta/i.test(n))||wb.SheetNames[0];
+  const ws=wb.Sheets[sn]; if(!ws) return null;
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:false,defval:''});
+  const hdrIdx=aoa.findIndex(r=>/^data$/i.test(String(r[0]||'').trim())&&/lan[çc]amento/i.test(String(r[1]||'')));
+  if(hdrIdx<0) return null;
+  const RE_VALOR_DC=/^(-?[\d.]+,\d{2})\s*([CD])$/i;
+  let saldoAnteriorDoc=null, saldoFinalDoc=null;
+  const lancamentos=[];
+  for(let i=hdrIdx+1;i<aoa.length;i++){
+    const r=aoa[i];
+    const dataIso=_lancctbDataIsoFlex(r[0]); if(!dataIso) continue;
+    const lancamento=String(r[1]||'').trim();
+    const detalhes=String(r[2]||'').trim();
+    const mVal=String(r[4]||'').trim().match(RE_VALOR_DC);
+    if(!mVal) continue;
+    const valor=_lancctbParseValorBR(mVal[1].replace(/^-/,''));
+    const dc=mVal[2].toUpperCase();
+    const valorAssinado=dc==='D'?-valor:valor;
+    const historico=[lancamento,detalhes&&detalhes!==' '?detalhes:''].filter(Boolean).join(' ').trim();
+    const historicoNorm=historico.replace(/^s\s+a\s+l\s+d\s+o$/i,'SALDO');
+    if(/^saldo anterior$/i.test(lancamento)){ saldoAnteriorDoc=valorAssinado; continue; }
+    if(/^saldo do dia$/i.test(lancamento)) continue; // marcador de saldo corrente, não é lançamento
+    if(/^SALDO$/i.test(historicoNorm)){ saldoFinalDoc=valorAssinado; continue; }
+    if(!historico) continue;
+    lancamentos.push({
+      data:dataIso,
+      historico,
+      valor_entrada:dc==='C'?valor:0,
+      valor_saida:dc==='D'?valor:0,
+      documento:null,
+    });
+  }
+  if(!lancamentos.length) return null;
+  return {lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Banco do Brasil (Extrato C/C Excel)'};
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -29068,7 +29187,7 @@ async function processarLancctbUploadExtrato(forcarIA){
 
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
-        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
+        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf));
       })();
       if(reconhecido){
@@ -29144,7 +29263,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
       // Formatos de C/C de marketplace/fintech (Mercado Pago, ShopeePay) —
       // leitura direta, sem IA, antes do mapeador genérico de colunas.
-      const recExcel=_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb);
+      const recExcel=_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb)||_lancctbParsearExtratoBBContaCorrenteXlsx(wb);
       if(recExcel){
         // 'excel' — precisa ser um dos valores aceitos por
         // lancamentos_extrato_origem_importacao_check (achado real
