@@ -23365,7 +23365,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
     // usuário 05/09/2026) — cada um só mexe no lado dele; o outro lado fica
     // pendente pra rodar no botão certo.
     if(modo==='comprovantes_pagamento'&&!ehSaida){ aindaPendente++; continue; }
-    if(modo==='comprovantes_recebimento'&&ehSaida){ aindaPendente++; continue; }
+    if((modo==='comprovantes_recebimento'||modo==='recebimentos_so_regras')&&ehSaida){ aindaPendente++; continue; }
     const comprovantesFonte=ehSaida?comprovantesPag:comprovantesReceb;
     const comprovantesUsados=ehSaida?comprovantesUsadosPag:comprovantesUsadosReceb;
     const tabelaComprovante=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
@@ -23462,7 +23462,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
     // e 'ia' — não devem usar comprovante como âncora). Saída usa
     // comprovantes_bancarios (Pagamento), entrada usa comprovantes_recebimento.
     let cnpjAncora=null,comprovanteMatch=null;
-    if(modo!=='notas_fiscais'&&modo!=='ia'){
+    if(modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
       for(const c of comprovantesFonte){
         if(comprovantesUsados.has(c.id)) continue;
         if(Math.abs(c.valor_pago-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR) continue;
@@ -23477,7 +23477,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
     // tenta quando o Passo 1 (comprovante único) NÃO achou nada — 1
     // comprovante batendo sozinho sempre tem prioridade sobre um grupo.
     let gruposComprovantes=null;
-    if(!comprovanteMatch&&modo!=='notas_fiscais'&&modo!=='ia'){
+    if(!comprovanteMatch&&modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
       const candidatosGrupo=comprovantesFonte.filter(c=>!comprovantesUsados.has(c.id)&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS).slice(0,20);
       const alvoCentavosGrupo=Math.round(valor*100);
       const subsetGrupo=_lancctbSubsetSum(candidatosGrupo.map(c=>Math.round(c.valor_pago*100)),alvoCentavosGrupo,Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR*100));
@@ -23495,7 +23495,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
     // do banco leva o valor total; 1 linha de contrapartida por comprovante,
     // já com Cliente/Fornecedor + CPF/CNPJ trazidos do comprovante (pedido
     // do usuário: ajuda o passo de Notas Fiscais a casar depois).
-    if(!resolvido&&gruposComprovantes&&modo!=='notas_fiscais'&&modo!=='ia'){
+    if(!resolvido&&gruposComprovantes&&modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
       const bancoTipoGrupo=ehSaida?'C':'D', contrapartidaTipoGrupo=ehSaida?'D':'C';
       const resolucoesGrupo=gruposComprovantes.map(c=>({
         comprovante:c,
@@ -23531,7 +23531,9 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
     // gera o lançamento contábil na hora (conta fixa 10000/10001 ou Regra
     // específica do CNPJ, ver gerarLancamentoNF). Tolerância própria e mais
     // rígida (ver LANCCTB_MATCH_TOLERANCIA_VALOR_NF/JANELA_DIAS_NF).
-    const nfCandidatas=gruposComprovantes?[]:parcelas.filter(p=>{
+    // "Recebimentos (só Regras)" — pedido do usuário: nunca tenta amarrar
+    // com Nota Fiscal, o Passo 3 (Regra) é a única fonte de resolução.
+    const nfCandidatas=(gruposComprovantes||modo==='recebimentos_so_regras')?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       // Sem isso, uma saída sem CNPJ âncora (histórico genérico tipo "Tar/
       // Custas Cobrança"/"Sispag Salários") podia casar por coincidência de
@@ -23724,7 +23726,16 @@ async function _lancctbReprocessarPendencias(){
 const LANCCTB_MODO_INFO={
   comprovantes_pagamento:{btn:'lancctbProcessarComprovBtn',label:'Pagamentos'},
   comprovantes_recebimento:{btn:'lancctbProcessarComprovRecebBtn',label:'Recebimentos'},
+  // Pedido do usuário 15/09/2026, só pra Taylu (eid 203): processa
+  // recebimento SEM tentar amarrar com Nota Fiscal (nem comprovante como
+  // âncora de NF) — só a Regra por histórico resolve. Ver guardas de modo
+  // em _lancctbRodarMatching (Passo 1/1b/2 pulados pra este modo).
+  recebimentos_so_regras:{btn:'lancctbProcessarRecebSoRegrasBtn',label:'Recebimentos (só Regras)'},
 };
+// Empresas com o botão extra "Processar Recebimentos (só Regras)" — pedido
+// explícito do usuário 15/09/2026, só pra Taylu por enquanto (não é um
+// comportamento genérico do módulo).
+const LANCCTB_EIDS_RECEB_SO_REGRAS=['203'];
 async function _lancctbProcessarFonteRegistro(modo){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   const info=LANCCTB_MODO_INFO[modo];
@@ -23745,6 +23756,7 @@ async function _lancctbProcessarFonteRegistro(modo){
   if(resultado.resolvNF) partes.push(`${resultado.resolvNF} por NF`);
   if(resultado.resolvSubsetSum) partes.push(`${resultado.resolvSubsetSum} por soma de NFs`);
   if(resultado.resolvSocio) partes.push(`${resultado.resolvSocio} por sócio`);
+  if(resultado.resolvRegra) partes.push(`${resultado.resolvRegra} por Regra`);
   const resumo=partes.length?partes.join(', '):'nenhum';
   toast(`${info.label}: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
   if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
@@ -24601,6 +24613,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarFluxoBtn" onclick="_lancctbProcessarFluxo()" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo). NÃO cria lançamento nem aplica Regra — só identifica, pra apoiar o Processar FOPAG e o Processar Tributos.">🔗 Processar Fluxo</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal. Também aplica as Regras com gatilho de Fluxo de Caixa.">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
+      ${LANCCTB_EIDS_RECEB_SO_REGRAS.includes(String(_lancctbEidAtual))?`<button class="btn bo bsm" id="lancctbProcessarRecebSoRegrasBtn" onclick="_lancctbProcessarFonteRegistro('recebimentos_so_regras')" title="Só pra esta empresa (pedido do usuário 15/09/2026): roda o matching pra pendências de RECEBIMENTO usando SÓ as Regras por histórico — nunca tenta amarrar com Comprovante nem Nota Fiscal.">🎯 Processar Recebimentos (só Regras)</button>`:''}
       <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbProcessarFopag()" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       <label style="font-size:11px;color:var(--slate);display:flex;align-items:center;gap:4px;white-space:nowrap" title="Quando marcado, guias de tributo ESCANEADAS (imagem, sem texto pra ler) também são tentadas via IA Gemini — sem marcar, essas guias continuam sem PDF encontrado (leitura sem IA, custo zero).">
