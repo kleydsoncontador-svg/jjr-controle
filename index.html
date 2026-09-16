@@ -17942,6 +17942,14 @@ const LANCCTB_ABAS=[
   // a empresa não "recebe" NFC-e como compradora cadastrada. Mesmo parser
   // XML da NF-e (_lancctbParsearNFeXml), só reclassificado pelo <mod>65</mod>.
   {id:'nfce-saida',    label:'NFC-e Saída', tipoDoc:'nfce', direcaoNf:'venda'},
+  // CT-e (Conhecimento de Transporte Eletrônico) — pedido do usuário
+  // 16/09/2026. Layout de XML bem diferente de NF-e/NFS-e (raiz <CTe>,
+  // blocos emit/rem/dest/exped/receb em vez de emit/dest), parser próprio
+  // (_lancctbParsearCTeXml). Nenhuma das empresas do grupo é transportadora
+  // (não emite CT-e como prestadora) — é sempre quem contrata/paga o frete,
+  // então só existe uma direção (Entrada/compra), igual a como NFC-e só
+  // existe Saída/venda.
+  {id:'cte-entrada',   label:'CT-e (Frete)', tipoDoc:'cte', direcaoNf:'compra'},
   {id:'comprovantes', label:'Comprovantes de Pagamentos'},
   {id:'comprovantes-receb', label:'Comprovantes de Recebimentos'},
   // Exclusiva da Rufato (eid 4) — pedido do usuário 11/09/2026. Conteúdo
@@ -18460,7 +18468,7 @@ async function _lancctbTestarSieg(){
 function _lancctbCaminhosReferenciaHtml(eid){
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   if(!emp) return '';
-  const base='C:\\Users\\kleyd\\HUB SIEG\\XML';
+  const base='X:\\03 - CONTABIL\\SIEG';
   const cnpjs=[{cnpj:emp.cnpjNum,label:'Matriz'}];
   (getFiliais(eid)||[]).forEach(f=>{
     const cnpj=(f.cnpj||'').replace(/\D/g,'');
@@ -18473,7 +18481,9 @@ function _lancctbCaminhosReferenciaHtml(eid){
   const linhas=cnpjs.map(c=>`<div style="margin-bottom:6px">
     <strong>${esc(c.label)}</strong> (${esc(_fmtCnpjCpf(c.cnpj))})<br>
     <span style="font-family:var(--mono);font-size:11px">NF-e: ${esc(base)}\\NF-es\\${esc(c.cnpj)}</span><br>
-    <span style="font-family:var(--mono);font-size:11px">NFS-e: ${esc(base)}\\NFS-es\\${esc(c.cnpj)}</span>
+    <span style="font-family:var(--mono);font-size:11px">NFS-e: ${esc(base)}\\NFS-es\\${esc(c.cnpj)}</span><br>
+    <span style="font-family:var(--mono);font-size:11px">NFC-e: ${esc(base)}\\NFC-es\\${esc(c.cnpj)}</span><br>
+    <span style="font-family:var(--mono);font-size:11px">CT-e: ${esc(base)}\\CT-es\\${esc(c.cnpj)}</span>
   </div>`).join('');
   return `<details style="margin-top:6px" open>
     <summary style="cursor:pointer;font-size:11.5px;color:var(--slate)">📁 Caminhos de referência${cnpjs.length>1?' (matriz + filiais)':''}</summary>
@@ -18648,6 +18658,11 @@ function _lancctbNaturezaEhFinanceira(natOp,modelo){
   // modelo, TODA NFC-e caía errada em "não financeira" (achado real
   // 12/09/2026, Adelpe).
   if(String(modelo)==='65') return true;
+  // CT-e (modelo 57/67) é sempre frete contratado de verdade — o <natOp>
+  // não usa o vocabulário VENDA/COMPRA (normalmente vem algo tipo
+  // "Prestação de Serviço de Transporte"), então sem essa checagem TODO
+  // CT-e cairia errado em "não financeira", igual ao achado da NFC-e acima.
+  if(String(modelo)==='57'||String(modelo)==='67') return true;
   if(!natOp) return true; // sem essa informação, nunca esconde/exclui por segurança
   const t=_convMpRemoverAcentos(String(natOp).toUpperCase());
   // Bug real 16/09/2026 (Taylu): natureza_operacao vem abreviada em muitas
@@ -18719,6 +18734,64 @@ function _lancctbParsearNFSeXml(xml){
     parcelas:[{numero_parcela:1,data_vencimento:dataEmissaoBruta.slice(0,10),valor_parcela:valorTotal}],
   };
 }
+// CNPJs do grupo (matriz + filiais) pra essa empresa — usado pelo parser de
+// CT-e pra descobrir qual bloco (rem/dest/exped/receb) do documento é "a
+// nossa empresa", já que o CT-e não tem um campo único "destinatário do
+// serviço" igual a NF-e/NFS-e (quem paga o frete pode aparecer em
+// qualquer um desses 4 papéis, dependendo do CFOP/tpCTe).
+function _lancctbCnpjsDaEmpresa(eid){
+  const emp=S.emps().find(e=>String(e.eid)===String(eid));
+  if(!emp) return [];
+  const lista=[emp.cnpjNum].filter(Boolean);
+  (getFiliais(eid)||[]).forEach(f=>{ const c=(f.cnpj||'').replace(/\D/g,''); if(c) lista.push(c); });
+  return lista;
+}
+// CT-e (Conhecimento de Transporte Eletrônico) — schema totalmente diferente
+// de NF-e/NFS-e (raiz <CTe>/<cteProc>, sem <ICMSTot>/<dup>). Nenhuma empresa
+// do grupo emite CT-e (não são transportadoras) — o documento sempre chega
+// como frete CONTRATADO (despesa), então cnpj_emitente aqui é a
+// transportadora (quem recebe o pagamento) e cnpj_destinatario é a nossa
+// própria empresa, resolvida batendo o CNPJ dela contra rem/dest/exped/receb
+// (nessa ordem de prioridade — remetente e destinatário da carga são os
+// papéis mais comuns de quem contrata o frete; expedidor/recebedor só
+// aparecem em operações com armazém intermediário).
+function _lancctbParsearCTeXml(xml,cnpjsEmpresa){
+  const chaveMatch=xml.match(/Id="CTe(\d{44})"/i)||xml.match(/<chCTe>(\d{44})<\/chCTe>/i);
+  const numero=_lancctbExtrairTag(xml,'nCT');
+  if(!numero) return null;
+  const emitBloco=_lancctbExtrairBloco(xml,'emit')||'';
+  const remBloco=_lancctbExtrairBloco(xml,'rem')||'';
+  const destBloco=_lancctbExtrairBloco(xml,'dest')||'';
+  const expedBloco=_lancctbExtrairBloco(xml,'exped')||'';
+  const recebBloco=_lancctbExtrairBloco(xml,'receb')||'';
+  const vPrestBloco=_lancctbExtrairBloco(xml,'vPrest')||xml;
+  const dataEmissaoBruta=_lancctbExtrairTag(xml,'dhEmi')||'';
+  const valorTotal=parseFloat(_lancctbExtrairTag(vPrestBloco,'vTPrest')||'0');
+  let nossoCnpj=null, nossoNome=null;
+  for(const b of [remBloco,destBloco,expedBloco,recebBloco]){
+    const c=(_lancctbExtrairTag(b,'CNPJ')||'').replace(/\D/g,'');
+    if(c&&(cnpjsEmpresa||[]).includes(c)){ nossoCnpj=c; nossoNome=_lancctbExtrairTag(b,'xNome'); break; }
+  }
+  if(!nossoCnpj){
+    // Não achou o CNPJ da empresa em nenhum papel — usa o destinatário do
+    // CT-e como fallback (a maioria dos CT-e chega com a empresa como
+    // destinatária da mercadoria transportada, dono ou não do CNPJ exato
+    // cadastrado — ex.: CNPJ raiz vs filial não mapeada em Cadastro).
+    nossoCnpj=(_lancctbExtrairTag(destBloco,'CNPJ')||'').replace(/\D/g,'')||null;
+    nossoNome=_lancctbExtrairTag(destBloco,'xNome');
+  }
+  return {
+    chave_acesso: chaveMatch?chaveMatch[1]:null,
+    numero, serie:_lancctbExtrairTag(xml,'serie'), modelo:_lancctbExtrairTag(xml,'mod')||'57',
+    cnpj_emitente:(_lancctbExtrairTag(emitBloco,'CNPJ')||'').replace(/\D/g,''),
+    nome_emitente:_lancctbExtrairTag(emitBloco,'xNome'),
+    cnpj_destinatario:nossoCnpj, nome_destinatario:nossoNome,
+    data_emissao:dataEmissaoBruta.slice(0,10),
+    natureza_operacao:_lancctbExtrairTag(xml,'natOp')||'Prestação de Serviço de Transporte',
+    valor_total:valorTotal, iss_valor:null,
+    parcelas:[{numero_parcela:1,data_vencimento:dataEmissaoBruta.slice(0,10),valor_parcela:valorTotal}],
+  };
+}
 // Chaves de acesso já gravadas pra essa empresa — pré-carregada 1x por
 // rodada de import pra permitir pular arquivo já conhecido sem gastar
 // upload/upsert de novo (ver comentário em _lancctbSalvarNotaFiscalArquivo).
@@ -18747,12 +18820,13 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
     const caminho=file.webkitRelativePath||file.name;
     const direcao=direcaoConhecida||_lancctbDirecaoDoCaminho(caminho);
     const ehNFSe=/xmlns="http:\/\/www\.sped\.fazenda\.gov\.br\/nfse"|<NFSe[ >]/.test(xml);
-    const nf=ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml);
+    const ehCTe=/<CTe[ >]|<cteProc[ >]/.test(xml);
+    const nf=ehCTe?_lancctbParsearCTeXml(xml,_lancctbCnpjsDaEmpresa(eid)):(ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml));
     if(!nf||!nf.cnpj_emitente||!direcao) return 'naoReconhecido';
     // NFC-e usa o MESMO schema XML da NF-e (infNFe), só muda o modelo (mod
     // 65 em vez de 55) — acrescentado 11/09/2026, sem parser novo nenhum,
     // só reclassifica pelo campo já extraído por _lancctbParsearNFeXml.
-    const tipo=ehNFSe?'nfse':(nf.modelo==='65'?'nfce':'nfe');
+    const tipo=ehCTe?'cte':(ehNFSe?'nfse':(nf.modelo==='65'?'nfce':'nfe'));
     if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte) return 'ignoradaData';
     // Já capturada antes (mesma chave de acesso) — pula upload+upsert, que
     // são os passos caros (rede). Achado real (05/09/2026): "Importar mês"
@@ -20047,6 +20121,30 @@ async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onSt
           if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
           if(chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
           arquivos.push({ file:await fh.getFile(), direcao:'venda' });
+        }
+      }
+      // CT-e (pedido do usuário 16/09/2026): pasta própria "CT-es" ao lado
+      // de "NF-es"/"NFS-es"/"NFC-es", sempre compra (nenhuma empresa do
+      // grupo é transportadora — é sempre quem contrata/paga o frete).
+      // Mesma incerteza de estrutura de subpasta que a NFC-e — tenta com e
+      // sem o nível "Entrada" antes do ano/mês.
+      for(const cnpj of cnpjs){
+        let dirMesCte=null;
+        try{
+          dirMesCte=await dirXml.getDirectoryHandle('CT-es')
+            .then(d=>d.getDirectoryHandle(cnpj)).then(d=>d.getDirectoryHandle('Entrada'))
+            .then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+        } catch(e){
+          try{
+            dirMesCte=await dirXml.getDirectoryHandle('CT-es')
+              .then(d=>d.getDirectoryHandle(cnpj)).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+          } catch(e2){ /* pasta CT-es não existe pra esse CNPJ/mês — ok, empresa pode não ter frete contratado nesse mês */ }
+        }
+        if(!dirMesCte) continue;
+        for await (const [nome,fh] of dirMesCte.entries()){
+          if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
+          if(chavesConhecidas.has(nome.replace(/\.xml$/i,''))){ puladasPorNome++; continue; }
+          arquivos.push({ file:await fh.getFile(), direcao:'compra' });
         }
       }
     }
