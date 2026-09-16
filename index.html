@@ -23912,10 +23912,20 @@ async function _lancctbProcessarTributos(){
   // 236,35) — reabrindo uma "diferença" em cima de uma linha que já estava
   // correta. Linha nascida de tributo_composicao/tributo_diferenca só se
   // resolve clicando nela e criando a Regra, nunca de novo por este botão.
-  const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
+  const { data: pendenciasBrutas } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,origem_importacao')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)
     .not('origem_importacao','in','(tributo_composicao,tributo_diferenca)')));
+  // Bug real 16/09/2026 (Taylu, "vc cagou tudo"): sem essa trava, o botão
+  // tentava casar QUALQUER saída pendente contra guias de tributo dentro da
+  // folga de 30% — pegou por engano 2 pagamentos REAIS ao fornecedor Jahu
+  // Borrachas (nada a ver com TFE/DAS) só porque o valor calhou de caber na
+  // folga. Agora só entra no matching de tributo quem já tem CARA de
+  // tributo no histórico bancário (mesma lista usada pra bloquear o
+  // matching por NF, ver _lancctbHistoricoEhTributo) — nunca tenta em cima
+  // de um histórico genérico tipo "Pagamento de conta FULANO"/"Pix enviado
+  // FULANO", mesmo que o valor bata por coincidência.
+  const pendencias=(pendenciasBrutas||[]).filter(l=>_lancctbHistoricoEhTributo(l.historico_bancario));
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
     .eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico'));
@@ -23958,9 +23968,15 @@ async function _lancctbProcessarTributos(){
       // — nesse 2º caso o lançamento é dividido: valor exato do tributo +
       // a diferença como pendência nova (pedido do usuário 10/09/2026, mesma
       // ideia do Processar FOPAG). Não aceita pagamento MENOR que o tributo.
+      // DAS do Simples Nacional é exceção (pedido do usuário 16/09/2026,
+      // "DAS não tem diferença"): só aceita batida EXATA, nunca a folga de
+      // 30% — o valor do DAS não muda por multa/juros parcial como um DARF
+      // pode ter, então uma "diferença" ali é sinal de ter casado a guia
+      // errada, não de sobra legítima.
       const dif=valor-extraido.valor;
+      const ehDasArquivo=_lancctbNomeTributoLegivel(_lancctbParsearNomeArquivoTributo(f.nome).descricao).token==='DAS';
       if(Math.abs(dif)<=LANCCTB_MATCH_TOLERANCIA_VALOR){ achou={f,extraido,diferenca:0}; arquivosUsados.add(chaveArquivo); break; }
-      if(dif>0 && dif<=extraido.valor*0.30){ achou={f,extraido,diferenca:Math.round(dif*100)/100}; arquivosUsados.add(chaveArquivo); break; }
+      if(!ehDasArquivo&&dif>0&&dif<=extraido.valor*0.30){ achou={f,extraido,diferenca:Math.round(dif*100)/100}; arquivosUsados.add(chaveArquivo); break; }
     }
     if(!achou){ semAchado++; continue; }
     const info=_lancctbParsearNomeArquivoTributo(achou.f.nome);
