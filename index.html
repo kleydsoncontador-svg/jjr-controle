@@ -22651,7 +22651,16 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     ];
     if(Math.abs(diferenca)>0.01){
       if(eid!=='203'){
-        toast(`Valor da NF (R$ ${_fmt(valorNf)}) é diferente do lançamento (R$ ${_fmt(valor)}) — diferença de R$ ${_fmt(diferenca)} não tem conta padrão definida nesta empresa. Associe manualmente.`,'err');
+        // Pedido do usuário 16/09/2026: em vez de só recusar, pergunta ALI
+        // MESMO em qual conta e lado (D/C) lançar a diferença — só a Taylu
+        // tem a conta 527 automática; nas demais não existe convenção
+        // padrão, quem decide é o contador.
+        _lancctbAbrirEscolhaContaDiferenca({
+          eid, parcelaId, valor, valorNf, diferenca, historicoUtilizado,
+          nomeTerceiro, cnpjTerceiro, contaBancoInfo, bancoTipo,
+          classifContrapartida, contaContrapartidaId, contrapartidaTipo,
+          rId:r.id, dataPagamento:r.data_pagamento, nfNumero:nf?.numero||'',
+        });
         return;
       }
       const { data: conta527 } = await _supaClient.from('plano_contas').select('id,classificacao').eq('empresa_eid',eid).eq('numero_conta','527').maybeSingle();
@@ -22677,6 +22686,76 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     if(typeof renderLancctbRegistroContabil==='function') renderLancctbRegistroContabil();
   } finally {
     if(btn){ btn.disabled=false; btn.textContent='✓ Usar esta'; }
+  }
+}
+// Diferença entre NF e valor do banco em empresa SEM convenção automática
+// (só a Taylu tem a conta 527, ver _lancctbAssociarNfManual) — pedido do
+// usuário 16/09/2026: em vez de só recusar, pergunta na hora em qual conta
+// e lado (D/C) lançar a diferença. Reaproveita o mesmo <select> de conta
+// contábil já buscado no modal (_lancctbRegraContasOptionsHtml).
+let _lancctbNfDiferencaCtx=null;
+function _lancctbAbrirEscolhaContaDiferenca(ctx){
+  _lancctbNfDiferencaCtx=ctx;
+  const maisQueNf=ctx.diferenca>0;
+  const el=document.getElementById('lancctbRegraBuscaNfResultado');
+  el.innerHTML=`<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px">
+    <div style="font-size:12px;color:var(--ink);margin-bottom:8px">
+      NF ${esc(ctx.nfNumero)} vale <b>R$ ${_fmt(ctx.valorNf)}</b>, mas o lançamento é <b>R$ ${_fmt(ctx.valor)}</b> —
+      diferença de <b>R$ ${_fmt(Math.abs(ctx.diferenca))}</b> (${maisQueNf?'pagou a mais':'pagou a menos'}). Em qual conta lançar essa diferença?
+    </div>
+    <div class="fg" style="margin-bottom:8px">
+      <div class="fl">Conta contábil da diferença</div>
+      <select class="si" id="lancctbNfDifConta" style="width:100%"><option value="">Selecione…</option>${_lancctbRegraContasOptionsHtml||''}</select>
+    </div>
+    <div class="fg" style="margin-bottom:8px">
+      <div class="fl">Lado</div>
+      <select class="si" id="lancctbNfDifDc" style="width:100%">
+        <option value="D">Débito</option>
+        <option value="C">Crédito</option>
+      </select>
+    </div>
+    <div class="ma" style="margin-top:10px">
+      <button class="btn bo bsm" type="button" onclick="_lancctbCancelarEscolhaContaDiferenca()">Cancelar</button>
+      <button class="btn bp bsm" type="button" id="lancctbNfDifConfirmarBtn" onclick="_lancctbConfirmarNfDiferencaManual()">✓ Confirmar e associar</button>
+    </div>
+  </div>`;
+  const selConta=document.getElementById('lancctbNfDifConta');
+  _lancctbAtivarBuscaSelectConta(selConta);
+  // Sugestão inicial de lado — pagou a mais: junto da NF (aumenta o que a
+  // empresa tem a receber/adiantado); pagou a menos: junto do banco (usa um
+  // saldo que já existia) — mas o contador pode trocar antes de confirmar.
+  document.getElementById('lancctbNfDifDc').value=maisQueNf?ctx.contrapartidaTipo:ctx.bancoTipo;
+}
+function _lancctbCancelarEscolhaContaDiferenca(){
+  _lancctbNfDiferencaCtx=null;
+  if(typeof _lancctbBuscarNfProLancamento==='function') _lancctbBuscarNfProLancamento();
+}
+async function _lancctbConfirmarNfDiferencaManual(){
+  const ctx=_lancctbNfDiferencaCtx;
+  if(!ctx){ toast('Contexto perdido — feche e reabra o modal.','err'); return; }
+  const contaId=document.getElementById('lancctbNfDifConta')?.value;
+  const dc=document.getElementById('lancctbNfDifDc')?.value;
+  if(!contaId){ toast('Escolha a conta contábil da diferença.','err'); return; }
+  const btn=document.getElementById('lancctbNfDifConfirmarBtn');
+  if(btn){ btn.disabled=true; btn.textContent='Associando…'; }
+  try{
+    const { data: contaDif } = await _supaClient.from('plano_contas').select('id,classificacao').eq('id',contaId).single();
+    if(!contaDif){ toast('Conta não encontrada.','err'); return; }
+    const linhas=[
+      { empresa_eid:ctx.eid, data:ctx.dataPagamento, classificacao:ctx.contaBancoInfo.plano_contas.classificacao, conta_contabil_id:ctx.contaBancoInfo.conta_contabil_id, tipo:ctx.bancoTipo, valor:ctx.valor, historico:ctx.historicoUtilizado, cliente_fornecedor_nome:ctx.nomeTerceiro||null, cnpj_cpf:ctx.cnpjTerceiro||null, lancamento_extrato_id:ctx.rId, origem_match:'manual' },
+      { empresa_eid:ctx.eid, data:ctx.dataPagamento, classificacao:ctx.classifContrapartida, conta_contabil_id:ctx.contaContrapartidaId, tipo:ctx.contrapartidaTipo, valor:ctx.valorNf, historico:ctx.historicoUtilizado, cliente_fornecedor_nome:ctx.nomeTerceiro||null, cnpj_cpf:ctx.cnpjTerceiro||null, nf_parcela_id:ctx.parcelaId, lancamento_extrato_id:ctx.rId, origem_match:'manual' },
+      { empresa_eid:ctx.eid, data:ctx.dataPagamento, classificacao:contaDif.classificacao, conta_contabil_id:contaDif.id, tipo:dc, valor:Math.abs(ctx.diferenca), historico:ctx.historicoUtilizado, cliente_fornecedor_nome:ctx.nomeTerceiro||null, cnpj_cpf:ctx.cnpjTerceiro||null, lancamento_extrato_id:ctx.rId, origem_match:'manual' },
+    ];
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(error){ toast('Erro ao gravar o lançamento: '+error.message,'err'); return; }
+    await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:ctx.rId}).eq('id',ctx.parcelaId);
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',ctx.rId);
+    toast('Lançamento amarrado à NF '+ctx.nfNumero+' com sucesso.','ok');
+    _lancctbNfDiferencaCtx=null;
+    closeModal('mLancctbRegra');
+    if(typeof renderLancctbRegistroContabil==='function') renderLancctbRegistroContabil();
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent='✓ Confirmar e associar'; }
   }
 }
 // Busca manual de Fluxo de Caixa dentro do modal de Regra — pedido do
