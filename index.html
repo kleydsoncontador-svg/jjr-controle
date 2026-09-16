@@ -24708,6 +24708,14 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   const trStyleBase=`border-bottom:1px solid var(--border);${ehAplicacao?'background:#FEF9C3;':''}`;
   const tituloTr=ehAplicacao?'Lançamento de Aplicação Financeira':'';
   const regraBtnHtml=`<td style="padding:7px 6px;text-align:center"><button class="icon-btn" title="Abrir Regra deste lançamento" onclick="abrirLancctbRegraModalDeExtratoId(${r.id})" style="padding:4px 6px;background:none;border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:13px">📝</button></td>`;
+  // Pedido do usuário 16/09/2026: clicar em "conciliado" pergunta se quer
+  // desconciliar — desfaz o lançamento contábil (marca estornado, não
+  // apaga — mantém rastro) e devolve NF/comprovante/fluxo amarrados pra
+  // pendente, igual "nunca existiu". Só "conciliado" é clicável; "pendente"
+  // já está pendente, não tem o que desfazer.
+  const statusCelHtml=r.status_conciliacao==='conciliado'
+    ? `<td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px;cursor:pointer;text-decoration:underline dotted" title="Clique pra desconciliar" onclick="_lancctbDesconciliarLancamento(${r.id})">${statusTxt}</span></td>`
+    : `<td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>`;
   // Explicação da IA (Processar via IA) — só existe quando origem_match='ia'.
   const iaCelHtml=(linha)=>{
     if(!linha||linha.origem_match!=='ia'||!linha.informacao_extra) return `<td style="padding:7px 10px;color:var(--slate)">—</td>`;
@@ -24772,7 +24780,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(d.cnpj_cpf))}</td>
       ${parcelaCelsHtml(d.nf_parcela_id?d:(c.nf_parcela_id?c:null))}
       <td style="padding:7px 10px;color:var(--slate)">—</td>
-      <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
+      ${statusCelHtml}
       ${iaCelHtml(d.origem_match==='ia'?d:c)}
     </tr>`;
   }
@@ -24797,7 +24805,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
         ${parcelaCelsHtml(l)}
         <td style="padding:7px 10px;color:var(--slate)">—</td>
-        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
+        ${statusCelHtml}
         ${iaCelHtml(l)}
       </tr>`;
     }).join('');
@@ -24829,6 +24837,35 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
 function abrirLancctbRegraModalDeExtratoId(extratoId){
   const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
   if(item) return abrirLancctbRegraModalDeLinha(item);
+}
+// Desconciliar — pedido do usuário 16/09/2026: clicar em "conciliado"
+// pergunta se quer desfazer, e sendo confirmado desamarra TUDO que esse
+// lançamento tinha amarrado (NF, comprovante, Fluxo de Caixa, movimento de
+// Aplicação Financeira) e volta pra pendente, como se nunca tivesse sido
+// resolvido. As linhas de lancamentos_contabeis são marcadas estornado=true
+// (não apagadas — mantém rastro pra auditoria; o resto da tela já ignora
+// linha estornada em toda consulta, ver .eq('estornado',false) no fetch
+// do Registro Contábil).
+async function _lancctbDesconciliarLancamento(extratoId){
+  const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
+  if(!item){ toast('Lançamento não encontrado — atualize a tela e tente de novo.','err'); return; }
+  if(!confirm('Desconciliar este lançamento? Isso desfaz o lançamento contábil e devolve a Nota Fiscal/Comprovante/Fluxo de Caixa amarrados pra pendente. Continuar?')) return;
+  const r=item.extrato;
+  const ehSaida=r.valor_saida>0;
+  const tabelaComprovante=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
+  try{
+    const idsNf=[...new Set(item.ctb.map(l=>l.nf_parcela_id).filter(Boolean))];
+    const idsComprovante=[...new Set(item.ctb.map(l=>l.comprovante_id).filter(Boolean))];
+    if(idsNf.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsNf);
+    if(idsComprovante.length) await _supaClient.from(tabelaComprovante).update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComprovante);
+    await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+    await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+    const { error } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).eq('lancamento_extrato_id',extratoId).eq('estornado',false);
+    if(error){ toast('Erro ao desconciliar: '+error.message,'err'); return; }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).eq('id',extratoId);
+    toast('Lançamento desconciliado — voltou pra pendente.','ok');
+    renderLancctbRegistroContabil();
+  }catch(e){ toast('Erro ao desconciliar: '+e.message,'err'); }
 }
 
 function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta}){
