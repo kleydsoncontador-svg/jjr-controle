@@ -29991,6 +29991,89 @@ async function _lancctbParsearExtratoBradescoContaCorrente(pdf){
   if(!registros.length) return null;
   return {lancamentos:registros,saldoAnteriorDoc,saldoFinalDoc,layout:'Bradesco (Extrato de Movimentação C/C)'};
 }
+// ── Bradesco "EXTRATO MENSAL" (layout legado, mainframe/CICS) — pedido do
+// usuário 17/09/2026, mesmo dia: existe pelo menos um 2º layout de extrato
+// do Bradesco, bem diferente do "Extrato de: Ag:" acima (esse aqui tem
+// cabeçalho "BRADESCO - EXTRATO MENSAL CICSM12 ..." e colunas "d a t a /
+// h i s t o r i c o / n.docto / v a l o r / debito da cpmf" com letras
+// espaçadas — resquício de relatório de mainframe). Diferenças estruturais
+// que exigiram parser à parte (não dá pra reaproveitar o de cima):
+// 1) Data/Histórico/Valor ficam todos na MESMA linha visual (sem o
+//    "espremido" do outro layout) — histórico só quebra em 2ª linha por
+//    baixo, sem nada entre elas, então basta olhar a próxima linha.
+// 2) O nº de documento não tem posição de coluna confiável (pra TED vem
+//    grudado no fim do texto do histórico sem separação; só pra PIX cai
+//    numa posição própria) — por isso aqui tudo entre Data e Valor vira
+//    histórico de uma vez, sem tentar separar um campo de documento.
+// 3) Débito é marcado com um "-" How SEPARADO no final (ex: "183,60" +
+//    "-"), não um "-" colado na frente do número.
+// 4) Não tem uma linha "Total" no fim — tem "Saldo em DD/MM/AAAA" (pode
+//    repetir por dia, tratado como checkpoint, não como fim de tabela).
+// 5) Depois da tabela de lançamentos vem OUTRO relatório colado no mesmo
+//    PDF ("BRADESCO - SALDOS" / "DISPONIVEL..." — saldo de aplicação, não
+//    é lançamento de C/C) — cortado fora ao achar esse cabeçalho.
+// Achado real testando (mesmo cliente do outro layout, SD Participações,
+// jul/2026): o corte de coluna Histórico×Valor não pode ficar em x=320 —
+// o valor da linha "Saldo em ..." nesse layout começa em x=315.5, mais à
+// esquerda que os demais valores (achado igual ao já visto no Safra: valor
+// right-aligned, número mais largo começa mais cedo). Usa x=310 como corte
+// único (histórico<310, valor>=310) — sem faixa cinza entre os dois, senão
+// o mesmo token cai nos dois lados e embaralha tudo.
+async function _lancctbParsearExtratoBradescoMensalLegado(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(!/BRADESCO/i.test(textoPagina1)||!/EXTRATO\s*MENSAL/i.test(textoPagina1)) return null;
+  if(!/n\.docto/i.test(textoPagina1)) return null;
+
+  const registros=[];
+  let saldoAnteriorDoc=null, saldoFinalDoc=null;
+  let dataAtual=null;
+  let pendente=null;
+  let encerrado=false;
+
+  for(let p=1;p<=pdf.numPages&&!encerrado;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens);
+    for(const linha of linhas){
+      if(encerrado) break;
+      const itData=linha.itens.find(i=>i.x<133&&/^\d{2}\/\d{2}\/\d{4}$/.test(i.str.trim()));
+      const itensHist=linha.itens.filter(i=>i.x>=133&&i.x<310);
+      const itensValor=linha.itens.filter(i=>i.x>=310);
+      const historico=itensHist.map(i=>i.str).join(' ').trim();
+      const valorTxt=itensValor.map(i=>i.str).join('').trim();
+      const linhaCompleta=linha.itens.map(i=>i.str).join(' ').trim();
+
+      if(/BRADESCO\s*-\s*SALDOS|^DISPONIVEL$/i.test(linhaCompleta)){ encerrado=true; break; } // início da seção de saldos de aplicação — fim da tabela real
+
+      if(!valorTxt){
+        // linha só de texto: continuação do histórico do lançamento aberto
+        if(historico&&pendente) pendente.historico=[pendente.historico,historico].filter(Boolean).join(' ').trim();
+        continue;
+      }
+
+      if(/^saldo anterior$/i.test(historico)){ saldoAnteriorDoc=_lancctbParseValorBR(valorTxt); pendente=null; continue; }
+      if(/^saldo em\s+\d{2}\/\d{2}\/\d{4}$/i.test(historico)){ saldoFinalDoc=_lancctbParseValorBR(valorTxt); pendente=null; continue; }
+
+      if(itData) dataAtual=itData.str.trim();
+      if(!dataAtual) continue;
+      const mData=dataAtual.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      if(!mData) continue;
+      const negativo=valorTxt.trim().endsWith('-');
+      const valor=_lancctbParseValorBR(valorTxt);
+      const registro={
+        data:`${mData[3]}-${mData[2]}-${mData[1]}`,
+        historico,
+        valor_entrada:negativo?0:valor,
+        valor_saida:negativo?valor:0,
+      };
+      registros.push(registro);
+      pendente=registro;
+    }
+  }
+  if(!registros.length) return null;
+  return {lancamentos:registros,saldoAnteriorDoc,saldoFinalDoc,layout:'Bradesco (Extrato Mensal legado)'};
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -30017,7 +30100,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
-          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))
+          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf));
       })();
       if(reconhecido){
