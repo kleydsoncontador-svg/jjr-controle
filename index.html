@@ -29798,6 +29798,93 @@ function _lancctbParsearExtratoBBContaCorrenteXlsx(wb){
   if(!lancamentos.length) return null;
   return {lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Banco do Brasil (Extrato C/C Excel)'};
 }
+// ── Banco Safra "Extrato de Movimentação" (C/C) — pedido do usuário
+// 17/09/2026: "no histórico bancário deve ser concatenado do PDF a coluna
+// Lançamento e Complemento". Layout de colunas fixas por posição x (Data/
+// Lançamento/Complemento/Nº Documento/Valor); Lançamento é um tipo genérico
+// ("PIX RECEBIDO SAFRAPAY", "TAR PIX QR CODE SAFRAPAY", "TED ENVIADA MESMA
+// TIT"...) e Complemento é o nome/CPF-CNPJ da contraparte — às vezes quebra
+// numa 2ª linha visual só com o documento (CPF/CNPJ), sem nenhum outro
+// token na linha, que precisa grudar no registro anterior. Valor negativo
+// (mesmo token, ex. "-1,64") = saída; positivo = entrada. "SALDO TOTAL" é
+// só um marcador de saldo corrente por dia (sem Complemento), não é
+// lançamento — pulado. Confirmado com arquivo real (Peixoto Auto Peças,
+// Safra Ag 0023 C/C 00586659-8, ago/2026, 103 páginas) e validado a
+// tokenização direto com pdfjs-dist em Node (não pdfplumber — a ordem/
+// junção de tokens pode divergir entre as duas libs).
+async function _lancctbParsearExtratoSafraContaCorrente(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(!/extrato de movimenta[çc][ãa]o/i.test(textoPagina1)) return null;
+  if(!/lan[çc]amento\s+complemento\s+n[°º]\s+documento\s+valor/i.test(textoPagina1.replace(/\s+/g,' '))) return null;
+
+  const mPeriodo=textoPagina1.match(/per[íi]odo\s+de\s+(\d{2})\/(\d{2})\/(\d{4})\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/i);
+  const mesRef=mPeriodo?parseInt(mPeriodo[2],10):(new Date().getMonth()+1);
+  const anoRef=mPeriodo?parseInt(mPeriodo[3],10):new Date().getFullYear();
+
+  const registros=[];
+  let atual=null;
+  const flush=()=>{ if(atual) registros.push(atual); atual=null; };
+  let saldoFinalDoc=null;
+
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens);
+    for(const linha of linhas){
+      const itData=linha.itens.find(i=>i.x<60&&/^\d{2}\/\d{2}$/.test(i.str.trim()));
+      const itensLanc=linha.itens.filter(i=>i.x>=60&&i.x<244);
+      const itensComp=linha.itens.filter(i=>i.x>=244&&i.x<412);
+      // x>=475 (não 534, a posição do cabeçalho "Valor") — achado real
+      // (17/09/2026): o valor é right-aligned, então um número mais longo
+      // (ex: "10.937,34" ou "-182.700,00") começa bem mais à esquerda do
+      // que "5,20". A coluna Nº Documento (sempre 9 dígitos, x=412) nunca
+      // passa de ~467, então 475 sobra margem dos dois lados.
+      const itensValor=linha.itens.filter(i=>i.x>=475);
+      if(itData){
+        flush();
+        const lancTxt=itensLanc.map(i=>i.str).join(' ').trim();
+        const valorTxt=itensValor.map(i=>i.str).join('').trim();
+        if(/^SALDO\s+TOTAL$/i.test(lancTxt)){
+          if(valorTxt) saldoFinalDoc=_lancctbParseValorBR(valorTxt.replace(/^-/,''))*(valorTxt.trim().startsWith('-')?-1:1);
+          continue; // marcador de saldo do dia, não é lançamento
+        }
+        atual={dataStr:itData.str.trim(),lancamento:lancTxt,complemento:itensComp.map(i=>i.str).join(' ').trim(),valorStr:valorTxt};
+        continue;
+      }
+      // Linha de continuação (só Complemento, sem Data/Lançamento/Valor) —
+      // gruda no registro em aberto.
+      if(itensComp.length&&atual){
+        atual.complemento=(atual.complemento?atual.complemento+' ':'')+itensComp.map(i=>i.str).join(' ').trim();
+      }
+    }
+  }
+  flush();
+
+  const lancamentos=[];
+  for(const r of registros){
+    if(!r.valorStr) continue;
+    const mData=r.dataStr.match(/^(\d{2})\/(\d{2})$/);
+    if(!mData) continue;
+    const dia=parseInt(mData[1],10),mes=parseInt(mData[2],10);
+    let ano=anoRef;
+    if(mes>mesRef+6) ano=anoRef-1; else if(mes<mesRef-6) ano=anoRef+1;
+    const dataIso=`${ano}-${String(mes).padStart(2,'0')}-${String(dia).padStart(2,'0')}`;
+    const negativo=r.valorStr.trim().startsWith('-');
+    const valor=_lancctbParseValorBR(r.valorStr.replace(/^-/,''));
+    const historico=[r.lancamento,r.complemento].filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
+    if(!historico) continue;
+    lancamentos.push({
+      data:dataIso,
+      historico,
+      valor_entrada:negativo?0:valor,
+      valor_saida:negativo?valor:0,
+      documento:null,
+    });
+  }
+  if(!lancamentos.length) return null;
+  return {lancamentos,saldoAnteriorDoc:null,saldoFinalDoc,layout:'Banco Safra (Extrato de Movimentação)'};
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -29824,6 +29911,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
+          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf));
       })();
       if(reconhecido){
