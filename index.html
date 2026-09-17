@@ -29885,6 +29885,112 @@ async function _lancctbParsearExtratoSafraContaCorrente(pdf){
   if(!lancamentos.length) return null;
   return {lancamentos,saldoAnteriorDoc:null,saldoFinalDoc,layout:'Banco Safra (Extrato de Movimentação)'};
 }
+// ── Bradesco "Extrato de: Ag: ... | CC: ..." (C/C) — pedido do usuário
+// 17/09/2026: "aprenda a ler esse modelo do Bradesco", sem IA. Tabela
+// Data/Lançamento/Dcto./Crédito (R$)/Débito (R$)/Saldo (R$), posições de
+// coluna lidas do próprio cabeçalho (não fixas) igual ao Itaú Mensal.
+// Peculiaridade real (achado testando o PDF de verdade, SD Participações,
+// Ag 2625 C/C 0022855-9, ago/2026): quando o Lançamento quebra em 2 linhas
+// visuais (ex: "TED-TRANSF ELET DISPON" + "REMET.Fulano de Tal"), a linha
+// com Data/Dcto/Crédito/Débito/Saldo fica ESPREMIDA entre as duas — mesmo
+// padrão já visto na Mister Contador, mas aqui as 3 sub-linhas têm y bem
+// próximos (~4-5pt de distância) e não dá pra simplesmente agrupar tudo
+// pela mesma linha (a tolerância padrão de _lancctbAgruparLinhasPorY não
+// separa direito). Resolvido agrupando com tolerância pequena (1.5) e
+// grudando a linha de cima/baixo na linha-âncora (a que tem Saldo) SÓ
+// quando a distância em y for pequena (<7) — sem essa checagem de
+// distância, o 1º lançamento depois de "SALDO ANTERIOR" grudava nele por
+// engano, já que os dois são "vizinhos" na lista mas de blocos diferentes.
+// Data só aparece impressa na 1ª transação de cada dia (dias seguintes
+// repetem o valor anterior — mesmo padrão do Itaú Mensal). A seção
+// "Saldos Invest Fácil / Plus" mais abaixo no mesmo PDF é saldo de
+// aplicação, não lançamento de C/C — like ignorada (a tabela dela não bate
+// o cabeçalho Lançamento/Dcto./Crédito/Débito/Saldo que o reconhecimento
+// exige, então nunca chega a ser processada). Parada real no rodapé
+// "Total" (resumo, não é lançamento).
+async function _lancctbParsearExtratoBradescoContaCorrente(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(!/extrato de:\s*ag:/i.test(textoPagina1)) return null;
+  if(!/lan[çc]amento\s+dcto\.?\s+cr[ée]dito\s*\(r\$\)\s*d[ée]bito\s*\(r\$\)\s*saldo\s*\(r\$\)/i.test(textoPagina1.replace(/\s+/g,' '))) return null;
+
+  const registros=[];
+  let saldoAnteriorDoc=null, saldoFinalDoc=null;
+  let encerrado=false;
+
+  for(let p=1;p<=pdf.numPages&&!encerrado;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens,1.5);
+
+    let colunas=null;
+    for(const linha of linhas){
+      const achar=(re)=>linha.itens.find(i=>re.test(i.str.toLowerCase()));
+      const itData=achar(/^data$/),itLanc=achar(/^lan[çc]amento$/),itDcto=achar(/^dcto\.?$/),itCred=achar(/cr[ée]dito/),itDeb=achar(/d[ée]bito/),itSal=achar(/saldo/);
+      if(itData&&itLanc&&itDcto&&itCred&&itDeb&&itSal){ colunas={data:itData.x,lancamento:itLanc.x,dcto:itDcto.x,credito:itCred.x,debito:itDeb.x,saldo:itSal.x}; break; }
+    }
+    if(!colunas) continue; // página sem a tabela principal (ex: só "Saldos Invest Fácil")
+
+    const limites=[
+      {nome:'data',fim:(colunas.data+colunas.lancamento)/2},
+      {nome:'lancamento',fim:(colunas.lancamento+colunas.dcto)/2},
+      {nome:'dcto',fim:(colunas.dcto+colunas.credito)/2},
+      {nome:'credito',fim:(colunas.credito+colunas.debito)/2},
+      {nome:'debito',fim:(colunas.debito+colunas.saldo)/2},
+      {nome:'saldo',fim:Infinity},
+    ];
+    const classificar=(linha)=>{
+      const cel={data:'',lancamento:'',dcto:'',credito:'',debito:'',saldo:''};
+      linha.itens.forEach(it=>{
+        const col=limites.find(l=>it.x<l.fim)||limites[limites.length-1];
+        cel[col.nome]+=(cel[col.nome]?' ':'')+it.str;
+      });
+      Object.keys(cel).forEach(k=>cel[k]=cel[k].trim());
+      return cel;
+    };
+
+    let dataAtual=null;
+    for(let idx=0;idx<linhas.length&&!encerrado;idx++){
+      const linha=linhas[idx];
+      const cel=classificar(linha);
+      if(!cel.saldo) continue; // não é linha-âncora — a de continuação é tratada via rowA/rowC abaixo
+
+      if(/^total$/i.test(cel.data)||/^total$/i.test(cel.lancamento)){ encerrado=true; break; } // rodapé — fim da tabela
+
+      if(cel.data) dataAtual=cel.data;
+
+      let historico=cel.lancamento;
+      const anterior=linhas[idx-1];
+      if(anterior){
+        const celAnt=classificar(anterior);
+        const gap=anterior.y-linha.y;
+        if(!celAnt.saldo&&celAnt.lancamento&&gap>0&&gap<7) historico=[celAnt.lancamento,historico].filter(Boolean).join(' ').trim();
+      }
+      const proxima=linhas[idx+1];
+      if(proxima){
+        const celProx=classificar(proxima);
+        const gap=linha.y-proxima.y;
+        if(!celProx.saldo&&celProx.lancamento&&gap>0&&gap<7){ historico=[historico,celProx.lancamento].filter(Boolean).join(' ').trim(); idx++; }
+      }
+
+      if(/^saldo anterior$/i.test(historico)){ saldoAnteriorDoc=_lancctbParseValorBR(cel.saldo); continue; }
+      saldoFinalDoc=_lancctbParseValorBR(cel.saldo); // vai sobrescrevendo — o último vira o saldo final de verdade
+
+      if(!dataAtual) continue;
+      const mData=dataAtual.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+      if(!mData) continue;
+      registros.push({
+        data:`${mData[3]}-${mData[2]}-${mData[1]}`,
+        historico,
+        documento:cel.dcto||null,
+        valor_entrada:cel.credito?_lancctbParseValorBR(cel.credito):0,
+        valor_saida:cel.debito?_lancctbParseValorBR(cel.debito.replace(/^-/,'')):0,
+      });
+    }
+  }
+  if(!registros.length) return null;
+  return {lancamentos:registros,saldoAnteriorDoc,saldoFinalDoc,layout:'Bradesco (Extrato de Movimentação C/C)'};
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -29911,7 +30017,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
-          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))
+          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf));
       })();
       if(reconhecido){
