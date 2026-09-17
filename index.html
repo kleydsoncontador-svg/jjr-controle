@@ -2135,11 +2135,11 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     </div>
     <div class="mc">
       <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-        <strong>Colunas esperadas</strong> (mesmo padrão do Mister Contador): Conta | Classificação | Tipo (S/A) | Descrição | Grau. A importação faz upsert por número de conta — reimportar atualiza as existentes sem duplicar.
+        <strong>Colunas esperadas</strong> (mesmo padrão do Mister Contador): Conta | Classificação | Tipo (S/A) | Descrição | Grau. A importação faz upsert por número de conta — reimportar atualiza as existentes sem duplicar. Aceita Excel/CSV ou o relatório impresso em PDF (leitura direta, sem IA).
       </div>
       <div class="fg">
-        <div class="fl">Arquivo Excel</div>
-        <input class="fi" id="lancctbPlanoArquivo" type="file" accept=".xls,.xlsx,.csv">
+        <div class="fl">Arquivo Excel ou PDF</div>
+        <input class="fi" id="lancctbPlanoArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
       </div>
       <div id="lancctbPlanoImportStatus" style="font-size:12.5px;margin-top:8px;min-height:16px"></div>
     </div>
@@ -21222,6 +21222,51 @@ function abrirLancctbImportPlanoModal(){
 // numa única coluna "Nome"). T vazio = Tipo A (só essas recebem lançamento,
 // confirmado pelo usuário); só 'S' marca Sintética. Rodapé
 // "Sistema licenciado para..." no fim, sem código — ignorado.
+// Mesmo relatório "Mister Contador" acima (Código/T/Classificação/Nome/
+// Grau, outline por indentação), só que em PDF em vez de Excel — pedido do
+// usuário 17/09/2026, sem IA (o PDF tem texto nativo, sem OCR). Colunas por
+// posição x: Código<45, Tipo (só quando 'S')∈[45,52), Classificação∈
+// [52,225), Nome∈[225,540) — a indentação por Grau move o Nome uns ~7pt
+// por nível, mas não precisa calcular isso: o Grau já vem numa coluna
+// própria e confiável em x≥540, então só filtra pelo intervalo [225,540)
+// e junta o que sobrar ali (funciona pra qualquer grau, sem inferir nada).
+// Sem "espremido" nem linha de continuação — cada conta é 1 linha só.
+async function _lancctbParsearPlanoContasPdf(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(!/PLANO DE CONTAS/i.test(textoPagina1)) return null;
+  if(!/C[oó]digo\s*T/i.test(textoPagina1)||!/Classifica[çc][ãa]o/i.test(textoPagina1)||!/Grau/i.test(textoPagina1)) return null;
+
+  const registros=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens);
+    for(const linha of linhas){
+      const itCodigo=linha.itens.find(i=>i.x<45);
+      const itTipo=linha.itens.find(i=>i.x>=45&&i.x<52);
+      const itClassif=linha.itens.find(i=>i.x>=52&&i.x<225);
+      const itNome=linha.itens.filter(i=>i.x>=225&&i.x<540);
+      const itGrau=linha.itens.find(i=>i.x>=540);
+
+      if(!itCodigo||!/^\d+$/.test(itCodigo.str.trim())) continue; // cabeçalho/rodapé — sem Código numérico
+      if(!itClassif||!/^\d/.test(itClassif.str.trim())) continue;
+      if(!itGrau||!/^\d$/.test(itGrau.str.trim())) continue;
+      const nome=itNome.map(i=>i.str).join(' ').trim();
+      if(!nome) continue;
+
+      registros.push({
+        empresa_eid: _lancctbEidAtual,
+        numero_conta: itCodigo.str.trim(),
+        classificacao: itClassif.str.trim(),
+        tipo: itTipo&&itTipo.str.trim().toUpperCase()==='S'?'S':'A',
+        descricao: nome,
+        grau: parseInt(itGrau.str.trim(),10),
+      });
+    }
+  }
+  return registros.length?registros:null;
+}
 function _lancctbParsearPlanoOutline(matriz){
   // Acha a linha de cabeçalho procurando "código" numa célula. As posições
   // de Código/Grau no header podem estar desalinhadas em ±1 coluna em
@@ -21297,6 +21342,16 @@ async function processarLancctbImportPlano(){
   btn.disabled=true; btn.textContent='Importando…';
   status.textContent='Lendo arquivo…';
   try{
+    const ehPdf=/\.pdf$/i.test(file.name);
+    let registros=null;
+    if(ehPdf){
+      status.textContent='Lendo PDF (leitura direta, sem IA)…';
+      _convItauGarantirWorker();
+      const buf=await file.arrayBuffer();
+      const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+      registros=await _lancctbParsearPlanoContasPdf(pdf);
+      if(!registros){ status.textContent='Layout do PDF não reconhecido (esperado: relatório "Plano de Contas" do Mister Contador, com colunas Código/T/Classificação/Nome/Grau).'; btn.disabled=false; btn.textContent='⬆ Importar'; return; }
+    } else {
     const buf=await file.arrayBuffer();
     const wb=XLSX.read(buf,{type:'array'});
     const ws=wb.Sheets[wb.SheetNames[0]];
@@ -21305,7 +21360,7 @@ async function processarLancctbImportPlano(){
     // Contador; se não bater, cai para tabela simples (Conta/Classificação/
     // Tipo/Descrição/Grau como colunas nomeadas).
     const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
-    let registros=_lancctbParsearPlanoOutline(matriz);
+    registros=_lancctbParsearPlanoOutline(matriz);
 
     if(!registros){
       const linhas=XLSX.utils.sheet_to_json(ws,{defval:''});
@@ -21326,6 +21381,7 @@ async function processarLancctbImportPlano(){
         descricao: String(acharCampo(row,['descrição','descricao'])||'').trim(),
         grau: parseInt(acharCampo(row,['grau']),10)||null,
       })).filter(r=>r.numero_conta && r.classificacao);
+    }
     }
 
     if(!registros.length){ status.textContent='Nenhuma linha válida encontrada (verifique as colunas Conta/Classificação).'; btn.disabled=false; btn.textContent='⬆ Importar'; return; }
