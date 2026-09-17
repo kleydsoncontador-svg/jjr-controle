@@ -24621,6 +24621,12 @@ let _lancctbRegistroIaBusca=''; // pedido do usuário 16/09/2026 — filtro pela
 // pendências (linhas sem ctb) entram aqui; guarda {id,data_pagamento,
 // valor_saida,valor_entrada,historico_bancario} de cada uma selecionada.
 let _lancctbRegistroSelecionados=new Map();
+// Seleção pra "Desclassificar em lote" (pedido do usuário 17/09/2026 —
+// "vc matou alguns bem, porém esses aqui nenhum faz sentido... preciso
+// que tire essas amarrações, quero um botão ali, para eu mesmo poder
+// desassociar essas classificações, em lote"). Só CONCILIADAS entram
+// aqui — o inverso exato de _lancctbRegistroSelecionados.
+let _lancctbRegistroSelecionadosDesclass=new Map();
 let _lancctbRegistroValor='';
 let _lancctbRegistroDataDe='';
 let _lancctbRegistroDataAte='';
@@ -24927,6 +24933,12 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   const statusCelHtml=r.status_conciliacao==='conciliado'
     ? `<td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px;cursor:pointer;text-decoration:underline dotted" title="Clique pra desconciliar" onclick="_lancctbDesconciliarLancamento(${r.id})">${statusTxt}</span></td>`
     : `<td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>`;
+  // Checkbox pra "Desclassificar em lote" — só nas conciliadas (pedido do
+  // usuário 17/09/2026, ver comentário na declaração de
+  // _lancctbRegistroSelecionadosDesclass).
+  const selDesclassCelHtml=r.status_conciliacao==='conciliado'
+    ? `<td style="padding:7px 6px;text-align:center"><input type="checkbox" ${_lancctbRegistroSelecionadosDesclass.has(r.id)?'checked':''} onchange="_lancctbRegistroToggleSelecionadoDesclass(${r.id},this.checked)"></td>`
+    : `<td style="padding:7px 6px"></td>`;
   // Explicação da IA (Processar via IA) — só existe quando origem_match='ia'.
   const iaCelHtml=(linha)=>{
     if(!linha||linha.origem_match!=='ia'||!linha.informacao_extra) return `<td style="padding:7px 10px;color:var(--slate)">—</td>`;
@@ -24976,7 +24988,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     const d=ds[0], c=cs[0];
     const ellip='white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
     return `<tr style="${trStyleBase}" title="${tituloTr}">
-      <td style="padding:7px 6px"></td>
+      ${selDesclassCelHtml}
       <td style="padding:7px 10px">${dataFmt}${ehAplicacao?' 💰':''}</td>
       <td style="padding:7px 10px;font-family:var(--mono)">${esc(d.plano_contas?.numero_conta||'')}</td>
       <td style="padding:7px 6px;font-family:var(--mono);font-size:10px;${ellip}" title="${esc(d.classificacao||'')}">${esc(d.classificacao||'')}</td>
@@ -25002,7 +25014,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       const ehD=l.tipo==='D';
       const ellip='white-space:nowrap;overflow:hidden;text-overflow:ellipsis';
       return `<tr style="${trStyleBase}" title="${tituloTr}">
-        <td style="padding:7px 6px"></td>
+        ${selDesclassCelHtml}
         <td style="padding:7px 10px">${dataFmt}${ehAplicacao?' 💰':''}</td>
         <td style="padding:7px 10px;font-family:var(--mono)">${ehD?esc(l.plano_contas?.numero_conta||''):''}</td>
         <td style="padding:7px 6px;font-family:var(--mono);font-size:10px;${ellip}" title="${ehD?esc(l.classificacao||''):''}">${ehD?esc(l.classificacao||''):''}</td>
@@ -25060,26 +25072,71 @@ function abrirLancctbRegraModalDeExtratoId(extratoId){
 // (não apagadas — mantém rastro pra auditoria; o resto da tela já ignora
 // linha estornada em toda consulta, ver .eq('estornado',false) no fetch
 // do Registro Contábil).
+// Núcleo do desconciliar, extraído pra ser reaproveitado tanto pelo clique
+// individual quanto pelo "Desclassificar em lote" (pedido do usuário
+// 17/09/2026) — lança exceção em erro real de banco; retorna false só
+// quando o item não é encontrado no cache local (tela desatualizada).
+async function _lancctbDesconciliarCore(extratoId){
+  const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
+  if(!item) return false;
+  const r=item.extrato;
+  const ehSaida=r.valor_saida>0;
+  const tabelaComprovante=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
+  const idsNf=[...new Set(item.ctb.map(l=>l.nf_parcela_id).filter(Boolean))];
+  const idsComprovante=[...new Set(item.ctb.map(l=>l.comprovante_id).filter(Boolean))];
+  if(idsNf.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsNf);
+  if(idsComprovante.length) await _supaClient.from(tabelaComprovante).update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComprovante);
+  await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+  await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+  const { error } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).eq('lancamento_extrato_id',extratoId).eq('estornado',false);
+  if(error) throw new Error(error.message);
+  await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).eq('id',extratoId);
+  return true;
+}
 async function _lancctbDesconciliarLancamento(extratoId){
   const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
   if(!item){ toast('Lançamento não encontrado — atualize a tela e tente de novo.','err'); return; }
   if(!confirm('Desconciliar este lançamento? Isso desfaz o lançamento contábil e devolve a Nota Fiscal/Comprovante/Fluxo de Caixa amarrados pra pendente. Continuar?')) return;
-  const r=item.extrato;
-  const ehSaida=r.valor_saida>0;
-  const tabelaComprovante=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
   try{
-    const idsNf=[...new Set(item.ctb.map(l=>l.nf_parcela_id).filter(Boolean))];
-    const idsComprovante=[...new Set(item.ctb.map(l=>l.comprovante_id).filter(Boolean))];
-    if(idsNf.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsNf);
-    if(idsComprovante.length) await _supaClient.from(tabelaComprovante).update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComprovante);
-    await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
-    await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
-    const { error } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).eq('lancamento_extrato_id',extratoId).eq('estornado',false);
-    if(error){ toast('Erro ao desconciliar: '+error.message,'err'); return; }
-    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).eq('id',extratoId);
+    await _lancctbDesconciliarCore(extratoId);
     toast('Lançamento desconciliado — voltou pra pendente.','ok');
     renderLancctbRegistroContabil();
   }catch(e){ toast('Erro ao desconciliar: '+e.message,'err'); }
+}
+// Seleção pra "Desclassificar em lote".
+function _lancctbRegistroToggleSelecionadoDesclass(id,checked){
+  if(checked){
+    const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===id);
+    if(item) _lancctbRegistroSelecionadosDesclass.set(id,item.extrato);
+  } else {
+    _lancctbRegistroSelecionadosDesclass.delete(id);
+  }
+  _lancctbAtualizarBotaoDesclassificarLote();
+}
+function _lancctbAtualizarBotaoDesclassificarLote(){
+  const n=_lancctbRegistroSelecionadosDesclass.size;
+  document.querySelectorAll('.lancctb-desclassificar-lote-btn').forEach(btn=>{
+    btn.disabled=!n;
+    btn.textContent=`🔓 Desclassificar em lote${n?` (${n})`:''}`;
+  });
+}
+async function _lancctbExecutarDesclassificarLote(){
+  const n=_lancctbRegistroSelecionadosDesclass.size;
+  if(!n){ toast('Selecione ao menos um lançamento conciliado.','err'); return; }
+  if(!confirm(`Desconciliar ${n} lançamento(s) selecionado(s)? Isso desfaz os lançamentos contábeis e devolve NF/Comprovante/Fluxo de Caixa amarrados pra pendente. Continuar?`)) return;
+  const btns=document.querySelectorAll('.lancctb-desclassificar-lote-btn');
+  btns.forEach(b=>b.disabled=true);
+  const ids=[..._lancctbRegistroSelecionadosDesclass.keys()];
+  let ok=0, falhas=0;
+  for(const extratoId of ids){
+    try{
+      const feito=await _lancctbDesconciliarCore(extratoId);
+      if(feito) ok++; else falhas++;
+    }catch(e){ console.error('Erro ao desconciliar em lote (id '+extratoId+'):',e); falhas++; }
+  }
+  toast(`${ok} lançamento(s) desconciliado(s)${falhas?`, ${falhas} com erro (veja o console)`:''}.`,falhas?'info':'ok');
+  _lancctbRegistroSelecionadosDesclass.clear();
+  renderLancctbRegistroContabil();
 }
 
 function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta}){
@@ -25095,7 +25152,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   ].map(o=>`<option value="${o.v}" ${_lancctbRegistroDirecao===o.v?'selected':''}>${o.t}</option>`).join('');
 
   let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-    <select class="si" data-filtro="registro-conta-sel" style="min-width:440px" onchange="_lancctbExtratoContaSel=this.value;_lancctbRegistroPagina=0;_lancctbRegistroSelecionados.clear();renderLancctbRegistroContabil()">${opcoesConta}</select>
+    <select class="si" data-filtro="registro-conta-sel" style="min-width:440px" onchange="_lancctbExtratoContaSel=this.value;_lancctbRegistroPagina=0;_lancctbRegistroSelecionados.clear();_lancctbRegistroSelecionadosDesclass.clear();renderLancctbRegistroContabil()">${opcoesConta}</select>
     ${_lancctbMesPickerHtml(_lancctbRegistroMes,'_lancctbRegistroMudarMes')}
     <select class="si" data-filtro="registro-direcao" onchange="_lancctbRegistroDirecao=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesDirecao}</select>
     <select class="si" data-filtro="registro-status" onchange="_lancctbRegistroStatus=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesStatus}</select>
@@ -25250,6 +25307,7 @@ function _lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas){
   return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--slate)">
     <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
     <button class="btn bo bsm lancctb-classificar-lote-btn" ${_lancctbRegistroSelecionados.size?'':'disabled'} onclick="abrirLancctbClassificarLoteModal()">🗂️ Classificar em lote${_lancctbRegistroSelecionados.size?` (${_lancctbRegistroSelecionados.size})`:''}</button>
+    <button class="btn bo bsm lancctb-desclassificar-lote-btn" ${_lancctbRegistroSelecionadosDesclass.size?'':'disabled'} onclick="_lancctbExecutarDesclassificarLote()" title="Desfaz o lançamento contábil e devolve NF/Comprovante/Fluxo de Caixa pra pendente — em lote">🔓 Desclassificar em lote${_lancctbRegistroSelecionadosDesclass.size?` (${_lancctbRegistroSelecionadosDesclass.size})`:''}</button>
     <div style="display:flex;gap:6px">
       <button class="btn bo bsm" ${_lancctbRegistroPagina===0?'disabled':''} onclick="_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">« Primeira</button>
       <button class="btn bo bsm" ${_lancctbRegistroPagina===0?'disabled':''} onclick="_lancctbRegistroPagina--;renderLancctbRegistroContabil()">‹ Anterior</button>
@@ -25271,9 +25329,17 @@ function _lancctbRegistroToggleSelecionado(id,checked){
 }
 function _lancctbRegistroToggleSelecionarTodos(checked){
   _lancctbUltimoRegistro.forEach(item=>{
-    if(item.ctb.length) return; // só pendência entra na seleção em lote
-    if(checked) _lancctbRegistroSelecionados.set(item.extrato.id,item.extrato);
-    else _lancctbRegistroSelecionados.delete(item.extrato.id);
+    // Pendência vai pra seleção de "Classificar em lote"; conciliada vai
+    // pra "Desclassificar em lote" — o mesmo checkbox de cabeçalho marca
+    // tudo que está visível, cada linha caindo no balde certo conforme o
+    // próprio status (pedido do usuário 17/09/2026).
+    if(item.ctb.length){
+      if(checked) _lancctbRegistroSelecionadosDesclass.set(item.extrato.id,item.extrato);
+      else _lancctbRegistroSelecionadosDesclass.delete(item.extrato.id);
+    } else {
+      if(checked) _lancctbRegistroSelecionados.set(item.extrato.id,item.extrato);
+      else _lancctbRegistroSelecionados.delete(item.extrato.id);
+    }
   });
   renderLancctbRegistroContabil();
 }
