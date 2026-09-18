@@ -18668,6 +18668,20 @@ function _lancctbExtrairDocDoHistorico(historico){
   if(digitos.length===11) return { doc:digitos, tipo:'CPF' };
   return null;
 }
+// Palavras genéricas de extrato que NÃO identificam quem pagou/recebeu — o
+// que sobra depois de tirar isso (com ≥3 letras) é tratado como "nome" no
+// histórico (ex.: "TED 237.2011.RIMA I S" → sobra "RIMA").
+const LANCCTB_PALAVRAS_GENERICAS_HISTORICO=new Set(['TED','DOC','PIX','TRANSF','TRANSFERENCIA','TRANSFERÊNCIA','RECEBIDO','RECEBIDA','ENVIADO','ENVIADA','PAGAMENTO','PAGTO','PGTO','CREDITO','CRÉDITO','DEBITO','DÉBITO','BOLETO','COBRANCA','COBRANÇA','DEPOSITO','DEPÓSITO','SAFRAPAY','ITAU','ITAÚ','BRADESCO','SICOOB','SAFRA','BANCO','CONTA','AGENCIA','AGÊNCIA','REMET','REMETENTE','DEST','FAVORECIDO','PESSOA','MESMA','TITULARIDADE','TIT','LIQUIDACAO','LIQUIDAÇÃO','TARIFA','SISPAG','DISPON','ELET','LTDA','EPP','EIRELI','SA','ME','CIA','DE','DA','DO','DAS','DOS','COM','NF','PARCELA']);
+// Pedido do usuário 18/09/2026 (Peixoto, "TED 237.2011.RIMA I S" amarrado a
+// NFs cujo destinatário vem em branco): se o histórico bancário traz o
+// nome (ou parte do nome) de uma empresa, NÃO amarrar com NF que não indica
+// o nome da empresa — sem nome na NF não dá pra confirmar que é a mesma.
+function _lancctbHistoricoTemNomeEmpresa(historico){
+  if(!historico) return false;
+  const semDoc=String(historico).replace(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/g,' ').replace(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/g,' ');
+  const palavras=_convMpRemoverAcentos(semDoc.toUpperCase()).split(/[^A-Z]+/).filter(Boolean);
+  return palavras.some(w=>w.length>=3&&!LANCCTB_PALAVRAS_GENERICAS_HISTORICO.has(w));
+}
 function _lancctbHistoricoEhTributo(historico){
   if(!historico) return false;
   const t=_convMpRemoverAcentos(String(historico).toUpperCase());
@@ -23999,6 +24013,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // diferente (ex. "BAGAROTII PNEUS LTDA"). docHistorico só entra em jogo
     // quando NÃO tem CNPJ-âncora de comprovante (esse já é mais confiável).
     const docHistorico=cnpjAncora?null:_lancctbExtrairDocDoHistorico(l.historico_bancario);
+    const historicoTemNome=cnpjAncora?false:_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
     const nfCandidatas=(gruposComprovantes||modo==='recebimentos_so_regras'||_lancctbHistoricoEhTributo(l.historico_bancario))?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       // Sem isso, uma saída sem CNPJ âncora (histórico genérico tipo "Tar/
@@ -24014,6 +24029,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // verdade — não pode virar candidata do matching automático.
       if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
       const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
+      // Histórico traz nome de empresa → NF sem nome da contraparte não casa.
+      const nomeNf=(ehSaida?p.notas_fiscais?.nome_emitente:p.notas_fiscais?.nome_destinatario)||'';
+      if(historicoTemNome&&!String(nomeNf).trim()) return false;
       // Trava PF (histórico) × PJ (NF): só passa se valor E data de
       // vencimento forem EXATOS (nada de tolerância) — vira só sugestão
       // manual quando não bater exato, nunca classifica sozinho.
