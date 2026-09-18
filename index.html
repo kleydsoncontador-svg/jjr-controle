@@ -18653,6 +18653,21 @@ const LANCCTB_HISTORICOS_TRIBUTO=[
   'TESOURO NACIONAL','TESOURO ESTADUAL','MINISTERIO DA FAZENDA','FUNDO ESTADUAL',
   'FAZENDA PUBLICA','MUNICIPIO DE','GOVERNO DO ESTADO',
 ];
+// Acha um CPF ou CNPJ formatado dentro do texto cru do histórico bancário
+// (ex.: "PIX RECEBIDO SAFRAPAY ANDRYEVANY KAROLLYNI IZABEL DO 022.428.706-02")
+// — usado pra saber se quem pagou/recebeu é pessoa física (CPF, 11 dígitos)
+// ou jurídica (CNPJ, 14), pra travar o matching automático de NF quando os
+// dois lados não batem (ver comentário no Passo 2 do matching). Tenta CNPJ
+// primeiro (padrão mais específico: tem "/"), senão CPF.
+function _lancctbExtrairDocDoHistorico(historico){
+  if(!historico) return null;
+  const m=String(historico).match(/\b(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{3}\.\d{3}\.\d{3}-\d{2})\b/);
+  if(!m) return null;
+  const digitos=m[1].replace(/\D/g,'');
+  if(digitos.length===14) return { doc:digitos, tipo:'CNPJ' };
+  if(digitos.length===11) return { doc:digitos, tipo:'CPF' };
+  return null;
+}
 function _lancctbHistoricoEhTributo(historico){
   if(!historico) return false;
   const t=_convMpRemoverAcentos(String(historico).toUpperCase());
@@ -23975,6 +23990,15 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // essa trava o matching por valor+data podia (por coincidência) casar
     // um pagamento de tributo com uma NF desse fornecedor — tributo nunca
     // tem NF.
+    // Pedido do usuário 18/09/2026: "quando no histórico do extrato tiver
+    // uma pessoa física... não amarre contra NF emitida para pessoa
+    // jurídica, a não ser que seja data e valor idêntico na parcela (sem
+    // aproximação)". Achado real (Peixoto): PIX de gente física (CPF no
+    // histórico, ex. "ANDRYEVANY KAROLLYNI...022.428.706-02") casando por
+    // coincidência de valor+data contra a NF de um cliente PJ completamente
+    // diferente (ex. "BAGAROTII PNEUS LTDA"). docHistorico só entra em jogo
+    // quando NÃO tem CNPJ-âncora de comprovante (esse já é mais confiável).
+    const docHistorico=cnpjAncora?null:_lancctbExtrairDocDoHistorico(l.historico_bancario);
     const nfCandidatas=(gruposComprovantes||modo==='recebimentos_so_regras'||_lancctbHistoricoEhTributo(l.historico_bancario))?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       // Sem isso, uma saída sem CNPJ âncora (histórico genérico tipo "Tar/
@@ -23989,10 +24013,18 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // amostra grátis etc. nunca geram pagamento nem recebimento de
       // verdade — não pode virar candidata do matching automático.
       if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
-      if(Math.abs(p.valor_parcela-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR_NF) return false;
-      if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
+      const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
+      // Trava PF (histórico) × PJ (NF): só passa se valor E data de
+      // vencimento forem EXATOS (nada de tolerância) — vira só sugestão
+      // manual quando não bater exato, nunca classifica sozinho.
+      if(docHistorico?.tipo==='CPF'&&cnpjNf&&cnpjNf.length===14){
+        if(p.valor_parcela!==valor) return false;
+        if(p.data_vencimento!==l.data_pagamento) return false;
+      } else {
+        if(Math.abs(p.valor_parcela-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR_NF) return false;
+        if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
+      }
       if(cnpjAncora){
-        const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
         if(cnpjNf!==cnpjAncora) return false;
       }
       return true;
