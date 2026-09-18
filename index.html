@@ -18689,6 +18689,22 @@ const LANCCTB_RE_NOME_TRIBUTO=/DARF|GPS|GNRE|INSS|FGTS|IRRF|IRPJ|CSLL|PIS|C
 function _lancctbTextoParecidoTributo(txt){
   return LANCCTB_RE_NOME_TRIBUTO.test(_convMpRemoverAcentos(String(txt||'').toUpperCase()));
 }
+// 18/09/2026 (Peixoto: histórico "COPASA CIA SANEAM..." + comprovante COPASA
+// amarrados a NFs da REDE ANCORA só por valor+data): a contraparte da NF tem
+// que ser COMPATÍVEL com o nome do histórico bancário e/ou do comprovante —
+// pelo menos 1 palavra significativa em comum (prefixo de 3+ letras vale,
+// pra cobrir abreviação de extrato tipo "RIMA I S" x "RIMA INDUSTRIAL").
+function _lancctbTokensNome(txt){
+  if(!txt) return [];
+  const semDoc=String(txt).replace(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/g,' ').replace(/\d{3}\.\d{3}\.\d{3}-\d{2}/g,' ');
+  return _convMpRemoverAcentos(semDoc.toUpperCase()).split(/[^A-Z]+/).filter(w=>w.length>=3&&!LANCCTB_PALAVRAS_GENERICAS_HISTORICO.has(w));
+}
+function _lancctbNomeCompativel(textosRef,nomeNf){
+  const refs=[...new Set(textosRef.flatMap(_lancctbTokensNome))];
+  if(!refs.length) return true; // sem nome de referência, esta trava não se aplica
+  const nfTokens=_lancctbTokensNome(nomeNf);
+  return refs.some(a=>nfTokens.some(b=>a===b||(a.length>=3&&b.length>=3&&(a.startsWith(b)||b.startsWith(a)))));
+}
 function _lancctbHistoricoEhTributo(historico){
   if(!historico) return false;
   const t=_convMpRemoverAcentos(String(historico).toUpperCase());
@@ -24040,6 +24056,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // Histórico traz nome de empresa → NF sem nome da contraparte não casa.
       const nomeNf=(ehSaida?p.notas_fiscais?.nome_emitente:p.notas_fiscais?.nome_destinatario)||'';
       if(historicoTemNome&&!String(nomeNf).trim()) return false;
+      // Contraparte tem que combinar com o nome do histórico/comprovante.
+      if(docHistorico?.tipo==='CNPJ'&&cnpjNf&&cnpjNf!==docHistorico.doc) return false;
+      if(!cnpjAncora&&!_lancctbNomeCompativel([l.historico_bancario,comprovanteMatch?.cliente_fornecedor_nome],nomeNf)) return false;
       // Trava PF (histórico) × PJ (NF): só passa se valor E data de
       // vencimento forem EXATOS (nada de tolerância) — vira só sugestão
       // manual quando não bater exato, nunca classifica sozinho.
@@ -24091,6 +24110,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         const cnpjNf=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
         return cnpjNf===cnpjAncora;
       }).slice(0,15);
+      // (âncora por CNPJ já garante a contraparte)
       const alvoCentavos=Math.round(valor*100);
       const subset=_lancctbSubsetSum(doCnpj.map(p=>Math.round(p.valor_parcela*100)),alvoCentavos,Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR_NF*100));
       if(subset&&subset.length>1){
@@ -27422,6 +27442,25 @@ async function confirmarLancctbImportComprovantes(){
       hash_dedup: c.hash_dedup||null,
     }:{}),
   }));
+  // Dedup por conteúdo (18/09/2026, Peixoto: comprovantes COPASA duplicados —
+  // parser sem hash_dedup não era barrado pela constraint, e recebimento/
+  // salários nunca tiveram hash). Antes de gravar, descarta o que já existe
+  // no banco com mesma data+valor+nome+documento (e conta), e também
+  // repetições dentro do próprio lote enviado.
+  const chaveComprov=r=>[r.conta_bancaria_id||'',r.data_pagamento||'',Number(r.valor_pago||0).toFixed(2),String(r.cliente_fornecedor_nome||'').trim().toUpperCase(),String(r.documento_numero||'').trim(),String(r.cnpj_cpf||'').replace(/\D/g,'')].join('|');
+  const datasLote=registros.map(r=>r.data_pagamento).filter(Boolean).sort();
+  const jaExistem=new Set();
+  if(datasLote.length){
+    const { data: exist }=await _lancctbFetchTudo(()=>_supaClient.from(_lancctbComprovTabela(tipo))
+      .select('conta_bancaria_id,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf')
+      .eq('empresa_eid',_lancctbEidAtual).gte('data_pagamento',datasLote[0]).lte('data_pagamento',datasLote[datasLote.length-1]));
+    (exist||[]).forEach(r=>jaExistem.add(chaveComprov(r)));
+  }
+  const registrosUnicos=[];
+  registros.forEach(r=>{ const k=chaveComprov(r); if(jaExistem.has(k)) return; jaExistem.add(k); registrosUnicos.push(r); });
+  const duplicadosPulados=registros.length-registrosUnicos.length;
+  if(!registrosUnicos.length){ toast(`Nada a salvar — ${duplicadosPulados} comprovante(s) já existiam (duplicados ignorados).`,'ok'); return; }
+  registros.length=0; registrosUnicos.forEach(r=>registros.push(r));
   // Pagamento: upsert ignorando duplicados (dedup por hash_dedup, spec) —
   // reimportar o mesmo PDF não cria linhas repetidas. Recebimento/salários:
   // insert normal (não têm hash).
@@ -27430,7 +27469,7 @@ async function confirmarLancctbImportComprovantes(){
     : await _supaClient.from(_lancctbComprovTabela(tipo)).insert(registros);
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
   const salvos=(typeof count==='number')?count:registros.length;
-  const ignorados=registros.length-salvos;
+  const ignorados=registros.length-salvos+duplicadosPulados;
   toast(`${salvos} comprovante(s) salvo(s)${ignorados>0?` (${ignorados} já existiam, ignorados)`:''}`,'ok');
   // Vínculo com o Visão Geral (Fase 16) — só Comprovantes de Pagamento por
   // enquanto, pedido do usuário (05/09/2026); mesma ideia do Extrato/Aplicações.
