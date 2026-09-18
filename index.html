@@ -19223,103 +19223,6 @@ async function _lancctbConcederAcessoPastaFopag(){
   } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
 }
 
-// ─── CLIENTES — X:\03 - CONTABIL\CLIENTES. Concede 1x (handle no IndexedDB,
-// chave 'raizClientes', só leitura). Usada pelo "Processar FOPAG" pra achar os
-// Recibos de Férias em {empresa}\{ano}\Docs. Suporte para Pagamentos\
-// Docs. Suporte para Pagamentos_{AAAA-MM}\ (pedido do usuário 18/09/2026).
-async function _lancctbSalvarHandleClientes(handle){
-  const db=await _lancctbAbrirDbHandles();
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction('handles','readwrite');
-    tx.objectStore('handles').put(handle,'raizClientes');
-    tx.oncomplete=()=>resolve();
-    tx.onerror=()=>reject(tx.error);
-  });
-}
-async function _lancctbCarregarHandleClientes(){
-  const db=await _lancctbAbrirDbHandles();
-  return new Promise((resolve,reject)=>{
-    const tx=db.transaction('handles','readonly');
-    const req=tx.objectStore('handles').get('raizClientes');
-    req.onsuccess=()=>resolve(req.result||null);
-    req.onerror=()=>reject(req.error);
-  });
-}
-async function _lancctbTemAcessoPastaClientes(){
-  if(!window.showDirectoryPicker) return false;
-  try{
-    const handle=await _lancctbCarregarHandleClientes();
-    if(!handle) return false;
-    return (await handle.queryPermission({mode:'read'}))==='granted';
-  } catch { return false; }
-}
-async function _lancctbConcederAcessoPastaClientes(){
-  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
-  try{
-    const handle=await window.showDirectoryPicker();
-    await _lancctbSalvarHandleClientes(handle);
-    toast('Acesso à pasta "CLIENTES" concedido!','ok');
-    _lancctbAtualizarEstadoBotoesAcesso();
-  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
-}
-// Recibos de Férias do mês: arquivos com "FÉRIAS" no nome na pasta de
-// "Docs. Suporte para Pagamentos" da empresa. Devolve [{ nome, handle }].
-async function _lancctbListarRecibosFeriasDoMes(raiz,eid,anoMes){
-  const out=[];
-  try{
-    let pastaEmp=null;
-    const reEid=new RegExp('(^|\\s)-\\s*'+String(eid)+'\\s*$');
-    for await (const [nome,h] of raiz.entries()){ if(h.kind==='directory'&&reEid.test(nome)){ pastaEmp=h; break; } }
-    if(!pastaEmp) return out;
-    const dAno=await pastaEmp.getDirectoryHandle(anoMes.slice(0,4));
-    const dDocs=await dAno.getDirectoryHandle('Docs. Suporte para Pagamentos');
-    const dMes=await dDocs.getDirectoryHandle('Docs. Suporte para Pagamentos_'+anoMes);
-    for await (const [nome,h] of dMes.entries()){
-      if(h.kind==='file'&&/\.pdf$/i.test(nome)&&/F[ÉE]RIAS/i.test(nome.normalize('NFC').toUpperCase())) out.push({ nome, handle:h });
-    }
-  }catch(e){ /* pasta do mês não existe — sem recibos */ }
-  return out;
-}
-const _lancctbCacheReciboFerias=new Map();
-// Lê 1 recibo de férias: tenta o texto do PDF; se for escaneado (sem texto),
-// manda as páginas como imagem pra Edge Function lancctb-parse-recibo-ferias
-// (Gemini). Devolve { nome, liquido, gozoInicio, gozoFim } ou null.
-async function _lancctbLerReciboFerias(fileHandle){
-  const arquivo=await fileHandle.getFile();
-  const chave=arquivo.name+'|'+arquivo.size+'|'+arquivo.lastModified;
-  if(_lancctbCacheReciboFerias.has(chave)) return _lancctbCacheReciboFerias.get(chave);
-  let resultado=null;
-  try{
-    _convItauGarantirWorker();
-    const pdf=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
-    let texto='';
-    for(let p=1;p<=Math.min(pdf.numPages,4);p++){ const c=await (await pdf.getPage(p)).getTextContent(); texto+=' '+c.items.map(i=>i.str).join(' '); }
-    texto=texto.replace(/\s+/g,' ');
-    const liqTxt=(texto.match(/TOTAL L[ÍI]QUIDO:?\s*([\d.]*\d,\d{2})/i)||[])[1];
-    if(liqTxt){
-      resultado={ nome:(texto.match(/Nome do empregado\s+(.+?)\s+N[úu]mero Carteira/i)||[])[1]||null, liquido:_convCobrParseValor(liqTxt), gozoInicio:null, gozoFim:null };
-    } else if(!texto.trim()){
-      const imagens=[];
-      for(let p=1;p<=Math.min(pdf.numPages,3);p++){
-        const page=await pdf.getPage(p);
-        const viewport=page.getViewport({scale:2});
-        const canvas=document.createElement('canvas'); canvas.width=viewport.width; canvas.height=viewport.height;
-        const timeout=new Promise((_,rej)=>setTimeout(()=>rej(new Error('Tempo esgotado renderizando a página '+p)),20000));
-        await Promise.race([page.render({canvasContext:canvas.getContext('2d'),viewport}).promise,timeout]);
-        imagens.push(canvas.toDataURL('image/jpeg',0.85));
-      }
-      const resp=await fetch(SUPABASE_URL+'/functions/v1/lancctb-parse-recibo-ferias',{
-        method:'POST', headers:{'Content-Type':'application/json','Authorization':'Bearer '+SUPABASE_ANON_KEY}, body:JSON.stringify({imagens}),
-      });
-      if(!resp.ok) throw new Error('A extração via IA do recibo de férias retornou status '+resp.status);
-      const d=await resp.json();
-      if(d.error) throw new Error(d.error);
-      if(d.totalLiquido>0) resultado={ nome:d.nomeEmpregado||null, liquido:Number(d.totalLiquido), gozoInicio:d.gozoInicio||null, gozoFim:d.gozoFim||null };
-    }
-  }catch(e){ console.error('Falha ao ler recibo de férias '+arquivo.name+':',e); }
-  _lancctbCacheReciboFerias.set(chave,resultado);
-  return resultado;
-}
 // Barra de "Conceder acesso" na listagem de empresas de Lançamentos
 // Contábeis — pedido do usuário (10/09/2026): concede 1x, vale pra TODAS as
 // empresas (inclusive as que entrarem depois), sem reabrir o seletor. Os
@@ -19334,7 +19237,6 @@ function _lancctbRenderBotoesAcessoPastas(){
     ${btn('lancctbAcessoTributosBtn','_lancctbConcederAcessoPastaTributos','Tributos do Mês')}
     ${btn('lancctbAcessoFopagBtn','_lancctbConcederAcessoPastaFopag','Relatórios FOPAG para Contábil')}
     ${btn('lancctbAcessoTransfRedeBtn','_lancctbConcederAcessoPastaTransfRede','Arquivos de Transferência de Rede')}
-    ${btn('lancctbAcessoClientesBtn','_lancctbConcederAcessoPastaClientes','CLIENTES (recibos de férias)')}
   </div>`;
 }
 async function _lancctbAtualizarEstadoBotoesAcesso(){
@@ -19349,7 +19251,6 @@ async function _lancctbAtualizarEstadoBotoesAcesso(){
   try{ marca('lancctbAcessoTributosBtn','Tributos do Mês', await _lancctbTemAcessoPastaTributos()); }catch{}
   try{ marca('lancctbAcessoFopagBtn','Relatórios FOPAG para Contábil', await _lancctbTemAcessoPastaFopag()); }catch{}
   try{ marca('lancctbAcessoTransfRedeBtn','Arquivos de Transferência de Rede', await _lancctbTemAcessoPastaTransfRede()); }catch{}
-  try{ marca('lancctbAcessoClientesBtn','CLIENTES (recibos de férias)', await _lancctbTemAcessoPastaClientes()); }catch{}
 }
 // ─── Arquivos de Transferência de Rede — X:\03 - CONTABIL\Arquivos de
 // Transferência de Rede. Pedido do usuário 11/09/2026: "sempre que a gente
@@ -19593,10 +19494,9 @@ async function _lancctbProcessarFopag(){
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
     if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada.','err'); return; }
     const { data: contasFixas } = await _supaClient.from('plano_contas')
-      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['187','724','567']);
+      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['187','724']);
     const contaSalario=(contasFixas||[]).find(c=>c.numero_conta==='187');
     const contaAdiantamento=(contasFixas||[]).find(c=>c.numero_conta==='724');
-    const contaFerias=(contasFixas||[]).find(c=>c.numero_conta==='567'); // férias debita 567 (pedido do usuário 18/09/2026)
     const socios=lucSocGet(eid);
     const { data: contasSocios } = socios.length
       ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
@@ -19655,42 +19555,10 @@ async function _lancctbProcessarFopag(){
         Math.abs((f.valor_saida||0)-l.valor_saida)<=LANCCTB_MATCH_TOLERANCIA_VALOR &&
         _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
 
-    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0;
-    // Recibos de Férias (pasta CLIENTES\{empresa}\{ano}\Docs. Suporte para
-    // Pagamentos\..._{AAAA-MM}) — cada recibo só resolve 1 saída, por valor
-    // EXATO do TOTAL LÍQUIDO. Precisa do acesso à pasta CLIENTES (botão 🔑).
-    const raizClientes=(await _lancctbTemAcessoPastaClientes())?await _lancctbCarregarHandleClientes():null;
-    const recibosPorMes={}, recibosUsados=new Set();
-    let semAcessoClientes=!raizClientes;
+    let resolvidos=0, semAchado=0, diferencasAbertas=0;
     for(let i=0;i<pendencias.length;i++){
       const l=pendencias[i];
       if(statusEl) statusEl.textContent=`Processando FOPAG ${i+1}/${pendencias.length}…`;
-      if(raizClientes&&contaFerias){
-        const anoMesL=l.data_pagamento.slice(0,7);
-        if(!recibosPorMes[anoMesL]){
-          const lista=await _lancctbListarRecibosFeriasDoMes(raizClientes,eid,anoMesL);
-          recibosPorMes[anoMesL]=[];
-          for(const it of lista){ const dados=await _lancctbLerReciboFerias(it.handle); if(dados) recibosPorMes[anoMesL].push({nomeArquivo:it.nome,...dados}); }
-        }
-        const rec=recibosPorMes[anoMesL].find(r=>!recibosUsados.has(r.nomeArquivo)&&Math.abs(r.liquido-l.valor_saida)<=0.01);
-        if(rec){
-          const nomePessoa=(rec.nome||rec.nomeArquivo.replace(/\.pdf$/i,'')).trim();
-          const gozo=rec.gozoInicio?` (gozo ${rec.gozoInicio.split('-').reverse().join('/')}${rec.gozoFim?' a '+rec.gozoFim.split('-').reverse().join('/'):''})`:'';
-          const hist=`Pagamento ref. férias${gozo} - ${nomePessoa}`;
-          const linhasF=[
-            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:hist, cliente_fornecedor_nome:nomePessoa, lancamento_extrato_id:l.id, origem_match:'regra' },
-            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaFerias.classificacao, conta_contabil_id:contaFerias.id, tipo:'D', valor:l.valor_saida, historico:hist, cliente_fornecedor_nome:nomePessoa, lancamento_extrato_id:l.id, origem_match:'regra' },
-          ];
-          const { error: eF } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasF });
-          if(!eF){
-            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-            const fx=acharFluxoDaPendencia(l);
-            if(fx){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fx.id); const ix=(fluxoLivre||[]).findIndex(f=>f.id===fx.id); if(ix>=0) fluxoLivre.splice(ix,1); }
-            recibosUsados.add(rec.nomeArquivo); resolvidos++; feriasResolvidas++;
-            continue;
-          } else console.error('Erro FOPAG (férias):',eF);
-        }
-      }
       const mmaaaaPeriodo=l.data_pagamento.slice(0,7).split('-').reverse().join('-'); // "AAAA-MM" → "MM-AAAA"
       const cMes=mmaaaaPeriodo, cAnt=mesAnterior(mmaaaaPeriodo);
       // Regra de calendário da folha (JJR): SALÁRIO é pago no início do mês
@@ -19790,7 +19658,7 @@ async function _lancctbProcessarFopag(){
       }
       resolvidos++;
     }
-    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${feriasResolvidas?` (${feriasResolvidas} por recibo de férias)`:''}${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.${semAcessoClientes&&semAchado?' Pra ler recibos de férias, conceda o acesso 🔑 CLIENTES na listagem de empresas.':''}`,'ok');
+    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
