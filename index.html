@@ -24259,6 +24259,14 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // deixou de ser botão separado): sem comprovante-âncora, cai direto pro
     // Passo 2 (NF) mais abaixo, que já roda sem exigir CNPJ âncora nenhum.
 
+    // NF SEMPRE tem prioridade sobre Regra (pedido do usuário 18/09/2026: "hoje
+    // eu crio uma regra pro Joãozinho porque não achei NF, amanhã tem outro
+    // pagamento e você achou NF — amarra com a NF"). Por isso a NF indicada
+    // pelo Fluxo (e o pagamento aglutinado, que tenta NF em cada parte antes
+    // de cair na Regra) roda ANTES do Passo 1c (grupo por Regra) e do Passo 3.
+    if(!resolvido&&modo!=='recebimentos_so_regras'&&modo!=='ia'&&!_lancctbHistoricoSemNF(l.historico_bancario)){
+      if(await tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch,true)) continue;
+    }
     // Passo 1c: grupo de comprovantes resolvido via Regra por CNPJ de CADA
     // um (nunca via NF — um lote "Sispag" normalmente não tem NF associada).
     // Só comita se TODOS os comprovantes do grupo tiverem Regra — sem isso,
@@ -24272,7 +24280,12 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         comprovante:c,
         regra:regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&r.cnpj_cpf_gatilho===c.cnpj_cpf),
       }));
-      if(resolucoesGrupo.every(rg=>rg.regra)){
+      // NF tem prioridade: se algum comprovante do grupo tem NF (mesmo CNPJ e valor
+      // exato) disponível, não resolve por Regra — fica pra amarrar a NF.
+      const temNfDisponivel=gruposComprovantes.some(c=>c.cnpj_cpf&&parcelas.some(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao===(ehSaida?'compra':'venda')
+        &&(ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario)===String(c.cnpj_cpf).replace(/\D/g,'')
+        &&Math.abs(p.valor_parcela-c.valor_pago)<=tolNF&&_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)));
+      if(!temNfDisponivel&&resolucoesGrupo.every(rg=>rg.regra)){
         const historicosGrupo=resolucoesGrupo.map(rg=>rg.regra.historico_fixo||`${ehSaida?'Pagamento a':'Recebimento de'} ${rg.comprovante.cliente_fornecedor_nome||''}`.trim());
         const historicoBancoGrupo=new Set(historicosGrupo).size<=1?historicosGrupo[0]:(ehSaida?'Pagamentos Diversos':'Recebimentos Diversos');
         const linhasGrupo=[
@@ -24319,9 +24332,6 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // coincidência de valor+data contra a NF de um cliente PJ completamente
     // diferente (ex. "BAGAROTII PNEUS LTDA"). docHistorico só entra em jogo
     // quando NÃO tem CNPJ-âncora de comprovante (esse já é mais confiável).
-    if(!resolvido&&modo!=='recebimentos_so_regras'&&modo!=='ia'&&!_lancctbHistoricoSemNF(l.historico_bancario)){
-      if(await tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch,true)) continue;
-    }
     const docHistorico=cnpjAncora?null:_lancctbExtrairDocDoHistorico(l.historico_bancario);
     const historicoTemNome=cnpjAncora?false:_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
     // Securitizadora/FIDC é só PONTE entre pagador e recebedor (pedido do
