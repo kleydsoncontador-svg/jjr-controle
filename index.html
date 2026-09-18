@@ -18714,6 +18714,43 @@ function _lancctbComprovanteCombinaHistorico(c,historico){
   if(doc&&cnpjC) return doc.doc===cnpjC;
   return _lancctbNomeCompativel([historico],c.cliente_fornecedor_nome);
 }
+// Fluxo de Caixa do cliente indica a NF (coluna "numero") e a parcela — pedido
+// do usuário 18/09/2026: o Fluxo serve de suporte pro que não amarrou NF. O
+// NOME do Fluxo quase nunca é idêntico ao da NF (só compatível), então casa
+// por número da NF + contraparte compatível (CNPJ igual OU nome com palavra em
+// comum) + parcela indicada. Só devolve quando o resultado é ÚNICO.
+function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorExtrato){
+  const numero=String(f.numero||f.documento_numero||'').trim().replace(/^0+/,'');
+  if(!numero||!/^\d+$/.test(numero)) return null;
+  const campoNome=ehSaida?'nome_emitente':'nome_destinatario', campoCnpj=ehSaida?'cnpj_emitente':'cnpj_destinatario';
+  const cnpjF=String(f.cnpj_cpf||'').replace(/\D/g,'');
+  const nomeRef=f.cliente_fornecedor_nome||'';
+  const doNumero=parcelas.filter(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais&&p.notas_fiscais.direcao===(ehSaida?'compra':'venda')
+    &&String(p.notas_fiscais.numero||'').replace(/^0+/,'')===numero);
+  if(!doNumero.length) return null;
+  const compat=doNumero.filter(p=>{
+    const nf=p.notas_fiscais;
+    if(cnpjF&&nf[campoCnpj]) return cnpjF===nf[campoCnpj];
+    if(_lancctbTokensNome(nomeRef).length) return String(nf[campoNome]||'').trim()&&_lancctbNomeCompativel([nomeRef],nf[campoNome]);
+    return new Set(doNumero.map(x=>x.nf_id)).size===1; // sem nome no Fluxo: só se houver UMA NF com esse número
+  });
+  if(!compat.length) return null;
+  const okValor=p=>Math.abs(p.valor_parcela-valorExtrato)<=LANCCTB_MATCH_TOLERANCIA_VALOR_NF;
+  const parcInd=Number(f.parcela)||null;
+  if(parcInd){
+    const porParc=compat.filter(p=>p.numero_parcela===parcInd&&okValor(p));
+    if(porParc.length===1) return porParc[0];
+    if(porParc.length>1) return null;
+  }
+  const porValor=compat.filter(okValor);
+  return porValor.length===1?porValor[0]:null;
+}
+// Texto do tooltip da coluna Fluxo de Caixa: NF e parcela que o Fluxo indica.
+function _lancctbFluxoIndicaTxt(f){
+  const n=f.numero||f.documento_numero;
+  if(!n) return '';
+  return `Fluxo indica: NF ${n}${f.parcela?' — parcela '+f.parcela:''}\n`;
+}
 function _lancctbHistoricoEhTributo(historico){
   if(!historico) return false;
   const t=_convMpRemoverAcentos(String(historico).toUpperCase());
@@ -23565,10 +23602,9 @@ async function _lancctbProcessarFluxo(){
     // "Livre" = não associada, ou associada a nada, ou associada a um
     // lançamento que não é mais uma pendência desta conta (associação velha).
     const fluxoPend=fluxoTodo.filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||!pendIds.has(f.lancamento_extrato_id));
-    if(!fluxoPend.length){ toast('Todas as linhas do Fluxo de Caixa já estão associadas a pendências desta conta.','ok'); return; }
     const usados=new Set();
     let associados=0;
-    for(let i=0;i<pendencias.length;i++){
+    for(let i=0;i<(fluxoPend.length?pendencias.length:0);i++){
       const l=pendencias[i];
       if(statusEl) statusEl.textContent=`Associando Fluxo ${i+1}/${pendencias.length}…`;
       const ehSaida=l.valor_saida>0;
@@ -23583,7 +23619,13 @@ async function _lancctbProcessarFluxo(){
       if(error){ console.error('Erro ao associar fluxo:',error); continue; }
       usados.add(f.id); associados++;
     }
-    toast(`Fluxo: ${associados} linha(s) associada(s) a pendência(s) — agora rode Processar FOPAG / Tributos.`, associados?'ok':'err');
+    // Pedido do usuário 18/09/2026: o Fluxo também indica a NF (número +
+    // parcela) — depois de associar, amarra as NFs que ele indica.
+    if(statusEl) statusEl.textContent='Amarrando NFs indicadas pelo Fluxo…';
+    const resNf=await _lancctbRodarMatching(eid,contaId,(m)=>{ if(statusEl) statusEl.textContent=m; },'fluxo_nf',true);
+    const nfs=resNf.erro?0:((resNf.resolvNF||0)+(resNf.resolvSubsetSum||0));
+    if(resNf.erro) console.warn('Fluxo→NF:',resNf.erro);
+    toast(`Fluxo: ${associados} linha(s) associada(s); ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo${associados||nfs?' — depois rode Processar FOPAG / Tributos.':'.'}`, (associados||nfs)?'ok':'err');
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
@@ -23749,7 +23791,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // Pra securitizadora (ponte): inclui também linhas do Fluxo JÁ associadas a
   // ESTE extrato pendente (ex.: "Processar Fluxo" já ligou, mas não classificou).
   const { data: fluxoCaixaPonteBase } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,lancamento_extrato_id')
+    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,lancamento_extrato_id,numero,documento_numero,parcela')
     .eq('empresa_eid',eid));
   // Fluxo de Caixa (Fase 10) ainda não associado — usado só como melhorador
   // de texto pro Passo 3 (Regra) bater; nunca resolve sozinho.
@@ -23858,6 +23900,80 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     return resultado;
   }
 
+  // NF indicada pelo Fluxo de Caixa (pedido do usuário 18/09/2026): "o fluxo
+  // serve de suporte pra aquilo que não conseguiu amarrar NF" e "pra abrir
+  // pagamentos aglutinados no extrato, que o fluxo abre por pagamento".
+  // Etapa 1 — 1 linha do Fluxo ↔ 1 extrato (valor±2,00/data±3d no Fluxo; a
+  // PARCELA da NF tem que bater com o extrato em ±0,02). Etapa 2 — extrato
+  // aglutinado (histórico genérico ou securitizadora): soma de N linhas do
+  // Fluxo, TODAS resolvidas em NF, fechando o valor do extrato.
+  async function tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch){
+    const base=(fluxoCaixaPonteBase||[]).filter(f=>!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
+      &&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&(f.numero||f.documento_numero));
+    if(!base.length) return false;
+    const ehPonteL=/SECURITIZ|\bFIDC\b|FUNDO DE INVEST/.test(_convMpRemoverAcentos(String(l.historico_bancario||'').toUpperCase()));
+    const temNome=_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
+    const vFluxo=f=>ehSaida?f.valor_saida:f.valor_entrada;
+    const perto=f=>vFluxo(f)&&Math.abs(vFluxo(f)-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
+    const nomeOk=f=>ehPonteL||!temNome||_lancctbNomeCompativel([l.historico_bancario],f.cliente_fornecedor_nome||f.descricao||'');
+    const tabComp=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
+    const comprovantesUsadosL=ehSaida?comprovantesUsadosPag:comprovantesUsadosReceb;
+    // Etapa 1
+    const c1=base.filter(f=>perto(f)&&nomeOk(f)).sort((a,b)=>(b.lancamento_extrato_id===l.id)-(a.lancamento_extrato_id===l.id)||_lancctbDiffDias(a.data,l.data_pagamento)-_lancctbDiffDias(b.data,l.data_pagamento));
+    for(const f of c1){
+      const par=_lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valor);
+      if(!par) continue;
+      const nf=par.notas_fiscais;
+      const cnpjT=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeT=ehSaida?nf.nome_emitente:nf.nome_destinatario;
+      const compUsa=comprovanteMatch&&(ehPonteL||!comprovanteMatch.cnpj_cpf||comprovanteMatch.cnpj_cpf===cnpjT)?comprovanteMatch:null;
+      const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjT,nomeT,nf.numero?[nf.numero]:[],compUsa,par.numero_parcela,par.id);
+      if(error){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
+      parcelasUsadas.add(par.id); fluxoPonteUsados.add(f.id);
+      await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',par.id);
+      await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',f.id);
+      if(compUsa){ comprovantesUsadosL.add(compUsa.id); await _supaClient.from(tabComp).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',compUsa.id); }
+      await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+      resolvNF++; return true;
+    }
+    // Etapa 2 — aglutinado
+    if(temNome&&!ehPonteL) return false;
+    const c2=[];
+    base.forEach(f=>{
+      if(!vFluxo(f)||_lancctbDiffDias(f.data,l.data_pagamento)>LANCCTB_MATCH_TOLERANCIA_DIAS) return;
+      const par=_lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,vFluxo(f));
+      if(par&&!c2.some(x=>x.par.id===par.id)) c2.push({f,par});
+    });
+    if(c2.length<2) return false;
+    const cand=c2.slice(0,20);
+    const sub=_lancctbSubsetSum(cand.map(x=>Math.round(vFluxo(x.f)*100)),Math.round(valor*100),Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR_NF*100));
+    if(!sub||sub.length<2) return false;
+    const escolhidos=sub.map(i=>cand[i]);
+    const bancoTipo=ehSaida?'C':'D', contraTipo=ehSaida?'D':'C';
+    const hists=[]; const linhas=[]; let somaAnt=0;
+    escolhidos.forEach((x,i)=>{
+      const nf=x.par.notas_fiscais, cnpjT=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeT=ehSaida?nf.nome_emitente:nf.nome_destinatario;
+      const rOv=regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&cnpjT&&r.cnpj_cpf_gatilho===cnpjT);
+      const fixa=ehSaida?contaSaidaNF:contaEntradaNF;
+      const hist=(rOv&&rOv.descricao)?rOv.descricao:`${ehSaida?'Pagamento a':'Recebimento de'} ${nomeT||cnpjT||''} - NF ${nf.numero} - parcela ${x.par.numero_parcela}`.trim();
+      hists.push(hist);
+      const ultimo=i===escolhidos.length-1;
+      const v=ultimo?Math.round((valor-somaAnt)*100)/100:x.par.valor_parcela;
+      somaAnt+=v;
+      linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:rOv?rOv.plano_contas.classificacao:fixa.classificacao, conta_contabil_id:rOv?rOv.conta_contabil_id:fixa.id, tipo:contraTipo, valor:v, historico:hist, cliente_fornecedor_nome:nomeT||null, cnpj_cpf:cnpjT||null, nf_parcela_id:x.par.id, lancamento_extrato_id:l.id, regra_matching_id:rOv?.id||null, origem_match:'automatico_triangular' });
+    });
+    const histBanco=new Set(hists).size<=1?hists[0]:(ehSaida?'Pagamentos Diversos':'Recebimentos Diversos');
+    linhas.unshift({ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:histBanco, cliente_fornecedor_nome:null, cnpj_cpf:null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(error){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
+    await checarAlertaAutomatico(linhas,l,valor,histBanco,null);
+    const idsP=escolhidos.map(x=>x.par.id), idsF=escolhidos.map(x=>x.f.id);
+    idsP.forEach(id=>parcelasUsadas.add(id)); idsF.forEach(id=>fluxoPonteUsados.add(id));
+    await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',idsP);
+    await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).in('id',idsF);
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+    resolvSubsetSum++; return true;
+  }
+
   for(let i=0;i<lancamentos.length;i++){
     const l=lancamentos[i];
     log(`Processando ${i+1}/${lancamentos.length}…`);
@@ -23872,6 +23988,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const comprovantesUsados=ehSaida?comprovantesUsadosPag:comprovantesUsadosReceb;
     const tabelaComprovante=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
     let resolvido=false;
+    // Modo do botão "Processar Fluxo": SÓ amarra NF pelo que o Fluxo indica.
+    if(modo==='fluxo_nf'){
+      if(_lancctbHistoricoEhTributo(l.historico_bancario)||!(await tentarNfViaFluxo(l,ehSaida,valor,null))) aindaPendente++;
+      continue;
+    }
 
     // Passo 0: sócio (Lucro/Dividendos) — checado ANTES de tudo, em
     // qualquer modo: nome/CPF batendo literal no histórico do banco é mais
@@ -24052,6 +24173,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // coincidência de valor+data contra a NF de um cliente PJ completamente
     // diferente (ex. "BAGAROTII PNEUS LTDA"). docHistorico só entra em jogo
     // quando NÃO tem CNPJ-âncora de comprovante (esse já é mais confiável).
+    if(!resolvido&&!gruposComprovantes&&modo!=='recebimentos_so_regras'&&modo!=='ia'&&!_lancctbHistoricoEhTributo(l.historico_bancario)){
+      if(await tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch)) continue;
+    }
     const docHistorico=cnpjAncora?null:_lancctbExtrairDocDoHistorico(l.historico_bancario);
     const historicoTemNome=cnpjAncora?false:_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
     // Securitizadora/FIDC é só PONTE entre pagador e recebedor (pedido do
@@ -24950,7 +25074,7 @@ async function renderLancctbRegistroContabil(){
   const conciliadosItens=linhas.filter(l=>l.ctb.length);
   if(conciliadosItens.length){
     const { data: fluxoAll }=await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,status_associado,lancamento_extrato_id')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,numero,parcela,status_associado,lancamento_extrato_id')
       .eq('empresa_eid',eid));
     const fluxoPorExtrato={};
     (fluxoAll||[]).forEach(f=>{ if(f.lancamento_extrato_id&&!fluxoPorExtrato[f.lancamento_extrato_id]) fluxoPorExtrato[f.lancamento_extrato_id]=f; });
@@ -25003,7 +25127,7 @@ async function renderLancctbRegistroContabil(){
       // lançamento que foi desfeito). Traz TODAS as linhas do Fluxo da
       // empresa e decide aqui pelo estado de cada pendência.
       _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-        .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem,status_associado,lancamento_extrato_id')
+        .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,numero,parcela,descricao_conta_origem,status_associado,lancamento_extrato_id')
         .eq('empresa_eid',eid)),
     ]);
     const pendenteIds=new Set(pendentes.map(it=>it.extrato.id));
@@ -25172,7 +25296,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     // o nome de quem recebeu/pagou, mais direto pra reconhecer de olho.
     const rotulo=f.cliente_fornecedor_nome||f.descricao||'';
     const confirmado=!!item.fluxoConfirmado;
-    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})</span></td>`;
+    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(_lancctbFluxoIndicaTxt(f))}${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})</span></td>`;
   };
   // Fluxo de Caixa de um lançamento JÁ conciliado — só conferência (18/09/2026).
   const fluxoConciliadoCelHtml=()=>{
@@ -25182,7 +25306,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     const nome=f.cliente_fornecedor_nome||f.descricao||'';
     const num=f.documento_numero?` (${esc(f.documento_numero)})`:'';
     const dFmt=f.data?new Date(f.data+'T00:00:00').toLocaleDateString('pt-BR'):'';
-    const tip=`${f.descricao||''} — ${dFmt} — ${ligado?'associado a este lançamento':'palpite por valor+data (não associado)'}`;
+    const tip=`${_lancctbFluxoIndicaTxt(f)}${f.descricao||''} — ${dFmt} — ${ligado?'associado a este lançamento':'palpite por valor+data (não associado)'}`;
     return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px" title="${esc(tip)}"><span style="${ligado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--slate)'}">${esc(nome)}${num}${ligado?'':' ?'}</span></td>`;
   };
 
