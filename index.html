@@ -24870,6 +24870,32 @@ async function renderLancctbRegistroContabil(){
   }
   let linhas=(extratoRows||[]).map(r=>({ extrato:r, ctb:ctbPorExtrato[r.id]||[] }));
 
+  // Pedido do usuário 18/09/2026: "pra fins de conferência, mesmo os
+  // lançamentos conciliados devem mostrar como está o pagamento no fluxo de
+  // caixa, cliente/fornecedor e Número entre parênteses". Conciliado mostra
+  // a linha do Fluxo ligada a ele (lancamento_extrato_id); se nenhuma está
+  // ligada, tenta a de mesmo valor+data (palpite em itálico) só pra conferir.
+  const conciliadosItens=linhas.filter(l=>l.ctb.length);
+  if(conciliadosItens.length){
+    const { data: fluxoAll }=await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,status_associado,lancamento_extrato_id')
+      .eq('empresa_eid',eid));
+    const fluxoPorExtrato={};
+    (fluxoAll||[]).forEach(f=>{ if(f.lancamento_extrato_id&&!fluxoPorExtrato[f.lancamento_extrato_id]) fluxoPorExtrato[f.lancamento_extrato_id]=f; });
+    const livres=(fluxoAll||[]).filter(f=>!f.lancamento_extrato_id);
+    const usados=new Set();
+    conciliadosItens.forEach(item=>{
+      const r=item.extrato;
+      if(fluxoPorExtrato[r.id]){ item.fluxoConciliado=fluxoPorExtrato[r.id]; item.fluxoConciliadoLigado=true; return; }
+      const ehSaida=r.valor_saida>0, valor=r.valor_saida||r.valor_entrada;
+      const cand=livres.filter(f=>!usados.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))).filter(f=>{
+        const vF=ehSaida?f.valor_saida:f.valor_entrada;
+        return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
+      }).sort((a,b)=>_lancctbTextoScoreSimilaridade(r.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(r.historico_bancario,a.descricao)||_lancctbDiffDias(a.data,r.data_pagamento)-_lancctbDiffDias(b.data,r.data_pagamento));
+      if(cand.length){ item.fluxoConciliado=cand[0]; usados.add(cand[0].id); }
+    });
+  }
+
   // Pra pendente sem classificação ainda, sugere o Cliente/Fornecedor de um
   // comprovante que bate por valor+data — só visual (não altera nada),
   // ajuda a enxergar "quem é" antes de rodar o matching de verdade.
@@ -24953,7 +24979,7 @@ async function renderLancctbRegistroContabil(){
   }
   if(_lancctbRegistroFiltroFluxo.trim()){
     const t=_lancctbRegistroFiltroFluxo.trim().toLowerCase();
-    linhas=linhas.filter(item=>((item.fluxoSugerido?.cliente_fornecedor_nome||'')+' '+(item.fluxoSugerido?.descricao||'')).toLowerCase().includes(t));
+    linhas=linhas.filter(item=>{ const f=item.fluxoSugerido||item.fluxoConciliado; return ((f?.cliente_fornecedor_nome||'')+' '+(f?.descricao||'')+' '+(f?.documento_numero||'')).toLowerCase().includes(t); });
   }
 
   // Pendências do PERÍODO filtrado na tela (Data De/Até) — é o que decide
@@ -25073,6 +25099,17 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     const confirmado=!!item.fluxoConfirmado;
     return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})</span></td>`;
   };
+  // Fluxo de Caixa de um lançamento JÁ conciliado — só conferência (18/09/2026).
+  const fluxoConciliadoCelHtml=()=>{
+    const f=item.fluxoConciliado;
+    if(!f) return `<td style="padding:7px 10px;color:var(--slate)">—</td>`;
+    const ligado=!!item.fluxoConciliadoLigado;
+    const nome=f.cliente_fornecedor_nome||f.descricao||'';
+    const num=f.documento_numero?` (${esc(f.documento_numero)})`:'';
+    const dFmt=f.data?new Date(f.data+'T00:00:00').toLocaleDateString('pt-BR'):'';
+    const tip=`${f.descricao||''} — ${dFmt} — ${ligado?'associado a este lançamento':'palpite por valor+data (não associado)'}`;
+    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:200px" title="${esc(tip)}"><span style="${ligado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--slate)'}">${esc(nome)}${num}${ligado?'':' ?'}</span></td>`;
+  };
 
   if(item.ctb.length&&ds.length===1&&cs.length===1){
     const d=ds[0], c=cs[0];
@@ -25093,7 +25130,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(d.cliente_fornecedor_nome||'')}">${esc(d.cliente_fornecedor_nome||'')}</td>
       <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(d.cnpj_cpf))}</td>
       ${parcelaCelsHtml(d.nf_parcela_id?d:(c.nf_parcela_id?c:null))}
-      <td style="padding:7px 10px;color:var(--slate)">—</td>
+      ${fluxoConciliadoCelHtml()}
       ${statusCelHtml}
       ${iaCelHtml(d.origem_match==='ia'?d:c)}
     </tr>`;
@@ -25119,7 +25156,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(l.cliente_fornecedor_nome||'')}">${esc(l.cliente_fornecedor_nome||'')}</td>
         <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
         ${parcelaCelsHtml(l)}
-        <td style="padding:7px 10px;color:var(--slate)">—</td>
+        ${fluxoConciliadoCelHtml()}
         ${statusCelHtml}
         ${iaCelHtml(l)}
       </tr>`;
