@@ -18682,6 +18682,13 @@ function _lancctbHistoricoTemNomeEmpresa(historico){
   const palavras=_convMpRemoverAcentos(semDoc.toUpperCase()).split(/[^A-Z]+/).filter(Boolean);
   return palavras.some(w=>w.length>=3&&!LANCCTB_PALAVRAS_GENERICAS_HISTORICO.has(w));
 }
+// 18/09/2026 (Peixoto: DARF/INSS/FGTS "sugerindo" fornecedores tipo GIRANDO
+// COMERCIO, GOLDEN COMPONENTES por mera coincidência de valor+data): pagamento
+// de tributo só pode ser ligado a comprovante/Fluxo que TAMBÉM pareça tributo.
+const LANCCTB_RE_NOME_TRIBUTO=/DARF|GPS|GNRE|INSS|FGTS|IRRF|IRPJ|CSLL|PIS|COFINS|ISS|ICMS|DAS|SIMPLES|TRIBUT|IMPOSTO|RECEITA|CONTRIB|GUIA|PREVID|TERCEIROS|SEBRAE|CIDE|PARCELAMENTO|TFE|TAXA|FAZENDA|MUNICIPAL|ESTADUAL|FEDERAL|PREFEITURA|SECRETARIA/;
+function _lancctbTextoParecidoTributo(txt){
+  return LANCCTB_RE_NOME_TRIBUTO.test(_convMpRemoverAcentos(String(txt||'').toUpperCase()));
+}
 function _lancctbHistoricoEhTributo(historico){
   if(!historico) return false;
   const t=_convMpRemoverAcentos(String(historico).toUpperCase());
@@ -23929,6 +23936,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     if(modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
       for(const c of comprovantesFonte){
         if(comprovantesUsados.has(c.id)) continue;
+        if(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome)) continue;
         if(Math.abs(c.valor_pago-valor)>LANCCTB_MATCH_TOLERANCIA_VALOR) continue;
         if(_lancctbDiffDias(c.data_pagamento,l.data_pagamento)>LANCCTB_MATCH_TOLERANCIA_DIAS) continue;
         comprovanteMatch=c; cnpjAncora=c.cnpj_cpf; break;
@@ -23942,7 +23950,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // comprovante batendo sozinho sempre tem prioridade sobre um grupo.
     let gruposComprovantes=null;
     if(!comprovanteMatch&&modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
-      const candidatosGrupo=comprovantesFonte.filter(c=>!comprovantesUsados.has(c.id)&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS).slice(0,20);
+      const candidatosGrupo=comprovantesFonte.filter(c=>!comprovantesUsados.has(c.id)&&(!_lancctbHistoricoEhTributo(l.historico_bancario)||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome))&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS).slice(0,20);
       const alvoCentavosGrupo=Math.round(valor*100);
       const subsetGrupo=_lancctbSubsetSum(candidatosGrupo.map(c=>Math.round(c.valor_pago*100)),alvoCentavosGrupo,Math.round(LANCCTB_MATCH_TOLERANCIA_VALOR*100));
       if(subsetGrupo&&subsetGrupo.length>1) gruposComprovantes=subsetGrupo.map(idx=>candidatosGrupo[idx]);
@@ -24122,6 +24130,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const bancoTipo=ehSaida?'C':'D';
       const fluxoMatch=(fluxoCaixa||[]).find(f=>{
         if(f.conta_bancaria_id&&String(f.conta_bancaria_id)!==String(contaId)) return false;
+        if(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||''))) return false;
         const v=f.valor_saida||f.valor_entrada;
         const mesmaDirecao=ehSaida?f.valor_saida>0:f.valor_entrada>0;
         return mesmaDirecao&&Math.abs(v-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
@@ -24890,6 +24899,7 @@ async function renderLancctbRegistroContabil(){
       const ehSaida=r.valor_saida>0, valor=r.valor_saida||r.valor_entrada;
       const cand=livres.filter(f=>!usados.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))).filter(f=>{
         const vF=ehSaida?f.valor_saida:f.valor_entrada;
+        if(_lancctbHistoricoEhTributo(r.historico_bancario)&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||''))) return false;
         return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
       }).sort((a,b)=>_lancctbTextoScoreSimilaridade(r.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(r.historico_bancario,a.descricao)||_lancctbDiffDias(a.data,r.data_pagamento)-_lancctbDiffDias(b.data,r.data_pagamento));
       if(cand.length){ item.fluxoConciliado=cand[0]; usados.add(cand[0].id); }
@@ -24947,12 +24957,13 @@ async function renderLancctbRegistroContabil(){
       const ehSaida=r.valor_saida>0;
       if(fluxoAssocPorPend[r.id]){ item.fluxoSugerido=fluxoAssocPorPend[r.id]; item.fluxoConfirmado=true; }
       const comps=ehSaida?compsPag:compsReceb;
-      const match=(comps||[]).find(c=>Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+      const ehTribHist=_lancctbHistoricoEhTributo(r.historico_bancario);
+      const match=(comps||[]).find(c=>Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS&&(!ehTribHist||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome)));
       if(match) item.comprovanteSugerido=match;
       const direcaoAlvo=ehSaida?'compra':'venda';
       const nfMatch=(parcelasPend||[]).filter(p=>p.notas_fiscais?.direcao===direcaoAlvo)
         .find(p=>Math.abs(p.valor_parcela-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_NF&&_lancctbDiffDias(p.data_vencimento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS*3);
-      if(nfMatch) item.parcelaSugerida=nfMatch;
+      if(nfMatch&&!ehTribHist) item.parcelaSugerida=nfMatch;
       // Pedido do usuário 09/09/2026 (caso real: histórico "GP TECNOLOGIA EM
       // SEGURANCA", sugestão veio "vivo- telefonica brasil" — só bateu por
       // valor+data, ignorando que havia outra linha do Fluxo do mesmo
@@ -24963,6 +24974,7 @@ async function renderLancctbRegistroContabil(){
       const candidatosFluxo=item.fluxoConfirmado?[]:fluxoDisponivel.filter(f=>!fluxoUsadoSugestao.has(f.id)).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))
         .filter(f=>{
           const vF=ehSaida?f.valor_saida:f.valor_entrada;
+          if(ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false;
           return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
         });
       if(candidatosFluxo.length){
