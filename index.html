@@ -30689,6 +30689,38 @@ async function _lancctbParsearExtratoBradescoMensalLegado(pdf){
   if(!registros.length) return null;
   return {lancamentos:registros,saldoAnteriorDoc,saldoFinalDoc,layout:'Bradesco (Extrato Mensal legado)'};
 }
+// Raízes (8 dígitos) de CNPJ dos próprios BANCOS/instituições — aparecem no
+// cabeçalho do extrato mas nunca são o titular da conta.
+const LANCCTB_RAIZES_CNPJ_BANCOS=new Set(['60701190','58160789','00000000','60746948','90400888','00360305','02038232','18236120','00416968','10573521','08561701','31872495','01181521','30306294','92894922','92702067','04902979','62073200','33657248','07207996','90400888','01522368','59588111','17351180','58616418']);
+// Confere se o extrato em PDF pertence à empresa (pedido do usuário 18/09/2026:
+// extrato da Peixoto Serviços Administrativos foi parar na Peixoto Auto Peças).
+// Só BLOQUEIA quando o cabeçalho traz "CNPJ" rotulado de alguém que não é
+// banco E o CNPJ da empresa (matriz ou filial, comparando a raiz) não aparece
+// em lugar nenhum da 1ª página. Se o banco não imprime CNPJ (Sicoob, Itaú
+// "Mister") ou o CNPJ da empresa está lá, libera. Devolve { ok, raizExtrato }.
+async function _lancctbExtratoPdfPertenceAEmpresa(pdf,raizesEmpresa){
+  try{
+    const page=await pdf.getPage(1);
+    const altura=page.view?page.view[3]:842;
+    const c=await page.getTextContent();
+    const todos=c.items.filter(i=>i.str.trim()).sort((a,b)=>b.transform[5]-a.transform[5]||a.transform[4]-b.transform[4]);
+    const txtTudo=todos.map(i=>i.str).join(' ').replace(/\s+/g,' ');
+    for(const r of raizesEmpresa){
+      const fmt=new RegExp(`${r.slice(0,2)}\\.${r.slice(2,5)}\\.${r.slice(5,8)}\\/`);
+      const plano=new RegExp(`(?<!\\d)0?${r}(?!\\d)|(?<!\\d)${r}\\d{6}(?!\\d)`);
+      if(fmt.test(txtTudo)||plano.test(txtTudo)) return { ok:true };
+    }
+    const topo=todos.filter(i=>i.transform[5]>=altura*0.55).map(i=>i.str).join(' ').replace(/\s+/g,' ');
+    const raizes=[];
+    for(const m of topo.matchAll(/(?<![\/A-Za-z])CNPJ\s*[:\-]?\s*(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{14}|\d{9}|\d{8})(?!\d)/gi)){
+      const dig=m[1].replace(/\D/g,'');
+      const raiz=dig.length===14?dig.slice(0,8):dig.length===9?dig.slice(1):dig;
+      if(!LANCCTB_RAIZES_CNPJ_BANCOS.has(raiz)) raizes.push(raiz);
+    }
+    if(!raizes.length) return { ok:true };
+    return { ok:false, raizExtrato:raizes[0] };
+  }catch(e){ return { ok:true }; }
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -30711,6 +30743,22 @@ async function processarLancctbUploadExtrato(forcarIA){
       _convItauGarantirWorker();
       const buf=await file.arrayBuffer();
       const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+
+      // Trava (pedido do usuário 18/09/2026): extrato que traz o CNPJ do titular
+      // não pode ser subido em empresa de outro CNPJ (extrato da Peixoto
+      // Serviços Administrativos foi parar na Peixoto Auto Peças). Compara a
+      // RAIZ do CNPJ com a da matriz e das filiais cadastradas.
+      const raizesEmpresa=[...new Set(_lancctbCnpjsDaEmpresa(_lancctbEidAtual).map(c=>String(c).replace(/\D/g,'').slice(0,8)).filter(r=>r.length===8))];
+      const conf=raizesEmpresa.length?await _lancctbExtratoPdfPertenceAEmpresa(pdf,raizesEmpresa):{ ok:true };
+      if(!conf.ok){
+        const raizExtrato=conf.raizExtrato;
+        const dona=S.emps().find(e=>[e.cnpjNum,...(getFiliais(e.eid)||[]).map(f=>f.cnpj)].filter(Boolean).some(c=>String(c).replace(/\D/g,'').slice(0,8)===raizExtrato));
+        const empAtual=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+        toast(`Extrato NÃO enviado: o CNPJ do titular no PDF (raiz ${raizExtrato.replace(/^(\d{2})(\d{3})(\d{3})$/,'$1.$2.$3')}) não é o desta empresa${empAtual?` (${empAtual.nome})`:''}.${dona?` Parece ser da empresa #${dona.eid} — ${dona.nome}.`:''} Suba na empresa correta.`,'err');
+        status.textContent='';
+        btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; }
+        return;
+      }
 
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
