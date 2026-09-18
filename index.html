@@ -24117,6 +24117,71 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     resolvSubsetSum++; return true;
   }
 
+  // NF tem prioridade MESMO sobre lançamento que já foi fechado por Regra
+  // (pedido do usuário 18/09/2026: "isso até para aquelas que já foram criadas,
+  // se achou NF, você usa a NF"). Antes do laço principal, revisita os
+  // conciliados do período/conta que foram resolvidos SÓ por Regra (2 linhas,
+  // origem 'regra', sem NF) e, quando existe UMA NF que casa com segurança
+  // (CNPJ igual ao do lançamento, ou nome compatível; valor/janela como no
+  // Passo 2; recebimento com valor exato), estorna o lançamento por Regra
+  // (estornado=true, mantém rastro) e devolve o extrato à fila pra ser
+  // amarrado com a NF pelo fluxo normal logo abaixo.
+  if(modo==='completo'||modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento'){
+    try{
+      log('Revisando lançamentos por Regra que já têm NF…');
+      const { data: conc } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato')
+        .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
+        .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','conciliado')
+        .order('data_pagamento',{ascending:true})));
+      const concFiltrados=(conc||[]).filter(e=>{
+        const saida=e.valor_saida>0;
+        if(modo==='comprovantes_pagamento'&&!saida) return false;
+        if(modo==='comprovantes_recebimento'&&saida) return false;
+        return !_lancctbHistoricoSemNF(e.historico_bancario)&&!_lancctbHistoricoEhTributo(e.historico_bancario);
+      });
+      const ctbPorExt={};
+      for(let k=0;k<concFiltrados.length;k+=200){
+        const ids=concFiltrados.slice(k,k+200).map(e=>e.id);
+        const { data: linhasC } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
+          .select('id,lancamento_extrato_id,tipo,origem_match,nf_parcela_id,cnpj_cpf,comprovante_id')
+          .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',ids));
+        (linhasC||[]).forEach(x=>{ (ctbPorExt[x.lancamento_extrato_id]=ctbPorExt[x.lancamento_extrato_id]||[]).push(x); });
+      }
+      let revisados=0;
+      for(const e of concFiltrados){
+        const cl=ctbPorExt[e.id]||[];
+        if(cl.length!==2||!cl.every(x=>x.origem_match==='regra'&&!x.nf_parcela_id)) continue;
+        const saida=e.valor_saida>0, valorE=e.valor_saida||e.valor_entrada;
+        const tol=saida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005;
+        const cnpjRef=String(cl.find(x=>x.cnpj_cpf)?.cnpj_cpf||'').replace(/\D/g,'')||null;
+        const docH=_lancctbExtrairDocDoHistorico(e.historico_bancario);
+        const cands=parcelas.filter(pp=>{
+          if(parcelasUsadas.has(pp.id)) return false;
+          const nf=pp.notas_fiscais; if(!nf||nf.direcao!==(saida?'compra':'venda')) return false;
+          if(!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)) return false;
+          if(Math.abs(pp.valor_parcela-valorE)>tol) return false;
+          if(!_lancctbNfDentroJanela(pp.data_vencimento,e.data_pagamento)) return false;
+          const cnpjNf=saida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeNf=(saida?nf.nome_emitente:nf.nome_destinatario)||'';
+          if(cnpjRef) return cnpjNf===cnpjRef&&(cl.some(x=>x.comprovante_id)||(docH&&docH.doc===cnpjNf)||(_lancctbTokensNome(e.historico_bancario).length>0&&_lancctbNomeCompativel([e.historico_bancario],nomeNf)));
+          if(docH&&cnpjNf&&cnpjNf.length===docH.doc.length) return cnpjNf===docH.doc;
+          if(docH&&cnpjNf&&docH.doc.length===11&&cnpjNf.length===14) return false; // PF × PJ: só na trava manual/exata do Passo 2
+          return String(nomeNf).trim()&&_lancctbTokensNome(e.historico_bancario).length>0&&_lancctbNomeCompativel([e.historico_bancario],nomeNf);
+        });
+        if(cands.length!==1) continue;
+        // desfaz o lançamento por Regra (estorno) e devolve o extrato à fila
+        const idsComp=[...new Set(cl.map(x=>x.comprovante_id).filter(Boolean))];
+        const tabC=saida?'comprovantes_bancarios':'comprovantes_recebimento';
+        const { error: eEst } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).eq('lancamento_extrato_id',e.id).eq('estornado',false);
+        if(eEst){ erros.push(`Revisão Regra→NF ${e.data_pagamento} R$ ${_fmt(valorE)}: ${eEst.message}`); continue; }
+        if(idsComp.length) await _supaClient.from(tabC).update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComp);
+        await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('lancamento_extrato_id',e.id);
+        await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).eq('id',e.id);
+        lancamentos.push(e); revisados++;
+      }
+      if(revisados) log(`${revisados} lançamento(s) por Regra devolvido(s) pra amarrar com NF…`);
+    }catch(err){ console.error('Revisão Regra→NF:',err); erros.push('Revisão Regra→NF: '+(err?.message||err)); }
+  }
+
   for(let i=0;i<lancamentos.length;i++){
     const l=lancamentos[i];
     log(`Processando ${i+1}/${lancamentos.length}…`);
