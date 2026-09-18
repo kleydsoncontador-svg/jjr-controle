@@ -23745,6 +23745,12 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     .in('regra_id',(regras||[]).map(r=>r.id).length?(regras||[]).map(r=>r.id):[-1]).order('ordem'));
   const linhasRateioPorRegra={};
   (linhasRateioRows||[]).forEach(l=>{ (linhasRateioPorRegra[l.regra_id]=linhasRateioPorRegra[l.regra_id]||[]).push(l); });
+  const fluxoPonteUsados=new Set();
+  // Pra securitizadora (ponte): inclui também linhas do Fluxo JÁ associadas a
+  // ESTE extrato pendente (ex.: "Processar Fluxo" já ligou, mas não classificou).
+  const { data: fluxoCaixaPonteBase } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,lancamento_extrato_id')
+    .eq('empresa_eid',eid));
   // Fluxo de Caixa (Fase 10) ainda não associado — usado só como melhorador
   // de texto pro Passo 3 (Regra) bater; nunca resolve sozinho.
   const { data: fluxoCaixa } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
@@ -24048,8 +24054,29 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // quando NÃO tem CNPJ-âncora de comprovante (esse já é mais confiável).
     const docHistorico=cnpjAncora?null:_lancctbExtrairDocDoHistorico(l.historico_bancario);
     const historicoTemNome=cnpjAncora?false:_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
+    // Securitizadora/FIDC é só PONTE entre pagador e recebedor (pedido do
+    // usuário 18/09/2026, Peixoto: "BOLETO PAGO GAVEA SECURITIZADORA"): o
+    // beneficiário real está no Fluxo de Caixa. Só amarra NF se o Fluxo tiver
+    // linha de valor E data IDÊNTICOS e o NOME/CNPJ dela combinar com o da
+    // NF, que por sua vez também precisa ter valor e vencimento idênticos.
+    const ehPonte=/SECURITIZ|FIDC|FUNDO DE INVEST/.test(_convMpRemoverAcentos(String(l.historico_bancario||'').toUpperCase()));
+    const fluxoPonte=ehPonte?(fluxoCaixaPonteBase||[]).filter(f=>{
+      if(fluxoPonteUsados.has(f.id)) return false;
+      if(f.lancamento_extrato_id&&f.lancamento_extrato_id!==l.id) return false;
+      if(f.conta_bancaria_id&&String(f.conta_bancaria_id)!==String(contaId)) return false;
+      const vF=ehSaida?f.valor_saida:f.valor_entrada;
+      return vF&&Math.abs(vF-valor)<0.005&&f.data===l.data_pagamento;
+    }):[];
     const nfCandidatas=(gruposComprovantes||modo==='recebimentos_so_regras'||_lancctbHistoricoEhTributo(l.historico_bancario))?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
+      if(ehPonte){
+        if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
+        if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
+        if(Math.abs(p.valor_parcela-valor)>=0.005||p.data_vencimento!==l.data_pagamento) return false;
+        const cnpjP=ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario;
+        const nomeP=(ehSaida?p.notas_fiscais?.nome_emitente:p.notas_fiscais?.nome_destinatario)||'';
+        return fluxoPonte.some(f=>(f.cnpj_cpf&&cnpjP&&String(f.cnpj_cpf).replace(/\D/g,'')===cnpjP)||(String(nomeP).trim()&&_lancctbTokensNome(f.cliente_fornecedor_nome||f.descricao||'').length>0&&_lancctbNomeCompativel([f.cliente_fornecedor_nome||f.descricao||''],nomeP)));
+      }
       // Sem isso, uma saída sem CNPJ âncora (histórico genérico tipo "Tar/
       // Custas Cobrança"/"Sispag Salários") podia casar por coincidência de
       // valor+data contra uma NF de VENDA da própria empresa — aí
@@ -24099,19 +24126,25 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       });
       const escolhida=nfCandidatas[0];
       const nf=escolhida.notas_fiscais;
-      const cnpjTerceiro=cnpjAncora||(ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario);
-      const nomeTerceiro=comprovanteMatch?.cliente_fornecedor_nome||(ehSaida?nf?.nome_emitente:nf?.nome_destinatario);
+      const cnpjTerceiro=(ehPonte?null:cnpjAncora)||(ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario);
+      const nomeTerceiro=(ehPonte?null:comprovanteMatch?.cliente_fornecedor_nome)||(ehSaida?nf?.nome_emitente:nf?.nome_destinatario);
       const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch,escolhida.numero_parcela,escolhida.id);
       if(error){
         erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
       } else {
         parcelasUsadas.add(escolhida.id);
         await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',escolhida.id);
+        if(ehPonte&&fluxoPonte.length){
+          const cnpjE=escolhida.notas_fiscais?.[ehSaida?'cnpj_emitente':'cnpj_destinatario'], nomeE=escolhida.notas_fiscais?.[ehSaida?'nome_emitente':'nome_destinatario']||'';
+          const fUsado=fluxoPonte.find(f=>(f.cnpj_cpf&&cnpjE&&String(f.cnpj_cpf).replace(/\D/g,'')===cnpjE)||_lancctbNomeCompativel([f.cliente_fornecedor_nome||f.descricao||''],nomeE))||fluxoPonte[0];
+          fluxoPonteUsados.add(fUsado.id);
+          await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fUsado.id);
+        }
         if(comprovanteMatch){ comprovantesUsados.add(comprovanteMatch.id); await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',comprovanteMatch.id); }
         await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
         resolvNF++; resolvido=true;
       }
-    } else if(cnpjAncora){
+    } else if(cnpjAncora&&!ehPonte){
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
