@@ -19467,6 +19467,48 @@ function _lancctbAplicarFiltroPeriodo(q,coluna='data_pagamento'){
 function _lancctbAplicarFiltroPeriodoSe(condicao,q,coluna='data_pagamento'){
   return condicao?_lancctbAplicarFiltroPeriodo(q,coluna):q;
 }
+// Recibos de Férias — X:\01 - PÚBLICA\Relatórios FOPAG para Contábil\Recibo de
+// Férias - MM-AAAA.pdf: 1 PDF com TEXTO, 1 página por empregado de TODAS as
+// empresas (pedido do usuário 18/09/2026: férias pagas por SISPAG não eram
+// resolvidas pelo FOPAG). Cada página traz a firma ("Recebi da firma X"), a
+// "importância de R$ N" (= TOTAL LÍQUIDO), o nome e o gozo. Devolve a lista de
+// páginas lidas; cache por arquivo (nome+tamanho+data).
+const _lancctbCacheRecibosFerias=new Map();
+async function _lancctbLerRecibosFeriasMes(raizFopag,anoMes){
+  const [aaaa,mm]=anoMes.split('-');
+  let fh;
+  try{ fh=await raizFopag.getFileHandle(`Recibo de Férias - ${mm}-${aaaa}.pdf`); }catch(e){ return []; }
+  const arquivo=await fh.getFile();
+  const chave=arquivo.name+'|'+arquivo.size+'|'+arquivo.lastModified;
+  if(_lancctbCacheRecibosFerias.has(chave)) return _lancctbCacheRecibosFerias.get(chave);
+  const out=[];
+  try{
+    _convItauGarantirWorker();
+    const pdf=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
+    for(let pg=1;pg<=pdf.numPages;pg++){
+      const c=await (await pdf.getPage(pg)).getTextContent();
+      const t=c.items.map(i=>i.str).join(' ').replace(/\s+/g,' ');
+      const firma=(t.match(/Recebi da firma\s+(.+?),\s*estabelecida/i)||[])[1];
+      const liqTxt=(t.match(/import[âa]ncia de R\$\s*([\d.]*\d,\d{2})/i)||[])[1];
+      if(!firma||!liqTxt) continue;
+      const antes=t.split(/Recebi da firma/i)[0];
+      const mNome=antes.match(/((?:[A-ZÀ-Ü]{2,}\s+){1,7}[A-ZÀ-Ü]{2,})(?:\s+PROVISAO[\s\S]*?\s[DP])?\s*$/);
+      const mGozo=t.match(/(\d{2})\/(\d{2})\/(\d{4})\s*A\s*(\d{2})\/(\d{2})\/(\d{4})\s*=\s*\d+\s*Dias/i);
+      out.push({ firma:firma.trim(), nome:mNome?mNome[1].trim():null, liquido:_convCobrParseValor(liqTxt),
+        gozoInicio:mGozo?`${mGozo[3]}-${mGozo[2]}-${mGozo[1]}`:null, gozoFim:mGozo?`${mGozo[6]}-${mGozo[5]}-${mGozo[4]}`:null, pagina:pg });
+    }
+  }catch(e){ console.error('Falha ao ler Recibo de Férias:',e); }
+  _lancctbCacheRecibosFerias.set(chave,out);
+  return out;
+}
+// A firma impressa no recibo é a da empresa? (compara os 4 primeiros termos
+// significativos do nome cadastrado — "Peixoto Auto Peças" ≠ "Peixoto
+// Serviços Administrativos").
+function _lancctbFirmaEhDaEmpresa(firma,nomeEmp){
+  const toks=t=>_convMpRemoverAcentos(String(t||'').toUpperCase()).split(/[^A-Z0-9]+/).filter(w=>w.length>=3&&!['LTDA','EIRELI','EPP','MATRIZ','FILIAL','COM','DE','DA','DO','DAS','DOS'].includes(w));
+  const ft=new Set(toks(firma)); const et=toks(nomeEmp).slice(0,4);
+  return et.length>0&&et.every(w=>ft.has(w));
+}
 async function _lancctbProcessarFopag(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -19494,9 +19536,10 @@ async function _lancctbProcessarFopag(){
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
     if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada.','err'); return; }
     const { data: contasFixas } = await _supaClient.from('plano_contas')
-      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['187','724']);
+      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['187','724','567']);
     const contaSalario=(contasFixas||[]).find(c=>c.numero_conta==='187');
     const contaAdiantamento=(contasFixas||[]).find(c=>c.numero_conta==='724');
+    const contaFerias=(contasFixas||[]).find(c=>c.numero_conta==='567'); // férias debita 567 (pedido do usuário 18/09/2026)
     const socios=lucSocGet(eid);
     const { data: contasSocios } = socios.length
       ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
@@ -19555,10 +19598,49 @@ async function _lancctbProcessarFopag(){
         Math.abs((f.valor_saida||0)-l.valor_saida)<=LANCCTB_MATCH_TOLERANCIA_VALOR &&
         _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
 
-    let resolvidos=0, semAchado=0, diferencasAbertas=0;
+    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0;
+    // Recibos de Férias (pasta "Relatórios FOPAG para Contábil"): casa a saída
+    // com o TOTAL LÍQUIDO EXATO do recibo da MESMA empresa; se houver mais de
+    // um recibo com o mesmo valor, desempata pelo início do gozo (pago poucos
+    // dias antes de começar as férias) e, persistindo empate, não resolve.
+    let raizFopagContabil=null;
+    try{ if(await _lancctbTemAcessoPastaFopag()) raizFopagContabil=await _lancctbCarregarHandleFopag(); }catch(e){}
+    const recibosFeriasUsados=new Set();
     for(let i=0;i<pendencias.length;i++){
       const l=pendencias[i];
       if(statusEl) statusEl.textContent=`Processando FOPAG ${i+1}/${pendencias.length}…`;
+      if(raizFopagContabil&&contaFerias){
+        const [anoL,mesL]=l.data_pagamento.slice(0,7).split('-').map(Number);
+        const meses=[l.data_pagamento.slice(0,7), mesL===12?`${anoL+1}-01`:`${anoL}-${String(mesL+1).padStart(2,'0')}`];
+        let cands=[];
+        for(const ym of meses){
+          const lista=await _lancctbLerRecibosFeriasMes(raizFopagContabil,ym);
+          lista.forEach(r=>{ if(!recibosFeriasUsados.has(ym+'|'+r.pagina)&&_lancctbFirmaEhDaEmpresa(r.firma,emp.nome)&&Math.abs(r.liquido-l.valor_saida)<=0.01) cands.push({...r,chaveUso:ym+'|'+r.pagina}); });
+        }
+        if(cands.length>1){
+          const dif=r=>r.gozoInicio?Math.round((new Date(r.gozoInicio+'T00:00:00')-new Date(l.data_pagamento+'T00:00:00'))/86400000):null;
+          const viaveis=cands.filter(r=>{ const d=dif(r); return d!==null&&d>=-1&&d<=35; });
+          cands=viaveis.length===1?viaveis:[]; // empate: não arrisca
+        }
+        if(cands.length===1){
+          const rec=cands[0];
+          const nomePessoa=rec.nome||'empregado';
+          const gozo=rec.gozoInicio?` (gozo ${rec.gozoInicio.split('-').reverse().join('/')} a ${(rec.gozoFim||'').split('-').reverse().join('/')})`:'';
+          const hist=`Pagamento ref. férias${gozo} - ${nomePessoa}`;
+          const linhasF=[
+            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:hist, cliente_fornecedor_nome:nomePessoa, lancamento_extrato_id:l.id, origem_match:'regra' },
+            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaFerias.classificacao, conta_contabil_id:contaFerias.id, tipo:'D', valor:l.valor_saida, historico:hist, cliente_fornecedor_nome:nomePessoa, lancamento_extrato_id:l.id, origem_match:'regra' },
+          ];
+          const { error: eF } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasF });
+          if(!eF){
+            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+            const fx=acharFluxoDaPendencia(l);
+            if(fx){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fx.id); const ix=(fluxoLivre||[]).findIndex(f=>f.id===fx.id); if(ix>=0) fluxoLivre.splice(ix,1); }
+            recibosFeriasUsados.add(rec.chaveUso); resolvidos++; feriasResolvidas++;
+            continue;
+          } else console.error('Erro FOPAG (férias):',eF);
+        }
+      }
       const mmaaaaPeriodo=l.data_pagamento.slice(0,7).split('-').reverse().join('-'); // "AAAA-MM" → "MM-AAAA"
       const cMes=mmaaaaPeriodo, cAnt=mesAnterior(mmaaaaPeriodo);
       // Regra de calendário da folha (JJR): SALÁRIO é pago no início do mês
@@ -19658,7 +19740,7 @@ async function _lancctbProcessarFopag(){
       }
       resolvidos++;
     }
-    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
+    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${feriasResolvidas?` (${feriasResolvidas} por recibo de férias)`:''}${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.${!raizFopagContabil&&semAchado?' Dica: conceda o acesso 🔑 "Relatórios FOPAG para Contábil" (listagem de empresas) pra ler os Recibos de Férias.':''}`,'ok');
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
