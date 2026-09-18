@@ -24239,6 +24239,32 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     resolvSubsetSum++; return true;
   }
 
+  // Soma de várias NFs num só pagamento (pedido do usuário 18/09/2026: "deveria
+  // ter um crédito do banco e uma linha pra cada débito de NF"): 1 linha do
+  // banco pelo total + 1 linha de contrapartida POR PARCELA (cada uma com o
+  // seu nf_parcela_id, valor e histórico com o nº da NF/parcela).
+  async function gerarLancamentoMultiNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,parcelasEsc,comprovanteMatch){
+    const bancoTipo=ehSaida?'C':'D', contraTipo=ehSaida?'D':'C';
+    const rOv=regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&cnpjTerceiro&&r.cnpj_cpf_gatilho===cnpjTerceiro);
+    const fixa=ehSaida?contaSaidaNF:contaEntradaNF;
+    const contaId_=rOv?rOv.conta_contabil_id:fixa.id, classif=rOv?rOv.plano_contas.classificacao:fixa.classificacao;
+    const verbo=ehSaida?'Pagamento a':'Recebimento de';
+    const numeros=[...new Set(parcelasEsc.map(x=>x.notas_fiscais?.numero).filter(Boolean))];
+    const histBanco=(rOv&&rOv.descricao)?rOv.descricao:`${verbo} ${nomeTerceiro||cnpjTerceiro||''} - NF ${numeros.join(', ')}`.trim();
+    const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:histBanco, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:rOv?.id||null, origem_match:'automatico_triangular' }];
+    let somaAnt=0;
+    parcelasEsc.forEach((pp,i)=>{
+      const ultimo=i===parcelasEsc.length-1;
+      const v=ultimo?Math.round((valor-somaAnt)*100)/100:Math.round(pp.valor_parcela*100)/100;
+      somaAnt+=v;
+      const hist=(rOv&&rOv.descricao)?rOv.descricao:`${verbo} ${nomeTerceiro||cnpjTerceiro||''} - NF ${pp.notas_fiscais?.numero} - parcela ${pp.numero_parcela}`.trim();
+      linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:classif, conta_contabil_id:contaId_, tipo:contraTipo, valor:v, historico:hist, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, nf_parcela_id:pp.id, lancamento_extrato_id:l.id, regra_matching_id:rOv?.id||null, origem_match:'automatico_triangular' });
+    });
+    const resultado=await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(!resultado.error) await checarAlertaAutomatico(linhas,l,valor,histBanco,nomeTerceiro);
+    return resultado;
+  }
+
   for(let i=0;i<lancamentos.length;i++){
     const l=lancamentos[i];
     log(`Processando ${i+1}/${lancamentos.length}…`);
@@ -24564,7 +24590,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         const nf0=escolhidas[0].notas_fiscais;
         const nomeTerceiro=comprovanteMatch?.cliente_fornecedor_nome||(ehSaida?nf0?.nome_emitente:nf0?.nome_destinatario);
         const numerosNF=escolhidas.map(p=>p.notas_fiscais?.numero).filter(Boolean);
-        const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjAncora,nomeTerceiro,numerosNF,comprovanteMatch);
+        const { error } = await gerarLancamentoMultiNF(l,valor,ehSaida,cnpjAncora,nomeTerceiro,escolhidas,comprovanteMatch);
         if(error){
           erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
         } else {
