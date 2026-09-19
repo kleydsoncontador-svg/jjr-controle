@@ -24464,6 +24464,14 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
           }
           const rotulo=HISTORICO_LABEL_OP[c.tipo_operacao];
           const regraOp=rotulo&&regras.find(r=>r.tipo_regra==='historico'&&r.historico_gatilho&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&rotulo.toLowerCase().includes(r.historico_gatilho.toLowerCase()));
+          // Sem Regra por histórico, usa a Conta padrão (🏷️) do tipo de operação:
+          // juros/multa → receita (crédito); tarifa/desconto → despesa (débito).
+          const kPad={tarifa_cobranca:['tarifas_boletos','D'],juros:['juros_ativos','C'],multa:['multas_ativas','C'],desconto:['descontos_concedidos','D']}[c.tipo_operacao];
+          const cPad=kPad?contaPad(kPad[0]):null;
+          if(!regraOp&&cPad){
+            linhasGrupoOp.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:kPad[1], valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
+            continue;
+          }
           if(!regraOp){ todasResolvidas=false; break; }
           linhasGrupoOp.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:regraOp.plano_contas.classificacao, conta_contabil_id:regraOp.conta_contabil_id, tipo:regraOp.dc, valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:l.id, regra_matching_id:regraOp.id, origem_match:'regra' });
         }
@@ -24785,6 +24793,17 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
           { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoBanco, cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
           { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor:valorLinha1, historico:historicosResolvidos[0], cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
         ];
+        // Comprovante de pagamento com Juros/Multa/Desconto (sem NF): separa o
+        // valor do documento da parte de juros/multa/desconto nas Contas padrão
+        // (🏷️), quando configuradas e a soma bate com o que saiu do banco.
+        if(!filhas.length&&comprovanteMatch&&ehSaida){
+          const j=Number(comprovanteMatch.juros||0), m=Number(comprovanteMatch.multa||0), d=Number(comprovanteMatch.desconto||0), vd=Number(comprovanteMatch.valor_documento||0);
+          if((j||m||d)&&vd>0&&Math.abs((vd+j+m-d)-valor)<=0.011){
+            const mk=(k,tipo,v,rot)=>{ const c=contaPad(k); return c?{ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo, valor:Math.round(v*100)/100, historico:`${rot} - ${historicosResolvidos[0]}`, cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch.id, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' }:null; };
+            const ex=[]; if(j>0) ex.push(mk('juros_pagos','D',j,'Juros')); if(m>0) ex.push(mk('multas_pagas','D',m,'Multa')); if(d>0) ex.push(mk('descontos_ativos','C',d,'Desconto obtido'));
+            if(ex.length&&ex.every(Boolean)){ linhas[1].valor=Math.round(vd*100)/100; linhas.push(...ex); }
+          }
+        }
         filhas.forEach((f,i)=>{
           linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:f.plano_contas?.classificacao||'', conta_contabil_id:f.conta_contabil_id, tipo:f.dc, valor:Number(f.valor_fixo), historico:historicosResolvidos[i+1], cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' });
         });
