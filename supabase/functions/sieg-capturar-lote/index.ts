@@ -325,8 +325,7 @@ Deno.serve(async (req: Request) => {
       if (!nf || !nf.cnpj_emitente) continue;
 
       const direcao = nf.cnpj_emitente === item.cnpj ? 'venda' : 'compra';
-      const storagePath = `${item.empresa_eid}/${item.tipo_doc}/${nf.chave_acesso || `${nf.cnpj_emitente}-${nf.numero}-${Date.now()}`}.xml`;
-      await supabase.storage.from('nf-xmls').upload(storagePath, new Blob([xml], { type: 'application/xml' }), { upsert: true });
+      // Não guarda mais o XML no Storage (19/09/2026 — cota grátis estourada); só os dados da NF.
 
       const { data: nfInserida, error: nfErro } = await supabase.from('notas_fiscais')
         .upsert({
@@ -344,7 +343,7 @@ Deno.serve(async (req: Request) => {
           data_emissao: nf.data_emissao || fimJanela,
           valor_total: nf.valor_total,
           iss_valor: nf.iss_valor,
-          xml_storage_path: storagePath,
+          xml_storage_path: null,
           status_captura: 'xml_completo',
         }, { onConflict: nf.chave_acesso ? 'empresa_eid,tipo,chave_acesso' : 'empresa_eid,tipo,cnpj_emitente,numero,serie' })
         .select('id').single();
