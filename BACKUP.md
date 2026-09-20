@@ -55,3 +55,27 @@ Actions → New repository secret):
 um projeto Supabase errado e só rodava enquanto alguém tivesse o servidor
 local aberto — na prática, quase nunca protegeu os dados reais. Foi
 substituído por este sistema em 2026-07-31.
+
+---
+
+## Backup COMPLETO de todas as tabelas (a partir de 20/09/2026)
+
+O backup acima (`dados_app`, a cada 6h, direto no repositório de backups) continua
+igual. Além dele, o workflow **"Backup completo de todas as tabelas"**
+(`.github/workflows/backup-completo.yml`, `scripts/backup-completo.js`) guarda
+**todas as tabelas do schema public** (NFs, parcelas, extratos, lançamentos
+contábeis, plano de contas, regras, comprovantes, Fluxo de Caixa, aplicações...
+e qualquer tabela nova — a lista é descoberta sozinha).
+
+- **Full** (todas as linhas): 1x por semana. **Incremental** (linhas com `updated_at`
+  recente): de 6 em 6h. Cada execução vira uma **Release** do repositório privado
+  `jjr-controle-backups` com um `<tabela>.ndjson.gz` por tabela + `manifest.json`
+  (contagem de linhas de cada tabela).
+- O full só é publicado se a contagem de linhas lida bater com a do banco.
+- Retenção: 8 fulls e 30 dias de incrementais.
+- Rodar na hora: Actions → "Backup completo de todas as tabelas" → Run workflow
+  (modo `full` pra forçar um full agora).
+- **Restaurar:** baixar o full mais recente + os incrementais posteriores da aba
+  Releases; cada linha do `.ndjson.gz` é um registro JSON — reaplicar em ordem
+  (upsert pela chave primária listada no manifest). Linhas apagadas depois do full
+  só deixam de existir num novo full.
