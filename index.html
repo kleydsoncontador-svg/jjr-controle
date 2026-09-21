@@ -37498,6 +37498,117 @@ function _renderImoveisList(){
   container.innerHTML=html;
 }
 
+// Origem da aquisição (pedido do usuário 21/09/2026: "não só vendedor, pois pode
+// ser doação, integralização de capital etc."). O rótulo da parte transmitente
+// muda conforme a origem.
+const IMOVEL_ORIGENS=[
+  {v:'Compra e Venda',parte:'Vendedor(es)',rot:'Vendedor'},
+  {v:'Doação',parte:'Doador(es)',rot:'Doador'},
+  {v:'Integralização de Capital',parte:'Sócio(s) / Integralizador(es)',rot:'Sócio / Integralizador'},
+  {v:'Herança / Inventário',parte:'Autor(es) da Herança / Espólio',rot:'Autor da herança / Inventariante'},
+  {v:'Permuta',parte:'Permutante(s)',rot:'Permutante'},
+  {v:'Dação em Pagamento',parte:'Devedor(es) / Transmitente(s)',rot:'Devedor / Transmitente'},
+  {v:'Adjudicação / Arrematação (Leilão)',parte:'Executado(s) / Transmitente(s)',rot:'Executado / Transmitente'},
+  {v:'Construção / Incorporação Própria',parte:'Construtora / Incorporadora',rot:'Construtora / Incorporadora'},
+  {v:'Usucapião',parte:'Proprietário(s) anterior(es)',rot:'Proprietário anterior'},
+  {v:'Cisão / Fusão / Incorporação de Empresa',parte:'Empresa(s) de origem',rot:'Empresa de origem'},
+  {v:'Outra',parte:'Transmitente(s)',rot:'Transmitente'},
+];
+function _imovOrigemInfo(v){return IMOVEL_ORIGENS.find(o=>o.v===v)||IMOVEL_ORIGENS[0];}
+function _imovAtualizarRotuloOrigem(){
+  const v=(document.getElementById('imovOrigem')||{}).value||'Compra e Venda';
+  const o=_imovOrigemInfo(v);
+  const t=document.getElementById('imovVendTitulo'); if(t) t.textContent=o.parte;
+  _renderVendedores();
+}
+// Motor de depreciação com REVISÕES de estimativa (CPC 23 — efeito prospectivo).
+// Regra (pedido do usuário 21/09/2026): a revisão de valor residual e/ou vida
+// útil NUNCA retroage: na data de vigência, base = Valor Contábil Líquido (VCL)
+// − novo residual; nova cota mensal = base ÷ meses de vida útil restantes.
+// CPC 27 item 54: se residual ≥ VCL, a depreciação para (cota = 0).
+function _depSchedule(p){
+  const R2=v=>Math.round(v*100)/100;
+  const ini=new Date(p.dataInicio+'T00:00:00'), fim=new Date(p.dataFim+'T00:00:00');
+  const revs=(p.revisoes||[]).filter(r=>r&&r.data).map(r=>({...r,_ap:false})).sort((a,b)=>a.data<b.data?-1:1);
+  const vidaTotal=Math.max(Math.round(p.vidaUtilMeses),1);
+  let residual=p.residual||0, acum=0, decorridos=0, restantes=vidaTotal;
+  let quota=Math.max(p.custo-residual,0)/vidaTotal;
+  const rows=[];
+  let cur=new Date(ini.getFullYear(),ini.getMonth(),1);
+  const lim=new Date(fim.getFullYear(),fim.getMonth(),1);
+  let primeiro=true;
+  while(cur<=lim){
+    const y=cur.getFullYear(), m=cur.getMonth();
+    const inicioMes=`${y}-${String(m+1).padStart(2,'0')}-01`;
+    const obsExtra=[];
+    revs.forEach(r=>{
+      if(!r._ap&&r.data<=inicioMes){
+        r._ap=true;
+        const vcl=p.custo-acum;
+        residual=r.residual!=null&&r.residual!==''?Number(r.residual):residual;
+        restantes=(r.vidaRestMeses!=null&&r.vidaRestMeses!=='')?Math.max(Math.round(Number(r.vidaRestMeses)),1):Math.max(vidaTotal-decorridos,1);
+        const base=vcl-residual;
+        if(base<=0.005){ quota=0; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual)} ≥ VCL ${R2(vcl)} — depreciação interrompida (CPC 27 item 54)`); }
+        else { quota=base/restantes; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual).toFixed(2)}, VCL ${R2(vcl).toFixed(2)}, ${restantes} meses restantes → nova cota ${R2(quota).toFixed(2)}`); }
+      }
+    });
+    const vclAntes=p.custo-acum;
+    const teto=Math.max(vclAntes-residual,0);
+    let valor=quota, obs='Integral';
+    if(primeiro&&p.prorata){
+      const dias=new Date(y,m+1,0).getDate(), dia=ini.getDate();
+      valor=quota/dias*(dias-dia+1); obs=`Pro-rata (${dias-dia+1} dias)`;
+    }
+    valor=Math.min(valor,teto);
+    if(valor<0.005&&quota===0) obs='Depreciação interrompida';
+    acum+=valor; decorridos++; restantes=Math.max(restantes-1,0);
+    rows.push({ano:y,mes:m+1,valor:R2(valor),valorRaw:valor,acum:R2(acum),vcl:R2(p.custo-acum),quota:R2(quota),obs:[obs,...obsExtra].join(' · ')});
+    primeiro=false;
+    cur=new Date(y,m+1,1);
+    if(teto<=0.005&&!revs.some(r=>!r._ap)&&valor<0.005) break;
+  }
+  return rows;
+}
+
+// ─── Depreciação do imóvel + revisões anuais (CPC 27 / CPC 23) ────────────────
+let _imovDepRevs=[];
+function _imovDataIso(s){const m=String(s||'').trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);return m?`${m[3]}-${m[2]}-${m[1]}`:(/^\d{4}-\d{2}-\d{2}$/.test(String(s||''))?s:'');}
+function _imovDepLer(){
+  const g=id=>document.getElementById(id);
+  return {ativa:!!(g('imovDepAtiva')&&g('imovDepAtiva').checked),
+    base:_parseValorReaisLivre(g('imovDepBase')&&g('imovDepBase').value),
+    inicio:(g('imovDepInicio')&&g('imovDepInicio').value||'').trim(),
+    vidaAnos:parseFloat(g('imovDepVida')&&g('imovDepVida').value)||0,
+    residual:_parseValorReaisLivre(g('imovDepResidual')&&g('imovDepResidual').value),
+    revisoes:_imovDepRevs.filter(r=>_imovDataIso(r.data)).map(r=>({data:r.data,residual:_parseValorReaisLivre(r.residual),vidaRestMeses:r.vidaRestMeses===''||r.vidaRestMeses==null?null:parseInt(r.vidaRestMeses,10),obs:r.obs||''}))};
+}
+function _imovDepRender(){
+  const c=document.getElementById('imovDepResultado'); if(!c) return;
+  const d=_imovDepLer();
+  const fmt=v=>'R$ '+v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const rc=document.getElementById('imovDepRevContainer');
+  if(rc) rc.innerHTML=_imovDepRevs.map((r,i)=>`<div style="display:grid;grid-template-columns:130px 150px 150px 1fr auto;gap:8px;margin-bottom:8px;align-items:end">
+    <div><label style="font-size:.75rem;color:var(--slate)">Vigência</label><input class="fi" value="${esc(r.data||'')}" oninput="_imovDepRevs[${i}].data=this.value;_imovDepRender()" placeholder="01/01/AAAA" style="margin-top:3px;width:100%"></div>
+    <div><label style="font-size:.75rem;color:var(--slate)">Novo residual (R$)</label><input class="fi" value="${esc(r.residual===''||r.residual==null?'':(typeof r.residual==='number'?_fmtMoneyOpt(r.residual):r.residual))}" oninput="_imovDepRevs[${i}].residual=this.value;_imovDepRender()" placeholder="0,00" style="margin-top:3px;width:100%"></div>
+    <div><label style="font-size:.75rem;color:var(--slate)">Vida restante (meses)</label><input class="fi" value="${esc(r.vidaRestMeses==null?'':r.vidaRestMeses)}" oninput="_imovDepRevs[${i}].vidaRestMeses=this.value;_imovDepRender()" placeholder="automática" style="margin-top:3px;width:100%"></div>
+    <div><label style="font-size:.75rem;color:var(--slate)">Justificativa</label><input class="fi" value="${esc(r.obs||'')}" oninput="_imovDepRevs[${i}].obs=this.value" placeholder="Ex: laudo de avaliação / valor de mercado" style="margin-top:3px;width:100%"></div>
+    <button class="btn bd bsm" onclick="_imovDepRevs.splice(${i},1);_imovDepRender()" title="Remover revisão">✕</button></div>`).join('')||'<div style="font-size:.78rem;color:var(--slate)">Nenhuma revisão registrada.</div>';
+  const inicioIso=_imovDataIso(d.inicio);
+  if(!d.ativa){ c.innerHTML='<div style="font-size:.8rem;color:var(--slate)">Marque "Depreciar este imóvel" para calcular.</div>'; return; }
+  if(!inicioIso||!d.base||!d.vidaAnos){ c.innerHTML='<div style="font-size:.8rem;color:var(--slate)">Informe a base depreciável, a data de início e a vida útil para ver o cronograma.</div>'; return; }
+  const vidaMeses=Math.max(Math.round(d.vidaAnos*12),1);
+  const fimIso=new Date(new Date(inicioIso+'T00:00:00').getFullYear()+Math.ceil(vidaMeses/12)+40,0,1).toISOString().slice(0,10);
+  const rows=_depSchedule({dataInicio:inicioIso,dataFim:fimIso,custo:d.base,residual:d.residual,vidaUtilMeses:vidaMeses,prorata:false,revisoes:d.revisoes.map(r=>({...r,data:_imovDataIso(r.data)}))});
+  const porAno={}; rows.forEach(x=>{const a=(porAno[x.ano]=porAno[x.ano]||{dep:0,quota:0,acum:0,vcl:0,obs:[]});a.dep+=x.valorRaw;a.quota=x.quota;a.acum=x.acum;a.vcl=x.vcl;if(x.obs&&x.obs!=='Integral')a.obs.push(x.obs.replace(/^Integral · /,''));});
+  const hoje=new Date(); const ym=hoje.getFullYear()*100+hoje.getMonth()+1;
+  const atual=[...rows].reverse().find(x=>x.ano*100+x.mes<=ym)||rows[0];
+  c.innerHTML=`<div style="background:var(--bg);border-radius:6px;padding:10px 12px;margin-bottom:10px;font-size:.82rem">Posição em ${String(atual.mes).padStart(2,'0')}/${atual.ano}: cota mensal <b>${fmt(atual.quota)}</b> · depreciação acumulada <b>${fmt(atual.acum)}</b> · valor contábil líquido <b>${fmt(atual.vcl)}</b></div>
+    <table style="width:100%;border-collapse:collapse;font-size:.8rem"><thead><tr style="background:var(--bg)"><th style="text-align:left;padding:6px">Ano</th><th style="text-align:right;padding:6px">Cota mensal (fim do ano)</th><th style="text-align:right;padding:6px">Depreciação do ano</th><th style="text-align:right;padding:6px">Acumulada</th><th style="text-align:right;padding:6px">Valor contábil líquido</th></tr></thead><tbody>
+    ${Object.keys(porAno).sort().map(a=>`<tr style="border-top:1px solid var(--border)"><td style="padding:5px 6px">${a}${porAno[a].obs.length?' <span title="'+esc(porAno[a].obs.join(' | '))+'" style="color:#b45309">⚑ revisão</span>':''}</td><td style="text-align:right;padding:5px 6px">${fmt(porAno[a].quota)}</td><td style="text-align:right;padding:5px 6px">${fmt(porAno[a].dep)}</td><td style="text-align:right;padding:5px 6px">${fmt(porAno[a].acum)}</td><td style="text-align:right;padding:5px 6px">${fmt(porAno[a].vcl)}</td></tr>`).join('')}
+    </tbody></table>
+    <div style="font-size:.72rem;color:var(--slate);margin-top:8px">Efeito prospectivo (CPC 23): a revisão não recalcula o que já foi depreciado. Base depreciável = valor contábil líquido − novo residual, dividida pela vida útil restante. Residual ≥ valor contábil líquido interrompe a depreciação (CPC 27 item 54). Terreno não se deprecia — informe aqui só a parte depreciável (edificação).</div>`;
+}
+function _imovDepAddRev(){const y=new Date().getFullYear()+1;_imovDepRevs.push({data:'01/01/'+y,residual:'',vidaRestMeses:'',obs:''});_imovDepRender();}
 function abrirFormImovel(eid,id){
   _imovEid=String(eid);_imovId=id||null;
   const im=id?getImoveis(eid)[id]:{};
@@ -37505,6 +37616,7 @@ function abrirFormImovel(eid,id){
   _imovPags=JSON.parse(JSON.stringify((im&&im.pagamentos&&im.pagamentos.length)?im.pagamentos:[{forma:'',valor:'',banco:'',parcelas:'',obs:''}]));
   _imovClasses=JSON.parse(JSON.stringify((im&&im.classificacoes&&im.classificacoes.length)?im.classificacoes:[{data:'',classif:'',valor:''}]));
   _imovCustos=JSON.parse(JSON.stringify((im&&im.outrosCustos&&im.outrosCustos.length)?im.outrosCustos:[{data:'',fornecedor:'',valor:''}]));
+  _imovDepRevs=JSON.parse(JSON.stringify((im&&im.depreciacao&&im.depreciacao.revisoes)||[]));
   document.getElementById('imoveisListView').style.display='none';
   document.getElementById('imoveisFormView').style.display='block';
   const titulo=id?'Editar Imóvel':'Cadastrar Novo Imóvel';
@@ -37536,6 +37648,8 @@ function abrirFormImovel(eid,id){
         <div>${lbl('Status')}<select id="imovStatus" class="fi" style="margin-top:4px;width:100%">${stOpts}</select></div>
         <div>${lbl('Data de Aquisição')}${fi('imovDataAq',im&&im.dataAquisicao,'DD/MM/AAAA')}</div>
         <div>${lbl('Valor Total de Aquisição (R$)',1)}<input id="imovValor" class="fi" value="${esc(_fmtMoneyOpt(im&&im.valorTotal))}" placeholder="0,00" style="margin-top:4px;width:100%" oninput="calcularGanhoCapital()" onblur="formatarValorReais(this)"></div>
+        <div>${lbl('Origem da Aquisição')}<select id="imovOrigem" class="fi" style="margin-top:4px;width:100%" onchange="_imovAtualizarRotuloOrigem()">${IMOVEL_ORIGENS.map(o=>`<option value="${o.v}"${((im&&im.origem)||'Compra e Venda')===o.v?' selected':''}>${o.v}</option>`).join('')}</select></div>
+        <div>${lbl('Detalhes da Origem')}${fi('imovOrigemDet',im&&im.origemDetalhe,'Ex: Ata de AGE de 30/07/2019, escritura, formal de partilha...')}</div>
       </div>
     </div>
     <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
@@ -37582,6 +37696,24 @@ function abrirFormImovel(eid,id){
       </div>
     </div>
     <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
+      <div style="background:#1E3558;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
+        <span style="font-size:.85rem;font-weight:700;color:#fff">Depreciação e Revisões Anuais (CPC 27 / CPC 23)</span>
+        <button class="btn bo bsm" onclick="_imovDepAddRev()" style="font-size:.72rem;color:#b8ccdf;border-color:#4a6a8a">+ Adicionar Revisão Anual</button>
+      </div>
+      <div style="padding:16px">
+        <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;margin-bottom:10px"><input type="checkbox" id="imovDepAtiva" ${(im&&im.depreciacao&&im.depreciacao.ativa)?'checked':''} onchange="_imovDepRender()"> Depreciar este imóvel (parte depreciável — edificação; terreno não se deprecia)</label>
+        <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:12px;margin-bottom:12px">
+          <div>${lbl('Base depreciável (R$)')}<input id="imovDepBase" class="fi" value="${esc(_fmtMoneyOpt(im&&im.depreciacao&&im.depreciacao.base))}" placeholder="0,00" style="margin-top:4px;width:100%" oninput="_imovDepRender()" onblur="formatarValorReais(this)"></div>
+          <div>${lbl('Início da depreciação')}<input id="imovDepInicio" class="fi" value="${esc((im&&im.depreciacao&&im.depreciacao.inicio)||(im&&im.dataAquisicao)||'')}" placeholder="DD/MM/AAAA" style="margin-top:4px;width:100%" oninput="_imovDepRender()"></div>
+          <div>${lbl('Vida útil (anos)')}<input id="imovDepVida" class="fi" type="number" step="0.5" value="${esc((im&&im.depreciacao&&im.depreciacao.vidaAnos)||'')}" placeholder="Ex: 25" style="margin-top:4px;width:100%" oninput="_imovDepRender()"></div>
+          <div>${lbl('Valor residual inicial (R$)')}<input id="imovDepResidual" class="fi" value="${esc(_fmtMoneyOpt(im&&im.depreciacao&&im.depreciacao.residual))}" placeholder="0,00" style="margin-top:4px;width:100%" oninput="_imovDepRender()" onblur="formatarValorReais(this)"></div>
+        </div>
+        <div style="font-size:.78rem;font-weight:700;color:var(--slate);margin:6px 0">Revisões anuais das estimativas (efeito prospectivo)</div>
+        <div id="imovDepRevContainer"></div>
+        <div id="imovDepResultado" style="margin-top:12px"></div>
+      </div>
+    </div>
+    <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
       <div style="background:#1E3558;padding:10px 16px;font-size:.85rem;font-weight:700;color:#fff">Alienação</div>
       <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div>${lbl('Data da Alienação')}${fi('imovAlienData',im&&im.alienacao&&im.alienacao.data,'DD/MM/AAAA')}</div>
@@ -37606,7 +37738,7 @@ function abrirFormImovel(eid,id){
     </div>
     <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
       <div style="background:#1E3558;padding:10px 16px;display:flex;justify-content:space-between;align-items:center">
-        <span style="font-size:.85rem;font-weight:700;color:#fff">Vendedor(es)</span>
+        <span id="imovVendTitulo" style="font-size:.85rem;font-weight:700;color:#fff">${_imovOrigemInfo(im&&im.origem).parte}</span>
         <button class="btn bo bsm" onclick="addVendedorRow()" style="font-size:.72rem;color:#b8ccdf;border-color:#4a6a8a">+ Adicionar</button>
       </div>
       <div id="imovVendsContainer" style="padding:16px"></div>
@@ -37627,7 +37759,7 @@ function abrirFormImovel(eid,id){
       <button class="btn bp" onclick="salvarImovel()">&#128190; Salvar Imóvel</button>
     </div>
   </div>`;
-  _renderVendedores();_renderPagamentos();_renderClassificacoes();_renderCustos();calcularGanhoCapital();
+  _renderVendedores();_renderPagamentos();_renderClassificacoes();_renderCustos();calcularGanhoCapital();_imovDepRender();
 }
 function fecharFormImovel(){
   document.getElementById('imoveisListView').style.display='block';
@@ -37727,7 +37859,7 @@ function _renderVendedores(){
   const c=document.getElementById('imovVendsContainer');if(!c)return;
   if(!_imovVends.length)_imovVends=[{nome:'',cpfCnpj:'',participacao:''}];
   c.innerHTML=_imovVends.map((v,i)=>`<div style="display:grid;grid-template-columns:2fr 2fr 1fr auto;gap:8px;margin-bottom:10px;align-items:end">
-    <div><label style="font-size:.75rem;color:var(--slate)">Nome do Vendedor</label><input class="fi" value="${esc(v.nome||'')}" oninput="_imovVends[${i}].nome=this.value" placeholder="Nome completo" style="margin-top:3px;width:100%"></div>
+    <div><label style="font-size:.75rem;color:var(--slate)">Nome do ${esc(_imovOrigemInfo((document.getElementById('imovOrigem')||{}).value).rot)}</label><input class="fi" value="${esc(v.nome||'')}" oninput="_imovVends[${i}].nome=this.value" placeholder="Nome completo" style="margin-top:3px;width:100%"></div>
     <div><label style="font-size:.75rem;color:var(--slate)">CPF / CNPJ</label><input class="fi" value="${esc(v.cpfCnpj||'')}" oninput="_imovVends[${i}].cpfCnpj=this.value" placeholder="000.000.000-00" style="margin-top:3px;width:100%"></div>
     <div><label style="font-size:.75rem;color:var(--slate)">% Participação</label><input class="fi" value="${esc(v.participacao||'')}" oninput="_imovVends[${i}].participacao=this.value" placeholder="100%" style="margin-top:3px;width:100%"></div>
     <button class="btn bd bsm" onclick="removeVendedorRow(${i})" style="align-self:end">✕</button>
@@ -37834,6 +37966,9 @@ function salvarImovel(){
     status:document.getElementById('imovStatus').value,
     dataAquisicao:document.getElementById('imovDataAq').value.trim(),
     valorTotal:_parseValorReaisLivre(document.getElementById('imovValor').value),
+    origem:document.getElementById('imovOrigem').value,
+    origemDetalhe:document.getElementById('imovOrigemDet').value.trim(),
+    depreciacao:_imovDepLer(),
     endereco:document.getElementById('imovEnd').value.trim(),
     numero:document.getElementById('imovNum').value.trim(),
     complemento:document.getElementById('imovComp').value.trim(),

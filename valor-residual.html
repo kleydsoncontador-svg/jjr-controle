@@ -461,6 +461,83 @@ function buildSchedule({ dataAquisicao, dataFinal, valorCusto, valorResidualPct,
   }
   return { rows, depreciacaoMensal, valorResidual, valorDepreciavel, totalAcumulado: acumulado };
 }
+// Motor de depreciação com REVISÕES de estimativa (CPC 23 — efeito prospectivo).
+// Regra (pedido do usuário 21/09/2026): a revisão de valor residual e/ou vida
+// útil NUNCA retroage: na data de vigência, base = Valor Contábil Líquido (VCL)
+// − novo residual; nova cota mensal = base ÷ meses de vida útil restantes.
+// CPC 27 item 54: se residual ≥ VCL, a depreciação para (cota = 0).
+function _depSchedule(p){
+  const R2=v=>Math.round(v*100)/100;
+  const ini=new Date(p.dataInicio+'T00:00:00'), fim=new Date(p.dataFim+'T00:00:00');
+  const revs=(p.revisoes||[]).filter(r=>r&&r.data).map(r=>({...r,_ap:false})).sort((a,b)=>a.data<b.data?-1:1);
+  const vidaTotal=Math.max(Math.round(p.vidaUtilMeses),1);
+  let residual=p.residual||0, acum=0, decorridos=0, restantes=vidaTotal;
+  let quota=Math.max(p.custo-residual,0)/vidaTotal;
+  const rows=[];
+  let cur=new Date(ini.getFullYear(),ini.getMonth(),1);
+  const lim=new Date(fim.getFullYear(),fim.getMonth(),1);
+  let primeiro=true;
+  while(cur<=lim){
+    const y=cur.getFullYear(), m=cur.getMonth();
+    const inicioMes=`${y}-${String(m+1).padStart(2,'0')}-01`;
+    const obsExtra=[];
+    revs.forEach(r=>{
+      if(!r._ap&&r.data<=inicioMes){
+        r._ap=true;
+        const vcl=p.custo-acum;
+        residual=r.residual!=null&&r.residual!==''?Number(r.residual):residual;
+        restantes=(r.vidaRestMeses!=null&&r.vidaRestMeses!=='')?Math.max(Math.round(Number(r.vidaRestMeses)),1):Math.max(vidaTotal-decorridos,1);
+        const base=vcl-residual;
+        if(base<=0.005){ quota=0; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual)} ≥ VCL ${R2(vcl)} — depreciação interrompida (CPC 27 item 54)`); }
+        else { quota=base/restantes; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual).toFixed(2)}, VCL ${R2(vcl).toFixed(2)}, ${restantes} meses restantes → nova cota ${R2(quota).toFixed(2)}`); }
+      }
+    });
+    const vclAntes=p.custo-acum;
+    const teto=Math.max(vclAntes-residual,0);
+    let valor=quota, obs='Integral';
+    if(primeiro&&p.prorata){
+      const dias=new Date(y,m+1,0).getDate(), dia=ini.getDate();
+      valor=quota/dias*(dias-dia+1); obs=`Pro-rata (${dias-dia+1} dias)`;
+    }
+    valor=Math.min(valor,teto);
+    if(valor<0.005&&quota===0) obs='Depreciação interrompida';
+    acum+=valor; decorridos++; restantes=Math.max(restantes-1,0);
+    rows.push({ano:y,mes:m+1,valor:R2(valor),valorRaw:valor,acum:R2(acum),vcl:R2(p.custo-acum),quota:R2(quota),obs:[obs,...obsExtra].join(' · ')});
+    primeiro=false;
+    cur=new Date(y,m+1,1);
+    if(teto<=0.005&&!revs.some(r=>!r._ap)&&valor<0.005) break;
+  }
+  return rows;
+}
+
+// Recalcula o cronograma de uma análise COM as revisões anuais (CPC 23).
+function _vrCronogramaComRevisoes(r){
+  const vidaMeses=Math.max(Math.round((r.vidaUtilAnos||0)*12),1);
+  const ini=new Date(r.dataAquisicao+'T00:00:00');
+  const fim=new Date(ini.getFullYear()+Math.ceil(vidaMeses/12)+40,0,1);
+  return _depSchedule({ dataInicio:r.dataAquisicao, dataFim:fim.toISOString().slice(0,10), custo:r.custoBase, residual:r.valorResidual, vidaUtilMeses:vidaMeses, prorata:true, revisoes:r.revisoes||[] });
+}
+async function adicionarRevisaoResidual(){
+  const r=analiseAtual; if(!r){ showToast('Abra uma análise primeiro.','err'); return; }
+  const data=(document.getElementById('revData')||{}).value;
+  const residual=parseNum((document.getElementById('revResidual')||{}).value);
+  const vidaTxt=((document.getElementById('revVida')||{}).value||'').trim();
+  const obs=((document.getElementById('revObs')||{}).value||'').trim();
+  if(!data||!isFinite(residual)||residual<0){ showToast('Informe a data de vigência e o novo valor residual (R$).','err'); return; }
+  if(data<=r.dataAquisicao){ showToast('A vigência da revisão precisa ser posterior à data de aquisição.','err'); return; }
+  const rev={ data, residual, vidaRestMeses: vidaTxt?parseInt(vidaTxt,10):null, obs, registradaEm:new Date().toISOString() };
+  r.revisoes=(r.revisoes||[]).concat([rev]).sort((a,b)=>a.data<b.data?-1:1);
+  try{ await VRSet('vr_relatorio_'+r.id, r); }catch(e){ showToast('Erro ao salvar a revisão: '+e.message,'err'); return; }
+  showToast('Revisão registrada — a depreciação é recalculada só daqui pra frente (CPC 23).','ok');
+  renderRelatorio(r);
+}
+async function removerRevisaoResidual(i){
+  const r=analiseAtual; if(!r||!r.revisoes) return;
+  if(!confirm('Remover esta revisão? A depreciação volta a ser calculada sem ela.')) return;
+  r.revisoes.splice(i,1);
+  try{ await VRSet('vr_relatorio_'+r.id, r); }catch(e){ showToast('Erro ao salvar: '+e.message,'err'); return; }
+  renderRelatorio(r);
+}
 function formatBRL(n) {
   return Number(n || 0).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' });
 }
@@ -2102,6 +2179,33 @@ function renderRelatorio(r){
   document.getElementById('relatorioEmpLabel').textContent = (r.empresaNome||empresaAtualNome||'') + ' — documento pronto para impressão/PDF';
 
   const cenarios = r.cenariosSugeridos || {conservador_pct:20, realista_pct:35, otimista_pct:50};
+  // Revisões anuais (CPC 23): recalcula o cronograma só quando existem.
+  const revs = r.revisoes || [];
+  const rowsRev = revs.length ? _vrCronogramaComRevisoes(r) : null;
+  const cronogramaExibir = rowsRev ? rowsRev.map(x=>({periodo:new Date(x.ano,x.mes-1,1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'}),valor:x.valor,obs:x.obs})) : (r.cronograma||[]);
+  const totalDepExibir = rowsRev ? rowsRev.reduce((s,x)=>s+x.valorRaw,0) : r.valorDepreciavel;
+  const porAno = {};
+  if(rowsRev) rowsRev.forEach(x=>{ (porAno[x.ano]=porAno[x.ano]||{dep:0,quotaFim:0,acum:0,vcl:0}); porAno[x.ano].dep+=x.valorRaw; porAno[x.ano].quotaFim=x.quota; porAno[x.ano].acum=x.acum; porAno[x.ano].vcl=x.vcl; });
+  const proximoAno = new Date().getFullYear()+ (new Date().getMonth()>=0?1:0);
+  const revisaoHtml = `
+    <div class="sc no-print-block">
+      <div class="sh">8 · Revisão Anual das Estimativas (CPC 23 / CPC 27 item 51)</div>
+      <div style="font-size:12.5px;color:var(--slate);margin-bottom:10px">O valor residual e a vida útil devem ser revisados ao menos ao final de cada exercício. A mudança tem <b>efeito prospectivo</b>: nada do que já foi depreciado é recalculado nem estornado — a partir da vigência, a nova cota = (Valor Contábil Líquido − novo residual) ÷ vida útil que ainda resta. Se o novo residual for maior ou igual ao valor contábil líquido, a depreciação é interrompida (CPC 27 item 54).</div>
+      ${revs.length ? `<table style="margin-bottom:12px"><thead><tr><th>Vigência</th><th style="text-align:right">Novo residual</th><th>Vida restante (meses)</th><th>Justificativa</th><th></th></tr></thead><tbody>
+        ${revs.map((v,i)=>`<tr><td>${new Date(v.data+'T00:00:00').toLocaleDateString('pt-BR')}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(v.residual)}</td><td>${v.vidaRestMeses!=null?v.vidaRestMeses:'automática (restante da vida útil)'}</td><td style="font-size:11.5px;color:var(--slate)">${esc(v.obs)||'—'}</td><td class="no-print"><button class="btn bo bsm" onclick="removerRevisaoResidual(${i})">🗑</button></td></tr>`).join('')}
+      </tbody></table>` : '<div style="color:var(--slate);font-size:12.5px;margin-bottom:10px">Nenhuma revisão registrada — a depreciação segue a estimativa inicial.</div>'}
+      <div class="no-print" style="display:grid;grid-template-columns:150px 170px 190px 1fr auto;gap:8px;align-items:end">
+        <div class="fg"><label class="fl">Vigência (geralmente 01/01)</label><input class="fi" id="revData" type="date" value="${proximoAno}-01-01"></div>
+        <div class="fg"><label class="fl">Novo valor residual (R$)</label><input class="fi" id="revResidual" placeholder="0,00"></div>
+        <div class="fg"><label class="fl">Vida útil restante (meses) — opcional</label><input class="fi" id="revVida" type="number" min="1" placeholder="automática"></div>
+        <div class="fg"><label class="fl">Justificativa</label><input class="fi" id="revObs" placeholder="Ex: valor de mercado dos usados subiu"></div>
+        <button class="btn bp" onclick="adicionarRevisaoResidual()">+ Registrar revisão</button>
+      </div>
+      ${rowsRev ? `<div style="margin-top:14px"><b style="font-size:12.5px">Posição por ano (com as revisões)</b>
+        <table><thead><tr><th>Ano</th><th style="text-align:right">Cota mensal ao fim do ano</th><th style="text-align:right">Depreciação do ano</th><th style="text-align:right">Depreciação acumulada</th><th style="text-align:right">Valor contábil líquido</th></tr></thead><tbody>
+        ${Object.keys(porAno).sort().map(a=>`<tr><td>${a}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].quotaFim)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].dep)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].acum)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].vcl)}</td></tr>`).join('')}
+        </tbody></table></div>` : ''}
+    </div>`;
   const docTexto = `POLÍTICA DE VALOR RESIDUAL — ${r.descricao}
 
 Empresa: ${r.empresaNome||''}
@@ -2190,19 +2294,21 @@ REFERÊNCIA: CPC 27 (art. 16, 50-55), Lei 6.404/76 (art. 183), IN RFB nº 1.700/
       <div class="doc-pre">${esc(docTexto)}</div>
     </div>
 
+    ${revisaoHtml}
+
     <div class="sc">
-      <div class="sh">8 · Lançamentos Contábeis (Cronograma de Depreciação)</div>
+      <div class="sh">9 · Lançamentos Contábeis (Cronograma de Depreciação)</div>
       <div class="cronograma-scroll" style="max-height:400px;overflow-y:auto">
         <table>
           <thead><tr><th>Período</th><th style="text-align:right">Valor</th><th>Observação</th></tr></thead>
-          <tbody>${(r.cronograma||[]).map(row=>`<tr><td style="text-transform:capitalize">${esc(row.periodo)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(row.valor)}</td><td style="font-size:11.5px;color:var(--slate)">${esc(row.obs)}</td></tr>`).join('')}</tbody>
-          <tfoot><tr style="border-top:2px solid var(--border);font-weight:700"><td>Total Depreciado</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(r.valorDepreciavel)}</td><td></td></tr></tfoot>
+          <tbody>${cronogramaExibir.map(row=>`<tr><td style="text-transform:capitalize">${esc(row.periodo)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(row.valor)}</td><td style="font-size:11.5px;color:var(--slate)">${esc(row.obs)}</td></tr>`).join('')}</tbody>
+          <tfoot><tr style="border-top:2px solid var(--border);font-weight:700"><td>Total Depreciado</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(totalDepExibir)}</td><td></td></tr></tfoot>
         </table>
       </div>
     </div>
 
     <div class="sc">
-      <div class="sh">9 · Embasamento Legal</div>
+      <div class="sh">10 · Embasamento Legal</div>
       <table>
         <thead><tr><th style="width:180px">Norma</th><th>Conteúdo Relevante</th></tr></thead>
         <tbody>
