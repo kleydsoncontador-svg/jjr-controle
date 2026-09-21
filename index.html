@@ -754,6 +754,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
 <div class="shell">
 <aside>
   <div class="ni" id="n-empresas" onclick="goPage('empresas')"><span class="ic">📋</span>Cadastro de Empresas</div>
+  <div class="ni" id="n-cronograma" onclick="goPage('cronograma')"><span class="ic">📅</span>Cronograma</div>
   <div class="ni on" id="n-dash" onclick="goPage('dash')"><span class="ic">📊</span>Visão geral</div>
   <div class="ni" id="n-d" onclick="goPage('pendencias')"><span class="ic">⏰</span>Pendências</div>
   <div class="ni" id="n-lancctb" onclick="goPage('lancctb')"><span class="ic">⚕️</span>Lançamentos Contábeis</div>
@@ -3620,6 +3621,12 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
   </div>
 </div>
 
+<div class="page" id="page-cronograma" style="display:none">
+  <div class="ptitle" style="display:flex;align-items:center;gap:12px;margin-bottom:4px"><span style="font-size:1.6rem">📅</span><span>Cronograma e Controle Mensal</span></div>
+  <div class="psub" style="margin-bottom:14px">Atividades, prazos, entregas e pendências de todas as empresas — mês a mês</div>
+  <div id="cronRoot"></div>
+</div>
+
 <div class="page" id="page-responsaveis" style="display:none;flex-direction:column">
   <div class="ptitle">
     <div style="display:flex;align-items:center;gap:12px;flex:1">
@@ -6162,7 +6169,7 @@ function goPage(id){
   // Fechar todas as modais ao navegar
   document.querySelectorAll('.mb').forEach(m => m.style.display = 'none');
   document.getElementById('gEmpSel').style.display = '';
-  ['home','dash','empresa','empresas','listagem','stub','pendencias','lancctb','declaracoes','tribAtraso','lucros','appfin','appfin-meses','comp-hub','comp','ganhos','parcelamentos','imoveis','emprestimos','dirpf','democ','fiscal-hub','despesasLocacao','receitasLocacao','filiais','conversor-hub','conv-mp','conv-itau','conv-nubank','conv-lma','conv-entradas','conv-cobr','conv-signus','conv-bb','conv-shopee','extrato-cc','conv-ativo','conv-aplicfin','conv-razaoconc','taxaselic','contas-alerta','apuracao','lalup','importacao','responsaveis','gruposeconomicos','valorresidual'].forEach(p=>{
+  ['home','dash','empresa','empresas','listagem','stub','pendencias','lancctb','declaracoes','tribAtraso','lucros','appfin','appfin-meses','comp-hub','comp','ganhos','parcelamentos','imoveis','emprestimos','dirpf','democ','fiscal-hub','despesasLocacao','receitasLocacao','filiais','conversor-hub','conv-mp','conv-itau','conv-nubank','conv-lma','conv-entradas','conv-cobr','conv-signus','conv-bb','conv-shopee','extrato-cc','conv-ativo','conv-aplicfin','conv-razaoconc','taxaselic','contas-alerta','apuracao','lalup','importacao','responsaveis','gruposeconomicos','valorresidual','cronograma'].forEach(p=>{
     const el = document.getElementById('page-'+p);
     if(el) el.style.display = p===id?(p==='tributacao'||p==='lucros'||p==='appfin-meses'||p==='comp'?'flex':'block'):'none';
   });
@@ -6179,6 +6186,7 @@ function goPage(id){
   // sidebar active
   document.querySelectorAll('.ni').forEach(n=>n.classList.remove('on'));
   if(id==='dash'){ document.getElementById('n-dash')?.classList.add('on'); renderDash(); }
+  else if(id==='cronograma'){ document.getElementById('n-cronograma')?.classList.add('on'); renderCronograma(); }
   else if(id==='listagem'){ document.getElementById('n-listagem')?.classList.add('on'); setTimeout(renderListagem,100); }
   else if(id==='pendencias'){ document.getElementById('n-d')?.classList.add('on'); setTimeout(renderPendencias,0); }
   else if(id==='lancctb'){ document.getElementById('n-lancctb')?.classList.add('on'); prepararAdicionarEmpresa('lancctb'); }
@@ -33160,6 +33168,9 @@ function setGanhoStatus(eid,id,periodKey,status){
   if(!g)return;
   g.statusPorPeriodo=g.statusPorPeriodo||{};
   g.statusPorPeriodo[periodKey]=status;
+  // Data em que o período foi finalizado — usada pelo Cronograma (entregue no prazo / com atraso)
+  g.statusDataPorPeriodo=g.statusDataPorPeriodo||{};
+  if(status==='finalizada') g.statusDataPorPeriodo[periodKey]=new Date().toISOString(); else delete g.statusDataPorPeriodo[periodKey];
   setGanhos(eid,ganhos);
   renderGanhoResumoCards();
 }
@@ -40046,7 +40057,7 @@ function lucRenderMes(el, emps, mes){
   el.innerHTML=html;
 }
 function lucEmpMesConcluido(eid,ano,mes){ return !!S.g('luc_emp_concluido_'+ano+'_'+mes+'_'+eid); }
-function lucSetEmpMesConcluido(eid,ano,mes,val){ S.s('luc_emp_concluido_'+ano+'_'+mes+'_'+eid,val); }
+function lucSetEmpMesConcluido(eid,ano,mes,val){ S.s('luc_emp_concluido_'+ano+'_'+mes+'_'+eid,val?new Date().toISOString():false); } // guarda a data da conclusão (lida como verdadeiro em todo o resto; usada pelo Cronograma)
 function lucToggleEmpMesConcluido(eid,mes,event){
   if(event)event.stopPropagation();
   var ano=lucCurrentAno||'2026';
@@ -46567,6 +46578,367 @@ document.addEventListener('DOMContentLoaded',async()=>{
   await inicializarResponsaveisPadrao();
   await inicializarGruposEconomicosPadrao();
 });
+</script>
+<script>
+// ═══════════════════════════════════════════════════════════════════════════
+// CRONOGRAMA E CONTROLE MENSAL (pedido da diretoria, 21/09/2026)
+// Cronograma mensal de tarefas (atividades + prazos) e controle das entregas/pendências,
+// de todas as empresas, com exportação em PDF e Excel. Não guarda "status" próprio: lê o que
+// os módulos já registram (Visão Geral → fechamento; Ganhos/Rendimentos → status do período;
+// Lucros/Dividendos → empresa concluída no mês) e só configura as regras de prazo.
+// ═══════════════════════════════════════════════════════════════════════════
+const CRON_ATIVS=[
+  {id:'fech',  nome:'Fechamento contábil do mês', desc:'Concluir o fechamento da competência (FOPAG, Fiscal, Financeiro e Balancete) — Visão Geral.'},
+  {id:'ganhos',nome:'Ganhos e Rendimentos',       desc:'Informar os ganhos/rendimentos (aplicações financeiras etc.) e finalizar o período — módulo Ganhos/Rendimentos.'},
+  {id:'lucros',nome:'Lucros e Dividendos',        desc:'Apurar e concluir a distribuição de lucros/dividendos da competência — módulo Lucros/Dividendos.'}
+];
+const CRON_GRUPOS=['Simples Nacional','Lucro Presumido','Lucro Real','Isenta / Outros'];
+function _cronCfgPadrao(){
+  const g=(per,dia,apos)=>({per,dia,apos});
+  return {
+    regras:{
+      fech:  {'Simples Nacional':g('m','U',1),'Lucro Presumido':g('m','U',1),'Lucro Real':g('m',15,1),'Isenta / Outros':g('m','U',1)},
+      ganhos:{'Simples Nacional':g('m',15,1),'Lucro Presumido':g('t',15,1),'Lucro Real':g('m',15,1),'Isenta / Outros':g('m',15,1)},
+      lucros:{'Simples Nacional':g('m',5,2),'Lucro Presumido':g('t',5,2),'Lucro Real':g('m',5,2),'Isenta / Outros':g('m',5,2)}
+    },
+    entregaCronogramaDia:1,  // cronograma do mês entregue até este dia do próprio mês
+    entregaControleDia:5     // controle mensal entregue até este dia do mês seguinte
+  };
+}
+function _cronCfg(){
+  const base=_cronCfgPadrao(), salvo=S.g('cron_config')||{};
+  CRON_ATIVS.forEach(a=>CRON_GRUPOS.forEach(gr=>{ base.regras[a.id][gr]=Object.assign(base.regras[a.id][gr],((salvo.regras||{})[a.id]||{})[gr]||{}); }));
+  if(salvo.entregaCronogramaDia) base.entregaCronogramaDia=salvo.entregaCronogramaDia;
+  if(salvo.entregaControleDia) base.entregaControleDia=salvo.entregaControleDia;
+  return base;
+}
+const _cronP2=n=>String(n).padStart(2,'0');
+function _cronHoje(){ const d=new Date(); return d.getFullYear()+'-'+_cronP2(d.getMonth()+1)+'-'+_cronP2(d.getDate()); }
+function _cronAddMes(ym,delta){ const [y,m]=ym.split('-').map(Number); const t=y*12+(m-1)+delta; return Math.floor(t/12)+'-'+_cronP2(t%12+1); }
+function _cronUltDia(ym){ const [y,m]=ym.split('-').map(Number); return new Date(y,m,0).getDate(); }
+function _cronBR(iso){ return iso?iso.slice(8,10)+'/'+iso.slice(5,7)+'/'+iso.slice(0,4):'—'; }
+function _cronBRcurto(iso){ return iso?iso.slice(8,10)+'/'+iso.slice(5,7):'—'; }
+function _cronDias(a,b){ const p=s=>Date.UTC(+s.slice(0,4),+s.slice(5,7)-1,+s.slice(8,10)); return Math.round((p(b)-p(a))/864e5); }
+function _cronDataLocal(v){ // aceita ISO com hora (UTC) ou YYYY-MM-DD; devolve YYYY-MM-DD no fuso local
+  if(!v||typeof v!=='string') return null;
+  if(v.length===10) return v;
+  const d=new Date(v); if(isNaN(d)) return null;
+  return d.getFullYear()+'-'+_cronP2(d.getMonth()+1)+'-'+_cronP2(d.getDate());
+}
+function _cronGrupo(reg){
+  const r=String(reg||'').toLowerCase();
+  if(r.includes('real')) return 'Lucro Real';
+  if(r.includes('presum')) return 'Lucro Presumido';
+  if(r.includes('simples')) return 'Simples Nacional';
+  return 'Isenta / Outros';
+}
+function _cronRegimeEm(e,ym){ return (e.tribMes&&e.tribMes[ym])||e.reg||''; }
+function _cronPrazo(comp,regra){
+  const alvo=_cronAddMes(comp,Number(regra.apos)||1), ult=_cronUltDia(alvo);
+  const dia=regra.dia==='U'||String(regra.dia).toUpperCase()==='U'?ult:Math.min(Number(regra.dia)||ult,ult);
+  return alvo+'-'+_cronP2(dia);
+}
+function _cronEmpAtiva(e,c){
+  const t=(e.fechamentoStatus&&e.fechamentoStatus.tipo)||'ativo';
+  const temMov=!!((e.fechMes||{})[c]&&Object.keys(e.fechMes[c]).length);
+  if(['saida','extincao','inativa'].includes(t)&&!temMov) return false;
+  if(e.entrada&&e.entrada.substring(0,7)>c) return false;
+  if(e.dataSaida&&e.dataSaida.substring(0,7)<c) return false;
+  if(e.ultimoFechamento&&e.ultimoFechamento.substring(0,7)<c) return false;
+  return true;
+}
+function _cronStatus(prazo,feito,data,hoje){
+  if(feito){
+    if(data){ const at=_cronDias(prazo,data); return at<=0?{cod:'ok_prazo',txt:'Entregue no prazo',cor:'g'}:{cod:'ok_atraso',txt:'Entregue com '+at+'d de atraso',cor:'a'}; }
+    return {cod:'ok',txt:'Entregue',cor:'g'};
+  }
+  const d=_cronDias(hoje,prazo);
+  if(d<0) return {cod:'atrasada',txt:'Atrasada há '+(-d)+'d',cor:'r'};
+  if(d===0) return {cod:'breve',txt:'Vence hoje',cor:'a'};
+  if(d<=3) return {cod:'breve',txt:'Vence em '+d+'d',cor:'a'};
+  return {cod:'a_vencer',txt:'A vencer ('+d+'d)',cor:'b'};
+}
+// Regra efetiva de uma atividade para uma empresa (o período de Ganhos segue o módulo: Presumido = trimestral)
+function _cronPer(ativ,grupo,regra){ return ativ==='ganhos'?(grupo==='Lucro Presumido'?'t':'m'):(ativ==='fech'?'m':(regra.per||'m')); }
+
+function _cronCalcItem(e,ativ,V,cfg,hoje){
+  const eid=String(e.eid);
+  let grupo=_cronGrupo(_cronRegimeEm(e,_cronAddMes(V,-1)));
+  let regra=cfg.regras[ativ][grupo], comp=_cronAddMes(V,-regra.apos);
+  const g2=_cronGrupo(_cronRegimeEm(e,comp));
+  if(g2!==grupo){ grupo=g2; regra=cfg.regras[ativ][grupo]; comp=_cronAddMes(V,-regra.apos); }
+  const per=_cronPer(ativ,grupo,regra);
+  const mm=+comp.slice(5), ano=comp.slice(0,4);
+  const base={aplica:false,comp,grupo};
+  if(per==='t'&&![3,6,9,12].includes(mm)) return base;
+  if(!_cronEmpAtiva(e,comp)) return base;
+  const prazo=_cronPrazo(comp,regra);
+  let feito=false,data=null,detalhe='';
+  if(ativ==='fech'){
+    const fm=(e.fechMes||{})[comp]||{};
+    const okv=v=>v==='ok'||v==='na'||v==='sm';
+    feito=okv(fm.balancete);
+    if(feito) data=_cronDataLocal(fm.balancete_data);
+    else { const f=[['fopag','FOPAG'],['fiscal','Fiscal'],['financeiro','Financeiro'],['balancete','Balancete']].filter(x=>!okv(fm[x[0]])).map(x=>x[1]); detalhe=f.length?'Falta: '+f.join(', '):''; }
+  } else if(ativ==='ganhos'){
+    const trim=_isTrimEmp(e);
+    const meses=trim?[mm-2,mm-1,mm].map(m=>_cronP2(m)+'/'+ano):[_cronP2(mm)+'/'+ano];
+    const pk=trim?('T'+Math.ceil(mm/3)+'/'+ano):meses[0];
+    const itens=Object.values(getGanhos(eid)).filter(g=>!g.arquivado&&meses.some(mk=>Object.prototype.hasOwnProperty.call(g.dados||{},mk)));
+    if(!itens.length) return base;
+    const fin=itens.filter(g=>((g.statusPorPeriodo||{})[pk])==='finalizada');
+    feito=fin.length===itens.length;
+    if(feito){ const ds=itens.map(g=>_cronDataLocal((g.statusDataPorPeriodo||{})[pk])); if(ds.every(Boolean)) data=ds.sort().pop(); }
+    else detalhe=fin.length+' de '+itens.length+' finalizado'+(itens.length>1?'s':'');
+  } else if(ativ==='lucros'){
+    if(!(lucSocGet(eid)||[]).length) return base;
+    const meses=per==='t'?[mm-2,mm-1,mm]:[mm];
+    const vals=meses.map(m=>S.g('luc_emp_concluido_'+ano+'_'+_cronP2(m)+'_'+eid));
+    feito=per==='t'?(!!vals[vals.length-1]||vals.every(Boolean)):!!vals[0];
+    if(feito){ const ds=vals.filter(Boolean).map(_cronDataLocal).filter(Boolean); if(ds.length) data=ds.sort().pop(); }
+  }
+  const st=_cronStatus(prazo,feito,data,hoje);
+  return {aplica:true,comp,grupo,prazo,feito,data,detalhe,st};
+}
+
+let _cronMes=null, _cronCfgAberto=false;
+function _cronDados(){
+  const V=_cronMes||_cronHoje().slice(0,7);
+  const cfg=_cronCfg(), hoje=_cronHoje();
+  const fResp=(document.getElementById('cronResp')||{}).value||'';
+  const fGrupo=(document.getElementById('cronGrupo')||{}).value||'';
+  const fBusca=((document.getElementById('cronBusca')||{}).value||'').toLowerCase().trim();
+  const fSt=(document.getElementById('cronSt')||{}).value||'';
+  const todas=S.emps().slice().sort((a,b)=>Number(a.eid||0)-Number(b.eid||0));
+  const compBase=_cronAddMes(V,-1);
+  const respsSet=new Set();
+  let rows=[];
+  todas.forEach(e=>{
+    const itens={}; let algum=false;
+    CRON_ATIVS.forEach(a=>{ itens[a.id]=_cronCalcItem(e,a.id,V,cfg,hoje); if(itens[a.id].aplica) algum=true; });
+    if(!algum) return;
+    const resp=(e.respMes&&e.respMes[compBase])||e.resp||'—';
+    respsSet.add(resp);
+    rows.push({eid:String(e.eid),nome:e.nome||'',resp,grupo:_cronGrupo(_cronRegimeEm(e,compBase)),reg:_cronRegimeEm(e,compBase),itens});
+  });
+  const rowsBase=rows.filter(r=>(!fResp||r.resp===fResp)&&(!fGrupo||r.grupo===fGrupo)&&(!fBusca||r.nome.toLowerCase().includes(fBusca)||r.eid.includes(fBusca)));
+  const rowsVis=fSt?rowsBase.filter(r=>CRON_ATIVS.some(a=>r.itens[a.id].aplica&&(fSt==='pend'?!r.itens[a.id].feito:r.itens[a.id].st.cod===fSt))):rowsBase;
+  // KPIs e resumo por responsável (sempre sobre rowsBase, independente do filtro de status)
+  const k={total:0,entregue:0,noPrazo:0,comAtraso:0,semData:0,atrasada:0,breve:0,aVencer:0};
+  const porResp={};
+  rowsBase.forEach(r=>{
+    const R=porResp[r.resp]=porResp[r.resp]||{resp:r.resp,total:0,entregue:0,noPrazo:0,comAtraso:0,atrasada:0,aVencer:0};
+    CRON_ATIVS.forEach(a=>{ const it=r.itens[a.id]; if(!it.aplica) return;
+      k.total++; R.total++;
+      if(it.feito){ k.entregue++; R.entregue++; if(it.st.cod==='ok_prazo'){k.noPrazo++;R.noPrazo++;} else if(it.st.cod==='ok_atraso'){k.comAtraso++;R.comAtraso++;} else k.semData++; }
+      else if(it.st.cod==='atrasada'){ k.atrasada++; R.atrasada++; }
+      else { k[it.st.cod==='breve'?'breve':'aVencer']++; R.aVencer++; }
+    });
+  });
+  const resumo=Object.values(porResp).sort((a,b)=>a.resp.localeCompare(b.resp,'pt-BR'));
+  return {V,cfg,hoje,rows:rowsVis,rowsBase,k,resumo,resps:[...respsSet].sort((a,b)=>a.localeCompare(b,'pt-BR'))};
+}
+function _cronRegraTxt(cfg,ativ,grupo){
+  const r=cfg.regras[ativ][grupo]; const per=_cronPer(ativ,grupo,r);
+  const dia=(r.dia==='U'||String(r.dia).toUpperCase()==='U')?'o último dia':'o dia '+r.dia;
+  const apos=Number(r.apos)===1?'do mês seguinte':'do '+r.apos+'º mês após';
+  return (per==='t'?'Trimestral':'Mensal')+' · até '+dia+' '+apos+(per==='t'?' ao fim do trimestre':' à competência');
+}
+function _cronPrazoNoMes(cfg,ativ,grupo,V){
+  const r=cfg.regras[ativ][grupo]; const per=_cronPer(ativ,grupo,r);
+  const comp=_cronAddMes(V,-r.apos);
+  if(per==='t'&&![3,6,9,12].includes(+comp.slice(5))) return {txt:'Sem vencimento neste mês',comp:null,prazo:null};
+  const prazo=_cronPrazo(comp,r);
+  return {txt:'Comp. '+fmtMes(comp)+' → '+_cronBR(prazo),comp,prazo};
+}
+const _cronCor={g:['var(--green-bg)','var(--green)'],a:['var(--amber-bg)','var(--amber)'],r:['var(--red-bg)','var(--red)'],b:['var(--blue-bg)','var(--blue)']};
+
+function renderCronograma(){
+  const root=document.getElementById('cronRoot'); if(!root) return;
+  if(!_cronMes) _cronMes=_cronHoje().slice(0,7);
+  // preserva os filtros entre re-renderizações
+  const keep={}; ['cronResp','cronGrupo','cronBusca','cronSt'].forEach(id=>{ const el=document.getElementById(id); if(el) keep[id]=el.value; });
+  const cfg=_cronCfg();
+  // opções de responsável precisam existir antes de calcular
+  const tmpResps=[...new Set(S.emps().flatMap(e=>[e.resp,...Object.values(e.respMes||{})]).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  root.innerHTML=`
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:14px">
+    <div style="display:flex;align-items:center;gap:6px;background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:4px 8px">
+      <button class="btn" style="padding:4px 10px;background:none;color:var(--ink)" onclick="cronMesMover(-1)" title="Mês anterior">&#8249;</button>
+      <input type="month" id="cronMesIn" value="${_cronMes}" onchange="cronMesSet(this.value)" style="border:none;background:transparent;color:var(--ink);font-size:14px;font-weight:700;font-family:var(--sans)">
+      <button class="btn" style="padding:4px 10px;background:none;color:var(--ink)" onclick="cronMesMover(1)" title="Próximo mês">&#8250;</button>
+    </div>
+    <span style="font-size:12px;color:var(--slate)">Mês de <b>vencimento</b> das entregas</span>
+    <div style="flex:1"></div>
+    <button class="btn bo bsm" onclick="cronToggleCfg()">⚙ Prazos e datas de entrega</button>
+    <button class="action-btn action-btn-pdf" onclick="cronExportarPDF()">📄 Gerar PDF</button>
+    <button class="action-btn action-btn-excel" onclick="cronExportarExcel()">📊 Gerar Excel</button>
+  </div>
+  <div id="cronCfgBox" style="display:${_cronCfgAberto?'block':'none'};margin-bottom:16px"></div>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px">
+    <select class="si" id="cronResp" onchange="cronAtualizar()"><option value="">Todos os responsáveis</option>${tmpResps.map(r=>`<option>${esc(r)}</option>`).join('')}</select>
+    <select class="si" id="cronGrupo" onchange="cronAtualizar()"><option value="">Todos os regimes</option>${CRON_GRUPOS.map(g=>`<option>${g}</option>`).join('')}</select>
+    <select class="si" id="cronSt" onchange="cronAtualizar()">
+      <option value="">Todos os status</option><option value="pend">Somente pendentes</option><option value="atrasada">Atrasadas</option><option value="breve">Vencendo em breve</option><option value="a_vencer">A vencer</option><option value="ok_prazo">Entregues no prazo</option><option value="ok_atraso">Entregues com atraso</option><option value="ok">Entregues (sem data)</option></select>
+    <input class="fi" id="cronBusca" placeholder="Buscar empresa ou ID…" oninput="cronAtualizar()" style="width:240px">
+  </div>
+  <div id="cronCorpo"></div>`;
+  Object.entries(keep).forEach(([id,v])=>{ const el=document.getElementById(id); if(el) el.value=v; });
+  if(_cronCfgAberto) _cronRenderCfg();
+  cronAtualizar();
+}
+function cronMesMover(d){ _cronMes=_cronAddMes(_cronMes||_cronHoje().slice(0,7),d); const i=document.getElementById('cronMesIn'); if(i) i.value=_cronMes; cronAtualizar(); }
+function cronMesSet(v){ if(/^\d{4}-\d{2}$/.test(v)){ _cronMes=v; cronAtualizar(); } }
+function cronToggleCfg(){ _cronCfgAberto=!_cronCfgAberto; const b=document.getElementById('cronCfgBox'); if(b){ b.style.display=_cronCfgAberto?'block':'none'; if(_cronCfgAberto) _cronRenderCfg(); } }
+
+function cronAtualizar(){
+  const el=document.getElementById('cronCorpo'); if(!el) return;
+  const D=_cronDados(); const {V,cfg,k,resumo}=D;
+  const pct=k.total?Math.round(k.entregue/k.total*100):0;
+  const card=(t,v,cor,sub)=>`<div style="flex:1;min-width:150px;background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:12px 14px"><div style="font-size:11px;color:var(--slate);text-transform:uppercase;letter-spacing:.04em">${t}</div><div style="font-size:26px;font-weight:700;color:${cor||'var(--ink)'};margin-top:2px">${v}</div>${sub?`<div style="font-size:11px;color:var(--slate)">${sub}</div>`:''}</div>`;
+  const entCron=V+'-'+_cronP2(cfg.entregaCronogramaDia), entCtl=_cronAddMes(V,1)+'-'+_cronP2(cfg.entregaControleDia);
+  let h=`<div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:16px">
+    ${card('Tarefas no mês',k.total,'','de '+D.rowsBase.length+' empresas')}
+    ${card('Entregues',k.entregue,'var(--green)',pct+'% do total')}
+    ${card('Atrasadas',k.atrasada,'var(--red)','pendentes vencidas')}
+    ${card('Vencem em breve',k.breve,'var(--amber)','até 3 dias')}
+    ${card('A vencer',k.aVencer,'var(--blue)','')}
+    ${card('Entregues c/ atraso',k.comAtraso,'var(--amber)','com data registrada')}
+  </div>
+  <div style="font-size:12px;color:var(--slate);margin-bottom:14px">Entrega do cronograma deste mês: até <b>${_cronBR(entCron)}</b> &nbsp;•&nbsp; Entrega do controle mensal: até <b>${_cronBR(entCtl)}</b></div>`;
+  // 1) Definição das atividades e prazos
+  h+=`<div class="ptitle" style="font-size:15px;margin:6px 0 8px">1. Cronograma — atividades e prazos de ${fmtMes(V)}</div>
+  <div style="overflow-x:auto;margin-bottom:22px"><table style="width:100%;border-collapse:collapse;font-size:12.5px;background:var(--white)"><thead><tr>
+    <th style="${_cronTh()}">Atividade</th><th style="${_cronTh()}">Definição</th>${CRON_GRUPOS.map(g=>`<th style="${_cronTh()}">${g}</th>`).join('')}</tr></thead><tbody>`;
+  CRON_ATIVS.forEach(a=>{
+    h+=`<tr><td style="${_cronTd()};font-weight:700">${a.nome}</td><td style="${_cronTd()};color:var(--slate);min-width:220px">${a.desc}</td>${CRON_GRUPOS.map(g=>{ const p=_cronPrazoNoMes(cfg,a.id,g,V); return `<td style="${_cronTd()}"><div style="font-size:11px;color:var(--slate)">${_cronRegraTxt(cfg,a.id,g)}</div><div style="font-weight:600;margin-top:2px;${p.prazo?'':'color:var(--slate);font-weight:400'}">${p.txt}</div></td>`; }).join('')}</tr>`;
+  });
+  h+=`</tbody></table></div>`;
+  // 2) Resumo por responsável
+  h+=`<div class="ptitle" style="font-size:15px;margin:6px 0 8px">2. Desempenho por responsável</div>
+  <div style="overflow-x:auto;margin-bottom:22px"><table style="width:100%;border-collapse:collapse;font-size:12.5px;background:var(--white)"><thead><tr>
+    ${['Responsável','Tarefas','Entregues','No prazo','Com atraso','A vencer','Atrasadas','% concluído'].map((t,i)=>`<th style="${_cronTh()};${i?'text-align:center':''}">${t}</th>`).join('')}</tr></thead><tbody>`;
+  if(!resumo.length) h+=`<tr><td colspan="8" style="${_cronTd()};color:var(--slate)">Nenhuma tarefa com vencimento neste mês.</td></tr>`;
+  resumo.forEach(r=>{ const p=r.total?Math.round(r.entregue/r.total*100):0;
+    h+=`<tr><td style="${_cronTd()};font-weight:600">${esc(r.resp)}</td>${[r.total,r.entregue,r.noPrazo,r.comAtraso,r.aVencer,r.atrasada].map((v,i)=>`<td style="${_cronTd()};text-align:center;${i===5&&v?'color:var(--red);font-weight:700':''}">${v}</td>`).join('')}<td style="${_cronTd()};text-align:center;font-weight:700;color:${p>=100?'var(--green)':p>=50?'var(--amber)':'var(--red)'}">${p}%</td></tr>`; });
+  h+=`</tbody></table></div>`;
+  // 3) Controle por empresa
+  h+=`<div class="ptitle" style="font-size:15px;margin:6px 0 8px">3. Controle mensal — entregas e pendências <span style="font-size:12px;font-weight:400;color:var(--slate)">(${D.rows.length} empresa${D.rows.length!==1?'s':''})</span></div>
+  <div style="overflow:auto;max-height:70vh;border:1px solid var(--border);border-radius:var(--r)"><table style="width:100%;border-collapse:collapse;font-size:12px;background:var(--white)"><thead style="position:sticky;top:0;z-index:2"><tr>
+    <th style="${_cronTh()}">ID</th><th style="${_cronTh()}">Empresa</th><th style="${_cronTh()}">Regime</th><th style="${_cronTh()}">Responsável</th>${CRON_ATIVS.map(a=>`<th style="${_cronTh()};min-width:190px">${a.nome}</th>`).join('')}</tr></thead><tbody>`;
+  if(!D.rows.length) h+=`<tr><td colspan="7" style="${_cronTd()};color:var(--slate)">Nenhuma empresa para os filtros escolhidos.</td></tr>`;
+  D.rows.forEach(r=>{
+    h+=`<tr><td style="${_cronTd()};font-family:var(--mono)">${esc(r.eid)}</td><td style="${_cronTd()};font-weight:600">${esc(r.nome)}</td><td style="${_cronTd()};color:var(--slate)">${esc(r.reg||'—')}</td><td style="${_cronTd()}">${esc(r.resp)}</td>`;
+    CRON_ATIVS.forEach(a=>{ const it=r.itens[a.id];
+      if(!it.aplica){ h+=`<td style="${_cronTd()};color:var(--slate)">—</td>`; return; }
+      const [bg,fg]=_cronCor[it.st.cor];
+      h+=`<td style="${_cronTd()}"><span class="badge" style="background:${bg};color:${fg}">${it.st.txt}</span><div style="font-size:11px;color:var(--slate);margin-top:3px">Comp. ${fmtMes(it.comp)} · prazo ${_cronBR(it.prazo)}</div>${it.feito?(it.data?`<div style="font-size:11px;color:var(--slate)">Entregue em ${_cronBR(it.data)}</div>`:''):(it.detalhe?`<div style="font-size:11px;color:var(--slate)">${it.detalhe}</div>`:'')}</td>`; });
+    h+=`</tr>`;
+  });
+  h+=`</tbody></table></div>`;
+  el.innerHTML=h;
+}
+function _cronTh(){ return 'padding:8px 10px;text-align:left;background:var(--ink2);color:#fff;font-size:11px;font-weight:700;white-space:nowrap;border-bottom:1px solid var(--border)'; }
+function _cronTd(){ return 'padding:7px 10px;border-bottom:1px solid var(--border);vertical-align:top'; }
+
+// ── Configuração dos prazos ────────────────────────────────────────────────
+function _cronRenderCfg(){
+  const box=document.getElementById('cronCfgBox'); if(!box) return;
+  const cfg=_cronCfg();
+  let h=`<div style="background:var(--white);border:1px solid var(--border);border-radius:var(--r);padding:14px 16px">
+    <div style="font-weight:700;margin-bottom:4px">Regras de prazo por regime tributário</div>
+    <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Prazo = <b>dia</b> (número, ou <b>U</b> para o último dia do mês) do mês que fica <b>N meses após</b> a competência. Ex.: Fechamento de 06/2026 com "U" e 1 mês após → 31/07/2026. Em <b>Ganhos e Rendimentos</b> o período segue o módulo (Lucro Presumido = trimestral; demais = mensal).</div>
+    <div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12.5px"><thead><tr><th style="${_cronTh()}">Atividade</th>${CRON_GRUPOS.map(g=>`<th style="${_cronTh()}">${g}</th>`).join('')}</tr></thead><tbody>`;
+  CRON_ATIVS.forEach(a=>{
+    h+=`<tr><td style="${_cronTd()};font-weight:600">${a.nome}</td>`;
+    CRON_GRUPOS.forEach((g,gi)=>{ const r=cfg.regras[a.id][g]; const id=a.id+'_'+gi;
+      h+=`<td style="${_cronTd()}"><div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+        <input class="fi" id="cc_dia_${id}" value="${r.dia}" style="width:52px;padding:4px 6px;text-align:center" title="Dia (número) ou U = último dia">
+        <select class="si" id="cc_apos_${id}" style="width:auto;padding:4px 6px">${[1,2,3].map(n=>`<option value="${n}" ${Number(r.apos)===n?'selected':''}>${n} mês${n>1?'es':''} após</option>`).join('')}</select>
+        ${a.id==='lucros'?`<select class="si" id="cc_per_${id}" style="width:auto;padding:4px 6px"><option value="m" ${r.per==='m'?'selected':''}>Mensal</option><option value="t" ${r.per==='t'?'selected':''}>Trimestral</option></select>`:''}
+      </div></td>`; });
+    h+=`</tr>`;
+  });
+  h+=`</tbody></table></div>
+    <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:center;margin-top:12px">
+      <label style="font-size:12.5px">Entrega do <b>cronograma</b> até o dia <input class="fi" id="cc_entCron" value="${cfg.entregaCronogramaDia}" style="width:56px;padding:4px 6px;text-align:center;display:inline-block"> <span style="color:var(--slate)">do próprio mês</span></label>
+      <label style="font-size:12.5px">Entrega do <b>controle mensal</b> até o dia <input class="fi" id="cc_entCtl" value="${cfg.entregaControleDia}" style="width:56px;padding:4px 6px;text-align:center;display:inline-block"> <span style="color:var(--slate)">do mês seguinte</span></label>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:12px"><button class="btn bp bsm" onclick="cronSalvarCfg()">Salvar prazos</button><button class="btn bo bsm" onclick="cronRestaurarCfg()">Restaurar padrão</button></div>
+  </div>`;
+  box.innerHTML=h;
+}
+function cronSalvarCfg(){
+  const cfg=_cronCfgPadrao();
+  CRON_ATIVS.forEach(a=>CRON_GRUPOS.forEach((g,gi)=>{
+    const id=a.id+'_'+gi;
+    let dia=String((document.getElementById('cc_dia_'+id)||{}).value||'').trim().toUpperCase();
+    if(dia!=='U'){ const n=parseInt(dia,10); dia=(n>=1&&n<=31)?n:cfg.regras[a.id][g].dia; }
+    cfg.regras[a.id][g]={per:(document.getElementById('cc_per_'+id)||{}).value||cfg.regras[a.id][g].per,dia,apos:parseInt((document.getElementById('cc_apos_'+id)||{}).value,10)||1};
+  }));
+  const dc=parseInt((document.getElementById('cc_entCron')||{}).value,10), dk=parseInt((document.getElementById('cc_entCtl')||{}).value,10);
+  cfg.entregaCronogramaDia=(dc>=1&&dc<=31)?dc:1; cfg.entregaControleDia=(dk>=1&&dk<=31)?dk:5;
+  S.s('cron_config',cfg);
+  toast('Prazos salvos.','ok'); cronAtualizar(); _cronRenderCfg();
+}
+function cronRestaurarCfg(){
+  if(!confirm('Restaurar os prazos padrão (regras da diretoria)?')) return;
+  S.s('cron_config',{}); toast('Prazos padrão restaurados.','ok'); cronAtualizar(); _cronRenderCfg();
+}
+
+// ── Exportações (todas as empresas, um único arquivo) ─────────────────────
+function _cronTxtItem(it){ return it.aplica?(it.st.txt+' — comp. '+fmtMes(it.comp)+', prazo '+_cronBR(it.prazo)+(it.feito&&it.data?', entregue em '+_cronBR(it.data):'')+(!it.feito&&it.detalhe?' ('+it.detalhe+')':'')):'—'; }
+function cronExportarExcel(){
+  if(typeof XLSX==='undefined'){ toast('Biblioteca de Excel não carregada.','err'); return; }
+  const D=_cronDados(), {V,cfg,k}=D;
+  const entCron=V+'-'+_cronP2(cfg.entregaCronogramaDia), entCtl=_cronAddMes(V,1)+'-'+_cronP2(cfg.entregaControleDia);
+  const ws1=[['JJR Consultoria Contábil S/S'],['Cronograma e Controle Mensal — vencimentos de '+fmtMes(V)],['Emitido em '+_cronBR(D.hoje)+(currentUser&&currentUser.nome?' por '+currentUser.nome:'')],
+    ['Entrega do cronograma até',_cronBR(entCron)],['Entrega do controle mensal até',_cronBR(entCtl)],[],
+    ['RESUMO'],['Tarefas no mês',k.total],['Entregues',k.entregue],['Entregues no prazo',k.noPrazo],['Entregues com atraso',k.comAtraso],['Entregues (sem data registrada)',k.semData],['Atrasadas',k.atrasada],['Vencem em breve (até 3 dias)',k.breve],['A vencer',k.aVencer],['% concluído',k.total?Math.round(k.entregue/k.total*100)+'%':'—'],[],
+    ['CRONOGRAMA — ATIVIDADES E PRAZOS'],['Atividade','Definição',...CRON_GRUPOS]];
+  CRON_ATIVS.forEach(a=>ws1.push([a.nome,a.desc,...CRON_GRUPOS.map(g=>_cronRegraTxt(cfg,a.id,g)+' | '+_cronPrazoNoMes(cfg,a.id,g,V).txt)]));
+  ws1.push([],['DESEMPENHO POR RESPONSÁVEL'],['Responsável','Tarefas','Entregues','No prazo','Com atraso','A vencer','Atrasadas','% concluído']);
+  D.resumo.forEach(r=>ws1.push([r.resp,r.total,r.entregue,r.noPrazo,r.comAtraso,r.aVencer,r.atrasada,r.total?Math.round(r.entregue/r.total*100)+'%':'—']));
+  const s1=XLSX.utils.aoa_to_sheet(ws1); s1['!cols']=[{wch:34},{wch:60},{wch:44},{wch:44},{wch:44},{wch:44},{wch:14},{wch:14}];
+  const cab=['ID','Empresa','Regime','Responsável'];
+  CRON_ATIVS.forEach(a=>cab.push(a.nome+' — competência',a.nome+' — prazo',a.nome+' — situação',a.nome+' — entregue em',a.nome+' — observação'));
+  const ws2=[cab];
+  D.rows.forEach(r=>{ const l=[r.eid,r.nome,r.reg||'—',r.resp];
+    CRON_ATIVS.forEach(a=>{ const it=r.itens[a.id]; if(!it.aplica){ l.push('—','—','Não se aplica','',''); return; }
+      l.push(fmtMes(it.comp),_cronBR(it.prazo),it.st.txt,it.feito&&it.data?_cronBR(it.data):'',!it.feito?it.detalhe:''); });
+    ws2.push(l); });
+  const s2=XLSX.utils.aoa_to_sheet(ws2); s2['!cols']=[{wch:6},{wch:44},{wch:22},{wch:16},...CRON_ATIVS.flatMap(()=>[{wch:12},{wch:12},{wch:24},{wch:14},{wch:30}])];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,s1,'Cronograma e resumo'); XLSX.utils.book_append_sheet(wb,s2,'Controle por empresa');
+  XLSX.writeFile(wb,'Cronograma_'+V+'.xlsx');
+  toast('Excel gerado.','ok');
+}
+function cronExportarPDF(){
+  const D=_cronDados(), {V,cfg,k}=D;
+  const entCron=V+'-'+_cronP2(cfg.entregaCronogramaDia), entCtl=_cronAddMes(V,1)+'-'+_cronP2(cfg.entregaControleDia);
+  const cores={g:['#DCFCE7','#15803D'],a:['#FEF3C7','#B45309'],r:['#FEE2E2','#B91C1C'],b:['#DBEAFE','#1D4ED8']};
+  const th='background:#1E3558;color:#fff;padding:5px 7px;font-size:10px;text-align:left;border:1px solid #1E3558';
+  const td='padding:4px 7px;border:1px solid #cbd5e1;font-size:10px;vertical-align:top';
+  let h=`<div style="margin-bottom:10px;font-size:11px">Entrega do cronograma: até <b>${_cronBR(entCron)}</b> &nbsp;•&nbsp; Entrega do controle mensal: até <b>${_cronBR(entCtl)}</b></div>
+  <div style="margin-bottom:12px;font-size:11px"><b>Resumo:</b> ${k.total} tarefas · ${k.entregue} entregues (${k.total?Math.round(k.entregue/k.total*100):0}%) · ${k.atrasada} atrasadas · ${k.breve} vencendo em breve · ${k.aVencer} a vencer · ${k.comAtraso} entregues com atraso</div>
+  <div style="font-weight:700;font-size:12px;margin:8px 0 4px">1. Cronograma — atividades e prazos de ${fmtMes(V)}</div>
+  <table style="width:100%;border-collapse:collapse"><tr><th style="${th}">Atividade</th><th style="${th}">Definição</th>${CRON_GRUPOS.map(g=>`<th style="${th}">${g}</th>`).join('')}</tr>`;
+  CRON_ATIVS.forEach(a=>{ h+=`<tr><td style="${td};font-weight:700">${a.nome}</td><td style="${td}">${a.desc}</td>${CRON_GRUPOS.map(g=>`<td style="${td}"><div style="color:#64748B">${_cronRegraTxt(cfg,a.id,g)}</div><b>${_cronPrazoNoMes(cfg,a.id,g,V).txt}</b></td>`).join('')}</tr>`; });
+  h+=`</table><div style="font-weight:700;font-size:12px;margin:14px 0 4px">2. Desempenho por responsável</div><table style="width:100%;border-collapse:collapse"><tr>${['Responsável','Tarefas','Entregues','No prazo','Com atraso','A vencer','Atrasadas','% concluído'].map(t=>`<th style="${th}">${t}</th>`).join('')}</tr>`;
+  D.resumo.forEach(r=>{ h+=`<tr><td style="${td};font-weight:600">${esc(r.resp)}</td>${[r.total,r.entregue,r.noPrazo,r.comAtraso,r.aVencer,r.atrasada].map(v=>`<td style="${td};text-align:center">${v}</td>`).join('')}<td style="${td};text-align:center;font-weight:700">${r.total?Math.round(r.entregue/r.total*100):0}%</td></tr>`; });
+  h+=`</table><div style="font-weight:700;font-size:12px;margin:14px 0 4px;page-break-before:always">3. Controle mensal — entregas e pendências</div><table style="width:100%;border-collapse:collapse"><tr><th style="${th}">ID</th><th style="${th}">Empresa</th><th style="${th}">Regime</th><th style="${th}">Resp.</th>${CRON_ATIVS.map(a=>`<th style="${th}">${a.nome}</th>`).join('')}</tr>`;
+  D.rows.forEach(r=>{ h+=`<tr style="page-break-inside:avoid"><td style="${td}">${esc(r.eid)}</td><td style="${td};font-weight:600">${esc(r.nome)}</td><td style="${td}">${esc(r.reg||'—')}</td><td style="${td}">${esc(r.resp)}</td>`;
+    CRON_ATIVS.forEach(a=>{ const it=r.itens[a.id]; if(!it.aplica){ h+=`<td style="${td};color:#94A3B8">—</td>`; return; }
+      const [bg,fg]=cores[it.st.cor];
+      h+=`<td style="${td}"><span style="background:${bg};color:${fg};padding:1px 6px;border-radius:8px;font-weight:700">${it.st.txt}</span><div style="color:#64748B">Comp. ${fmtMes(it.comp)} · prazo ${_cronBR(it.prazo)}</div>${it.feito?(it.data?`<div style="color:#64748B">Entregue em ${_cronBR(it.data)}</div>`:''):(it.detalhe?`<div style="color:#64748B">${esc(it.detalhe)}</div>`:'')}</td>`; });
+    h+=`</tr>`; });
+  h+=`</table>`;
+  const win=window.open('','_blank','width=1200,height=850');
+  if(!win){ toast('Permita popups para gerar o PDF.','err'); return; }
+  win.document.write(`<html><head><meta charset="UTF-8"><title>Cronograma ${fmtMes(V)}</title><style>@page{size:landscape;margin:10mm}body{font-family:Arial,sans-serif;color:#1E3558;margin:12px}</style></head><body>${_jjrHeader('Cronograma e Controle Mensal &bull; vencimentos de '+fmtMes(V)+' &bull; '+_cronBR(D.hoje))}${h}</body></html>`);
+  win.document.close();
+  setTimeout(()=>{ win.print(); },700);
+}
+
 </script>
 </body>
 </html>
