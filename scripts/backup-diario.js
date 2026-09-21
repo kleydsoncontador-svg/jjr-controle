@@ -35,6 +35,7 @@ async function main() {
     const { data: page, error } = await supabase
       .from('dados_app')
       .select('*')
+      .order('key', { ascending: true }) // ordem estável: sem ela a paginação pode pular/duplicar linhas
       .range(from, from + PAGE_SIZE - 1);
     if (error) {
       console.error('❌ Erro ao buscar dados:', error);
