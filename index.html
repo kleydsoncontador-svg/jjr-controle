@@ -694,6 +694,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
 <script src="razao-parser.js?v=1"></script>
 <script src="contabil-parsers.js?v=1"></script>
 <script src="contabil-import.js?v=1"></script>
+<script src="itau-extrato-parsers.js?v=1"></script>
 <script src="supabase-config.js"></script>
 </head>
 <body>
@@ -30274,6 +30275,22 @@ async function _lancctbParsearExtratoItauMensal(pdf){
   return {lancamentos,saldoAnteriorDoc,saldoFinalDoc};
 }
 
+// Itaú — 2 modelos novos (sem IA), reconhecidos pelo cabeçalho: "Itaú Empresas — Extrato de dd/mm até dd/mm" e
+// "Lançamentos do período" (com Razão Social/CNPJ). Lógica em itau-extrato-parsers.js (testada com os 8 extratos
+// reais da MRS, jan–ago/2026). Devolve null se o layout não for um dos dois → o fluxo segue pros outros leitores.
+async function _lancctbParsearExtratoItauModelosNovos(pdf){
+  if(!window.ItauExtratoParsers) return null;
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const c=await (await pdf.getPage(p)).getTextContent();
+    paginas.push({num:p,items:c.items.filter(i=>i.str&&i.str.trim()).map(i=>({str:i.str,x:i.transform[4],y:i.transform[5],w:i.width}))});
+  }
+  if(!window.ItauExtratoParsers.reconhecer(paginas)) return null;
+  const r=window.ItauExtratoParsers.parse(paginas);
+  if(!r) return null;
+  return {lancamentos:r.lancamentos,saldoAnteriorDoc:r.saldoAnteriorDoc!=null?r.saldoAnteriorDoc:null,saldoFinalDoc:r.saldoFinalDoc!=null?r.saldoFinalDoc:null,layout:r.layout,observacao:r.observacao||(r.validacoes&&r.validacoes.length?('⚠ '+r.validacoes.length+' saldo(s) do dia não batem com o movimento'):(r.saldosDoDia&&r.saldosDoDia.length?' ✓ saldos do dia conferem.':''))};
+}
+
 // ═══ Extratos de C/C de marketplace/fintech (Mercado Pago, ShopeePay) ═══
 // Todos determinísticos (xlsx.js / pdf.js), sem IA. 1 lançamento por
 // transação. Reconhecimento pelo cabeçalho fixo do arquivo.
@@ -31077,7 +31094,7 @@ async function processarLancctbUploadExtrato(forcarIA){
 
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
-        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))
+        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
           ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf));
       })();
@@ -31095,7 +31112,7 @@ async function processarLancctbUploadExtrato(forcarIA){
             : ` ⚠ saldo final calculado (R$ ${_fmt(saldoCalculado)}) diverge do impresso no extrato (R$ ${_fmt(reconhecido.saldoFinalDoc)}) — confira antes de salvar.`;
         }
         const nomeLayout=reconhecido.layout||(reconhecido.mesPt?'Mister Contador':(reconhecido.mesRef?'Banco do Brasil':'Itaú'));
-        status.textContent=`Layout reconhecido (${nomeLayout}, leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}`;
+        status.textContent=`Layout reconhecido (${nomeLayout}, leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confere}${reconhecido.observacao?' '+reconhecido.observacao:''}`;
         _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
         renderLancctbExtratoPreview();
         btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; }
