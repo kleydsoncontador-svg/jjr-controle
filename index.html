@@ -37526,6 +37526,28 @@ function _imovAtualizarRotuloOrigem(){
 // útil NUNCA retroage: na data de vigência, base = Valor Contábil Líquido (VCL)
 // − novo residual; nova cota mensal = base ÷ meses de vida útil restantes.
 // CPC 27 item 54: se residual ≥ VCL, a depreciação para (cota = 0).
+function _depF(v){return 'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});}
+
+// Memória de cálculo por ano (pedido do usuário 21/09/2026): explica, ano a ano, como se chegou
+// à cota e ao valor residual — base depreciável, revisões (CPC 23), depreciação e valor líquido.
+function _depMemoria(rows,p){
+  const f=v=>'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const porAno={};
+  rows.forEach(x=>{const a=porAno[x.ano]=porAno[x.ano]||{dep:0,meses:0,quota:0,acum:0,vcl:0,obs:[]};a.dep+=x.valorRaw;a.meses++;a.quota=x.quota;a.acum=x.acum;a.vcl=x.vcl;
+    if(x.obs&&/Revisão CPC 23/.test(x.obs)) a.obs.push(x.obs.split(' · ').filter(o=>/Revisão CPC 23/.test(o)).join(' · '));});
+  const anos=Object.keys(porAno).sort();
+  return anos.map((ano,i)=>{
+    const a=porAno[ano]; let t=ano+': ';
+    if(i===0){ const dep=Math.max(p.custo-p.residual,0); t+=`base depreciável = custo ${f(p.custo)} − valor residual ${f(p.residual)} = ${f(dep)}; ÷ ${p.vidaMeses} meses de vida útil = cota mensal ${f(dep/p.vidaMeses)}. `; }
+    if(a.obs.length) t+=a.obs.join(' | ')+'. '; else if(i>0) t+=`sem revisão do valor residual — mantida a cota mensal de ${f(a.quota)}. `;
+    t+=`Depreciação do ano ${f(a.dep)} (${a.meses} ${a.meses===1?'mês':'meses'}); acumulada ${f(a.acum)}; valor líquido ${f(a.vcl)}.`;
+    const rev=(p.revisoes||[]).filter(r=>String(r.data).slice(0,4)===ano&&r.obs);
+    if(rev.length) t+=' Justificativa: '+rev.map(r=>r.obs).join(' / ');
+    const fe=(p.fechamentos||[]).filter(fx=>String(fx.ate).slice(0,4)===ano);
+    if(fe.length) t+=' 🔒 Período fechado em '+fe.map(x=>x.ate.split('-').reverse().join('/')).join(', ')+'.';
+    return t;
+  });
+}
 function _depSchedule(p){
   const R2=v=>Math.round(v*100)/100;
   const ini=new Date(p.dataInicio+'T00:00:00'), fim=new Date(p.dataFim+'T00:00:00');
@@ -37548,8 +37570,8 @@ function _depSchedule(p){
         residual=r.residual!=null&&r.residual!==''?Number(r.residual):residual;
         restantes=(r.vidaRestMeses!=null&&r.vidaRestMeses!=='')?Math.max(Math.round(Number(r.vidaRestMeses)),1):Math.max(vidaTotal-decorridos,1);
         const base=vcl-residual;
-        if(base<=0.005){ quota=0; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual)} ≥ VCL ${R2(vcl)} — depreciação interrompida (CPC 27 item 54)`); }
-        else { quota=base/restantes; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual).toFixed(2)}, VCL ${R2(vcl).toFixed(2)}, ${restantes} meses restantes → nova cota ${R2(quota).toFixed(2)}`); }
+        if(base<=0.005){ quota=0; obsExtra.push(`Revisão CPC 23 vigente desde ${r.data.split('-').reverse().join('/')}: novo residual ${_depF(residual)} ≥ valor líquido ${_depF(vcl)} — depreciação interrompida (CPC 27 item 54)`); }
+        else { quota=base/restantes; obsExtra.push(`Revisão CPC 23 vigente desde ${r.data.split('-').reverse().join('/')}: valor líquido ${_depF(vcl)} − novo residual ${_depF(residual)} = base ${_depF(vcl-residual)}; ÷ ${restantes} meses restantes = nova cota ${_depF(quota)}`); }
       }
     });
     const vclAntes=p.custo-acum;
@@ -37697,6 +37719,25 @@ function _imovDepRender(soResultado){
     html=`<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">${kpi('Valor inicial do bem (custo)',fmt(total))}${kpi('Depreciação acumulada','R$ 0,00 (não deprecia)')}${kpi('Valor líquido contábil',fmt(total),'#16a34a')}</div>`;
   }
   c.innerHTML=html;
+  // Memória de cálculo (ano a ano) nas Observações
+  const mem=g('imovDepMemoria');
+  if(mem){
+    let linhas=[];
+    if(modo==='custo'){
+      const cc=_imovDepCalc(d);
+      if(cc){ const vm=Math.max(Math.round(d.vidaAnos*12),1); linhas=_depMemoria(cc.rows,{custo:cc.edif,residual:d.residual,vidaMeses:vm,revisoes:d.revisoes.map(r=>({...r,data:_imovDataIso(r.data)})),fechamentos:_imovDepFech}); }
+    } else if(modo==='valor_justo'){
+      let ant=total; linhas=[...d.valoresJustos].sort((a,b)=>_imovDataIso(a.data)<_imovDataIso(b.data)?-1:1).map(v=>{const t=`${v.data}: valor justo ${fmt(v.valor)} contra ${fmt(ant)} anterior = ${fmt(v.valor-ant)} de ${v.valor-ant<0?'perda':'ganho'} reconhecido no resultado (CPC 28). Sem depreciação.${v.obs?' Base: '+v.obs:''}`; ant=v.valor; return t;});
+    } else linhas=['Sem depreciação: bem mantido pelo custo (CPC 16 / terreno).'];
+    mem.innerHTML=linhas.length?linhas.map(l=>`<div style="padding:3px 0;border-bottom:1px solid var(--border)">${esc(l)}</div>`).join(''):'<span style="color:var(--slate)">Informe início, vida útil e valor da edificação para gerar a memória de cálculo.</span>';
+    window.__imovMemoriaTexto=linhas;
+  }
+}
+function _imovDepMemoriaCopiar(){
+  const l=window.__imovMemoriaTexto||[]; if(!l.length){ toast('Ainda não há memória de cálculo.','err'); return; }
+  const el=document.getElementById('imovObs'); if(!el) return;
+  el.value=(el.value.trim()?el.value.trim()+'\n\n':'')+'MEMÓRIA DE CÁLCULO (valor residual e depreciação):\n'+l.join('\n');
+  toast('Memória de cálculo copiada para as observações.','ok');
 }
 // 🤖 Análise do valor residual pela IA (mesma função da Análise de Imobilizado —
 // vr-pesquisa-mercado — com o contexto do imóvel). i = -1: valor residual inicial;
@@ -37738,6 +37779,26 @@ async function _imovDepIA(i){
 }
 // Recolher/expandir quadros do formulário (pedido do usuário 21/09/2026: "quero poder
 // esconder alguns quadros quando não estiver usando"). Lembra o estado por título no navegador.
+// Coluna ESQUERDA: cadastro + memória de cálculo + observações; DIREITA: mensuração/depreciação,
+// alienação, ganho de capital, partes e pagamentos (pedido do usuário 21/09/2026: quadro grande
+// da memória de cálculo à esquerda, no espaço livre).
+function _imovOrganizarColunas(){
+  const wrap=document.getElementById('imovSecoes'); if(!wrap||wrap.querySelector('.imov-col')) return;
+  const esq=document.createElement('div'); esq.className='imov-col';
+  const dir=document.createElement('div'); dir.className='imov-col';
+  const ESQ=['Informações Básicas','Outros Custos de Aquisição','Localização','Dados do Registro','Classificação Contábil','Memória de Cálculo','Observações'];
+  [...wrap.children].forEach(sec=>{
+    const t=(sec.firstElementChild&&sec.firstElementChild.textContent||'').trim();
+    (ESQ.some(x=>t.indexOf(x)===0)?esq:dir).appendChild(sec);
+  });
+  // ordem dentro da esquerda conforme a lista
+  [...esq.children].sort((a,b)=>{
+    const ta=(a.firstElementChild.textContent||'').trim(), tb=(b.firstElementChild.textContent||'').trim();
+    const ia=ESQ.findIndex(x=>ta.indexOf(x)===0), ib=ESQ.findIndex(x=>tb.indexOf(x)===0);
+    return ia-ib;
+  }).forEach(n=>esq.appendChild(n));
+  wrap.appendChild(esq); wrap.appendChild(dir);
+}
 function _imovColapsadosLer(){ try{ return JSON.parse(localStorage.getItem('imovQuadrosRecolhidos')||'[]'); }catch(e){ return []; } }
 function _imovColapsadosSalvar(l){ try{ localStorage.setItem('imovQuadrosRecolhidos',JSON.stringify(l)); }catch(e){} }
 function _imovAplicarColapso(sec,recolher){
@@ -37747,7 +37808,7 @@ function _imovAplicarColapso(sec,recolher){
 }
 function _imovInstalarColapso(){
   const recolhidos=new Set(_imovColapsadosLer());
-  document.querySelectorAll('#imovSecoes>div').forEach(sec=>{
+  document.querySelectorAll('#imovSecoes .imov-col>div').forEach(sec=>{
     const head=sec.firstElementChild; if(!head||head.querySelector('.imov-toggle')) return;
     const titulo=(head.querySelector('span')||head).textContent.trim();
     if(getComputedStyle(head).display!=='flex'){ head.style.display='flex'; head.style.justifyContent='space-between'; head.style.alignItems='center'; }
@@ -37760,7 +37821,7 @@ function _imovInstalarColapso(){
 }
 function _imovColapsarTudo(recolher){
   const l=new Set();
-  document.querySelectorAll('#imovSecoes>div').forEach(sec=>{ _imovAplicarColapso(sec,recolher); if(recolher&&sec.dataset.titulo) l.add(sec.dataset.titulo); });
+  document.querySelectorAll('#imovSecoes .imov-col>div').forEach(sec=>{ _imovAplicarColapso(sec,recolher); if(recolher&&sec.dataset.titulo) l.add(sec.dataset.titulo); });
   _imovColapsadosSalvar([...l]);
 }
 function _imovDepAddRev(){
@@ -37784,15 +37845,18 @@ function _imovDepFechar(){
   if(!ate){ toast('Ainda não há depreciação até essa data.','err'); return; }
   _imovDepFech.push({ate:ateIso,acumulado:ate.acum,vclEdificacao:ate.vcl,quota:ate.quota,fechadoEm:new Date().toISOString()});
   _imovDepRender();
-  toast('Período fechado até '+ateIso.split('-').reverse().join('/')+' — clique em Salvar Imóvel para gravar.','ok');
+  if(salvarImovel(true)===true) toast('Período fechado até '+ateIso.split('-').reverse().join('/')+' e gravado.','ok');
+  else { _imovDepFech.pop(); _imovDepRender(); }
 }
 function _imovDepReabrir(){
   if(!_imovDepFech.length) return;
   const ult=[..._imovDepFech].sort((a,b)=>a.ate<b.ate?-1:1).slice(-1)[0];
   if(!confirm('Reabrir o fechamento de '+ult.ate.split('-').reverse().join('/')+'?\n\nOs dados do passado voltam a poder ser alterados (e o acumulado recalculado).')) return;
+  const guardado=_imovDepFech.slice();
   _imovDepFech=_imovDepFech.filter(f=>f!==ult&&f.ate!==ult.ate);
   _imovDepRender();
-  toast('Fechamento reaberto — clique em Salvar Imóvel para gravar.','ok');
+  if(salvarImovel(true)===true) toast('Fechamento reaberto e gravado.','ok');
+  else { _imovDepFech=guardado; _imovDepRender(); }
 }
 // Motor compartilhado pela tela e pelo fechamento (modelo custo)
 function _imovDepCalc(d){
@@ -37825,8 +37889,9 @@ function abrirFormImovel(eid,id){
   const lbl=(t,r)=>`<label style="font-size:.78rem;font-weight:600;color:var(--slate)">${t}${r?' <span style="color:#dc2626">*</span>':''}</label>`;
   const fi=(id2,val,ph,type)=>`<input id="${id2}" class="fi" ${type?'type="'+type+'"':''} value="${esc(val||'')}" placeholder="${ph}" style="margin-top:4px;width:100%">`;
   document.getElementById('imoveisFormView').innerHTML=`<style>
-    #imovSecoes{columns:2 620px;column-gap:16px}
-    #imovSecoes>div{break-inside:avoid;margin-bottom:16px}
+    #imovSecoes{display:flex;flex-wrap:wrap;gap:16px;align-items:flex-start}
+    .imov-col{flex:1 1 620px;min-width:0}
+    .imov-col>div{margin-bottom:16px}
     .imov-toggle{background:transparent;border:1px solid #4a6a8a;color:#b8ccdf;border-radius:6px;font-size:.75rem;padding:2px 9px;cursor:pointer;margin-left:10px;line-height:1.4}
     .imov-toggle:hover{background:#2c4a70}
   </style><div style="width:100%;max-width:none">
@@ -37951,6 +38016,10 @@ function abrirFormImovel(eid,id){
       </div>
     </div>
     <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
+      <div style="background:#1E3558;padding:10px 16px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="font-size:.85rem;font-weight:700;color:#fff">Memória de Cálculo — valor residual e depreciação, ano a ano</span><button class="btn bo bsm" type="button" onclick="_imovDepMemoriaCopiar()" title="Acrescenta o texto ao final das observações" style="font-size:.72rem;color:#b8ccdf;border-color:#4a6a8a">📋 Copiar para as observações</button></div>
+      <div style="padding:16px"><div style="font-size:.75rem;color:var(--slate);margin-bottom:8px">Gerada automaticamente: mostra, para cada ano, como se chegou à cota, ao valor residual e ao valor líquido (base depreciável, revisões CPC 23, justificativas e fechamentos).</div><div id="imovDepMemoria" style="font-size:.82rem;line-height:1.55;max-height:75vh;overflow:auto"></div></div>
+    </div>
+    <div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:16px;overflow:hidden">
       <div style="background:#1E3558;padding:10px 16px;font-size:.85rem;font-weight:700;color:#fff">Alienação</div>
       <div style="padding:16px;display:grid;grid-template-columns:1fr 1fr;gap:12px">
         <div>${lbl('Data da Alienação')}${fi('imovAlienData',im&&im.alienacao&&im.alienacao.data,'DD/MM/AAAA')}</div>
@@ -37997,7 +38066,7 @@ function abrirFormImovel(eid,id){
       <button class="btn bp" onclick="salvarImovel()">&#128190; Salvar Imóvel</button>
     </div>
   </div>`;
-  _renderVendedores();_renderPagamentos();_renderClassificacoes();_renderCustos();calcularGanhoCapital();_imovDepRender();_imovInstalarColapso();
+  _renderVendedores();_renderPagamentos();_renderClassificacoes();_renderCustos();calcularGanhoCapital();_imovDepRender();_imovOrganizarColunas();_imovInstalarColapso();
 }
 function fecharFormImovel(){
   document.getElementById('imoveisListView').style.display='block';
@@ -38231,7 +38300,7 @@ function _renderPagamentos(){
 }
 function addPagamentoRow(){_imovPags.push({forma:'',valor:'',banco:'',parcelas:'',obs:''});_renderPagamentos();}
 function removePagamentoRow(i){_imovPags.splice(i,1);if(!_imovPags.length)_imovPags=[{forma:'',valor:'',banco:'',parcelas:'',obs:''}];_renderPagamentos();}
-function salvarImovel(){
+function salvarImovel(silencioso){
   const descricao=(document.getElementById('imovDesc').value||'').trim();
   if(!descricao){toast('Informe uma descrição para o imóvel','err');return;}
   {
@@ -38279,6 +38348,7 @@ function salvarImovel(){
     ganhoCapital:{despesas:_parseValorReaisLivre(document.getElementById('imovGanhoDespesas').value)},
     obs:document.getElementById('imovObs').value.trim()};
   setImoveis(_imovEid,imoveis);
+  if(silencioso===true){ _imovId=id; _imovDepRevsOriginais=JSON.parse(JSON.stringify(imoveis[id].depreciacao.revisoes||[])); return true; }
   toast(_imovId?'Imóvel atualizado!':'Imóvel cadastrado!','ok');
   _imovId=null;fecharFormImovel();_renderImoveisList();
 }

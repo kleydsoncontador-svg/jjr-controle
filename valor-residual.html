@@ -466,6 +466,28 @@ function buildSchedule({ dataAquisicao, dataFinal, valorCusto, valorResidualPct,
 // útil NUNCA retroage: na data de vigência, base = Valor Contábil Líquido (VCL)
 // − novo residual; nova cota mensal = base ÷ meses de vida útil restantes.
 // CPC 27 item 54: se residual ≥ VCL, a depreciação para (cota = 0).
+function _depF(v){return 'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});}
+
+// Memória de cálculo por ano (pedido do usuário 21/09/2026): explica, ano a ano, como se chegou
+// à cota e ao valor residual — base depreciável, revisões (CPC 23), depreciação e valor líquido.
+function _depMemoria(rows,p){
+  const f=v=>'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const porAno={};
+  rows.forEach(x=>{const a=porAno[x.ano]=porAno[x.ano]||{dep:0,meses:0,quota:0,acum:0,vcl:0,obs:[]};a.dep+=x.valorRaw;a.meses++;a.quota=x.quota;a.acum=x.acum;a.vcl=x.vcl;
+    if(x.obs&&/Revisão CPC 23/.test(x.obs)) a.obs.push(x.obs.split(' · ').filter(o=>/Revisão CPC 23/.test(o)).join(' · '));});
+  const anos=Object.keys(porAno).sort();
+  return anos.map((ano,i)=>{
+    const a=porAno[ano]; let t=ano+': ';
+    if(i===0){ const dep=Math.max(p.custo-p.residual,0); t+=`base depreciável = custo ${f(p.custo)} − valor residual ${f(p.residual)} = ${f(dep)}; ÷ ${p.vidaMeses} meses de vida útil = cota mensal ${f(dep/p.vidaMeses)}. `; }
+    if(a.obs.length) t+=a.obs.join(' | ')+'. '; else if(i>0) t+=`sem revisão do valor residual — mantida a cota mensal de ${f(a.quota)}. `;
+    t+=`Depreciação do ano ${f(a.dep)} (${a.meses} ${a.meses===1?'mês':'meses'}); acumulada ${f(a.acum)}; valor líquido ${f(a.vcl)}.`;
+    const rev=(p.revisoes||[]).filter(r=>String(r.data).slice(0,4)===ano&&r.obs);
+    if(rev.length) t+=' Justificativa: '+rev.map(r=>r.obs).join(' / ');
+    const fe=(p.fechamentos||[]).filter(fx=>String(fx.ate).slice(0,4)===ano);
+    if(fe.length) t+=' 🔒 Período fechado em '+fe.map(x=>x.ate.split('-').reverse().join('/')).join(', ')+'.';
+    return t;
+  });
+}
 function _depSchedule(p){
   const R2=v=>Math.round(v*100)/100;
   const ini=new Date(p.dataInicio+'T00:00:00'), fim=new Date(p.dataFim+'T00:00:00');
@@ -488,8 +510,8 @@ function _depSchedule(p){
         residual=r.residual!=null&&r.residual!==''?Number(r.residual):residual;
         restantes=(r.vidaRestMeses!=null&&r.vidaRestMeses!=='')?Math.max(Math.round(Number(r.vidaRestMeses)),1):Math.max(vidaTotal-decorridos,1);
         const base=vcl-residual;
-        if(base<=0.005){ quota=0; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual)} ≥ VCL ${R2(vcl)} — depreciação interrompida (CPC 27 item 54)`); }
-        else { quota=base/restantes; obsExtra.push(`Revisão CPC 23 (${r.data.split('-').reverse().join('/')}): residual ${R2(residual).toFixed(2)}, VCL ${R2(vcl).toFixed(2)}, ${restantes} meses restantes → nova cota ${R2(quota).toFixed(2)}`); }
+        if(base<=0.005){ quota=0; obsExtra.push(`Revisão CPC 23 vigente desde ${r.data.split('-').reverse().join('/')}: novo residual ${_depF(residual)} ≥ valor líquido ${_depF(vcl)} — depreciação interrompida (CPC 27 item 54)`); }
+        else { quota=base/restantes; obsExtra.push(`Revisão CPC 23 vigente desde ${r.data.split('-').reverse().join('/')}: valor líquido ${_depF(vcl)} − novo residual ${_depF(residual)} = base ${_depF(vcl-residual)}; ÷ ${restantes} meses restantes = nova cota ${_depF(quota)}`); }
       }
     });
     const vclAntes=p.custo-acum;
@@ -2306,6 +2328,8 @@ function renderRelatorio(r){
         <div class="fg"><label class="fl">Justificativa</label><input class="fi" id="revObs" placeholder="Ex: valor de mercado dos usados subiu"></div>
         <button class="btn bp" onclick="adicionarRevisaoResidual()">+ Registrar revisão</button>
       </div>
+      <div style="margin-top:14px"><b style="font-size:12.5px">Memória de cálculo do valor residual e da depreciação — ano a ano</b>
+        <div style="font-size:12px;line-height:1.5;margin-top:6px">${_depMemoria(rowsPos,{custo:r.custoBase,residual:r.valorResidual,vidaMeses:Math.max(Math.round((r.vidaUtilAnos||0)*12),1),revisoes:revs,fechamentos:r.fechamentos||[]}).map(l=>'<div style="padding:3px 0;border-bottom:1px solid var(--border)">'+esc(l)+'</div>').join('')}</div></div>
       ${rowsRev ? `<div style="margin-top:14px"><b style="font-size:12.5px">Posição por ano (com as revisões)</b>
         <table><thead><tr><th>Ano</th><th style="text-align:right">Cota mensal ao fim do ano</th><th style="text-align:right">Depreciação do ano</th><th style="text-align:right">Depreciação acumulada</th><th style="text-align:right">Valor contábil líquido</th></tr></thead><tbody>
         ${Object.keys(porAno).sort().map(a=>`<tr><td>${a}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].quotaFim)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].dep)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].acum)}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(porAno[a].vcl)}</td></tr>`).join('')}
