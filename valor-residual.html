@@ -529,6 +529,7 @@ function _vrCronogramaComRevisoes(r){
 async function atualizarSituacaoBem(){
   const r=analiseAtual; if(!r) return;
   const g=id=>document.getElementById(id);
+  if(_vrUltimoFech(r)){ showToast('Há período fechado — reabra o fechamento para mudar a situação do bem.','err'); renderRelatorio(r); return; }
   const tipo=(g('sitTipo')||{}).value||'em_uso';
   r.situacao={ tipo, inicioDepreciacao:(g('sitInicio')||{}).value||'', dataVenda:(g('sitVenda')||{}).value||'' };
   if(tipo==='andamento'&&!r.situacao.inicioDepreciacao){ /* sem data: fica sem depreciar */ }
@@ -537,6 +538,36 @@ async function atualizarSituacaoBem(){
 }
 let _vrRefData='';
 function atualizarPosicaoBem(){ const r=analiseAtual; if(!r) return; _vrRefData=(document.getElementById('sitRef')||{}).value||''; renderRelatorio(r); }
+// Fechamento de período (pedido do usuário 21/09/2026): depois de fechado até uma data, o
+// acumulado até ela não muda — não se altera situação do bem nem revisões já vigentes, e só
+// entram revisões com vigência POSTERIOR ao fechamento.
+function _vrUltimoFech(r){ return (r&&r.fechamentos||[]).reduce((m,f)=>f.ate>m?f.ate:m,''); }
+async function fecharPeriodoBem(){
+  const r=analiseAtual; if(!r) return;
+  const ateBr=((document.getElementById('fechAte')||{}).value||'').trim();
+  const m=ateBr.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); if(!m){ showToast('Informe a data de fechamento (DD/MM/AAAA).','err'); return; }
+  const ate=m[3]+'-'+m[2]+'-'+m[1];
+  const ultDia=new Date(+m[3],+m[2],0).getDate();
+  if(+m[1]!==ultDia){ showToast('O fechamento é sempre no último dia de um mês (ex: 31/12/'+m[3]+').','err'); return; }
+  const ult=_vrUltimoFech(r);
+  if(ult&&ate<=ult){ showToast('Já existe fechamento até '+ult.split('-').reverse().join('/')+'. Feche uma data posterior.','err'); return; }
+  const rows=_vrCronogramaComRevisoes(r);
+  const ym=+m[3]*100+ +m[2];
+  const linha=[...rows].reverse().find(x=>x.ano*100+x.mes<=ym);
+  if(!linha){ showToast('Ainda não há depreciação até essa data.','err'); return; }
+  r.fechamentos=(r.fechamentos||[]).concat([{ate,acumulado:linha.acum,vcl:linha.vcl,quota:linha.quota,fechadoEm:new Date().toISOString()}]);
+  try{ await VRSet('vr_relatorio_'+r.id, r); }catch(e){ r.fechamentos.pop(); showToast('Erro ao salvar o fechamento: '+e.message,'err'); return; }
+  showToast('Período fechado até '+ateBr+'.','ok'); renderRelatorio(r);
+}
+async function reabrirPeriodoBem(){
+  const r=analiseAtual; if(!r||!(r.fechamentos||[]).length) return;
+  const ult=_vrUltimoFech(r);
+  if(!confirm('Reabrir o fechamento de '+ult.split('-').reverse().join('/')+'?\n\nOs dados do passado voltam a poder ser alterados (e o acumulado recalculado).')) return;
+  const guardado=r.fechamentos.slice();
+  r.fechamentos=r.fechamentos.filter(f=>f.ate!==ult);
+  try{ await VRSet('vr_relatorio_'+r.id, r); }catch(e){ r.fechamentos=guardado; showToast('Erro ao salvar: '+e.message,'err'); return; }
+  showToast('Fechamento reaberto.','ok'); renderRelatorio(r);
+}
 async function adicionarRevisaoResidual(){
   const r=analiseAtual; if(!r){ showToast('Abra uma análise primeiro.','err'); return; }
   const data=(document.getElementById('revData')||{}).value;
@@ -545,6 +576,8 @@ async function adicionarRevisaoResidual(){
   const obs=((document.getElementById('revObs')||{}).value||'').trim();
   if(!data||!isFinite(residual)||residual<0){ showToast('Informe a data de vigência e o novo valor residual (R$).','err'); return; }
   if(data<=r.dataAquisicao){ showToast('A vigência da revisão precisa ser posterior à data de aquisição.','err'); return; }
+  const ultF=_vrUltimoFech(r);
+  if(ultF&&data<=ultF){ showToast('Período fechado até '+ultF.split('-').reverse().join('/')+': use uma vigência posterior ou reabra o fechamento.','err'); return; }
   const rev={ data, residual, vidaRestMeses: vidaTxt?parseInt(vidaTxt,10):null, obs, registradaEm:new Date().toISOString() };
   r.revisoes=(r.revisoes||[]).concat([rev]).sort((a,b)=>a.data<b.data?-1:1);
   try{ await VRSet('vr_relatorio_'+r.id, r); }catch(e){ showToast('Erro ao salvar a revisão: '+e.message,'err'); return; }
@@ -553,6 +586,8 @@ async function adicionarRevisaoResidual(){
 }
 async function removerRevisaoResidual(i){
   const r=analiseAtual; if(!r||!r.revisoes) return;
+  const ultR=_vrUltimoFech(r);
+  if(ultR&&r.revisoes[i]&&r.revisoes[i].data<=ultR){ showToast('Esta revisão está em período fechado (até '+ultR.split('-').reverse().join('/')+') — reabra o fechamento para remover.','err'); return; }
   if(!confirm('Remover esta revisão? A depreciação volta a ser calculada sem ela.')) return;
   r.revisoes.splice(i,1);
   try{ await VRSet('vr_relatorio_'+r.id, r); }catch(e){ showToast('Erro ao salvar: '+e.message,'err'); return; }
@@ -2209,6 +2244,21 @@ function renderRelatorio(r){
   const porAno = {};
   if(rowsRev) rowsRev.forEach(x=>{ (porAno[x.ano]=porAno[x.ano]||{dep:0,quotaFim:0,acum:0,vcl:0}); porAno[x.ano].dep+=x.valorRaw; porAno[x.ano].quotaFim=x.quota; porAno[x.ano].acum=x.acum; porAno[x.ano].vcl=x.vcl; });
   const proximoAno = new Date().getFullYear()+ (new Date().getMonth()>=0?1:0);
+  const ultFechR = _vrUltimoFech(r);
+  const rowsInteg = _vrCronogramaComRevisoes(r);
+  const divergentesR = (r.fechamentos||[]).filter(f=>{ const y=+f.ate.slice(0,4)*100+ +f.ate.slice(5,7); const x=[...rowsInteg].reverse().find(q=>q.ano*100+q.mes<=y); return !x||Math.abs(x.acum-f.acumulado)>0.01; });
+  const fechHtml = `
+      <div style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin:12px 0" class="no-print-block">
+        <div class="no-print" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <b style="font-size:12.5px">Fechamento de período</b>
+          <input class="fi" id="fechAte" style="width:120px" value="31/12/${new Date().getFullYear()-1}" title="Último dia do mês a fechar">
+          <button class="btn bp bsm" onclick="fecharPeriodoBem()">🔒 Fechar período</button>
+          <button class="btn bo bsm" onclick="reabrirPeriodoBem()">🔓 Reabrir último fechamento</button>
+        </div>
+        <div style="font-size:11.5px;color:var(--slate);margin:6px 0">Depois de fechado, o acumulado até a data não muda: ficam travados a situação do bem e as revisões já vigentes; só entram revisões com vigência posterior.</div>
+        ${divergentesR.length?`<div style="background:#fee2e2;color:#991b1b;border-radius:6px;padding:8px 12px;margin-bottom:6px;font-size:12px">⚠ Histórico DIVERGENTE do fechamento (${divergentesR.map(f=>f.ate.split('-').reverse().join('/')).join(', ')}): o acumulado recalculado não bate com o gravado — algum dado do passado foi alterado.</div>`:''}
+        ${(r.fechamentos||[]).length?(r.fechamentos||[]).slice().sort((a,b)=>a.ate<b.ate?-1:1).map(f=>`<div style="font-size:12px;padding:2px 0">🔒 Fechado até <b>${f.ate.split('-').reverse().join('/')}</b> · acumulado <b>${formatBRL(f.acumulado)}</b> · cota ${formatBRL(f.quota)} · em ${new Date(f.fechadoEm).toLocaleDateString('pt-BR')}</div>`).join(''):'<div style="font-size:12px;color:var(--slate)">Nenhum período fechado.</div>'}
+      </div>`;
   // Posição contábil na data de referência (valor inicial, depreciado, líquido)
   const hojeIso = new Date().toISOString().slice(0,10);
   const refIso = _vrRefData || hojeIso;
@@ -2246,8 +2296,9 @@ function renderRelatorio(r){
       <div class="sh">8 · Revisão Anual das Estimativas (CPC 23 / CPC 27 item 51)</div>
       <div style="font-size:12.5px;color:var(--slate);margin-bottom:10px">O valor residual e a vida útil devem ser revisados ao menos ao final de cada exercício. A mudança tem <b>efeito prospectivo</b>: nada do que já foi depreciado é recalculado nem estornado — a partir da vigência, a nova cota = (Valor Contábil Líquido − novo residual) ÷ vida útil que ainda resta. Se o novo residual for maior ou igual ao valor contábil líquido, a depreciação é interrompida (CPC 27 item 54).</div>
       ${revs.length ? `<table style="margin-bottom:12px"><thead><tr><th>Vigência</th><th style="text-align:right">Novo residual</th><th>Vida restante (meses)</th><th>Justificativa</th><th></th></tr></thead><tbody>
-        ${revs.map((v,i)=>`<tr><td>${new Date(v.data+'T00:00:00').toLocaleDateString('pt-BR')}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(v.residual)}</td><td>${v.vidaRestMeses!=null?v.vidaRestMeses:'automática (restante da vida útil)'}</td><td style="font-size:11.5px;color:var(--slate)">${esc(v.obs)||'—'}</td><td class="no-print"><button class="btn bo bsm" onclick="removerRevisaoResidual(${i})">🗑</button></td></tr>`).join('')}
+        ${revs.map((v,i)=>`<tr><td>${new Date(v.data+'T00:00:00').toLocaleDateString('pt-BR')}</td><td style="text-align:right;font-family:var(--mono)">${formatBRL(v.residual)}</td><td>${v.vidaRestMeses!=null?v.vidaRestMeses:'automática (restante da vida útil)'}</td><td style="font-size:11.5px;color:var(--slate)">${esc(v.obs)||'—'}</td><td class="no-print">${(ultFechR&&v.data<=ultFechR)?'🔒':`<button class="btn bo bsm" onclick="removerRevisaoResidual(${i})">🗑</button>`}</td></tr>`).join('')}
       </tbody></table>` : '<div style="color:var(--slate);font-size:12.5px;margin-bottom:10px">Nenhuma revisão registrada — a depreciação segue a estimativa inicial.</div>'}
+      ${fechHtml}
       <div class="no-print" style="display:grid;grid-template-columns:150px 170px 190px 1fr auto;gap:8px;align-items:end">
         <div class="fg"><label class="fl">Vigência (geralmente 01/01)</label><input class="fi" id="revData" type="date" value="${proximoAno}-01-01"></div>
         <div class="fg"><label class="fl">Novo valor residual (R$)</label><input class="fi" id="revResidual" placeholder="0,00"></div>
