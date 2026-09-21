@@ -4099,6 +4099,15 @@ function _retentarSincronizacao(k){
   }, function(e){ console.warn('SB retry err',k,e); _tratarFalhaGravacao(k,e); });
 }
 
+function _cccDeepEq(a,b){
+  if(a===b) return true;
+  if(a===null||b===null||typeof a!=='object'||typeof b!=='object') return false;
+  if(Array.isArray(a)!==Array.isArray(b)) return false;
+  const ka=Object.keys(a), kb=Object.keys(b);
+  if(ka.length!==kb.length) return false;
+  for(let i=0;i<ka.length;i++){ const k=ka[i]; if(!Object.prototype.hasOwnProperty.call(b,k)||!_cccDeepEq(a[k],b[k])) return false; }
+  return true;
+}
 const S = {
   g:(k)=>(k in cccCache)?cccCache[k]:null,
   s:(k,v)=>{
@@ -4120,22 +4129,22 @@ const S = {
     // exposto no MÁXIMO à mesma janela de corrida de 10s já existente
     // (RACE_CONDITION_MS) entre salvar e recarregar a própria página — bem
     // mais seguro que deixar um carimbo nunca confirmado válido pra sempre.
-    function marcarConfirmado(){
-      cccLocalUpdatedAt[k]=ts;
+    function marcarConfirmado(tsServidor){
+      cccLocalUpdatedAt[k]=tsServidor||ts;
       cccIdbSet(CCC_META_KEY, cccLocalUpdatedAt);
     }
     if(_supaClient&&k!=='ccc_session'){
-      _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
+      _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).select('updated_at').then(function(r){
         if(r.error){ console.warn('SB save err',k,r.error); _tratarFalhaGravacao(k,r.error); }
-        else { marcarConfirmado(); _limparErroSincronizacao(k); }
+        else { marcarConfirmado(r.data&&r.data[0]&&r.data[0].updated_at); _limparErroSincronizacao(k); }
       }, function(e){ console.warn('SB save err',k,e); _tratarFalhaGravacao(k,e); });
     } else if(!_supaClient&&k!=='ccc_session') {
       // Se Supabase não está pronto, tenta novamente em 500ms
       setTimeout(()=>{
         if(_supaClient){
-          _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).then(function(r){
+          _supaClient.from('dados_app').upsert({key:k,value:v,updated_at:ts}).select('updated_at').then(function(r){
             if(r&&r.error){ console.warn('SB retry err',k,r.error); _tratarFalhaGravacao(k,r.error); }
-            else { marcarConfirmado(); _limparErroSincronizacao(k); }
+            else { marcarConfirmado(r&&r.data&&r.data[0]&&r.data[0].updated_at); _limparErroSincronizacao(k); }
           }, function(e){ console.warn('SB retry err',k,e); _tratarFalhaGravacao(k,e); });
         } else {
           console.warn('SB retry err',k,'Supabase ainda não disponível após 500ms');
@@ -4187,11 +4196,11 @@ async function ccGravarAtomico(key, montarNovoValor, maxTentativas){
     const ts = new Date().toISOString();
     let q = _supaClient.from('dados_app').update({ value: novoValor, updated_at: ts }).eq('key', key);
     q = updatedAtLido ? q.eq('updated_at', updatedAtLido) : q.is('updated_at', null);
-    const { data: upd, error: errUpd } = await q.select('key');
+    const { data: upd, error: errUpd } = await q.select('key,updated_at');
     if(errUpd) throw errUpd;
     if(upd && upd.length){
       cccCache[key]=novoValor; cccIdbSet(key,novoValor);
-      cccLocalUpdatedAt[key]=ts; cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt);
+      cccLocalUpdatedAt[key]=upd[0].updated_at||ts; // o banco regrava updated_at com o relógio dele cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt);
       return novoValor;
     }
     if(!data){
@@ -10251,6 +10260,9 @@ async function _loadFromSupabase(){
           var localTs=cccLocalUpdatedAt[row.key];
           var localMaisNovoDeVerdade=localTs&&row.updated_at
             &&new Date(localTs).getTime()-new Date(row.updated_at).getTime()>RACE_CONDITION_MS;
+          // Relógio do PC adiantado em relação ao banco (visto em 21/09/2026: +233s) faz TODA gravação daqui
+          // parecer "mais nova que o servidor" mesmo com o conteúdo idêntico. Conteúdo igual = não há divergência.
+          if(localMaisNovoDeVerdade&&(row.key in cccCache)&&_cccDeepEq(cccCache[row.key],row.value)) localMaisNovoDeVerdade=false;
           if(!localMaisNovoDeVerdade){
             cccCache[row.key]=row.value;
             cccIdbSet(row.key,row.value); // espelha no IndexedDB como backup local
@@ -46779,7 +46791,7 @@ function _cronDados(){
     });
   });
   const resumo=Object.values(porResp).sort((a,b)=>a.resp.localeCompare(b.resp,'pt-BR'));
-  return {V,cfg,hoje,rows:rowsVis,rowsBase,k,resumo,resps:[...respsSet].sort((a,b)=>a.localeCompare(b,'pt-BR'))};
+  return {V,cfg,hoje,rows:_cronColFiltrar(rowsVis),rowsBase,k,resumo,resps:[...respsSet].sort((a,b)=>a.localeCompare(b,'pt-BR'))};
 }
 // Ganhos e Rendimentos não se aplicam a empresas do Simples Nacional (definição do usuário, 21/09/2026)
 function _cronNaoAplica(ativ,grupo){ return ativ==='ganhos'&&grupo==='Simples Nacional'; }
@@ -46871,22 +46883,62 @@ function cronAtualizar(){
   resumo.forEach(r=>{ const p=r.total?Math.round(r.entregue/r.total*100):0;
     h+=`<tr><td style="${_cronTd()};font-weight:600">${esc(r.resp)}</td>${[r.emp,r.total,r.entregue,r.noPrazo,r.comAtraso,r.aVencer,r.atrasada,r.empDoc,r.empTar].map((v,i)=>`<td style="${_cronTd()};text-align:center;${i===6&&v?'color:var(--red);font-weight:700':''}">${v}</td>`).join('')}<td style="${_cronTd()};text-align:center;font-weight:700;color:${p>=100?'var(--green)':p>=50?'var(--amber)':'var(--red)'}">${p}%</td></tr>`; });
   h+=`</tbody></table></div>`;
-  // 3) Controle por empresa
-  h+=`<div class="ptitle" style="font-size:15px;margin:6px 0 8px">3. Controle mensal — entregas e pendências <span style="font-size:12px;font-weight:400;color:var(--slate)">(${D.rows.length} empresa${D.rows.length!==1?'s':''})</span></div>
+  // 3) Controle por empresa (com filtro em cada coluna)
+  const cf=_cronColF;
+  const selSt=(k,extra)=>`<select class="si" data-cf="${k}" onchange="cronFiltrarCol('${k}',this.value)" style="width:100%;padding:3px 4px;font-size:11px"><option value="">Todos</option>${extra.map(o=>`<option value="${o[0]}" ${cf[k]===o[0]?'selected':''}>${o[1]}</option>`).join('')}</select>`;
+  const optAtiv=[['pend','Pendentes'],['atrasada','Atrasadas'],['breve','Vencem em breve'],['a_vencer','A vencer'],['ok','Entregues (todas)'],['ok_prazo','Entregues no prazo'],['ok_atraso','Entregues com atraso'],['na','Não se aplica']];
+  const fth=(inner)=>`<th style="padding:4px 6px;background:var(--ink3);border-bottom:1px solid var(--border);font-weight:400">${inner}</th>`;
+  h+=`<div class="ptitle" style="font-size:15px;margin:6px 0 8px">3. Controle mensal — entregas e pendências <span id="cronTab3Cont" style="font-size:12px;font-weight:400;color:var(--slate)"></span></div>
   <div style="overflow:auto;max-height:70vh;border:1px solid var(--border);border-radius:var(--r)"><table style="width:100%;border-collapse:collapse;font-size:12px;background:var(--white)"><thead style="position:sticky;top:0;z-index:2"><tr>
-    <th style="${_cronTh()}">ID</th><th style="${_cronTh()}">Empresa</th><th style="${_cronTh()}">Regime</th><th style="${_cronTh()}">Responsável</th>${CRON_ATIVS.map(a=>`<th style="${_cronTh()};min-width:190px">${a.nome}</th>`).join('')}<th style="${_cronTh()};min-width:220px">Tarefas adicionais</th><th style="${_cronTh()};min-width:260px">Documentação recebida</th></tr></thead><tbody>`;
-  if(!D.rows.length) h+=`<tr><td colspan="9" style="${_cronTd()};color:var(--slate)">Nenhuma empresa para os filtros escolhidos.</td></tr>`;
-  D.rows.forEach(r=>{
-    h+=`<tr><td style="${_cronTd()};font-family:var(--mono)">${esc(r.eid)}</td><td style="${_cronTd()};font-weight:600">${esc(r.nome)}</td><td style="${_cronTd()};color:var(--slate)">${esc(r.reg||'—')}</td><td style="${_cronTd()}">${esc(r.resp)}</td>`;
+    <th style="${_cronTh()}">ID</th><th style="${_cronTh()}">Empresa</th><th style="${_cronTh()}">Regime</th><th style="${_cronTh()}">Responsável</th>${CRON_ATIVS.map(a=>`<th style="${_cronTh()};min-width:190px">${a.nome}</th>`).join('')}<th style="${_cronTh()};min-width:220px">Tarefas adicionais</th><th style="${_cronTh()};min-width:260px">Documentação recebida</th></tr>
+    <tr>${fth(`<input class="fi" data-cf="eid" value="${esc(cf.eid||'')}" oninput="cronFiltrarCol('eid',this.value)" placeholder="ID" style="padding:3px 6px;font-size:11px;width:56px">`)}
+    ${fth(`<input class="fi" data-cf="nome" value="${esc(cf.nome||'')}" oninput="cronFiltrarCol('nome',this.value)" placeholder="Filtrar empresa…" style="padding:3px 6px;font-size:11px">`)}
+    ${fth(selSt('grupo',CRON_GRUPOS.map(g=>[g,g])))}
+    ${fth(selSt('resp',D.resps.map(r=>[r,esc(r)])))}
+    ${CRON_ATIVS.map(a=>fth(selSt(a.id,optAtiv))).join('')}
+    ${fth(selSt('tar',[['completas','Completas'],['pend','Com pendência'],['sem','Sem tarefas']]))}
+    ${fth(selSt('docs',[['todos','Todos recebidos'],['pend','Com pendência'],['sem','Sem documentos']]))}</tr></thead><tbody id="cronTab3Body"></tbody></table></div>`;
+  el.innerHTML=h;
+  cronRenderTab3(D);
+}
+const _cronColF={};
+function _cronColFiltrar(rows){
+  const f=_cronColF;
+  const norm=t=>String(t||'').toLowerCase();
+  return rows.filter(r=>{
+    if(f.eid&&!r.eid.includes(f.eid.trim())) return false;
+    if(f.nome&&!norm(r.nome).includes(norm(f.nome).trim())) return false;
+    if(f.grupo&&r.grupo!==f.grupo) return false;
+    if(f.resp&&r.resp!==f.resp) return false;
+    for(const a of CRON_ATIVS){ const v=f[a.id]; if(!v) continue; const it=r.itens[a.id];
+      if(v==='na'){ if(it.aplica) return false; continue; }
+      if(!it.aplica) return false;
+      if(v==='pend'){ if(it.feito) return false; }
+      else if(v==='ok'){ if(!it.feito) return false; }
+      else if(it.st.cod!==v) return false;
+    }
+    if(f.tar){ const t=r.tar; if(f.tar==='sem'?t.aplica:(!t.aplica||(f.tar==='completas'?t.pend.length>0:t.pend.length===0))) return false; }
+    if(f.docs){ const d=r.docs; if(f.docs==='sem'?d.aplica:(!d.aplica||(f.docs==='todos'?d.pend.length>0:d.pend.length===0))) return false; }
+    return true;
+  });
+}
+function cronRenderTab3(D){
+  const body=document.getElementById('cronTab3Body'); if(!body) return;
+  D=D||_cronDados(); const rows=D.rows;
+  const cont=document.getElementById('cronTab3Cont'); if(cont) cont.textContent='('+rows.length+' empresa'+(rows.length!==1?'s':'')+')';
+  let h='';
+  if(!rows.length) h+=`<tr><td colspan="9" style="${_cronTd()};color:var(--slate)">Nenhuma empresa para os filtros escolhidos.</td></tr>`;
+  rows.forEach(r=>{
+    h+=`<tr><td style="${_cronTd()};font-family:var(--mono)">${esc(r.eid)}</td><td style="${_cronTd()};font-weight:600"><a onclick="goEmpresa('${esc(r.eid)}')" title="Abrir a Visão Geral desta empresa" style="cursor:pointer;color:inherit;text-decoration:underline dotted">${esc(r.nome)}</a></td><td style="${_cronTd()};color:var(--slate)">${esc(r.reg||'—')}</td><td style="${_cronTd()}">${esc(r.resp)}</td>`;
     CRON_ATIVS.forEach(a=>{ const it=r.itens[a.id];
       if(!it.aplica){ h+=`<td style="${_cronTd()};color:var(--slate)">—</td>`; return; }
       const [bg,fg]=_cronCor[it.st.cor];
       h+=`<td style="${_cronTd()}"><span class="badge" style="background:${bg};color:${fg}">${it.st.txt}</span><div style="font-size:11px;color:var(--slate);margin-top:3px">Comp. ${fmtMes(it.comp)} · prazo ${_cronBR(it.prazo)}</div>${it.feito?(it.data?`<div style="font-size:11px;color:var(--slate)">Entregue em ${_cronBR(it.data)}</div>`:''):(it.detalhe?`<div style="font-size:11px;color:var(--slate)">${it.detalhe}</div>`:'')}</td>`; });
     h+=_cronCelTar(r)+_cronCelDoc(r)+`</tr>`;
   });
-  h+=`</tbody></table></div>`;
-  el.innerHTML=h;
+  body.innerHTML=h;
 }
+function cronFiltrarCol(k,v){ _cronColF[k]=v; cronRenderTab3(); }
 function _cronCelTar(r){
   const t=r.tar; if(!t.aplica) return `<td style="${_cronTd()};color:var(--slate)">—</td>`;
   if(!t.pend.length) return `<td style="${_cronTd()}"><span class="badge" style="background:var(--green-bg);color:var(--green)">Completas (${t.total})</span></td>`;
