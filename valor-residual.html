@@ -511,12 +511,32 @@ function _depSchedule(p){
 }
 
 // Recalcula o cronograma de uma análise COM as revisões anuais (CPC 23).
+// Situação do bem (pedido do usuário 21/09/2026):
+//  • em_uso    — deprecia desde a aquisição/disponibilidade para uso (CPC 27 itens 55-56);
+//  • andamento — imobilizado em andamento / obra: NÃO deprecia até estar disponível para
+//                uso (CPC 27 item 55); a depreciação começa na "data de início" informada;
+//  • venda     — mantido para venda (CPC 31): pára de depreciar na data da classificação.
 function _vrCronogramaComRevisoes(r){
+  const sit=r.situacao||{tipo:'em_uso'};
   const vidaMeses=Math.max(Math.round((r.vidaUtilAnos||0)*12),1);
-  const ini=new Date(r.dataAquisicao+'T00:00:00');
-  const fim=new Date(ini.getFullYear()+Math.ceil(vidaMeses/12)+40,0,1);
-  return _depSchedule({ dataInicio:r.dataAquisicao, dataFim:fim.toISOString().slice(0,10), custo:r.custoBase, residual:r.valorResidual, vidaUtilMeses:vidaMeses, prorata:true, revisoes:r.revisoes||[] });
+  let inicio=r.dataAquisicao;
+  if(sit.tipo==='andamento'){ if(!sit.inicioDepreciacao) return []; inicio=sit.inicioDepreciacao; }
+  const ini=new Date(inicio+'T00:00:00');
+  let fimIso=new Date(ini.getFullYear()+Math.ceil(vidaMeses/12)+40,0,1).toISOString().slice(0,10);
+  if(sit.tipo==='venda'&&sit.dataVenda){ if(sit.dataVenda<inicio) return []; fimIso=sit.dataVenda; }
+  return _depSchedule({ dataInicio:inicio, dataFim:fimIso, custo:r.custoBase, residual:r.valorResidual, vidaUtilMeses:vidaMeses, prorata:true, revisoes:r.revisoes||[] });
 }
+async function atualizarSituacaoBem(){
+  const r=analiseAtual; if(!r) return;
+  const g=id=>document.getElementById(id);
+  const tipo=(g('sitTipo')||{}).value||'em_uso';
+  r.situacao={ tipo, inicioDepreciacao:(g('sitInicio')||{}).value||'', dataVenda:(g('sitVenda')||{}).value||'' };
+  if(tipo==='andamento'&&!r.situacao.inicioDepreciacao){ /* sem data: fica sem depreciar */ }
+  try{ await VRSet('vr_relatorio_'+r.id, r); }catch(e){ showToast('Erro ao salvar: '+e.message,'err'); return; }
+  renderRelatorio(r);
+}
+let _vrRefData='';
+function atualizarPosicaoBem(){ const r=analiseAtual; if(!r) return; _vrRefData=(document.getElementById('sitRef')||{}).value||''; renderRelatorio(r); }
 async function adicionarRevisaoResidual(){
   const r=analiseAtual; if(!r){ showToast('Abra uma análise primeiro.','err'); return; }
   const data=(document.getElementById('revData')||{}).value;
@@ -2181,12 +2201,46 @@ function renderRelatorio(r){
   const cenarios = r.cenariosSugeridos || {conservador_pct:20, realista_pct:35, otimista_pct:50};
   // Revisões anuais (CPC 23): recalcula o cronograma só quando existem.
   const revs = r.revisoes || [];
-  const rowsRev = revs.length ? _vrCronogramaComRevisoes(r) : null;
+  const sit = r.situacao || {tipo:'em_uso'};
+  const usarMotor = revs.length>0 || sit.tipo!=='em_uso';
+  const rowsRev = usarMotor ? _vrCronogramaComRevisoes(r) : null;
   const cronogramaExibir = rowsRev ? rowsRev.map(x=>({periodo:new Date(x.ano,x.mes-1,1).toLocaleDateString('pt-BR',{month:'long',year:'numeric'}),valor:x.valor,obs:x.obs})) : (r.cronograma||[]);
   const totalDepExibir = rowsRev ? rowsRev.reduce((s,x)=>s+x.valorRaw,0) : r.valorDepreciavel;
   const porAno = {};
   if(rowsRev) rowsRev.forEach(x=>{ (porAno[x.ano]=porAno[x.ano]||{dep:0,quotaFim:0,acum:0,vcl:0}); porAno[x.ano].dep+=x.valorRaw; porAno[x.ano].quotaFim=x.quota; porAno[x.ano].acum=x.acum; porAno[x.ano].vcl=x.vcl; });
   const proximoAno = new Date().getFullYear()+ (new Date().getMonth()>=0?1:0);
+  // Posição contábil na data de referência (valor inicial, depreciado, líquido)
+  const hojeIso = new Date().toISOString().slice(0,10);
+  const refIso = _vrRefData || hojeIso;
+  const rowsPos = _vrCronogramaComRevisoes(r);
+  const refYm = +refIso.slice(0,4)*100 + +refIso.slice(5,7);
+  const ateRef = [...rowsPos].reverse().find(x=>x.ano*100+x.mes<=refYm);
+  const acumRef = ateRef ? ateRef.acum : 0;
+  const residVig = (()=>{ let v=r.valorResidual; revs.forEach(x=>{ if(x.data<=refIso) v=x.residual; }); return v; })();
+  const quotaRef = ateRef ? ateRef.quota : (rowsPos[0]?rowsPos[0].quota:0);
+  const kp = (t,v,cor)=>`<div style="background:var(--bg);border-radius:6px;padding:10px 12px"><div style="font-size:11px;color:var(--slate)">${t}</div><div style="font-size:15px;font-weight:700;${cor?'color:'+cor:''}">${v}</div></div>`;
+  const situacaoHtml = `
+    <div class="sc">
+      <div class="sh">6A · Situação do Bem e Posição Contábil (CPC 27 / CPC 31)</div>
+      <div class="no-print" style="display:grid;grid-template-columns:1.3fr 1fr 1fr 1fr;gap:10px;align-items:end;margin-bottom:12px">
+        <div class="fg"><label class="fl">Situação do bem</label><select class="fi" id="sitTipo" onchange="atualizarSituacaoBem()">
+          <option value="em_uso"${sit.tipo==='em_uso'?' selected':''}>Em uso — deprecia desde a aquisição</option>
+          <option value="andamento"${sit.tipo==='andamento'?' selected':''}>Em andamento / obra — só deprecia quando disponível para uso (CPC 27 item 55)</option>
+          <option value="venda"${sit.tipo==='venda'?' selected':''}>Mantido para venda — para de depreciar (CPC 31)</option></select></div>
+        <div class="fg" style="${sit.tipo==='andamento'?'':'opacity:.45'}"><label class="fl">Início da depreciação (disponível p/ uso)</label><input class="fi" id="sitInicio" type="date" value="${esc(sit.inicioDepreciacao||'')}" onchange="atualizarSituacaoBem()" ${sit.tipo==='andamento'?'':'disabled'}></div>
+        <div class="fg" style="${sit.tipo==='venda'?'':'opacity:.45'}"><label class="fl">Data da classificação p/ venda</label><input class="fi" id="sitVenda" type="date" value="${esc(sit.dataVenda||'')}" onchange="atualizarSituacaoBem()" ${sit.tipo==='venda'?'':'disabled'}></div>
+        <div class="fg"><label class="fl">Posição em</label><input class="fi" id="sitRef" type="date" value="${refIso}" onchange="atualizarPosicaoBem()"></div>
+      </div>
+      ${sit.tipo==='andamento'&&!sit.inicioDepreciacao?'<div style="font-size:12px;color:#b45309;margin-bottom:10px">Bem em andamento: sem depreciação até informar a data em que ficou disponível para uso.</div>':''}
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px">
+        ${kp('Valor inicial (custo)',formatBRL(r.custoBase))}
+        ${kp('Valor residual vigente',formatBRL(residVig))}
+        ${kp('Valor depreciável',formatBRL(Math.max(r.custoBase-residVig,0)))}
+        ${kp('Depreciação acumulada',formatBRL(acumRef),'#b45309')}
+        ${kp('Cota mensal vigente',formatBRL(sit.tipo==='venda'?0:quotaRef))}
+        ${kp('Valor líquido contábil',formatBRL(r.custoBase-acumRef),'#16a34a')}
+      </div>
+    </div>`;
   const revisaoHtml = `
     <div class="sc no-print-block">
       <div class="sh">8 · Revisão Anual das Estimativas (CPC 23 / CPC 27 item 51)</div>
@@ -2288,6 +2342,8 @@ REFERÊNCIA: CPC 27 (art. 16, 50-55), Lei 6.404/76 (art. 183), IN RFB nº 1.700/
       </div>
       <div style="margin-top:10px;font-size:12.5px;color:var(--slate)">Taxa de depreciação equivalente: ${((r.depreciacaoMensal*12)/r.custoBase*100).toFixed(2)}% a.a. · Vida útil: ${r.vidaUtilAnos} anos</div>
     </div>
+
+    ${situacaoHtml}
 
     <div class="sc">
       <div class="sh">7 · Documentação Contábil Sugerida</div>
