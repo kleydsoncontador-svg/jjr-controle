@@ -24908,6 +24908,50 @@ async function _lancctbProcessarFonteRegistro(modo){
 // cheio (regra simples). Achou PDF mas ainda não tem Regra → só conta como
 // "com sugestão" no resumo (o usuário resolve manual, e o painel do modal
 // de Regra já mostra esse mesmo PDF como sugestão clicável).
+// ═══ Pagamento único de VÁRIAS guias (achado real 21/09/2026, MRS: SISPAG TRIBUTOS 18/08 = guia PIS/COFINS 3.102,50 + guia Pessoal 533,30) ═══
+// Antes: a guia legível cabia na "folga de 30%" e o resto virava "DIFERENÇA" — errado, o resto era OUTRA guia. Agora, antes da folga,
+// procura combinação de 2+ guias do mês cuja soma bate o pagamento. Guia que é só imagem (sem texto) entra pelo valor que falta,
+// mas só se for a ÚNICA guia sem texto com vencimento próximo do pagamento (senão fica ambíguo e nada é inferido).
+async function _lancctbLerGuiasDoMes(eid,anoMes,permitirIA){
+  const cand=await _lancctbBuscarPdfsTributosDoMes(eid,anoMes); const out=[];
+  for(const f of cand){
+    let extraido=null;
+    try{ const arq=await f.fileHandle.getFile(); const pdf=await pdfjsLib.getDocument({data:await arq.arrayBuffer()}).promise; extraido=await _lancctbExtrairValorPdfTributo(pdf,permitirIA); }catch(e){ console.warn('guia ilegível',f.nome,e); }
+    out.push({ f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave:anoMes+'|'+f.nome });
+  }
+  return out;
+}
+function _lancctbDiasEntre(isoA,isoB){ return Math.round((new Date(isoA+'T00:00:00Z')-new Date(isoB+'T00:00:00Z'))/86400000); }
+function _lancctbSubconjuntos(arr,min,max){ const out=[]; const n=arr.length; if(n>14) return out; for(let m=1;m<(1<<n);m++){ const sub=[]; for(let i=0;i<n;i++) if(m&(1<<i)) sub.push(arr[i]); if(sub.length>=min&&sub.length<=max) out.push(sub); } return out.sort((a,b)=>a.length-b.length); }
+function _lancctbAcharCombinacaoGuias(valor,dataPag,leituras,usados){
+  const tol=LANCCTB_MATCH_TOLERANCIA_VALOR, r2=x=>Math.round(x*100)/100;
+  const legiveis=leituras.filter(g=>g.extraido&&g.extraido.valor>0&&!usados.has(g.chave));
+  // 1) soma exata de 2 a 4 guias legíveis
+  for(const sub of _lancctbSubconjuntos(legiveis,2,4)){
+    const soma=r2(sub.reduce((s,g)=>s+g.extraido.valor,0));
+    if(Math.abs(soma-valor)<=tol) return { guias:sub.map(g=>({...g,valorUsado:r2(g.extraido.valor),inferido:false})), inferido:false };
+  }
+  // 2) legíveis + UMA guia só-imagem (valor = o que falta), com vencimento perto do pagamento
+  const semTexto=leituras.filter(g=>!g.extraido&&!usados.has(g.chave)&&g.info.vencimento&&Math.abs(_lancctbDiasEntre(g.info.vencimento,dataPag))<=15);
+  if(semTexto.length===1){
+    const ilegivel=semTexto[0];
+    for(const sub of _lancctbSubconjuntos(legiveis,1,3)){
+      const soma=r2(sub.reduce((s,g)=>s+g.extraido.valor,0)), falta=r2(valor-soma);
+      if(falta>=0.01&&falta<valor) return { guias:sub.map(g=>({...g,valorUsado:r2(g.extraido.valor),inferido:false})).concat([{...ilegivel,valorUsado:falta,inferido:true}]), inferido:true };
+    }
+  }
+  return null;
+}
+// itens (1 por imposto/guia) de uma combinação
+function _lancctbItensDaCombinacao(comb){
+  const itens=[];
+  comb.guias.forEach(g=>{
+    const nomeG=_lancctbNomeTributoLegivel(g.info.descricao).nomeCompleto||g.info.descricao;
+    if(!g.inferido&&g.extraido.composicao&&g.extraido.composicao.length){ g.extraido.composicao.forEach(c=>itens.push({ rotulo:String(c.denominacao||'').split(' - ')[0].trim()+(c.codigo?' cód. '+c.codigo:''), valor:Math.round((c.valor||0)*100)/100, guia:g.info.descricao, inferido:false })); }
+    else itens.push({ rotulo:nomeG, valor:g.valorUsado, guia:g.info.descricao, inferido:g.inferido });
+  });
+  return itens;
+}
 async function _lancctbProcessarTributos(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   // Achado real 15/09/2026 (Accurare, TFE 27/07 duplicada 2x): o botão só
@@ -24957,7 +25001,7 @@ async function _lancctbProcessarTributos(){
     .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
   if(!contaBancoInfo?.conta_contabil_id){ if(btn) btn.disabled=false; toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
 
-  const cachePorMes={};
+  const cachePorMes={}, leiturasPorMes={};
   // Bug real 15/09/2026 (Taylu): sem isso, a MESMA guia (ex: 1 DAS) podia
   // bater dentro da folga de 30% contra 2 pagamentos TOTALMENTE diferentes
   // (um pagamento à própria JJR e um Pix a outro fornecedor) na mesma
@@ -25000,6 +25044,35 @@ async function _lancctbProcessarTributos(){
       // aparecia antes na lista e cabia na folga) — guarda a 1ª folga e só usa
       // se nenhum PDF bater exato.
       if(!ehDasArquivo&&dif>0&&dif<=extraido.valor*0.30&&!folga){ folga={f,extraido,diferenca:Math.round(dif*100)/100,chaveArquivo}; }
+    }
+    // Pagamento único de VÁRIAS guias (ver _lancctbAcharCombinacaoGuias) — vem ANTES da folga de 30%, senão a soma vira "DIFERENÇA".
+    if(!achou){
+      if(!leiturasPorMes[anoMes]) leiturasPorMes[anoMes]=await _lancctbLerGuiasDoMes(eid,anoMes,_lancctbTributosPermitirIA);
+      const comb=_lancctbAcharCombinacaoGuias(valor,l.data_pagamento,leiturasPorMes[anoMes],arquivosUsados);
+      if(comb){
+        comb.guias.forEach(g=>arquivosUsados.add(g.chave));
+        const itens=_lancctbItensDaCombinacao(comb);
+        const regrasDosItens=itens.map(it=>regras.find(r=>{ if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false; return r.historico_gatilho&&(it.rotulo+' '+it.guia).toLowerCase().includes(r.historico_gatilho.toLowerCase()); }));
+        const tudoComRegra=regrasDosItens.every(Boolean)&&!itens.some(it=>it.inferido);
+        if(tudoComRegra){
+          // UM crédito no banco (valor total) e UM débito por imposto — nunca linhas de crédito separadas
+          const soma=Math.round(itens.reduce((s,it)=>s+it.valor,0)*100)/100, ajuste=Math.round((valor-soma)*100)/100;
+          const histsIguais=new Set(regrasDosItens.map((r,i)=>r.historico_fixo||itens[i].rotulo)).size===1;
+          const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:histsIguais?(regrasDosItens[0].historico_fixo||itens[0].rotulo):'Pagamentos Diversos', lancamento_extrato_id:l.id, regra_matching_id:regrasDosItens[0].id, origem_match:'regra' }];
+          itens.forEach((it,i)=>{ const r=regrasDosItens[i]; linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:r.plano_contas.classificacao, conta_contabil_id:r.conta_contabil_id, tipo:r.dc, valor:Math.round((it.valor+(i===0?ajuste:0))*100)/100, historico:r.historico_fixo||it.rotulo, lancamento_extrato_id:l.id, regra_matching_id:r.id, origem_match:'regra' }); });
+          const { error: eRpc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+          if(eRpc){ console.error('Erro ao gerar lançamento de várias guias:',eRpc); comSugestao++; continue; }
+          await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+          resolvidos++; continue;
+        }
+        // Falta Regra para algum imposto (ou há guia só-imagem): NÃO divide a linha do extrato e NÃO cria "diferença". Só marca quais guias
+        // compõem o pagamento; o crédito único com vários débitos é montado pelo rateio (Regra com várias linhas) ou "Lançar" manual.
+        const nomes=comb.guias.map(g=>`${g.info.descricao} ${_fmt(g.valorUsado)}${g.inferido?' (valor = o que falta; guia só-imagem, sem texto)':''}`).join(' + ');
+        const jaTem=/^\[PAGAMENTO DE \d+ GUIAS/.test(l.historico_bancario||'');
+        const { error: eMarca } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario: jaTem?l.historico_bancario:`[PAGAMENTO DE ${comb.guias.length} GUIAS: ${nomes}] ${l.historico_bancario||''}`.trim(), origem_importacao:'tributo_composicao' }).eq('id',l.id);
+        if(eMarca) console.error('Erro ao marcar pagamento de várias guias:',eMarca);
+        comSugestao++; continue;
+      }
     }
     if(!achou&&folga){ achou={f:folga.f,extraido:folga.extraido,diferenca:folga.diferenca}; arquivosUsados.add(folga.chaveArquivo); }
     if(!achou){ semAchado++; continue; }
