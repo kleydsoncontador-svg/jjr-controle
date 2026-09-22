@@ -22471,12 +22471,15 @@ async function _lancctbAplicUploadExtrair(usarIA){
     if(usarIA){
       extraido=await _convAplicFinExtrairGenerico(file);
     } else {
-      extraido=await _lancctbAplicParseBradescoPadraoDet(file);
+      // Achado real 22/09/2026 (CLD): existe mais de um layout Bradesco de
+      // Aplicações/Resgates ("Extrato Padrão" e "Extrato de CDBs/LETRAS") —
+      // tenta cada leitor determinístico em sequência antes de cair pra IA.
+      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file));
       if(!extraido){
         statusEl.textContent='';
         if(btn) btn.disabled=false;
         if(btnIa) btnIa.disabled=false;
-        toast('Não reconheci esse layout automaticamente (só "Extrato Padrão" Bradesco por enquanto) — tente "Usar IA Gemini".','err');
+        toast('Não reconheci esse layout automaticamente (só padrões Bradesco por enquanto) — tente "Usar IA Gemini".','err');
         return;
       }
     }
@@ -35166,6 +35169,74 @@ async function _lancctbAplicParseBradescoPadraoDet(file){
   });
   if(!resultado.length) return null;
   return { colunas, linhas: resultado };
+}
+
+// Leitor SEM IA do "Extrato de CDBs/LETRAS" MULTIPRODUTO Bradesco (achado
+// real 22/09/2026, CLD Participação: "Extrato do Cliente - Movimentos" com
+// título "Extrato de CDBs/LETRAS - Para simples conferência" — layout
+// DIFERENTE do "Extrato Padrão" acima, não reconhecido por
+// _lancctbAplicParseBradescoPadraoDet). Reaproveita a MESMA extração de
+// seção/cabeçalho/coluna-por-x já validada em _aplicfinParseBradescoCdbMulti
+// (Ganhos/Rendimentos, que agrega por produto/mês) — mas aqui devolve CADA
+// linha de Aplicação/Resgate individualmente (uma por certificado), no
+// mesmo formato {colunas,linhas} que os demais leitores deste módulo.
+// Datas: Aplicações só tem Emissão+Vencimento (usa a 1ª = Emissão, data
+// efetiva do aporte); Resgates tem Emissão+Vencimento+Pagamento (usa a
+// ÚLTIMA = Pagamento, data efetiva do resgate — mesma convenção de "data
+// mais à direita = a que interessa" já usada no restante do módulo).
+async function _lancctbAplicParseBradescoCdbMultiDet(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let itensTodos=[], texto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const its=_aplicfinItens(page,content).map(i=>({...i,y:i.y+p*100000}));
+    itensTodos=itensTodos.concat(its);
+    texto+=' '+its.map(i=>i.s).join(' ');
+  }
+  texto=texto.replace(/\s+/g,' ');
+  if(!/Extrato\s+do\s+Cliente\s*-\s*Movimentos/i.test(texto)||!/Extrato\s+de\s+CDBs\/LETRAS/i.test(texto)) return null;
+
+  const KEY2LABEL={principal:'Principal',atualizado:'Atualizado',rendimento:'Rendimento',iof:'IOF',ir:'IR',liquido:'Líquido',resgate:'Resgate',credito:'Crédito'};
+  const norm=s=>String(s).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').trim();
+  const ehProdutoTxt=s=>/[A-Za-zÀ-ÿ]/.test(s)&&!/^(produto|total|certificado|emiss|venc|taxa|pagamento|descri|saldo|aplica|resgates)/i.test(norm(s));
+  const SECOES=[
+    [/^Saldo\s+Anterior\s+em/i,'ignorar'],
+    [/^Aplica[çc][õo]es:/i,'aplicacoes'],
+    [/^Resgates:/i,'resgates'],
+    [/^Saldo\s+Atual\s+em/i,'ignorar'],
+  ];
+  const linhasPdf=_aplicfinLinhas(itensTodos,3);
+  let secAtual=null, headerCols=null;
+  const colunasSet=new Set(['Produto','Histórico','Data']);
+  const resultado=[];
+  linhasPdf.forEach(L=>{
+    const txt=L.map(i=>i.s).join(' ').trim();
+    for(const [re,id] of SECOES){ if(re.test(txt)){ secAtual=id; headerCols=null; return; } }
+    if(secAtual!=='aplicacoes'&&secAtual!=='resgates') return;
+    if(/\bProduto\b/i.test(txt)&&/\bPrincipal\b/i.test(txt)){
+      headerCols=L.map(i=>({key:KEY2LABEL[norm(i.s)]?norm(i.s):null,xr:i.xr})).filter(c=>c.key);
+      headerCols.sort((a,b)=>a.xr-b.xr);
+      headerCols.forEach(c=>colunasSet.add(KEY2LABEL[c.key]));
+      return;
+    }
+    if(!headerCols) return;
+    const primeiro=L[0];
+    if(primeiro&&/^Total$/i.test(primeiro.s)&&primeiro.x<45) return; // linha de agregado da seção, não um lançamento
+    if(!primeiro||primeiro.x>60||!ehProdutoTxt(primeiro.s)) return;
+    const datas=L.filter(i=>_aplicfinEhData(i.s)).map(i=>i.s);
+    const dataEfetiva=secAtual==='resgates'?datas[datas.length-1]:datas[0];
+    if(!dataEfetiva) return; // linha incompleta/ruído (ex: cabeçalho repetido) — ignora
+    const linha={ Produto:primeiro.s.trim(), 'Histórico':secAtual==='resgates'?'Resgate':'Aplicação', Data:dataEfetiva };
+    L.filter(i=>_aplicfinEhNum(i.s)).forEach(i=>{
+      const k=_aplicfinColPorHeader(headerCols,i.xr);
+      if(k) linha[KEY2LABEL[k]]=_convCobrParseValor(i.s);
+    });
+    resultado.push(linha);
+  });
+  if(!resultado.length) return null;
+  return { colunas:[...colunasSet], linhas: resultado };
 }
 
 // ── MODELO 3: Bradesco "Extrato de CDBs/LETRAS" MULTIPRODUTO ──
