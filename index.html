@@ -22079,14 +22079,14 @@ async function renderLancctbAplicacoes(){
   let movimentosPorAplicacao={};
   if(aplicacoes&&aplicacoes.length){
     const { data: movs } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras_movimentos')
-      .select('id,aplicacao_id,tipo,data,valor_bruto,valor_liquido,valor_ir,valor_iof,lancamento_extrato_id')
+      .select('id,aplicacao_id,tipo,data,valor_bruto,valor_liquido,valor_principal,valor_ir,valor_iof,lancamento_extrato_id')
       .eq('empresa_eid',eid).order('data',{ascending:true}));
     (movs||[]).forEach(m=>{ (movimentosPorAplicacao[m.aplicacao_id]=movimentosPorAplicacao[m.aplicacao_id]||[]).push(m); });
   }
 
   let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
     <input class="si" data-filtro="aplicacoes-busca" placeholder="🔎 filtrar por nome..." value="${esc(_lancctbAplicacoesFiltro)}" style="flex:1;min-width:220px" oninput="_lancctbAplicacoesFiltroDebounced(this.value)">
-    <button class="btn bo bsm" onclick="baixarLancctbAplicIrIofTxt()" title="Gera um TXT com todas as linhas de IRRF e IOF retidos nos Resgates, pra usar no lançamento contábil">📄 Gerar TXT IRRF/IOF</button>
+    <button class="btn bo bsm" onclick="baixarLancctbAplicIrIofTxt()" title="Gera um TXT com todas as linhas de IRRF e IOF retidos nos Resgates + os Rendimentos lançados manualmente, pra usar no lançamento contábil">📄 Gerar TXT IRRF/IOF/Rendimentos</button>
     <button class="btn bp bsm" onclick="abrirLancctbAplicacaoModal(null)">+ Cadastrar Aplicação Financeira</button>
   </div>
   <div style="margin-bottom:14px">${_lancctbMesPickerHtml(mesAtual,'_lancctbAplicacoesMudarMes')}</div>`;
@@ -22105,17 +22105,21 @@ async function renderLancctbAplicacoes(){
     const conta=a.agencias_bancarias?`${esc(a.agencias_bancarias.banco_nome||'')} Ag ${esc(a.agencias_bancarias.agencia||'')} Cc ${esc(a.agencias_bancarias.conta_corrente||'')}`:'—';
     const contaContabil=a.plano_contas?`${esc(a.plano_contas.numero_conta)} - ${esc(a.plano_contas.descricao)}`:'— sem vínculo —';
     const todosMovs=movimentosPorAplicacao[a.id]||[];
-    // Sinal no saldo da Aplicação: Aplicação/Rendimento entram (+), Resgate
-    // sai (−) pelo valor bruto (o que efetivamente deixa a Aplicação, antes
-    // de IR/IOF retidos na fonte — esses nunca mexem no saldo da Aplicação
-    // em si, só reduzem o que chega líquido na conta corrente).
+    // Sinal no saldo da Aplicação: Aplicação/Rendimento entram (+). Resgate
+    // sai (−) pelo valor LÍQUIDO (pedido do usuário 22/09/2026: "pro cálculo
+    // do saldo da aplicação deduza o líquido" — distinto de qual valor vai
+    // pro Extrato Bancário, que o usuário escolhe à parte em "No Resgate,
+    // usar no Extrato Bancário" — Principal/Bruto/Líquido são coisas
+    // diferentes, uma é o saldo interno da Aplicação, outra é o que sai do
+    // banco). Cai pro Bruto só se a linha não tiver Líquido informado.
+    const valorParaSaldo=m=>m.tipo==='resgate'?(m.valor_liquido!=null?m.valor_liquido:(m.valor_bruto||0)):(m.valor_bruto||0);
     const sinal=m=>m.tipo==='resgate'?-1:1;
     const saldoInicial=a.saldo_inicial||0;
     let saldoAntes=saldoInicial;
-    todosMovs.filter(m=>m.data.slice(0,7)<mesAtual).forEach(m=>{ saldoAntes+=sinal(m)*(m.valor_bruto||0); });
+    todosMovs.filter(m=>m.data.slice(0,7)<mesAtual).forEach(m=>{ saldoAntes+=sinal(m)*valorParaSaldo(m); });
     const movsDoMes=todosMovs.filter(m=>m.data.slice(0,7)===mesAtual);
     let saldoCorrido=saldoAntes;
-    const linhas=movsDoMes.map(m=>{ saldoCorrido+=sinal(m)*(m.valor_bruto||0); return {...m,saldo:saldoCorrido}; });
+    const linhas=movsDoMes.map(m=>{ saldoCorrido+=sinal(m)*valorParaSaldo(m); return {...m,saldo:saldoCorrido}; });
     const statusExtrato=[a.levar_aplicacao_para_extrato?'Aplicações→Extrato':null,a.levar_resgate_para_extrato?'Resgates→Extrato':null].filter(Boolean);
     html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:14px;background:var(--white)">
       <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
@@ -22133,6 +22137,7 @@ async function renderLancctbAplicacoes(){
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn bp bsm" onclick="abrirLancctbAplicacaoMovimentoModal(${a.id})">+ Lançar Movimento</button>
+            <button class="btn bo bsm" onclick="abrirLancctbAplicacaoRendimentoModal(${a.id})" title="Lançamento manual de Rendimento — só soma no saldo da Aplicação, nunca gera lançamento no Extrato Bancário">+ Lançar Rendimento</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicUploadModal(${a.id})" title="Sobe um PDF com várias Aplicações e Resgates (ex: extrato de aplicações do banco) e lança tudo de uma vez — sem IA por padrão, com opção de tentar com IA Gemini">⬆ Importar PDF</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicacaoModal(${a.id})">✎ Editar</button>
             <button class="btn bo bsm" style="color:#dc2626" onclick="excluirLancctbAplicacao(${a.id})">🗑️ Excluir</button>
@@ -22141,11 +22146,12 @@ async function renderLancctbAplicacoes(){
       </div>
       ${linhas.length?`<div style="overflow-x:auto;margin-top:10px;border-top:1px solid var(--border);padding-top:8px">
         <table style="width:100%;border-collapse:collapse;font-size:12px">
-          <thead><tr style="color:var(--slate)"><th style="text-align:left;padding:4px 8px">Data</th><th style="text-align:left;padding:4px 8px">Tipo</th><th style="text-align:right;padding:4px 8px">Bruto</th><th style="text-align:right;padding:4px 8px">Líquido</th><th style="text-align:right;padding:4px 8px">IRRF</th><th style="text-align:right;padding:4px 8px">IOF</th><th style="text-align:right;padding:4px 8px">Saldo</th><th style="padding:4px 8px"></th></tr></thead>
-          <tbody><tr style="border-top:1px solid var(--border);color:var(--slate)"><td colspan="6" style="padding:4px 8px;text-align:right">Saldo anterior</td><td style="padding:4px 8px;text-align:right">R$ ${_fmt(saldoAntes)}</td><td></td></tr>
+          <thead><tr style="color:var(--slate)"><th style="text-align:left;padding:4px 8px">Data</th><th style="text-align:left;padding:4px 8px">Tipo</th><th style="text-align:right;padding:4px 8px">Principal</th><th style="text-align:right;padding:4px 8px">Bruto</th><th style="text-align:right;padding:4px 8px">Líquido</th><th style="text-align:right;padding:4px 8px">IRRF</th><th style="text-align:right;padding:4px 8px">IOF</th><th style="text-align:right;padding:4px 8px">Saldo</th><th style="padding:4px 8px"></th></tr></thead>
+          <tbody><tr style="border-top:1px solid var(--border);color:var(--slate)"><td colspan="7" style="padding:4px 8px;text-align:right">Saldo anterior</td><td style="padding:4px 8px;text-align:right">R$ ${_fmt(saldoAntes)}</td><td></td></tr>
           ${linhas.map(m=>`<tr style="border-top:1px solid var(--border)">
             <td style="padding:4px 8px">${new Date(m.data+'T00:00:00').toLocaleDateString('pt-BR')}</td>
             <td style="padding:4px 8px">${m.tipo==='aplicacao'?'Aplicação':m.tipo==='rendimento'?'Rendimento':'Resgate'}</td>
+            <td style="padding:4px 8px;text-align:right">${m.valor_principal!=null?'R$ '+_fmt(m.valor_principal):'—'}</td>
             <td style="padding:4px 8px;text-align:right">R$ ${_fmt(m.valor_bruto)}</td>
             <td style="padding:4px 8px;text-align:right">${m.valor_liquido!=null?'R$ '+_fmt(m.valor_liquido):'—'}</td>
             <td style="padding:4px 8px;text-align:right">${m.valor_ir!=null?'R$ '+_fmt(m.valor_ir):'—'}</td>
@@ -22244,12 +22250,14 @@ async function excluirLancctbAplicacao(id){
   toast('Aplicação removida','ok');
   renderLancctbAplicacoes();
 }
-function abrirLancctbAplicacaoMovimentoModal(aplicacaoId){
+function abrirLancctbAplicacaoMovimentoModal(aplicacaoId,tipoForcado){
   const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
   if(!a) return;
   document.getElementById('lancctbAplicMovAplicacaoId').value=aplicacaoId;
-  document.getElementById('lancctbAplicMovTitulo').textContent=`Lançar movimento — ${a.nome}`;
-  document.getElementById('lancctbAplicMovTipo').value='aplicacao';
+  document.getElementById('lancctbAplicMovTitulo').textContent=tipoForcado==='rendimento'?`Lançar Rendimento — ${a.nome}`:`Lançar movimento — ${a.nome}`;
+  const selTipo=document.getElementById('lancctbAplicMovTipo');
+  selTipo.value=tipoForcado||'aplicacao';
+  selTipo.disabled=!!tipoForcado;
   document.getElementById('lancctbAplicMovData').value='';
   document.getElementById('lancctbAplicMovValorBruto').value='';
   document.getElementById('lancctbAplicMovValorLiquido').value='';
@@ -22259,6 +22267,10 @@ function abrirLancctbAplicacaoMovimentoModal(aplicacaoId){
   _lancctbAtualizarCampoLiquido();
   openModal('mLancctbAplicacaoMovimento');
 }
+// Botão dedicado (pedido do usuário 22/09/2026: "crie um botão pra incluir
+// rendimento aqui apenas") — mesmo modal, mas já trava o Tipo em
+// "Rendimento" (select desabilitado) pra não precisar escolher toda vez.
+function abrirLancctbAplicacaoRendimentoModal(aplicacaoId){ abrirLancctbAplicacaoMovimentoModal(aplicacaoId,'rendimento'); }
 function _lancctbAtualizarCampoLiquido(){
   const ehResgate=document.getElementById('lancctbAplicMovTipo').value==='resgate';
   document.getElementById('lancctbAplicMovLiquidoWrap').style.display=ehResgate?'':'none';
@@ -22349,39 +22361,52 @@ async function excluirLancctbAplicacaoMovimento(movId){
   renderLancctbAplicacoes();
 }
 
-// Gera um TXT com cada linha de IRRF/IOF retido nos Resgates de todas as
-// Aplicações Financeiras da empresa — pedido do usuário 22/09/2026: "nós
-// poderemos dentro dele, gerar um TXT do IRRF e IOF para lançamento". Não é
-// o TXT de partida dobrada do Registro Contábil (esse já existe, ver
-// exportarLancctbRegistroContabilTxt) — é uma listagem simples, por
-// Aplicação/data, pra apoiar o lançamento manual do IRRF/IOF retido.
+// Gera um TXT com cada linha de IRRF/IOF retido nos Resgates + cada
+// Rendimento lançado manualmente, de todas as Aplicações Financeiras da
+// empresa — pedido do usuário 22/09/2026: "nós poderemos dentro dele, gerar
+// um TXT do IRRF e IOF para lançamento" e depois "o botão do TXT deve levar
+// o rendimento tbm". Não é o TXT de partida dobrada do Registro Contábil
+// (esse já existe, ver exportarLancctbRegistroContabilTxt) — é uma
+// listagem simples, por Aplicação/data, pra apoiar o lançamento manual.
 async function baixarLancctbAplicIrIofTxt(){
   const eid=_lancctbEidAtual;
   const aplicacoes=_lancctbUltimasAplicacoes||[];
   if(!aplicacoes.length){ toast('Nenhuma Aplicação Financeira cadastrada.','err'); return; }
   const nomePorId={}; aplicacoes.forEach(a=>nomePorId[a.id]=a.nome);
 
-  const { data: movs, error } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras_movimentos')
+  const { data: movsResgate, error: e1 } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras_movimentos')
     .select('aplicacao_id,data,valor_ir,valor_iof')
     .eq('empresa_eid',eid).eq('tipo','resgate').or('valor_ir.not.is.null,valor_iof.not.is.null').order('data',{ascending:true}));
-  if(error){ toast('Erro ao buscar movimentos: '+error.message,'err'); return; }
-  const linhas=(movs||[]).filter(m=>(m.valor_ir||0)>0||(m.valor_iof||0)>0);
-  if(!linhas.length){ toast('Nenhum IRRF/IOF lançado ainda nesta empresa.','err'); return; }
+  if(e1){ toast('Erro ao buscar movimentos: '+e1.message,'err'); return; }
+  const { data: movsRendimento, error: e2 } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras_movimentos')
+    .select('aplicacao_id,data,valor_bruto')
+    .eq('empresa_eid',eid).eq('tipo','rendimento').order('data',{ascending:true}));
+  if(e2){ toast('Erro ao buscar rendimentos: '+e2.message,'err'); return; }
+
+  const linhasIrIof=(movsResgate||[]).filter(m=>(m.valor_ir||0)>0||(m.valor_iof||0)>0);
+  const linhasRendimento=movsRendimento||[];
+  if(!linhasIrIof.length&&!linhasRendimento.length){ toast('Nenhum IRRF/IOF/Rendimento lançado ainda nesta empresa.','err'); return; }
 
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   const dataFmt=d=>new Date(d+'T00:00:00').toLocaleDateString('pt-BR');
-  let totalIr=0, totalIof=0;
-  const corpo=linhas.map(m=>{
+  let totalIr=0, totalIof=0, totalRendimento=0;
+  const corpoIrIof=linhasIrIof.map(m=>{
     totalIr+=m.valor_ir||0; totalIof+=m.valor_iof||0;
     return `${dataFmt(m.data)}\t${(nomePorId[m.aplicacao_id]||'').padEnd(35)}\tIRRF ${_fmt(m.valor_ir||0)}\tIOF ${_fmt(m.valor_iof||0)}`;
   }).join('\r\n');
-  const conteudo=`IRRF E IOF RETIDOS — ${(emp?.nome||eid).toUpperCase()}\r\nGerado em ${new Date().toLocaleString('pt-BR')}\r\n\r\nData\t\tAplicação\t\t\t\t\tIRRF\tIOF\r\n${corpo}\r\n\r\nTOTAL IRRF: R$ ${_fmt(totalIr)}\r\nTOTAL IOF:  R$ ${_fmt(totalIof)}\r\n`;
+  const corpoRendimento=linhasRendimento.map(m=>{
+    totalRendimento+=m.valor_bruto||0;
+    return `${dataFmt(m.data)}\t${(nomePorId[m.aplicacao_id]||'').padEnd(35)}\tRendimento ${_fmt(m.valor_bruto||0)}`;
+  }).join('\r\n');
+  const conteudo=`IRRF, IOF E RENDIMENTOS — ${(emp?.nome||eid).toUpperCase()}\r\nGerado em ${new Date().toLocaleString('pt-BR')}\r\n\r\n`
+    +(linhasIrIof.length?`Data\t\tAplicação\t\t\t\t\tIRRF\tIOF\r\n${corpoIrIof}\r\n\r\nTOTAL IRRF: R$ ${_fmt(totalIr)}\r\nTOTAL IOF:  R$ ${_fmt(totalIof)}\r\n\r\n`:'')
+    +(linhasRendimento.length?`Data\t\tAplicação\t\t\t\t\tRendimento\r\n${corpoRendimento}\r\n\r\nTOTAL RENDIMENTOS: R$ ${_fmt(totalRendimento)}\r\n`:'');
 
   const blob=new Blob([conteudo],{type:'text/plain;charset=utf-8'});
   const url=URL.createObjectURL(blob);
   const nomeEmpSlug=(emp?.nome||eid).normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]/g,'_');
   const a=document.createElement('a');
-  a.href=url; a.download=`IRRF_IOF_${nomeEmpSlug}_${new Date().toISOString().split('T')[0]}.txt`; a.click();
+  a.href=url; a.download=`IRRF_IOF_Rendimentos_${nomeEmpSlug}_${new Date().toISOString().split('T')[0]}.txt`; a.click();
   URL.revokeObjectURL(url);
 }
 
