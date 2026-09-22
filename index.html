@@ -34545,6 +34545,236 @@ async function _aplicfinParseItauAplicAutMais(pdf){
   };
 }
 
+// ── MODELO 2: Itaú "Extrato de movimentação mensal - CDB-DI" (ITAU_CDB_DI_MOVIMENTACAO) ──
+// Título e fingerprint DISTINTOS de "APLIC AUT MAIS" (modelo 1 acima) — nunca confundir. 3 seções
+// independentes na mesma página, cada uma com SEU cabeçalho e colunas por coordenada (nunca por ordem
+// de leitura): 1) Movimentação mensal (linha a linha, por Histórico); 2) Resumo do período (só a linha
+// TOTAL, valor oficial do banco — nunca recalculado somando outra tabela); 3) Posição em DD/MM/AAAA
+// (pode continuar na página 2 — só encerra na linha TOTAL, nunca no fim da página 1).
+// Pedido do usuário 22/09/2026, testado com o PDF real de julho/2026 da MRS (161).
+async function _aplicfinParseItauCdbDi(pdf){
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    // Offset de y por página (mesmo truque já usado no Bradesco Padrão): mantém a ordem página 1 → 2
+    // numa lista só, sem misturar coordenadas de páginas diferentes na hora de agrupar em linhas.
+    paginas.push(_aplicfinItens(page,content).map(i=>({...i,y:i.y+p*100000,pagina:p})));
+  }
+  const texto1=paginas[0].map(i=>i.s).join(' ').replace(/\s+/g,' ');
+  if(!/Extrato de movimenta[çc][ãa]o mensal\s*-\s*CDB-DI/i.test(texto1)) return null;
+  const warnings=[], validations=[];
+  const num=v=>_convCobrParseValor(v);
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+
+  // ── 1. Identificação ──
+  const mCnpj=texto1.match(/CPF\/CNPJ:\s*([\d.\/-]+)/i);
+  const cnpj=mCnpj?mCnpj[1]:null;
+  const mAg=texto1.match(/Ag[êe]ncia:\s*(\d+)/i), mConta=texto1.match(/Conta:\s*([\d-]+)/i);
+  const account=(mAg?mAg[1]:'?')+'/'+(mConta?mConta[1]:'?');
+  const mPeriodo=texto1.match(/Per[íi]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s*[àa]\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  let competence=null;
+  if(mPeriodo) competence=mPeriodo[6]+'-'+mPeriodo[5];
+  else warnings.push('Competência não identificada (linha "Período:").');
+
+  const linhasP1=_aplicfinLinhas(paginas[0],3);
+
+  // ── 2/3. Movimentação mensal (seção 1) ──
+  // Cabeçalho em DUAS linhas (topo quebrado + linha principal) — junta os tokens das duas pra achar a
+  // coluna mais próxima de cada valor, nunca por ordem de leitura (colunas nem sempre têm valor em toda linha).
+  const linhaHistTitulo=linhasP1.find(L=>L.some(i=>/^Hist[óo]rico$/i.test(i.s)));
+  const idxHistTitulo=linhaHistTitulo?linhasP1.indexOf(linhaHistTitulo):-1;
+  const headerColsMov=[];
+  if(idxHistTitulo>=0){
+    const linhaTopo=linhasP1[idxHistTitulo-1]||[], linhaBase=linhasP1[idxHistTitulo];
+    const add=(key,itens)=>itens.forEach(i=>headerColsMov.push({key,xr:i.xr}));
+    add('valor_bruto', linhaBase.filter(i=>/^Valor\(\*\)$/i.test(i.s)));
+    add('iof', linhaBase.filter(i=>/^IOF$/i.test(i.s)));
+    add('ir', linhaBase.filter(i=>/^IR$/i.test(i.s)));
+    add('valor_creditado', linhaTopo.filter(i=>/^Valor$/i.test(i.s)&&i.x<400).concat(linhaBase.filter(i=>/^creditado$/i.test(i.s))));
+    add('valor_principal', linhaTopo.filter(i=>/^Valor$/i.test(i.s)&&i.x>=400&&i.x<480).concat(linhaBase.filter(i=>/^principal$/i.test(i.s))));
+    add('remuneracao', linhaTopo.filter(i=>/^Remunera[çc][ãa]o$/i.test(i.s)).concat(linhaBase.filter(i=>i.s==='(%)'&&i.x<520)));
+    add('rentab_periodo', linhaTopo.filter(i=>/^Rentab\.\s*no$/i.test(i.s)).concat(linhaBase.filter(i=>/^per[íi]odo\(%\)$/i.test(i.s))));
+    add('data_aplicacao', linhaTopo.filter(i=>/^Data$/i.test(i.s)&&i.x>600&&i.x<700).concat(linhaBase.filter(i=>/^aplica[çc][ãa]o$/i.test(i.s))));
+    add('data_vencimento', linhaTopo.filter(i=>/^Data$/i.test(i.s)&&i.x>=700).concat(linhaBase.filter(i=>/^vencimento$/i.test(i.s))));
+    add('n_operacao', linhaBase.filter(i=>/^N\.\s*opera[çc][ãa]o$/i.test(i.s)));
+  } else warnings.push('Cabeçalho da Movimentação mensal não encontrado.');
+
+  const mov={applications:0,redemptions:0,redemption_iof:0,redemption_ir:0,redemption_credit:0,redemption_principal:0};
+  let iofInferido=false, iofAmbiguo=false;
+  const linhasMov=idxHistTitulo>=0?linhasP1.slice(idxHistTitulo+1):[];
+  for(const L of linhasMov){
+    const dataTok=L.find(i=>_aplicfinEhData(i.s));
+    if(!dataTok) break; // fim da tabela (próxima seção não começa com data nessa posição)
+    const histTok=L.find(i=>/^(SALDO\s+ANTERIOR|APLICACAO|RESGATE|SALDO\s+FINAL)$/i.test(i.s));
+    if(!histTok) continue;
+    const hist=histTok.s.toUpperCase();
+    if(hist==='SALDO ANTERIOR'||hist==='SALDO FINAL') continue; // nunca são movimentação (pedido do usuário)
+    const vals={};
+    L.filter(i=>_aplicfinEhNum(i.s)).forEach(i=>{ const k=_aplicfinColPorHeader(headerColsMov,i.xr); if(k&&vals[k]==null) vals[k]=num(i.s); });
+    if(hist==='APLICACAO') mov.applications=r2(mov.applications+(vals.valor_bruto||0));
+    else if(hist==='RESGATE'){
+      const bruto=vals.valor_bruto||0, ir=vals.ir||0, creditado=vals.valor_creditado||0;
+      let iof=vals.iof;
+      if(iof==null){
+        const inferido=r2(bruto-ir-creditado);
+        if(inferido!=null&&Math.abs(inferido)<=0.02){ iof=0; iofInferido=true; }
+        else { iof=null; iofAmbiguo=true; warnings.push('RESGATE de '+dataTok.s+': IOF em branco e a validação (Bruto − IR − Creditado) não fechou em zero — IOF ficou sem valor (não inventado).'); }
+      }
+      mov.redemptions=r2(mov.redemptions+bruto);
+      mov.redemption_iof=r2(mov.redemption_iof+(iof||0));
+      mov.redemption_ir=r2(mov.redemption_ir+ir);
+      mov.redemption_credit=r2(mov.redemption_credit+creditado);
+      mov.redemption_principal=r2(mov.redemption_principal+(vals.valor_principal||0));
+      // Conferência POR LINHA (não só no agregado): Bruto − IOF − IR = Creditado.
+      const calcLinha=r2(bruto-(iof||0)-ir);
+      const okLinha=calcLinha!=null&&Math.abs(calcLinha-creditado)<=0.02;
+      validations.push({name:'resgate_'+dataTok.s.replace(/\//g,'')+'_bruto_menos_impostos_igual_creditado',ok:okLinha,detail:`RESGATE ${dataTok.s}: ${bruto} − ${iof==null?'?':iof} − ${ir} = ${calcLinha} (esperado ${creditado})`+(iofInferido?' [IOF inferido pela validação, não lido diretamente]':'')});
+      if(!okLinha) warnings.push('VALIDATION_FAILED: resgate de '+dataTok.s+' — Bruto − IOF − IR ≠ Valor creditado.');
+    }
+  }
+  const realized_gross_yield=r2(mov.redemptions-mov.redemption_principal);
+  const realized_net_yield=r2(mov.redemption_credit-mov.redemption_principal);
+
+  // ── 4. Resumo do período (seção 2) — só a linha TOTAL, valor oficial ──
+  const idxResumoTitulo=linhasP1.findIndex(L=>L.some(i=>/^Resumo do per[íi]odo:$/i.test(i.s)));
+  const headerColsResumo=[];
+  const resumo={previous_balance:null,applications:null,redemptions:null,maturities:null,accumulated_yield:null,final_gross_balance:null,estimated_taxes:null,final_net_balance:null};
+  if(idxResumoTitulo>=0){
+    // 2 linhas de cabeçalho quebrado (achadas por conterem "Saldo anterior"/"Total", nem sempre no mesmo offset)
+    const linhaTotalResumo=linhasP1.slice(idxResumoTitulo+1).find(L=>L.some(i=>/^Total$/i.test(i.s)));
+    const idxLinhaTotal=linhaTotalResumo?linhasP1.indexOf(linhaTotalResumo):-1;
+    if(idxLinhaTotal>=0){
+      // as linhas de cabeçalho ficam ENTRE o título e a linha Total (1 ou 2 linhas, quebradas)
+      const headerLinhas=linhasP1.slice(idxResumoTitulo+1,idxLinhaTotal);
+      const add=(key,re)=>headerLinhas.forEach(L=>L.filter(i=>re.test(i.s)).forEach(i=>headerColsResumo.push({key,xr:i.xr})));
+      add('previous_balance',/^Saldo anterior$/i);
+      add('applications',/^Aplica[çc][õo]es$/i);
+      add('redemptions',/^Resgates\/$/i); add('redemptions',/^Recompras$/i);
+      add('maturities',/^Vencimentos$/i);
+      add('accumulated_yield',/^Rendim\.$/i); add('accumulated_yield',/^acumulado$/i);
+      add('final_gross_balance',/^Saldo bruto final\(\*\*\)$/i);
+      add('estimated_taxes',/^Impostos$/i); add('estimated_taxes',/^estimados$/i);
+      add('final_net_balance',/^Saldo final\(\*\*\)$/i);
+      linhaTotalResumo.filter(i=>_aplicfinEhNum(i.s)).forEach(i=>{ const k=_aplicfinColPorHeader(headerColsResumo,i.xr); if(k&&resumo[k]==null) resumo[k]=num(i.s); });
+    } else warnings.push('Linha "Total" do Resumo do período não encontrada.');
+  } else warnings.push('Seção "Resumo do período" não encontrada.');
+  ['accumulated_yield','final_gross_balance'].forEach(k=>{ if(resumo[k]==null) warnings.push('EXTRACTION_ERROR: '+k+' não encontrado no Resumo do período — confira o PDF (não foi preenchido com zero).'); });
+
+  // ── 5. Posição em DD/MM/AAAA (seção 3) — pode continuar na página seguinte; só encerra em TOTAL ──
+  const mTituloPos=texto1.match(/Posi[çc][ãa]o em\s*(\d{2}\/\d{2}\/\d{4}):/i);
+  const dataPosicaoAtual=mTituloPos?mTituloPos[1]:null;
+  const idxPosTitulo=linhasP1.findIndex(L=>L.some(i=>/^Posi[çc][ãa]o em/i.test(i.s)));
+  const headerColsPos=[]; let dataPosicaoAnterior=null;
+  const posicao={total_invested_value:null,previous_date_value:null,current_date_value:null};
+  const detalhePos=[];
+  if(idxPosTitulo>=0){
+    // cabeçalho (2 linhas quebradas) só existe na página 1, logo após o título
+    const restoP1=linhasP1.slice(idxPosTitulo+1);
+    // "N. operação" também é o cabeçalho da Movimentação mensal (seção 1) — usa "Valor aplicação", único da Posição.
+    const linhaColNomes=restoP1.find(L=>L.some(i=>/^Valor aplica[çc][ãa]o$/i.test(i.s)));
+    const idxColNomes=linhaColNomes?linhasP1.indexOf(linhaColNomes):-1;
+    if(idxColNomes>=0){
+      const linhaTopo=linhasP1[idxColNomes-1]||[], linhaBase=linhasP1[idxColNomes];
+      const add=(key,itens)=>itens.forEach(i=>headerColsPos.push({key,xr:i.xr}));
+      add('n_operacao', linhaBase.filter(i=>/^N\.\s*opera[çc][ãa]o$/i.test(i.s)));
+      add('data_vencimento', linhaBase.filter(i=>/^Data vencimento$/i.test(i.s)));
+      add('data_aplicacao', linhaBase.filter(i=>/^Data aplica[çc][ãa]o$/i.test(i.s)));
+      add('total_invested_value', linhaBase.filter(i=>/^Valor aplica[çc][ãa]o$/i.test(i.s)));
+      add('remuneracao', linhaTopo.filter(i=>/^Remunera[çc][ãa]o$/i.test(i.s)).concat(linhaBase.filter(i=>i.s==='(%)'&&i.x<430)));
+      add('rentab_periodo', linhaTopo.filter(i=>/^Rentab\.\s*no$/i.test(i.s)).concat(linhaBase.filter(i=>/^per[íi]odo\(%\)$/i.test(i.s))));
+      // as duas colunas "Valor em DD/MM/AAAA" têm data DIFERENTE em cada uma — não dá pra casar só pelo texto
+      // "Valor em"; usa a ORDEM (esquerda=anterior, direita=atual) e guarda a data de cada uma achada no cabeçalho.
+      const colsValorEm=linhaBase.filter(i=>_aplicfinEhData(i.s)).sort((a,b)=>a.x-b.x);
+      if(colsValorEm[0]){ dataPosicaoAnterior=colsValorEm[0].s; headerColsPos.push({key:'previous_date_value',xr:colsValorEm[0].xr}); }
+      if(colsValorEm[1]){ headerColsPos.push({key:'current_date_value',xr:colsValorEm[1].xr}); }
+    } else warnings.push('Cabeçalho da seção Posição não encontrado.');
+  } else warnings.push('Seção "Posição em ..." não encontrada.');
+
+  if(headerColsPos.length){
+    // Junta TODAS as linhas depois do cabeçalho de Posição, cruzando pra página seguinte se precisar —
+    // NUNCA encerra no fim da página 1, só quando achar a linha TOTAL (ou uma próxima seção inequívoca).
+    let todasLinhas=[];
+    for(let p=0;p<paginas.length;p++) todasLinhas=todasLinhas.concat(_aplicfinLinhas(paginas[p],3));
+    todasLinhas.sort((a,b)=>a[0].y-b[0].y);
+    const idxInicioPos=todasLinhas.findIndex(L=>L.some(i=>/^Valor aplica[çc][ãa]o$/i.test(i.s)));
+    let achouTotal=false;
+    if(idxInicioPos>=0){
+      for(const L of todasLinhas.slice(idxInicioPos+1)){
+        const totalTok=L.find(i=>/^TOTAL$/i.test(i.s));
+        if(totalTok){
+          L.filter(i=>_aplicfinEhNum(i.s)).forEach(i=>{ const k=_aplicfinColPorHeader(headerColsPos,i.xr); if(k&&posicao[k]==null) posicao[k]=num(i.s); });
+          achouTotal=true;
+          break;
+        }
+        const opTok=L.find(i=>/^\d{10,}$/.test(i.s));
+        if(!opTok) continue; // linha fora da tabela (rodapé, nota de rodapé etc.)
+        const vals={};
+        L.filter(i=>_aplicfinEhNum(i.s)).forEach(i=>{ const k=_aplicfinColPorHeader(headerColsPos,i.xr); if(k&&vals[k]==null) vals[k]=num(i.s); });
+        detalhePos.push({n_operacao:opTok.s,...vals});
+      }
+    }
+    if(!achouTotal) warnings.push('Linha "TOTAL" da Posição não encontrada (nem na página 2) — valores de Posição não preenchidos.');
+  }
+
+  // ── 6. Conferências matemáticas obrigatórias ──
+  if(resumo.previous_balance!=null&&resumo.applications!=null&&resumo.redemptions!=null&&resumo.maturities!=null&&resumo.accumulated_yield!=null&&resumo.final_gross_balance!=null){
+    // Resgates e Vencimentos SAEM do saldo (reduzem) — confirmado batendo os valores reais deste PDF.
+    const calc=r2(resumo.previous_balance+resumo.applications-resumo.redemptions-resumo.maturities+resumo.accumulated_yield);
+    const ok=Math.abs(calc-resumo.final_gross_balance)<=0.02;
+    validations.push({name:'saldo_bruto_final',ok,detail:`${resumo.previous_balance} + ${resumo.applications} − ${resumo.redemptions} − ${resumo.maturities} + ${resumo.accumulated_yield} = ${calc} (esperado ${resumo.final_gross_balance})`});
+    if(!ok) warnings.push('VALIDATION_FAILED: conferência do saldo bruto final não fechou.');
+  }
+  if(resumo.final_gross_balance!=null&&resumo.estimated_taxes!=null&&resumo.final_net_balance!=null){
+    const calc=r2(resumo.final_gross_balance-resumo.estimated_taxes);
+    const ok=Math.abs(calc-resumo.final_net_balance)<=0.02;
+    validations.push({name:'saldo_liquido_final',ok,detail:`${resumo.final_gross_balance} − ${resumo.estimated_taxes} = ${calc} (esperado ${resumo.final_net_balance})`});
+    if(!ok) warnings.push('VALIDATION_FAILED: conferência do saldo líquido final não fechou.');
+  }
+  if(resumo.previous_balance!=null&&posicao.previous_date_value!=null){
+    const ok=Math.abs(resumo.previous_balance-posicao.previous_date_value)<=0.02;
+    validations.push({name:'posicao_anterior_bate_resumo',ok,detail:`Resumo/Saldo anterior ${resumo.previous_balance} vs Posição/Valor em ${dataPosicaoAnterior||'?'} ${posicao.previous_date_value}`});
+    if(!ok) warnings.push('TOTAL_MISMATCH: Saldo anterior (Resumo) diverge de Valor em '+(dataPosicaoAnterior||'?')+' (Posição).');
+  }
+  if(resumo.final_gross_balance!=null&&posicao.current_date_value!=null){
+    const ok=Math.abs(resumo.final_gross_balance-posicao.current_date_value)<=0.02;
+    validations.push({name:'posicao_atual_bate_resumo',ok,detail:`Resumo/Saldo bruto final ${resumo.final_gross_balance} vs Posição/Valor em ${dataPosicaoAtual||'?'} ${posicao.current_date_value}`});
+    if(!ok) warnings.push('TOTAL_MISMATCH: Saldo bruto final (Resumo) diverge de Valor em '+(dataPosicaoAtual||'?')+' (Posição).');
+  }
+
+  // ── 7/9. Fontes independentes (identificadores fixos — iguais em todos os meses) ──
+  const M='itau_cdb_di';
+  const mk=(key,label,section,value,ct)=>({key:M+'.'+key,label,section,product:null,value:r2(value),calculationType:ct});
+  const sources=[
+    mk('summary.previous_balance','Resumo do período → Total → Saldo anterior','Resumo do período',resumo.previous_balance,'DIRECT_TOTAL'),
+    mk('summary.applications','Resumo do período → Total → Aplicações','Resumo do período',resumo.applications,'DIRECT_TOTAL'),
+    mk('summary.redemptions','Resumo do período → Total → Resgates/Recompras','Resumo do período',resumo.redemptions,'DIRECT_TOTAL'),
+    mk('summary.maturities','Resumo do período → Total → Vencimentos','Resumo do período',resumo.maturities,'DIRECT_TOTAL'),
+    mk('summary.accumulated_yield','Resumo do período → Total → Rendim. acumulado','Resumo do período',resumo.accumulated_yield,'DIRECT_TOTAL'),
+    mk('summary.final_gross_balance','Resumo do período → Total → Saldo bruto final(**)','Resumo do período',resumo.final_gross_balance,'DIRECT_TOTAL'),
+    mk('summary.estimated_taxes','Resumo do período → Total → Impostos estimados','Resumo do período',resumo.estimated_taxes,'DIRECT_TOTAL'),
+    mk('summary.final_net_balance','Resumo do período → Total → Saldo final(**)','Resumo do período',resumo.final_net_balance,'DIRECT_TOTAL'),
+    mk('movements.applications','Movimentação mensal → soma de Valor(*) nas linhas APLICACAO (conferência)','Movimentação mensal',mov.applications,'CONDITIONAL_SUM'),
+    mk('movements.redemptions_gross','Movimentação mensal → soma de Valor(*) nas linhas RESGATE (conferência)','Movimentação mensal',mov.redemptions,'CONDITIONAL_SUM'),
+    mk('movements.redemption_principal','Movimentação mensal → soma de Valor principal nas linhas RESGATE','Movimentação mensal',mov.redemption_principal,'CONDITIONAL_SUM'),
+    mk('movements.redemption_ir','Movimentação mensal → soma de IR nas linhas RESGATE','Movimentação mensal',mov.redemption_ir,'CONDITIONAL_SUM'),
+    mk('movements.redemption_iof','Movimentação mensal → soma de IOF nas linhas RESGATE'+(iofInferido?' (zero inferido pela validação onde o campo veio em branco)':''),'Movimentação mensal',mov.redemption_iof,'CONDITIONAL_SUM'),
+    mk('movements.redemption_credit','Movimentação mensal → soma de Valor creditado nas linhas RESGATE','Movimentação mensal',mov.redemption_credit,'CONDITIONAL_SUM'),
+    mk('movements.realized_gross_yield','Calculado: Valor bruto resgatado − Valor principal resgatado','Movimentação mensal (calculado)',realized_gross_yield,'CALCULATED'),
+    mk('movements.realized_net_yield','Calculado: Valor creditado − Valor principal resgatado','Movimentação mensal (calculado)',realized_net_yield,'CALCULATED'),
+    mk('position.total_invested_value','Posição em '+(dataPosicaoAtual||'?')+' → TOTAL → Valor aplicação','Posição',posicao.total_invested_value,'DIRECT_TOTAL'),
+    mk('position.previous_date_value','Posição em '+(dataPosicaoAtual||'?')+' → TOTAL → Valor em '+(dataPosicaoAnterior||'?'),'Posição',posicao.previous_date_value,'DIRECT_TOTAL'),
+    mk('position.current_date_value','Posição em '+(dataPosicaoAtual||'?')+' → TOTAL → Valor em '+(dataPosicaoAtual||'?'),'Posição',posicao.current_date_value,'DIRECT_TOTAL'),
+  ];
+
+  return {
+    bank:'ITAU', model:M, competence, account, cnpj,
+    fingerprint:_aplicfinFingerprint('ITAU',M,['EXTRATO DE MOVIMENTACAO MENSAL - CDB-DI','RESUMO DO PERIODO','POSICAO EM']),
+    productMode:'single', products:[], sources, validations, warnings, pageCount:pdf.numPages,
+    detalhePosicao:detalhePos, // informação de detalhe (não somada) — disponível se precisar auditar
+  };
+}
+
 // ── MODELO 4: Bradesco "Extrato Padrão" (produto ÚNICO, declarado no PDF) ──
 // Máquina de estados por SEÇÃO (Saldo Anterior / Aplicações / Resgates-
 // Vencimentos / Saldo em). Cada seção fecha numa linha "Total" — é dela que
@@ -34829,7 +35059,7 @@ async function _aplicfinExtrairSemIA(file){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseBradescoPadrao,_aplicfinParseBradescoCdbMulti];
+  const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseItauCdbDi,_aplicfinParseBradescoPadrao,_aplicfinParseBradescoCdbMulti];
   for(const fn of parsers){
     try{ const r=await fn(pdf); if(r) return r; }catch(e){ console.error('Parser aplicfin sem IA:',e); }
   }
@@ -34861,6 +35091,16 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       resgate:'itau_aplic_aut_mais.month_total.principal_redeemed',
       rendLiq:'itau_aplic_aut_mais.month_total.paid_yield_net',
       saldoBrutoExtrato:'itau_aplic_aut_mais.final_position.gross',
+    },
+    itau_cdb_di:{
+      bruto:'itau_cdb_di.movements.realized_gross_yield',
+      iof:'itau_cdb_di.movements.redemption_iof',
+      irrf:'itau_cdb_di.movements.redemption_ir',
+      rendMes:'itau_cdb_di.summary.accumulated_yield',
+      aplic:'itau_cdb_di.summary.applications',
+      resgate:'itau_cdb_di.movements.redemption_principal',
+      rendLiq:'itau_cdb_di.movements.realized_net_yield',
+      saldoBrutoExtrato:'itau_cdb_di.summary.final_gross_balance',
     },
     bradesco_padrao:{
       bruto:'bradesco_padrao.resgates.renda_bruta_periodo',
