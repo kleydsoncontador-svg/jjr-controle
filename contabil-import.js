@@ -12,7 +12,7 @@
   var RP=function(){ return root.RazaoParser; }, CP=function(){ return root.ContabilParsers; };
   var LIMITE_MB=180, LIMITE_PAGINAS=1500, LIMITE_LANCAMENTOS=300000, CHUNK=400;
   var TIPO_ROTULO={GENERAL_LEDGER:'Livro Razão',TRIAL_BALANCE:'Balancete',INCOME_STATEMENT:'DRE'};
-  var st={eid:null, docs:[], salvando:false};
+  var st={eid:null, docs:[], salvando:false, tipoAlvo:null};
 
   // ── utilidades ──────────────────────────────────────────────────────────
   function num(c){ if(c===null||c===undefined) return null; var neg=c<0, s=String(Math.abs(c)); while(s.length<3) s='0'+s; return (neg?'-':'')+s.slice(0,-2)+'.'+s.slice(-2); } // centavos → "1234.56" sem float
@@ -58,12 +58,13 @@
   }
 
   // ── processa 1 arquivo: detecta o tipo, aplica o parser certo e valida o CNPJ ──
-  async function processarArquivo(file, empresaAlvo){
+  async function processarArquivo(file, empresaAlvo, tipoAlvo){
     var d={nome:file.name, tamanho:file.size, erro:null, bloqueado:null, avisos:[], validacoes:[]};
     try{
       var pdf=await lerPdf(file); d.hash=pdf.hash; d.paginas=pdf.numPages;
       d.tipo=CP().tipoDoDocumento(pdf.paginas);
       if(!d.tipo){ d.erro='Modelo não reconhecido (esperado: Livro Razão, Balancete ou DRE do Domínio). Nada foi importado.'; return d; }
+      if(tipoAlvo&&d.tipo!==tipoAlvo){ d.erro='Este campo é só de '+TIPO_ROTULO[tipoAlvo]+', mas o arquivo é '+TIPO_ROTULO[d.tipo]+'. Importe-o na aba de '+TIPO_ROTULO[d.tipo]+'. Nada foi importado.'; return d; }
       if(d.tipo==='GENERAL_LEDGER') d.parse=RP().parse(pdf.paginas,{plPrefixos:(cfgEmpresa(empresaAlvo&&empresaAlvo.eid)||{}).plPrefixos});
       else if(d.tipo==='TRIAL_BALANCE') d.parse=CP().parseBalancete(pdf.paginas);
       else d.parse=CP().parseDRE(pdf.paginas);
@@ -265,12 +266,13 @@
     var b=document.getElementById('ctbBtnSalvar'); if(b){ b.disabled=!ok.length||st.salvando; b.textContent=st.salvando?'Salvando…':('💾 Salvar dados estruturados ('+ok.length+')'); }
   }
   function fechar(){ st.docs=[]; var m=document.getElementById('ctbModal'); if(m) m.remove(); }   // descarta tudo o que foi lido
-  function abrir(eid){
-    st={eid:eid?String(eid):((typeof _democEidAtual!=='undefined'&&_democEidAtual)||(typeof _empresaGlobal!=='undefined'&&_empresaGlobal)||null), docs:[], salvando:false};
+  function abrir(eid,tipo){
+    st={eid:eid?String(eid):((typeof _democEidAtual!=='undefined'&&_democEidAtual)||(typeof _empresaGlobal!=='undefined'&&_empresaGlobal)||null), docs:[], salvando:false, tipoAlvo:tipo||null};
+    var rotTipo=tipo?TIPO_ROTULO[tipo]:'Livro Razão · Balancete · DRE';
     var alvo=infoEmpresa(st.eid), m=document.createElement('div'); m.id='ctbModal';
     m.style.cssText='position:fixed;inset:0;z-index:9500;background:rgba(0,0,0,.55);display:flex;align-items:flex-start;justify-content:center;padding:24px;overflow:auto';
     m.innerHTML='<div style="background:var(--bg);color:var(--ink);border-radius:12px;max-width:980px;width:100%;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.4)">'
-      +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="font-size:16px;font-weight:700">📥 Importar PDFs contábeis — Livro Razão · Balancete · DRE</div><button class="btn bo bsm" onclick="CtbImport.fechar()">✕ Fechar (descarta a leitura)</button></div>'
+      +'<div style="display:flex;justify-content:space-between;align-items:center;gap:8px"><div style="font-size:16px;font-weight:700">📥 Importar '+rotTipo+' (PDF do Domínio)</div><button class="btn bo bsm" onclick="CtbImport.fechar()">✕ Fechar (descarta a leitura)</button></div>'
       +'<div style="font-size:12.5px;color:var(--slate);margin:6px 0 10px">'+(alvo?'Empresa aberta: <b>'+esc2(alvo.nome)+'</b> — CNPJ '+esc2(alvo.cnpj)+'. PDFs de outro CNPJ são bloqueados.':'Nenhuma empresa aberta: a empresa será identificada pelo <b>CNPJ do cabeçalho</b> do PDF.')+' Sem IA. Os PDFs não são armazenados: fica só o dado estruturado (mantenha o arquivo original no arquivo documental do escritório).</div>'
       +'<input type="file" id="ctbArq" accept=".pdf,application/pdf" multiple class="fi" onchange="CtbImport.escolheu(this)" style="margin-bottom:10px">'
       +'<div id="ctbStatus" style="font-size:12.5px;color:var(--slate);margin-bottom:8px"></div><div id="ctbCorpo"></div>'
@@ -279,15 +281,17 @@
   }
   async function escolheu(inp){
     var arqs=Array.prototype.slice.call(inp.files||[]); if(!arqs.length) return;
+    await lerLote(arqs,0); inp.value='';                   // solta as referências dos arquivos
+  }
+  async function lerLote(arqs,pulados){
     var alvo=infoEmpresa(st.eid), stt=document.getElementById('ctbStatus'); st.docs=[];
     for(var i=0;i<arqs.length;i++){
       if(stt) stt.textContent='Lendo '+(i+1)+' de '+arqs.length+': '+arqs[i].name+' …';
-      var d=await processarArquivo(arqs[i],alvo); st.docs.push(d);
+      var d=await processarArquivo(arqs[i],alvo,st.tipoAlvo); st.docs.push(d);
       if(d.parse&&!d.erro&&!d.bloqueado){ try{ if(stt) stt.textContent='Comparando com o que já está no banco: '+arqs[i].name+' …'; await calcularDiferencas(d); }catch(e){ d.avisos.push({codigo:'FALHA_COMPARAR_BANCO',pagina:0,mensagem:String(e.message||e)}); } }
       render(); await sleep(0);
     }
-    inp.value='';                                        // solta as referências dos arquivos
-    if(stt) stt.textContent='Leitura concluída. Confira a prévia abaixo antes de salvar.';
+    if(stt) stt.textContent='Leitura concluída. Confira a prévia abaixo antes de salvar.'+(pulados?' ('+pulados+' arquivo(s) da pasta já estavam importados e foram pulados; para reler um deles, use o campo de arquivo.)':'');
     render();
   }
   async function salvar(){
@@ -309,19 +313,19 @@
   }
 
   // ── painel salvo (aba Livros Razão da empresa): importações + conciliação ──
-  async function painel(eid, contId){
+  async function painel(eid, contId, tipo){
     var el=document.getElementById(contId); if(!el) return;
     el.innerHTML='<div style="color:var(--slate);font-size:12.5px">Carregando dados estruturados…</div>';
     try{
-      var r=await _supaClient.from('accounting_imports').select('id,document_type,period_start,period_end,competence,file_name,row_count,pages,parser_version,imported_at,imported_by,validation,warnings,summary').eq('empresa_eid',String(eid)).order('period_end',{ascending:false}).order('imported_at',{ascending:false}).limit(200);
+      var r=await _supaClient.from('accounting_imports').select('id,document_type,period_start,period_end,competence,file_name,row_count,pages,parser_version,imported_at,imported_by,validation,warnings,summary').eq('empresa_eid',String(eid)).match(tipo?{document_type:tipo}:{}).order('period_end',{ascending:false}).order('imported_at',{ascending:false}).limit(200);
       if(r.error) throw r.error; var lista=r.data||[];
-      var h='<div style="font-weight:700;margin:12px 0 6px">Importações salvas (só dados estruturados — os PDFs não ficam no sistema)</div>';
+      var h='<div style="font-weight:700;margin:12px 0 6px">'+(tipo?TIPO_ROTULO[tipo]+' — importações':'Importações')+' salvas (só dados estruturados — os PDFs não ficam no sistema)</div>';
       if(!lista.length) h+='<div style="color:var(--slate);font-size:12.5px">Nenhuma importação ainda.</div>';
       else h+='<table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+['Documento','Período','Arquivo original (referência)','Linhas','Validações','Importado em'].map(function(t){ return '<th style="padding:6px 8px;text-align:left;background:var(--ink2);color:#fff">'+t+'</th>'; }).join('')+'</tr></thead><tbody>'
         +lista.map(function(x,i){ var nv=(x.validation||[]).length; return '<tr style="background:'+(i%2?'var(--bg)':'var(--white)')+'"><td style="padding:5px 8px"><b>'+TIPO_ROTULO[x.document_type]+'</b></td><td style="padding:5px 8px">'+brDeIso(x.period_start)+' a '+brDeIso(x.period_end)+'</td><td style="padding:5px 8px">'+esc2(x.file_name||'')+'</td><td style="padding:5px 8px">'+(x.row_count==null?'':x.row_count)+'</td><td style="padding:5px 8px;color:'+(nv?'var(--red)':'var(--green)')+'">'+(nv?nv+' falha(s)':'✓ ok')+'</td><td style="padding:5px 8px">'+esc2(new Date(x.imported_at).toLocaleDateString('pt-BR'))+'</td></tr>'; }).join('')+'</tbody></table>';
       var comps={}; lista.filter(function(x){ return x.document_type==='TRIAL_BALANCE'&&x.competence; }).forEach(function(x){ comps[x.competence]=true; });
       var ks=Object.keys(comps).sort().reverse();
-      if(ks.length){ h+='<div style="font-weight:700;margin:16px 0 6px">Conciliação (dados salvos)</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><select class="si" id="ctbCompSel_'+eid+'">'+ks.map(function(k){ return '<option>'+k+'</option>'; }).join('')+'</select><button class="btn bp bsm" onclick="CtbImport.conciliarSalvo(\''+eid+'\')">Conciliar Balancete × DRE × Razão</button></div><div id="ctbConc_'+eid+'" style="margin-top:8px"></div>'; }
+      if(ks.length&&(!tipo||tipo==='TRIAL_BALANCE')){ h+='<div style="font-weight:700;margin:16px 0 6px">Conciliação (dados salvos)</div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><select class="si" id="ctbCompSel_'+eid+'">'+ks.map(function(k){ return '<option>'+k+'</option>'; }).join('')+'</select><button class="btn bp bsm" onclick="CtbImport.conciliarSalvo(\''+eid+'\')">Conciliar Balancete × DRE × Razão</button></div><div id="ctbConc_'+eid+'" style="margin-top:8px"></div>'; }
       el.innerHTML=h;
     }catch(e){ el.innerHTML='<div style="color:var(--red);font-size:12.5px">Não foi possível ler os dados salvos: '+esc2(e.message||e)+'</div>'; }
   }
@@ -366,5 +370,154 @@
     }catch(e){ out.innerHTML='<span style="color:var(--red)">'+esc2(e.message||e)+'</span>'; }
   }
 
-  root.CtbImport={abrir:abrir, fechar:fechar, escolheu:escolheu, salvar:salvar, painel:painel, conciliarSalvo:conciliarSalvo, _st:function(){ return st; }, _processar:processarArquivo, _montarLinhasRazao:montarLinhasRazao};
+  // ═══ Uma aba para cada tipo: importar (campo próprio), ler da pasta própria e ABRIR os dados salvos ═══
+  // Pastas: ...\Demonstrativos Contábeis\{Balancete | DRE | Livro Razão}\{ano}\{Rótulo}_{eid}_{DDMMAAAA} a {DDMMAAAA}.pdf
+  var PASTAS={GENERAL_LEDGER:['Livro Razão','Livros Razão','Livro Razao','Razão','Razao'],TRIAL_BALANCE:['Balancete','Balancetes'],INCOME_STATEMENT:['DRE','D.R.E.','DREs']};
+  var vst={};    // estado dos visores (conta/mês/busca/página) por empresa e tipo
+  var PG=100;
+  function nf(v){ return Number(v||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+  function nfLado(v,l){ return nf(v)+(l?' '+l:''); }
+  function cents(c){ c=Number(c)||0; return brl(Math.abs(c))+(c<0?' C':(c>0?' D':'')); }
+  function thH(t,al){ return '<th style="padding:6px 8px;text-align:'+(al||'left')+';background:var(--ink2);color:#fff;position:sticky;top:0;z-index:1;white-space:nowrap">'+t+'</th>'; }
+  function tdH(t,al,extra){ return '<td style="padding:4px 8px;text-align:'+(al||'left')+';'+(extra||'')+'">'+t+'</td>'; }
+  var MONO='font-family:var(--mono);white-space:nowrap';
+  function vazio(msg){ return '<div style="color:var(--slate);font-size:12.5px;padding:8px 0">'+msg+'</div>'; }
+  function optHtml(v,t,sel){ return '<option value="'+esc2(v)+'"'+(sel?' selected':'')+'>'+esc2(t)+'</option>'; }
+  function vzCall(eid,tipo,patch){ return "CtbImport.vz('"+esc2(eid)+"','"+tipo+"',"+patch+")"; }
+
+  async function daPasta(eid,tipo){
+    eid=String(eid);
+    try{
+      if(!window.showDirectoryPicker){ toast('Este navegador não deixa ler pastas — use o campo de arquivo.','err'); return; }
+      var raiz=(typeof _democCarregarHandlePasta==='function')?await _democCarregarHandlePasta():null;
+      if(!raiz){ toast('Falta liberar a pasta "Demonstrativos Contábeis": use "Conceder acesso à pasta" no topo desta tela e tente de novo.','err'); return; }
+      if((await raiz.queryPermission({mode:'read'}))!=='granted'){ if((await raiz.requestPermission({mode:'read'}))!=='granted'){ toast('Acesso à pasta não autorizado.','err'); return; } }
+      var dirTipo=null, nomeTipo=null;
+      for(var i=0;i<PASTAS[tipo].length&&!dirTipo;i++){ try{ dirTipo=await raiz.getDirectoryHandle(PASTAS[tipo][i]); nomeTipo=PASTAS[tipo][i]; }catch(e){} }
+      if(!dirTipo){ toast('Não achei a pasta "'+PASTAS[tipo][0]+'" dentro da pasta liberada.','err'); return; }
+      var achados=[];
+      for await (var ent of dirTipo.entries()){                 // subpasta de cada ano
+        if(ent[1].kind!=='directory') continue;
+        for await (var ar of ent[1].entries()){
+          if(ar[1].kind!=='file') continue;
+          var m=/_(\d+)_(\d{2})(\d{2})(\d{4})\s*a\s*(\d{2})(\d{2})(\d{4})\.pdf$/i.exec(ar[0]);
+          if(m&&m[1]===eid) achados.push({nome:ar[0],fh:ar[1],fim:m[7]+m[6]+m[5]});
+        }
+      }
+      if(!achados.length){ toast('Nenhum PDF desta empresa (código '+eid+') na pasta "'+nomeTipo+'".','warn'); return; }
+      achados.sort(function(a,b){ return a.fim<b.fim?-1:1; });
+      var r=await _supaClient.from('accounting_imports').select('file_name').eq('empresa_eid',eid).eq('document_type',tipo).in('file_name',achados.map(function(a){ return a.nome; }));
+      if(r.error) throw r.error;
+      var ja={}; (r.data||[]).forEach(function(x){ ja[x.file_name]=true; });
+      var novos=achados.filter(function(a){ return !ja[a.nome]; });
+      if(!novos.length){ toast('Pasta "'+nomeTipo+'": '+achados.length+' arquivo(s) desta empresa e todos já foram importados. Para reler um deles, use o campo de arquivo.','ok'); return; }
+      abrir(eid,tipo);
+      var arqs=[]; for(var k=0;k<novos.length;k++) arqs.push(await novos[k].fh.getFile());
+      await lerLote(arqs,achados.length-novos.length);
+    }catch(e){ if(e&&e.name==='AbortError') return; console.error('daPasta',e); toast('Erro ao ler a pasta: '+(e.message||e),'err'); }
+  }
+
+  // ── abrir o que está salvo ──
+  async function aba(eid,tipo){
+    eid=String(eid);
+    var cv=document.getElementById('ctbVisor_'+tipo+'_'+eid);
+    if(cv) visor(eid,tipo,cv);
+    painel(eid,'ctbPainel_'+tipo+'_'+eid,tipo);
+  }
+  async function visor(eid,tipo,el){
+    el.innerHTML=vazio('Carregando…');
+    try{
+      if(tipo==='GENERAL_LEDGER') await visorRazao(eid,el);
+      else if(tipo==='TRIAL_BALANCE') await visorBalancete(eid,el);
+      else await visorDRE(eid,el);
+    }catch(e){ el.innerHTML='<div style="color:var(--red);font-size:12.5px">Não foi possível abrir os dados salvos: '+esc2(e.message||e)+'</div>'; }
+  }
+  function vz(eid,tipo,patch){
+    var k=tipo+'|'+eid, s=vst[k]=vst[k]||{};
+    if('conta' in patch&&patch.conta!==s.conta){ s.comp=''; s.pag=0; }
+    if('comp' in patch||'busca' in patch||'so' in patch||'periodo' in patch) s.pag=0;
+    Object.keys(patch).forEach(function(x){ s[x]=patch[x]; });
+    var el=document.getElementById('ctbVisor_'+tipo+'_'+eid); if(el) visor(eid,tipo,el);
+  }
+
+  // LIVRO RAZÃO — os lançamentos de cada conta, mês a mês
+  async function visorRazao(eid,el){
+    var s=vst['GENERAL_LEDGER|'+eid]=vst['GENERAL_LEDGER|'+eid]||{conta:'',comp:'',busca:'',pag:0}, T='GENERAL_LEDGER';
+    var contas=await pag('ledger_accounts','code,classification,description,group_name,opening_cents,opening_date',[['eq','empresa_eid',eid]]);
+    if(!contas.length){ el.innerHTML=vazio('Nenhum Livro Razão importado ainda. Use <b>Importar Livro Razão</b> ou <b>Ler da pasta</b>.'); return; }
+    contas.sort(function(a,b){ return String(a.classification).localeCompare(String(b.classification),'pt-BR',{numeric:true}); });
+    if(!s.conta||!contas.some(function(c){ return c.code===s.conta; })) s.conta=contas[0].code;
+    var conta=contas.filter(function(c){ return c.code===s.conta; })[0];
+    var meses=await pag('ledger_monthly_summary','competence,opening_cents,debit_cents,credit_cents,closing_cents,reconciled,entries_count,closing_entries_debit_cents,closing_entries_credit_cents',[['eq','empresa_eid',eid],['eq','account_code',s.conta]]);
+    meses.sort(function(a,b){ return a.competence<b.competence?-1:1; });
+    var q=_supaClient.from('ledger_entries').select('entry_date,entry_number,history,counterpart,debit,credit,balance,balance_side',{count:'exact'}).eq('empresa_eid',eid).eq('account_code',s.conta);
+    if(s.comp) q=q.eq('competence',s.comp);
+    if(s.busca) q=q.ilike('history','%'+String(s.busca).replace(/[%_]/g,' ')+'%');
+    var r=await q.order('entry_date').order('id').range(s.pag*PG,s.pag*PG+PG-1); if(r.error) throw r.error;
+    var total=r.count||0, npag=Math.max(1,Math.ceil(total/PG)); if(s.pag>=npag){ s.pag=npag-1; }
+    var h='<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:10px">'
+      +'<div><div style="font-size:11px;color:var(--slate)">Conta</div><select class="si" style="min-width:340px;max-width:520px" onchange="'+vzCall(eid,T,'{conta:this.value}')+'">'+contas.map(function(c){ return optHtml(c.code,c.code+' — '+(c.description||'')+'  ['+c.classification+']',c.code===s.conta); }).join('')+'</select></div>'
+      +'<div><div style="font-size:11px;color:var(--slate)">Mês</div><select class="si" onchange="'+vzCall(eid,T,'{comp:this.value}')+'">'+optHtml('','Todos os meses',!s.comp)+meses.map(function(m){ return optHtml(m.competence,m.competence.slice(5)+'/'+m.competence.slice(0,4),m.competence===s.comp); }).join('')+'</select></div>'
+      +'<div><div style="font-size:11px;color:var(--slate)">Buscar no histórico</div><input class="fi" style="width:220px" value="'+esc2(s.busca||'')+'" placeholder="texto e Enter" onchange="'+vzCall(eid,T,'{busca:this.value}')+'"></div></div>';
+    // resumo mensal da conta (clicar num mês abre os lançamentos dele)
+    if(meses.length){
+      h+='<div style="max-height:190px;overflow:auto;border:1px solid var(--border);border-radius:6px;margin-bottom:10px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+thH('Mês')+thH('Saldo anterior','right')+thH('Débitos','right')+thH('Créditos','right')+thH('Saldo final','right')+thH('Lanç.','right')+thH('Totais do PDF')+'</tr></thead><tbody>'
+        +meses.map(function(m,i){ var sel=m.competence===s.comp; return '<tr style="cursor:pointer;background:'+(sel?'var(--blue-bg)':(i%2?'var(--bg)':'var(--white)'))+'" onclick="'+vzCall(eid,T,"{comp:'"+m.competence+"'}")+'">'+tdH('<b>'+m.competence.slice(5)+'/'+m.competence.slice(0,4)+'</b>')+tdH(cents(m.opening_cents),'right',MONO)+tdH(brl(m.debit_cents),'right',MONO)+tdH(brl(m.credit_cents),'right',MONO)+tdH(cents(m.closing_cents),'right',MONO)+tdH(m.entries_count,'right')+tdH(m.reconciled?'<span style="color:var(--green)">✓ conferem</span>':'<span style="color:var(--amber)">não conferido</span>')+'</tr>'; }).join('')+'</tbody></table></div>';
+    }
+    h+='<div style="font-size:12px;color:var(--slate);margin-bottom:6px"><b>'+esc2(conta.code)+' — '+esc2(conta.description||'')+'</b> · '+esc2(conta.group_name||'')+' · '+total+' lançamento(s)'+(s.comp?' em '+s.comp.slice(5)+'/'+s.comp.slice(0,4):'')+(s.busca?' contendo "'+esc2(s.busca)+'"':'')+'</div>';
+    var linhas=r.data||[];
+    if(!linhas.length) h+=vazio('Nenhum lançamento para este filtro.');
+    else h+='<div style="max-height:520px;overflow:auto;border:1px solid var(--border);border-radius:6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+thH('Data')+thH('Nº')+thH('Histórico')+thH('Contrapartida')+thH('Débito','right')+thH('Crédito','right')+thH('Saldo','right')+'</tr></thead><tbody>'
+      +linhas.map(function(l,i){ return '<tr style="background:'+(i%2?'var(--bg)':'var(--white)')+'">'+tdH(brDeIso(l.entry_date),'left',MONO)+tdH(esc2(l.entry_number||''),'left',MONO)+tdH(esc2(l.history||''),'left','min-width:320px')+tdH(esc2(l.counterpart||'(várias)'),'left',MONO)+tdH(Number(l.debit)?nf(l.debit):'','right',MONO)+tdH(Number(l.credit)?nf(l.credit):'','right',MONO)+tdH(l.balance==null?'':nfLado(l.balance,l.balance_side),'right',MONO)+'</tr>'; }).join('')+'</tbody></table></div>';
+    if(npag>1) h+='<div style="display:flex;gap:10px;align-items:center;margin-top:8px"><button class="btn bo bsm" '+(s.pag<=0?'disabled':'')+' onclick="'+vzCall(eid,T,'{pag:'+(s.pag-1)+'}')+'">◄</button><span style="font-size:12px">Página '+(s.pag+1)+' de '+npag+'</span><button class="btn bo bsm" '+(s.pag>=npag-1?'disabled':'')+' onclick="'+vzCall(eid,T,'{pag:'+(s.pag+1)+'}')+'">►</button></div>';
+    el.innerHTML=h;
+  }
+
+  // BALANCETE — todas as contas do período escolhido
+  async function visorBalancete(eid,el){
+    var T='TRIAL_BALANCE', s=vst[T+'|'+eid]=vst[T+'|'+eid]||{periodo:'',so:'todas',busca:''};
+    var sums=await pag('trial_balance_summary','competence,period_start,period_end,monthly_result_amount,monthly_result_side,monthly_result_type,monthly_result_signed,exercise_result_amount,exercise_result_side,exercise_result_type,exercise_result_signed',[['eq','empresa_eid',eid]]);
+    if(!sums.length){ el.innerHTML=vazio('Nenhum Balancete importado ainda. Use <b>Importar Balancete</b> ou <b>Ler da pasta</b>.'); return; }
+    sums.sort(function(a,b){ return a.period_end<b.period_end?1:-1; });
+    var chave=function(x){ return x.period_start+'|'+x.period_end; };
+    if(!s.periodo||!sums.some(function(x){ return chave(x)===s.periodo; })) s.periodo=chave(sums[0]);
+    var sm=sums.filter(function(x){ return chave(x)===s.periodo; })[0], ps=sm.period_start, pe=sm.period_end;
+    var contas=await pag('trial_balance_accounts','code,classification,description,is_analytic,level,prev_balance,prev_side,debit,credit,balance,balance_side',[['eq','empresa_eid',eid],['eq','period_start',ps],['eq','period_end',pe]]);
+    contas.sort(function(a,b){ return String(a.classification).localeCompare(String(b.classification),'pt-BR',{numeric:true})||String(a.code).localeCompare(String(b.code),'pt-BR',{numeric:true}); });
+    var res=function(t,c,l,a){ return c==null?null:{tipo:t,cents:Math.round(Number(c)*100),lado:l,assinado:Math.round(Number(a)*100)}; };
+    var busca=String(s.busca||'').toLowerCase();
+    var vis=contas.filter(function(c){ if(s.so==='analiticas'&&!c.is_analytic) return false; if(s.so==='sinteticas'&&c.is_analytic) return false; return !busca||(String(c.description||'').toLowerCase().indexOf(busca)>=0||String(c.code).indexOf(busca)>=0||String(c.classification).indexOf(busca)>=0); });
+    var h='<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:10px">'
+      +'<div><div style="font-size:11px;color:var(--slate)">Balancete</div><select class="si" onchange="'+vzCall(eid,T,'{periodo:this.value}')+'">'+sums.map(function(x){ return optHtml(chave(x),(x.competence?x.competence.slice(5)+'/'+x.competence.slice(0,4)+' · ':'')+brDeIso(x.period_start)+' a '+brDeIso(x.period_end),chave(x)===s.periodo); }).join('')+'</select></div>'
+      +'<div><div style="font-size:11px;color:var(--slate)">Contas</div><select class="si" onchange="'+vzCall(eid,T,'{so:this.value}')+'">'+optHtml('todas','Todas (sintéticas e analíticas)',s.so==='todas')+optHtml('analiticas','Só analíticas',s.so==='analiticas')+optHtml('sinteticas','Só sintéticas',s.so==='sinteticas')+'</select></div>'
+      +'<div><div style="font-size:11px;color:var(--slate)">Buscar conta</div><input class="fi" style="width:220px" value="'+esc2(s.busca||'')+'" placeholder="nome, código ou classificação + Enter" onchange="'+vzCall(eid,T,'{busca:this.value}')+'"></div></div>'
+      +'<div style="font-size:13px;margin-bottom:8px">Resultado do <b>mês</b>: '+tagRes(res(sm.monthly_result_type,sm.monthly_result_amount,sm.monthly_result_side,sm.monthly_result_signed))+'<br>Resultado do <b>exercício</b>: '+tagRes(res(sm.exercise_result_type,sm.exercise_result_amount,sm.exercise_result_side,sm.exercise_result_signed))+'</div>';
+    h+='<div style="font-size:12px;color:var(--slate);margin-bottom:6px">'+vis.length+' de '+contas.length+' conta(s)</div>'
+      +'<div style="max-height:560px;overflow:auto;border:1px solid var(--border);border-radius:6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+thH('Classificação')+thH('Código')+thH('Descrição')+thH('Saldo anterior','right')+thH('Débito','right')+thH('Crédito','right')+thH('Saldo atual','right')+'</tr></thead><tbody>'
+      +vis.map(function(c,i){ var neg=!c.is_analytic; return '<tr style="background:'+(i%2?'var(--bg)':'var(--white)')+(neg?';font-weight:700':'')+'">'+tdH(esc2(c.classification),'left',MONO)+tdH(esc2(c.code),'left',MONO)+tdH(esc2(c.description||''),'left','padding-left:'+(8+Math.max(0,(c.level||1)-1)*10)+'px')+tdH(nfLado(c.prev_balance,c.prev_side),'right',MONO)+tdH(nf(c.debit),'right',MONO)+tdH(nf(c.credit),'right',MONO)+tdH(nfLado(c.balance,c.balance_side),'right',MONO)+'</tr>'; }).join('')+'</tbody></table></div>';
+    el.innerHTML=h;
+  }
+
+  // DRE — todas as linhas do período escolhido
+  async function visorDRE(eid,el){
+    var T='INCOME_STATEMENT', s=vst[T+'|'+eid]=vst[T+'|'+eid]||{periodo:''};
+    var imps=await pag('accounting_imports','period_start,period_end,competence,summary',[['eq','empresa_eid',eid],['eq','document_type',T]]);
+    if(!imps.length){ el.innerHTML=vazio('Nenhuma DRE importada ainda. Use <b>Importar DRE</b> ou <b>Ler da pasta</b>.'); return; }
+    var vistos={}, per=[]; imps.forEach(function(x){ var k=x.period_start+'|'+x.period_end; if(!vistos[k]){ vistos[k]=1; per.push(x); } });
+    per.sort(function(a,b){ return a.period_end<b.period_end?1:-1; });
+    var chave=function(x){ return x.period_start+'|'+x.period_end; };
+    if(!s.periodo||!per.some(function(x){ return chave(x)===s.periodo; })) s.periodo=chave(per[0]);
+    var p=per.filter(function(x){ return chave(x)===s.periodo; })[0];
+    var linhas=await pag('income_statement_lines','line_no,code,classification,description,indent,amount,amount_text,is_result',[['eq','empresa_eid',eid],['eq','period_start',p.period_start],['eq','period_end',p.period_end]]);
+    linhas.sort(function(a,b){ return a.line_no-b.line_no; });
+    var rs=p.summary&&p.summary.resultado;
+    var h='<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:10px"><div><div style="font-size:11px;color:var(--slate)">DRE</div><select class="si" onchange="'+vzCall(eid,T,'{periodo:this.value}')+'">'+per.map(function(x){ return optHtml(chave(x),(x.competence?x.competence.slice(5)+'/'+x.competence.slice(0,4)+' · ':'')+brDeIso(x.period_start)+' a '+brDeIso(x.period_end),chave(x)===s.periodo); }).join('')+'</select></div></div>';
+    if(rs) h+='<div style="font-size:13px;margin-bottom:8px">Resultado: '+tagRes({tipo:rs.tipo,cents:Math.abs(Math.round(Number(rs.assinado)*100)),lado:Number(rs.assinado)<0?'D':'C',assinado:Math.round(Number(rs.assinado)*100)})+'</div>';
+    h+='<div style="font-size:12px;color:var(--slate);margin-bottom:6px">'+linhas.length+' linha(s) — valores negativos em vermelho (no PDF vêm entre parênteses)</div>'
+      +'<div style="max-height:560px;overflow:auto;border:1px solid var(--border);border-radius:6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr>'+thH('Código')+thH('Classificação')+thH('Descrição')+thH('Valor','right')+'</tr></thead><tbody>'
+      +linhas.map(function(l,i){ var v=l.amount==null?null:Number(l.amount); var negrito=l.is_result||l.amount==null||!l.code; return '<tr style="background:'+(i%2?'var(--bg)':'var(--white)')+(negrito?';font-weight:700':'')+'">'+tdH(esc2(l.code||''),'left',MONO)+tdH(esc2(l.classification||''),'left',MONO)+tdH(esc2(l.description||''),'left','padding-left:'+(8+Math.max(0,l.indent||0)*6)+'px')+tdH(v==null?'':nf(v),'right',MONO+(v!=null&&v<0?';color:var(--red)':''))+'</tr>'; }).join('')+'</tbody></table></div>';
+    el.innerHTML=h;
+  }
+
+  root.CtbImport={abrir:abrir, fechar:fechar, escolheu:escolheu, salvar:salvar, painel:painel, aba:aba, daPasta:daPasta, vz:vz, conciliarSalvo:conciliarSalvo, _st:function(){ return st; }, _processar:processarArquivo, _montarLinhasRazao:montarLinhasRazao};
 })(typeof window!=='undefined'?window:this);
