@@ -2241,6 +2241,38 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: gerar lançamentos no Extrato Bancário a partir dos movimentos já
+     lançados de uma Aplicação Financeira — pedido do usuário 22/09/2026:
+     "crie um botão pra gerar os resgates (eu escolho qual coluna), e as
+     aplicações pra o extrato bancário, é melhor assim, não ir
+     automaticamente". Nunca gera pra Rendimento (nunca mexe na conta
+     corrente). -->
+<div class="mb" id="mLancctbAplicGerarExtrato" style="display:none">
+  <div class="modal" style="max-width:440px">
+    <div class="mt">
+      <h3 id="lancctbAplicGerarExtratoTitulo">Gerar Lançamentos no Extrato</h3>
+      <button onclick="closeModal('mLancctbAplicGerarExtrato')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <input type="hidden" id="lancctbAplicGerarExtratoAplicacaoId">
+      <div style="font-size:12px;color:var(--slate);margin-bottom:12px">Gera o lançamento no Extrato Bancário só dos movimentos que ainda não têm um (não duplica). Aplicações e Resgates dependem de estarem marcados pra isso na Aplicação (✎ Editar) — Rendimento nunca gera.</div>
+      <div class="fg">
+        <div class="fl">No Resgate, usar no Extrato Bancário</div>
+        <select class="si" id="lancctbAplicGerarExtratoValor" style="width:100%">
+          <option value="principal">Valor Principal</option>
+          <option value="bruto">Valor Bruto</option>
+          <option value="liquido">Valor Líquido</option>
+        </select>
+      </div>
+      <div id="lancctbAplicGerarExtratoStatus" style="font-size:12px;color:var(--slate);margin-top:8px"></div>
+    </div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbAplicGerarExtrato')">Cancelar</button>
+      <button class="btn bp" onclick="_lancctbAplicGerarExtratoConfirmar()">✓ Gerar</button>
+    </div>
+  </div>
+</div>
+
 <!-- Modal: importar em massa Aplicações/Resgates de uma Aplicação Financeira via PDF (IA) -->
 <!-- Modal: lançamento manual avulso no Extrato Bancário (pedido do usuário
 08/09/2026: "quero poder incluir e excluir lançamentos") -->
@@ -22139,6 +22171,7 @@ async function renderLancctbAplicacoes(){
             <button class="btn bp bsm" onclick="abrirLancctbAplicacaoMovimentoModal(${a.id})">+ Lançar Movimento</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicacaoRendimentoModal(${a.id})" title="Lançamento manual de Rendimento — só soma no saldo da Aplicação, nunca gera lançamento no Extrato Bancário">+ Lançar Rendimento</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicUploadModal(${a.id})" title="Sobe um PDF com várias Aplicações e Resgates (ex: extrato de aplicações do banco) e lança tudo de uma vez — sem IA por padrão, com opção de tentar com IA Gemini">⬆ Importar PDF</button>
+            <button class="btn bo bsm" onclick="abrirLancctbAplicGerarExtratoModal(${a.id})" title="Gera o lançamento no Extrato Bancário dos movimentos que ainda não têm um — nada é gerado automaticamente ao salvar/importar">🏦 Gerar Lançamentos no Extrato</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicacaoModal(${a.id})">✎ Editar</button>
             <button class="btn bo bsm" style="color:#dc2626" onclick="excluirLancctbAplicacao(${a.id})">🗑️ Excluir</button>
           </div>
@@ -22300,6 +22333,64 @@ function _lancctbAplicDeveIrParaExtrato(a,tipo){
   if(tipo==='resgate') return a.levar_resgate_para_extrato!==false;
   return false;
 }
+// Botão manual "🏦 Gerar Lançamentos no Extrato" (pedido do usuário
+// 22/09/2026: "crie um botão pra gerar os resgates (eu escolho qual
+// coluna), e as aplicações pra o extrato bancário, é melhor assim, não ir
+// automaticamente") — salvar/importar um movimento NUNCA mais gera o
+// lançamento sozinho (ver salvarLancctbAplicacaoMovimento/
+// _lancctbAplicUploadAplicar); só este fluxo gera, e só quando o usuário
+// clica, escolhendo aqui qual valor (Principal/Bruto/Líquido) usar pros
+// Resgates daquela vez — pode ser diferente do que está salvo por padrão
+// na Aplicação.
+function abrirLancctbAplicGerarExtratoModal(aplicacaoId){
+  const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
+  if(!a) return;
+  document.getElementById('lancctbAplicGerarExtratoAplicacaoId').value=aplicacaoId;
+  document.getElementById('lancctbAplicGerarExtratoTitulo').textContent=`Gerar Lançamentos no Extrato — ${a.nome}`;
+  document.getElementById('lancctbAplicGerarExtratoValor').value=a.valor_usar_extrato||'principal';
+  document.getElementById('lancctbAplicGerarExtratoStatus').textContent='';
+  openModal('mLancctbAplicGerarExtrato');
+}
+async function _lancctbAplicGerarExtratoConfirmar(){
+  const aplicacaoId=document.getElementById('lancctbAplicGerarExtratoAplicacaoId').value;
+  const valorUsarExtrato=document.getElementById('lancctbAplicGerarExtratoValor').value;
+  const statusEl=document.getElementById('lancctbAplicGerarExtratoStatus');
+  statusEl.textContent='Gerando…';
+  const r=await _lancctbAplicGerarLancamentosExtrato(aplicacaoId,valorUsarExtrato);
+  if(!r){ statusEl.textContent=''; return; }
+  closeModal('mLancctbAplicGerarExtrato');
+  const partes=[];
+  if(r.gerados) partes.push(`${r.gerados} lançamento(s) gerado(s)`);
+  if(r.pulados) partes.push(`${r.pulados} pulado(s) (tipo desmarcado nesta Aplicação)`);
+  if(r.erros) partes.push(`${r.erros} erro(s)`);
+  toast(partes.length?partes.join(', ')+'.':'Nenhum movimento pendente de lançamento no Extrato.','ok');
+  renderLancctbAplicacoes();
+}
+async function _lancctbAplicGerarLancamentosExtrato(aplicacaoId,valorUsarExtrato){
+  const a=_lancctbUltimasAplicacoes.find(x=>String(x.id)===String(aplicacaoId));
+  if(!a){ toast('Aplicação não encontrada.','err'); return null; }
+  const { data: movs, error } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras_movimentos')
+    .select('id,tipo,data,valor_bruto,valor_liquido,valor_principal')
+    .eq('aplicacao_id',aplicacaoId).in('tipo',['aplicacao','resgate']).is('lancamento_extrato_id',null));
+  if(error){ toast('Erro ao buscar movimentos: '+error.message,'err'); return null; }
+  let gerados=0, pulados=0, erros=0;
+  for(const m of movs||[]){
+    if(!_lancctbAplicDeveIrParaExtrato(a,m.tipo)){ pulados++; continue; }
+    const valorExtrato=_lancctbAplicValorParaExtrato(m.tipo,m.valor_principal,m.valor_bruto,m.valor_liquido,valorUsarExtrato);
+    const ehAplicacao=m.tipo==='aplicacao';
+    const historico=`${ehAplicacao?'Aplicação Financeira':'Resgate Financeiro'} - ${a.nome}`;
+    const { data: extratoSalvo, error: erroExtrato } = await _supaClient.from('lancamentos_extrato').insert({
+      empresa_eid: _lancctbEidAtual, conta_bancaria_id: a.conta_bancaria_id, data_pagamento: m.data,
+      valor_saida: ehAplicacao?valorExtrato:0, valor_entrada: ehAplicacao?0:valorExtrato,
+      historico_bancario: historico, origem_importacao: 'aplicacao_financeira',
+      hash_dedup: `aplicacao_financeira_mov_${m.id}`,
+    }).select().single();
+    if(erroExtrato){ console.error('Erro ao gerar lançamento no Extrato:',erroExtrato); erros++; continue; }
+    await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:extratoSalvo.id}).eq('id',m.id);
+    gerados++;
+  }
+  return {gerados,pulados,erros};
+}
 async function salvarLancctbAplicacaoMovimento(){
   const aplicacaoId=document.getElementById('lancctbAplicMovAplicacaoId').value;
   const a=_lancctbUltimasAplicacoes.find(x=>String(x.id)===String(aplicacaoId));
@@ -22318,32 +22409,14 @@ async function salvarLancctbAplicacaoMovimento(){
   if(!data){ toast('Preencha a Data','err'); return; }
   if(!valorBruto){ toast('Preencha o Valor Bruto','err'); return; }
 
-  const { data: movSalvo, error: erroMov } = await _supaClient.from('aplicacoes_financeiras_movimentos')
-    .insert({ aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual, tipo, data, valor_bruto:valorBruto, valor_liquido:valorLiquido, valor_principal:valorPrincipal, valor_ir:valorIr, valor_iof:valorIof })
-    .select().single();
+  // Achado real 22/09/2026 (pedido do usuário: "é melhor assim, não ir
+  // automaticamente"): não gera mais o lançamento no Extrato Bancário na
+  // hora de salvar — isso agora só acontece quando o usuário clica em
+  // "🏦 Gerar Lançamentos no Extrato" (ver _lancctbAplicGerarLancamentosExtrato),
+  // escolhendo ali qual valor usar pros Resgates daquela vez.
+  const { error: erroMov } = await _supaClient.from('aplicacoes_financeiras_movimentos')
+    .insert({ aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual, tipo, data, valor_bruto:valorBruto, valor_liquido:valorLiquido, valor_principal:valorPrincipal, valor_ir:valorIr, valor_iof:valorIof });
   if(erroMov){ toast('Erro ao salvar movimento: '+erroMov.message,'err'); return; }
-
-  if(_lancctbAplicDeveIrParaExtrato(a,tipo)){
-    const valorExtrato=_lancctbAplicValorParaExtrato(tipo,valorPrincipal,valorBruto,valorLiquido,a.valor_usar_extrato);
-    const ehAplicacao=tipo==='aplicacao';
-    const historico=`${ehAplicacao?'Aplicação Financeira':'Resgate Financeiro'} - ${a.nome}`;
-    const registroExtrato={
-      empresa_eid: _lancctbEidAtual,
-      conta_bancaria_id: a.conta_bancaria_id,
-      data_pagamento: data,
-      valor_saida: ehAplicacao?valorExtrato:0,
-      valor_entrada: ehAplicacao?0:valorExtrato,
-      historico_bancario: historico,
-      origem_importacao: 'aplicacao_financeira',
-      hash_dedup: `aplicacao_financeira_mov_${movSalvo.id}`,
-    };
-    const { data: extratoSalvo, error: erroExtrato } = await _supaClient.from('lancamentos_extrato').insert(registroExtrato).select().single();
-    if(erroExtrato){
-      toast('Movimento salvo, mas houve erro ao gerar o lançamento no Extrato: '+erroExtrato.message,'err');
-    } else {
-      await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:extratoSalvo.id}).eq('id',movSalvo.id);
-    }
-  }
   toast('Movimento lançado com sucesso','ok');
   closeModal('mLancctbAplicacaoMovimento');
   renderLancctbAplicacoes();
@@ -22791,27 +22864,13 @@ async function _lancctbAplicUploadAplicar(aplicacaoId,extraido,mapeamento,valorU
     const valorBrutoFinal=bruto!=null?bruto:(principal!=null?principal:liquido);
     if(jaExiste(tipo,data,valorBrutoFinal)){ duplicados++; continue; }
 
-    const { data: movSalvo, error: erroMov } = await _supaClient.from('aplicacoes_financeiras_movimentos')
-      .insert({ aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual, tipo, data, valor_bruto:valorBrutoFinal, valor_liquido:liquido, valor_principal:principal, valor_ir:valorIr, valor_iof:valorIof })
-      .select().single();
+    // Achado real 22/09/2026 (pedido do usuário: "é melhor assim, não ir
+    // automaticamente") — a importação em massa só grava o movimento; o
+    // lançamento no Extrato Bancário fica pro botão manual
+    // "🏦 Gerar Lançamentos no Extrato" (_lancctbAplicGerarLancamentosExtrato).
+    const { error: erroMov } = await _supaClient.from('aplicacoes_financeiras_movimentos')
+      .insert({ aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual, tipo, data, valor_bruto:valorBrutoFinal, valor_liquido:liquido, valor_principal:principal, valor_ir:valorIr, valor_iof:valorIof });
     if(erroMov){ erros.push(erroMov.message); pulados++; continue; }
-
-    if(_lancctbAplicDeveIrParaExtrato(a,tipo)){
-      const valorExtrato=_lancctbAplicValorParaExtrato(tipo,principal,valorBrutoFinal,liquido,valorUsarExtrato);
-      const ehAplicacao=tipo==='aplicacao';
-      const historico=`${ehAplicacao?'Aplicação Financeira':'Resgate Financeiro'} - ${a.nome}`;
-      const { data: extratoSalvo, error: erroExtrato } = await _supaClient.from('lancamentos_extrato').insert({
-        empresa_eid: _lancctbEidAtual, conta_bancaria_id: a.conta_bancaria_id, data_pagamento: data,
-        valor_saida: ehAplicacao?valorExtrato:0, valor_entrada: ehAplicacao?0:valorExtrato,
-        historico_bancario: historico, origem_importacao: 'aplicacao_financeira',
-        hash_dedup: `aplicacao_financeira_mov_${movSalvo.id}`,
-      }).select().single();
-      if(!erroExtrato){
-        await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:extratoSalvo.id}).eq('id',movSalvo.id);
-      } else {
-        erros.push(erroExtrato.message);
-      }
-    }
     if(tipo==='aplicacao') lancAplic++; else lancResgate++;
   }
 
