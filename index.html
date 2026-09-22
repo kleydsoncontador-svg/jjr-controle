@@ -30386,6 +30386,110 @@ async function _lancctbParsearExtratoItauModelosNovos(pdf){
 
 // Leitor GENÉRICO (sem IA): aprende as colunas pelo cabeçalho do próprio PDF e SÓ é aceito se o saldo conferir (saldo por linha, saldo
 // anterior + movimento = saldo final, ou totais de entradas/saídas). Fica por último na cadeia: só roda se nenhum leitor específico serviu.
+// ── BTG Pactual "Conta corrente - PJ" (BTG_PACTUAL_CONTA_CORRENTE_PJ) — pedido do usuário 22/09/2026 ──
+// 3 seções na mesma tabela lida por coordenada: 01. Conta corrente (resumo/totalizadores, nunca vira
+// lançamento) e 02. Lançamentos (Data/Descrição/Entradas-Saídas/Saldo), que continua pelas páginas
+// seguintes (aqui: 3 páginas) até acabar a lista — nunca para no fim de uma página. Peculiaridade real
+// deste layout: quando a descrição não cabe numa linha só, o banco IMPRIME a data/valor/saldo ESPREMIDOS
+// ENTRE duas linhas de descrição (1ª parte ANTES, 2ª parte DEPOIS) — diferente do padrão "continuação
+// só depois" visto nos outros bancos. "Saldo de abertura"/"Saldo de fechamento" aparecem DENTRO da
+// tabela de lançamentos (sem valor de Entradas/Saídas) — são marcadores de saldo, nunca movimentação.
+async function _lancctbParsearExtratoBTGPactualCC(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const texto1=itens1.map(i=>i.str).join(' ').replace(/\s+/g,' ');
+  if(!/Conta corrente\s*-\s*PJ/i.test(texto1)) return null;
+  if(!/BTG\s*Pactual/i.test(texto1)) return null;
+
+  const mPeriodo=texto1.match(/Per[íi]odo do extrato:\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  // Competência = mês/ano do FIM do período (não a data de geração do PDF, que pode ser do mês seguinte).
+  const competencia=mPeriodo?mPeriodo[6]+'-'+mPeriodo[5]:null;
+
+  // Faixas de coluna (coordenadas nativas do PDF — mesmas usadas por _lancctbAgruparLinhasPorY em toda
+  // a tela): Data < 100 · Descrição 100–490 · Entradas/Saídas 490–660 · Saldo ≥ 660.
+  const ehData=s=>/^\d{2}\/\d{2}\/\d{4}$/.test(String(s).trim());
+  const ehValor=s=>/^-?\d[\d.]*,\d{2}$/.test(String(s).trim());
+  const linhaData=L=>L.itens.find(i=>i.x<100&&ehData(i.str));
+  const linhaValor=L=>L.itens.find(i=>i.x>=490&&i.x<660&&ehValor(i.str));
+  const linhaSaldo=L=>L.itens.filter(i=>i.x>=660).map(i=>i.str).join('').trim();
+  const linhaDesc=L=>L.itens.filter(i=>i.x>=100&&i.x<490).map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+  const ehDescPura=L=>L.itens.length>0&&L.itens.every(i=>i.x>=100&&i.x<490);
+
+  let saldoAnteriorDoc=null, saldoFinalDoc=null;
+  const registros=[]; const avisos=[];
+  let seqOrigem=0;
+
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens);
+    for(let i=0;i<linhas.length;i++){
+      const L=linhas[i];
+      const itData=linhaData(L);
+      if(!itData) continue; // não é linha-âncora (cabeçalho repetido, rodapé, ou continuação de descrição — tratada ao lado da âncora)
+      const dataIso=itData.str.slice(6,10)+'-'+itData.str.slice(3,5)+'-'+itData.str.slice(0,2);
+      const saldoStr=linhaSaldo(L);
+      const itValor=linhaValor(L);
+      const descPropria=linhaDesc(L);
+      if(!itValor){
+        // Sem valor de Entradas/Saídas → marcador de saldo (abertura/fechamento), nunca movimentação.
+        const saldoNum=saldoStr?_lancctbParseValorBR(saldoStr):null;
+        if(/abertura/i.test(descPropria)) saldoAnteriorDoc=saldoNum;
+        else if(/fechamento/i.test(descPropria)) saldoFinalDoc=saldoNum;
+        else if(descPropria) avisos.push('Linha com data e saldo mas sem "Entradas/Saídas", e sem ser abertura/fechamento — ignorada: '+descPropria);
+        continue;
+      }
+      // Reconstrói a descrição. Achado real (22/09/2026): só busca linha vizinha quando a PRÓPRIA linha-
+      // âncora não tem NADA de descrição — isso é o que diferencia "descrição espremida entre 2 linhas"
+      // (âncora sem descrição própria) de "lançamento completo numa linha só" (âncora já tem a descrição
+      // inteira); sem essa checagem, um lançamento de 1 linha só "roubava" a descrição do PRÓXIMO
+      // lançamento (ex: "Pix enviado para Andreia Peixoto Cruz" grudava com "Pix recebido de Bytedance...").
+      let historico;
+      if(descPropria){
+        historico=descPropria;
+      } else {
+        let partes=[];
+        const anterior=linhas[i-1];
+        if(anterior&&!anterior._usada&&ehDescPura(anterior)){ partes.push(linhaDesc(anterior)); anterior._usada=true; }
+        const seguinte=linhas[i+1];
+        if(seguinte&&!seguinte._usada&&ehDescPura(seguinte)){ partes.push(linhaDesc(seguinte)); seguinte._usada=true; }
+        historico=partes.join(' ').replace(/\s+/g,' ').trim();
+      }
+      if(!historico){ avisos.push('Lançamento de '+itData.str+' sem descrição reconstruída — mantido, revise.'); }
+      const valor=_lancctbParseValorBR(itValor.str.replace(/^-/,''));
+      const negativo=itValor.str.trim().startsWith('-');
+      seqOrigem++;
+      registros.push({
+        data:dataIso, historico: historico||'(sem descrição)',
+        valor_entrada: negativo?0:valor, valor_saida: negativo?valor:0,
+        documento:null, _seq:seqOrigem, _pagina:p, _saldoLinha:saldoStr?_lancctbParseValorBR(saldoStr):null,
+      });
+    }
+  }
+
+  if(!registros.length) return null;
+
+  // Conferência dos totalizadores da seção "01. Conta corrente" (nunca gerados como lançamento — só
+  // usados pra validar a extração). Não impede a leitura se divergir; só avisa (pedido do usuário).
+  const pegar=(re)=>{ const m=texto1.match(re); return m?_lancctbParseValorBR(m[1]):null; };
+  const totalEntradasDoc=pegar(/Total de entradas\s*R\$\s*([\d.,]+)/i);
+  const totalSaidasDoc=pegar(/Total de sa[íi]das\s*R\$\s*([\d.,]+)/i);
+  const somaEntradas=Math.round(registros.reduce((s,r)=>s+r.valor_entrada,0)*100)/100;
+  const somaSaidas=Math.round(registros.reduce((s,r)=>s+r.valor_saida,0)*100)/100;
+  if(totalEntradasDoc!=null&&Math.abs(somaEntradas-totalEntradasDoc)>0.02) avisos.push(`MOVEMENT_TOTAL_MISMATCH: total de entradas somado dos lançamentos (R$ ${somaEntradas.toFixed(2)}) diverge do impresso no extrato (R$ ${totalEntradasDoc.toFixed(2)}).`);
+  if(totalSaidasDoc!=null&&Math.abs(somaSaidas-totalSaidasDoc)>0.02) avisos.push(`MOVEMENT_TOTAL_MISMATCH: total de saídas somado dos lançamentos (R$ ${somaSaidas.toFixed(2)}) diverge do impresso no extrato (R$ ${totalSaidasDoc.toFixed(2)}).`);
+
+  // Ordem original do PDF é do mais recente pro mais antigo — preserva _seq (sequência de origem) pra
+  // auditoria, mas devolve em ordem cronológica crescente (mesma convenção das outras leituras deste módulo).
+  const lancamentos=registros.sort((a,b)=>a.data<b.data?-1:a.data>b.data?1:a._seq-b._seq)
+    .map(r=>({data:r.data,historico:r.historico,valor_entrada:r.valor_entrada,valor_saida:r.valor_saida,documento:r.documento}));
+
+  return {
+    lancamentos, saldoAnteriorDoc, saldoFinalDoc,
+    layout:'BTG Pactual (Conta corrente - PJ)',
+    observacao: avisos.length?avisos.join(' '):undefined,
+  };
+}
+
 async function _lancctbParsearExtratoGenerico(pdf){
   if(!window.ExtratoGenerico) return null;
   const paginas=[];
@@ -31204,7 +31308,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
-          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))
+          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoGenerico(pdf));
       })();
       if(reconhecido){
