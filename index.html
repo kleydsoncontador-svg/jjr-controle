@@ -23453,7 +23453,10 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
   // histórico bancário, ex: "[COFINS cód. 2172 ref. 07/2026] PAGTO...")
   // já marca "Personalizado" e preenche pronto, sem o contador precisar
   // digitar o mesmo texto todo mês.
-  const mColchete=hist.match(/^\[([^\]]+)\]/);
+  // "[TRIBUTO COMPOSTO: ...]" (2+ impostos na mesma Guia, ver
+  // _lancctbProcessarTributos) NUNCA vira Histórico Fixo de uma conta só —
+  // esse caso é tratado abaixo pelo Rateio (composicao_tributo).
+  const mColchete=!/^\[TRIBUTO COMPOSTO:/.test(hist)?hist.match(/^\[([^\]]+)\]/):null;
   if(mColchete){
     const radioFixo=document.querySelector('input[name="lancctbRegraHistModo"][value="fixo"]');
     if(radioFixo){ radioFixo.checked=true; _lancctbAtualizarCampoHistoricoFixo(); }
@@ -23463,6 +23466,28 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
     // — prefixar de novo aqui duplicava ("Pagamento ref. Pagamento ref.
     // IRPJ..."). Só adiciona o prefixo quando ainda não tem.
     if(campoFixo) campoFixo.value=/^pagamento ref\./i.test(mColchete[1].trim())?mColchete[1]:`Pagamento ref. ${mColchete[1]}`;
+  }
+  // Achado real 22/09/2026 (INSS CLD, cód. 1099+1138 — "ficou separado,
+  // deveria ser um crédito para vários débitos"): quando "Processar
+  // Tributos" identifica 2+ impostos na composição de uma Guia sem Regra
+  // ainda, guarda em composicao_tributo (nunca fragmenta o extrato). Abre
+  // aqui já no modo Rateio, com 1 linha por imposto pré-preenchida
+  // (histórico+valor) — o contador só escolhe a conta contábil de cada e
+  // salva; nas próximas competências resolve sozinho via
+  // regras_matching_linhas (mesmo motor já usado quando a Regra já existe).
+  const composicaoTrib=r.composicao_tributo;
+  if(Array.isArray(composicaoTrib)&&composicaoTrib.length>=2){
+    _lancctbRegraToggleRateio(true);
+    while(_lancctbRateioRowIds.length<composicaoTrib.length) _lancctbRateioAdicionarLinha();
+    while(_lancctbRateioRowIds.length>composicaoTrib.length) _lancctbRateioRemoverLinha(_lancctbRateioRowIds[_lancctbRateioRowIds.length-1]);
+    composicaoTrib.forEach((c,i)=>{
+      const rowId=_lancctbRateioRowIds[i];
+      const hEl=document.getElementById('lancctbRateioHistorico_'+rowId);
+      const vEl=document.getElementById('lancctbRateioValor_'+rowId);
+      if(hEl) hEl.value=c.resumo||c.denominacao||'';
+      if(vEl) vEl.value=_fmt(c.valor||0);
+    });
+    _lancctbRateioAtualizarTotal();
   }
 
   const origemInfo=document.getElementById('lancctbRegraOrigemInfo');
@@ -25545,49 +25570,47 @@ async function _lancctbProcessarTributos(){
     });
     if(!regra){
       // Sem Regra ainda: se o Guia tem 2+ impostos na composição (ex: DARF
-      // PIS+COFINS), DIVIDE o lançamento de extrato em uma linha por imposto,
-      // já com o histórico de cada um ("[PIS 08/2026] ...", "[COFINS ...] ..."),
-      // pra o contador clicar em cada linha e criar a Regra sobre o histórico
-      // (pedido do usuário 10/09/2026). Só divide se a soma da composição
-      // bater com o valor da pendência.
+      // PIS+COFINS), marca a composição na PRÓPRIA linha (nunca fragmenta o
+      // extrato em N linhas separadas — achado real 22/09/2026, INSS CLD
+      // cód. 1099+1138: "ficou separado, deveria ser um crédito para vários
+      // débitos" — dividir em N linhas de extrato criava N créditos
+      // bancários independentes em vez de 1 crédito banco : N débitos). Ao
+      // clicar nesta linha, abrirLancctbRegraModalDeLinha lê
+      // composicao_tributo e já abre o Rateio com uma linha por imposto
+      // pré-preenchida (histórico+valor) — só falta o contador escolher a
+      // conta contábil de cada uma, e o RPC criar_lancamento_partida_dobrada
+      // grava 1 crédito + N débitos numa tacada só. Só marca se a soma da
+      // composição bater com o valor da pendência.
       const comp=achou.extraido.composicao;
       if(comp && comp.length>=2){
         const compet=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao)||'';
         const somaComp=Math.round(comp.reduce((s,c)=>s+(c.valor||0),0)*100)/100;
         if(Math.abs(somaComp-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR){
-          // Pedido do usuário 12/09/2026: "código e competência sempre
-          // estarão no PDF dos impostos" — grava no colchete um resumo já
-          // pronto ("COFINS cód. 2172 ref. 07/2026") em vez da denominação
-          // crua do DARF, pra abrirLancctbRegraModalDeLinha conseguir
-          // pré-preencher o Histórico Utilizado sozinho quando o contador
-          // clicar na linha pra criar a Regra.
           const nomeCurto=(c)=>String(c.denominacao||'').split(' - ')[0].trim();
-          const histDe=(c)=>{
+          const resumoDe=(c)=>{
             const partes=[nomeCurto(c)];
             if(c.codigo) partes.push(`cód. ${c.codigo}`);
             if(compet) partes.push(`ref. ${compet}`);
-            return `[${partes.join(' ')}] ${l.historico_bancario||''}`.trim();
+            return partes.join(' ');
           };
-          const criadas=[];
-          let okAll=true;
-          for(let k=1;k<comp.length;k++){
-            const { data: novoRow, error: eI } = await _supaClient.from('lancamentos_extrato').insert({
-              empresa_eid: eid, conta_bancaria_id: contaId, data_pagamento: l.data_pagamento,
-              valor_saida: Math.round((comp[k].valor||0)*100)/100, valor_entrada: 0,
-              historico_bancario: histDe(comp[k]),
-              origem_importacao: 'tributo_composicao',
-              hash_dedup: `tributo_comp_${l.id}_${k}_${Date.now()}`,
-            }).select('id').single();
-            if(eI){ okAll=false; console.error('Erro ao dividir composição do tributo:',eI); break; }
-            criadas.push(novoRow.id);
-          }
-          if(okAll){
-            const { error: eU } = await _supaClient.from('lancamentos_extrato')
-              .update({ valor_saida: Math.round((comp[0].valor||0)*100)/100, historico_bancario: histDe(comp[0]), origem_importacao: 'tributo_composicao' }).eq('id',l.id);
-            if(eU){ okAll=false; console.error('Erro ao ajustar 1ª linha da composição:',eU); }
-          }
-          if(!okAll && criadas.length){ await _supaClient.from('lancamentos_extrato').delete().in('id',criadas); }
-          if(okAll) tributosDivididos++;
+          const resumo=comp.map(c=>`${resumoDe(c)} ${_fmt(c.valor)}`).join(' + ');
+          const semMarcaComp=String(l.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+          // "resumo" aqui é só o nome curto (ex: "CP DESCONTADA SEGURADO"),
+          // NUNCA o texto decorado com código/competência — vira
+          // regras_matching_linhas.descricao_imposto (Regra por nome do
+          // código) e o motor de matching futuro compara contra a
+          // denominação CRUA do PDF do mês seguinte com
+          // denominacao.includes(descricao_imposto); "cód. 1099 ref.
+          // 07/2026" nunca aparece dentro dessa denominação crua, quebraria
+          // o auto-match nos próximos meses.
+          const composicaoParaSalvar=comp.map(c=>({codigo:c.codigo,denominacao:c.denominacao,valor:Math.round((c.valor||0)*100)/100,resumo:nomeCurto(c)}));
+          const { error: eU } = await _supaClient.from('lancamentos_extrato').update({
+            historico_bancario: `[TRIBUTO COMPOSTO: ${resumo}] ${semMarcaComp}`.trim(),
+            origem_importacao: 'tributo_composicao',
+            composicao_tributo: composicaoParaSalvar,
+          }).eq('id',l.id);
+          if(eU){ console.error('Erro ao marcar composição do tributo:',eU); }
+          else { tributosDivididos++; l.historico_bancario=`[TRIBUTO COMPOSTO: ${resumo}] ${semMarcaComp}`.trim(); l.composicao_tributo=composicaoParaSalvar; }
         }
       }
       comSugestao++; continue;
@@ -25633,7 +25656,7 @@ async function _lancctbProcessarTributos(){
   if(btn) btn.disabled=false;
   if(statusEl) statusEl.textContent='';
   const detalheSemAchado=semAchado?` (${semPdfNaPasta} sem NENHUM PDF na pasta do mês pra esta empresa — confira o nome do arquivo/pasta; ${semAchado-semPdfNaPasta} tinham PDF mas nenhum bateu o valor)`:'';
-  toast(`Tributos: ${resolvidos} resolvido(s) sozinho(s)${tributosDivididos?`, ${tributosDivididos} Guia(s) aberta(s) em linhas por imposto pra criar Regra`:''}, ${comSugestao} com PDF encontrado (falta Regra), ${semAchado} sem PDF no mês${detalheSemAchado}.`,'ok');
+  toast(`Tributos: ${resolvidos} resolvido(s) sozinho(s)${tributosDivididos?`, ${tributosDivididos} Guia(s) com composição identificada (clique na linha pendente pra ratear entre as contas — 1 crédito, vários débitos)`:''}, ${comSugestao} com PDF encontrado (falta Regra), ${semAchado} sem PDF no mês${detalheSemAchado}.`,'ok');
   renderLancctbRegistroContabil();
 }
 
@@ -25976,7 +25999,7 @@ async function renderLancctbRegistroContabil(){
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
   let q=_supaClient.from('lancamentos_extrato')
-    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao,conta_bancaria_id,origem_importacao',{count:'exact'})
+    .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao,conta_bancaria_id,origem_importacao,composicao_tributo',{count:'exact'})
     .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel);
   // Pedido do usuário 09/09/2026: "quando eu ignorar não deve ser levado
   // pra tela de Registro Contábil" — lançamento "ignorado" (via 🚫 Ignorar
