@@ -38095,10 +38095,11 @@ function abrirFormImovel(eid,id){
       <div style="padding:16px;background:var(--white)">
         <input type="file" id="imovArquivosDocs" accept=".pdf" multiple class="fi" style="width:100%">
         <div style="margin-top:10px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-          <button type="button" class="btn bsm btn-ia-gemini" id="imovBtnExtrairIA" onclick="_imovExtrairDocsIA()">🔍 Extrair Dados dos Documentos (IA Gemini)</button>
+          <button type="button" class="btn bsm" id="imovBtnLerSemIA" onclick="_imovExtrairDocsSemIA()" title="Lê o texto do PDF por padrões, direto no seu navegador — grátis e sem enviar nada para a IA. Só funciona em PDF com texto (as fichas documentais, carnê de IPTU digital…); escritura/matrícula digitalizada (imagem) precisa da IA.">📄 Ler sem IA (grátis)</button>
+          <button type="button" class="btn bsm btn-ia-gemini" id="imovBtnExtrairIA" onclick="_imovExtrairDocsIA()">🔍 Extrair com IA (Gemini)</button>
           <span id="imovStatusExtracao" style="font-size:.78rem;color:var(--slate)"></span>
         </div>
-        <div style="font-size:.72rem;color:var(--slate);margin-top:8px">Anexe a escritura, matrícula, contrato de compra e venda ou carnê de IPTU (pode selecionar mais de um) — a IA sugere os valores abaixo pra você revisar e ajustar antes de salvar. Nada é salvo automaticamente.</div>
+        <div style="font-size:.72rem;color:var(--slate);margin-top:8px">Anexe a escritura, matrícula, contrato de compra e venda ou carnê de IPTU (pode selecionar mais de um) — sugerimos os valores abaixo pra você revisar e ajustar antes de salvar. <b>Ler sem IA</b> é grátis e funciona em PDF com texto; <b>com IA</b> também lê documento digitalizado (imagem) e consome a cota do Gemini. Nada é salvo automaticamente.</div>
       </div>
     </div>
     <div id="imovSecoes">
@@ -38275,6 +38276,188 @@ async function _iaErroResposta(resp){
   if(/spending cap|RESOURCE_EXHAUSTED|Gemini, 429|quota/i.test(msg)) return new Error('O limite mensal de gastos da IA (Gemini) foi atingido. Libere ou aumente o teto em ai.studio/spend e tente de novo — até lá, preencha os campos manualmente.');
   return new Error(msg?('A IA retornou erro ('+resp.status+'): '+msg.slice(0,220)):('A extração retornou status '+resp.status));
 }
+// ═══ Leitura SEM IA dos documentos de imóvel (21/09/2026) ═══
+// Lê o texto do PDF por PADRÕES (rótulo + valor, como nas "Fichas documentais", e frases típicas de escritura/matrícula/IPTU) e devolve o MESMO
+// formato que a IA devolve, para reaproveitar _imovAplicarExtracao. Só preenche o que achou com segurança — o resto fica null (nada é inventado).
+// PDF digitalizado (imagem, sem camada de texto) NÃO é lido aqui: só a IA (ou digitação) resolve.
+function _imovLerDocPuro(textoBruto){
+  const t=String(textoBruto||'').replace(/\s+/g,' ').trim();
+  const m=(re,g)=>{ const x=re.exec(t); return x?String(x[g||1]||'').trim():null; };
+  const MESES={janeiro:1,fevereiro:2,'março':3,marco:3,abril:4,maio:5,junho:6,julho:7,agosto:8,setembro:9,outubro:10,novembro:11,dezembro:12};
+  const d={descricaoSugerida:null,tipoImovel:null,dataAquisicao:null,valorTotalAquisicao:null,cep:null,logradouro:null,numero:null,complemento:null,bairro:null,cidade:null,uf:null,areaTotal:null,numeroMatricula:null,cartorioRegistro:null,iptuInscricao:null,origemAquisicao:null,origemDetalhe:null,valorTerreno:null,valorEdificacao:null,valorMercadoAtual:null,vendedores:[],outrosCustos:[],pagamentos:[],alienacao:null,observacoes:null};
+  const num=s=>parseFloat(String(s).replace(/\./g,'').replace(',','.'))||null;
+  // valor de aquisição — do rótulo mais específico para o mais genérico
+  const REG_V=[/VALOR DE AQUISI[ÇC][ÃA]O\s*R\$\s*([\d.]+,\d{2})/i,/Pre[çc]o desta unidade\s*R\$\s*([\d.]+,\d{2})/i,/Valor ajustado\s*R\$\s*([\d.]+,\d{2})/i,/Pre[çc]o de aquisi[çc][ãa]o na escritura\s*R\$\s*([\d.]+,\d{2})/i,/(?:pre[çc]o|valor)\s+(?:total\s+)?(?:certo\s+e\s+)?(?:ajustado|da\s+(?:presente\s+)?(?:compra\s+e\s+venda|venda)|de\s+(?:compra|venda))[^R]{0,90}R\$\s*([\d.]+,\d{2})/i];
+  for(const re of REG_V){ const v=m(re); if(v){ d.valorTotalAquisicao=num(v); break; } }
+  // data da escritura
+  let data=m(/Data da escritura\s*(\d{2}\/\d{2}\/\d{4})/i)||m(/Escritura (?:p[úu]blica )?(?:de compra e venda )?de (\d{2}\/\d{2}\/\d{4})/i)||m(/lavrad[ao]\s+em\s+(\d{2}\/\d{2}\/\d{4})/i);
+  if(!data){ const x=/(\d{1,2})\s*(?:º|o)?\s*dias?\s+do\s+m[êe]s\s+de\s+([a-zç]+)\s+d[eo]\s+(?:ano\s+de\s+)?(\d{4})/i.exec(t); if(x&&MESES[x[2].toLowerCase()]) data=String(x[1]).padStart(2,'0')+'/'+String(MESES[x[2].toLowerCase()]).padStart(2,'0')+'/'+x[3]; }
+  d.dataAquisicao=data;
+  // tipo do imóvel (título e rótulo "Tipo de imóvel")
+  const cab=(m(/Tipo de im[óo]vel\s+(.{0,80})/i)||'')+' '+t.slice(0,300);
+  if(/galp[ãa]o/i.test(cab)) d.tipoImovel='Galpão'; else if(/apartamento|\bapto\b/i.test(cab)) d.tipoImovel='Apartamento'; else if(/conjunto|sala comercial|\bsalas?\b|escrit[óo]rio/i.test(cab)) d.tipoImovel='Sala Comercial'; else if(/\bloja\b/i.test(cab)) d.tipoImovel='Loja'; else if(/\bcasa\b|sobrado|resid[êe]ncia/i.test(cab)) d.tipoImovel='Casa'; else if(/rural|s[ií]tio|fazenda|ch[áa]cara/i.test(cab)) d.tipoImovel='Imóvel Rural'; else if(/terreno|\blote\b/i.test(cab)) d.tipoImovel='Terreno';
+  // descrição curta
+  let desc=m(/Ficha documental \|\s*([^|]+?)\s*\|/i);
+  if(!desc){ const x=/FICHA DOCUMENTAL DO IM[ÓO]VEL\s+(.+?)\s+(Edif[íi]cio\s+[^·|.]+?)\s*·/i.exec(t); if(x) desc=x[1].trim()+' — '+x[2].trim(); }
+  d.descricaoSugerida=desc||null;
+  // endereço: só o rótulo do imóvel ("Endereço", "Endereço na escritura / IPTU"), nunca "Endereço declarado:" das partes
+  const ml=/Endere[çc]o(?: do im[óo]vel| na escritura(?: \/ IPTU)?)?\s+((?:Rua|Avenida|Av\.?|Alameda|Travessa|Estrada|Rodovia|Pra[çc]a|Largo)\s.*?)(?=\sCEP\b|\sEndere[çc]o|\s\d+\.\s[A-ZÀ-Ú]|$)/i.exec(t);
+  if(ml){
+    const partes=ml[1].replace(/\([^)]*\)/g,'').split(',').map(p=>p.trim().replace(/\.$/,'')).filter(Boolean);
+    d.logradouro=partes[0]||null;
+    let iNum=-1; partes.forEach((p,i)=>{ if(iNum<0&&i>0){ const x=/^(?:n[ºo°.]{0,2}\s*)?(\d+[A-Za-z]?)$/i.exec(p); if(x){ iNum=i; d.numero=x[1]; } } });
+    const ehCid=p=>/^(.+?)\s*\/\s*([A-Z]{2})$/.exec(p);
+    const cid=partes.map(ehCid).filter(Boolean).pop(); if(cid){ d.cidade=cid[1].trim(); d.uf=cid[2]; }
+    const cand=partes.slice(iNum>=0?iNum+1:1).find(p=>!ehCid(p)&&!/subdistrito|distrito|munic[ií]pio|comarca|^CEP/i.test(p)); if(cand) d.bairro=cand.replace(/^bairro\s+/i,'').trim();
+  }
+  const posEnd=ml?ml.index:0; const tEnd=t.slice(posEnd); const xc=/CEP\s*:?\s*(\d{5}-?\d{3})/i.exec(tEnd); if(xc) d.cep=xc[1].length===8?xc[1].slice(0,5)+'-'+xc[1].slice(5):xc[1];
+  const un=m(/Unidade\s+(.+?)(?:\.\s|$)/); if(un) d.complemento=un.replace(/\([^)]*\)/g,'').replace(/\s+,/g,',').replace(/\s{2,}/g,' ').trim();
+  // áreas
+  const at=m(/[áa]rea do terreno\s+([\d.]+,\d+)\s*m[²2]/i), ac=m(/[áa]rea constru[íi]da\s*-\s*matr[íi]cula\s+([\d.]+,\d+)\s*m[²2]/i), ap=m(/[áa]rea privativa\s+([\d.]+,\d+)\s*m[²2]/i), atot=m(/[áa]rea total\s+([\d.]+,\d+)\s*m[²2]/i);
+  if(at) d.areaTotal='Terreno '+at+' m²'+(ac?' · Construída '+ac+' m²':''); else if(ap) d.areaTotal=ap+' m² privativa'+(atot?' (total '+atot+' m²)':''); else if(atot) d.areaTotal=atot+' m²';
+  // matrícula, cartório de registro, IPTU
+  d.numeroMatricula=m(/Matr[íi]cula\s+(?:n[ºo°.]{0,2}\s*)?(\d{1,3}(?:\.\d{3})+|\d{3,7})(?!\d)/i);
+  d.cartorioRegistro=m(/((?:\d+[ºo°]\s+)?(?:Oficial de\s+)?Registro de Im[óo]veis(?:\s+de\s+[A-ZÀ-Ú][A-Za-zÀ-ú]*(?:\s+[A-ZÀ-Ú][A-Za-zÀ-ú]*){0,2}(?:\/[A-Z]{2})?)?)/);
+  d.iptuInscricao=m(/Inscri[çc][ãa]o imobili[áa]ria\s+([\d.\-/]{6,})/i)||m(/IPTU\s*\/\s*contribuinte\s+([\d.\-/]{6,})/i)||m(/(?:contribuinte|SQL|inscri[çc][ãa]o cadastral)\s*(?:n[ºo°.]{0,2})?\s*:?\s*([\d.\-/]{8,})/i);
+  // origem da aquisição (só por frase explícita)
+  const org=[[/escritura (?:p[úu]blica )?de compra e venda|compra e venda/i,'Compra e Venda'],[/escritura (?:p[úu]blica )?de doa[çc][ãa]o/i,'Doação'],[/integraliza[çc][ãa]o de capital/i,'Integralização de Capital'],[/formal de partilha|invent[áa]rio/i,'Herança / Inventário'],[/escritura (?:p[úu]blica )?de permuta/i,'Permuta'],[/carta de arremata[çc][ãa]o|adjudica[çc][ãa]o/i,'Adjudicação / Arrematação (Leilão)']].find(o=>o[0].test(t));
+  if(org) d.origemAquisicao=org[1];
+  const tab=m(/(\d+[ºo°]\s+Tabeli[ãa]o de Notas(?:\s+de\s+[A-ZÀ-Ú][A-Za-zÀ-ú]*(?:\s+[A-ZÀ-Ú][A-Za-zÀ-ú]*){0,2}(?:\/[A-Z]{2})?)?)/i);
+  const lv=/Livro\s+(\d+)[^.]{0,25}?p[áa]ginas?\s+(\d+)\s+a\s*(\d+)/i.exec(t);
+  if(org&&org[1]==='Compra e Venda'&&(d.dataAquisicao||tab||lv)) d.origemDetalhe='Escritura de Compra e Venda'+(d.dataAquisicao?' de '+d.dataAquisicao:'')+(tab?', '+tab:'')+(lv?', Livro '+lv[1]+', págs. '+lv[2]+' a '+lv[3]:'');
+  // vendedores (com documento ou cônjuges)
+  const vx=/Vendedor(?:a|es|as)?\s+([^|]{3,140}?)\s*\|\s*(CNPJ|CPF)\s*([\d./-]{11,18})/.exec(t);
+  if(vx) d.vendedores=[{nome:vx[1].trim().replace(/[,;]$/,''),cpfCnpj:vx[3],participacao:''}];
+  else { const vc=/Vendedor(?:es|as)?\s+([A-ZÀ-Ú][^()|]{4,120}?)\s*\(\s*(?:c[ôo]njuges|casad)/.exec(t); if(vc){ const ps=vc[1].split(/\s+e\s+/).map(s=>s.trim()); if(ps.length>=2&&ps.every(p=>p.split(/\s+/).length>=2)) d.vendedores=ps.map(n=>({nome:n,cpfCnpj:'',participacao:''})); } }
+  // ITBI (não confundir com "valor venal para ITBI")
+  const ix=/(?<!para\s)(?<!de\s)\bITBI\s+R\$\s*([\d.]+,\d{2})(.{0,220})/.exec(t);
+  if(ix){ const dt=/pag[oa]s?\s+em\s+(\d{2}\/\d{2}\/\d{4})/i.exec(ix[2]); d.outrosCustos.push({data:dt?dt[1]:d.dataAquisicao,fornecedor:'Prefeitura — ITBI',valor:num(ix[1])}); }
+  // forma de pagamento
+  const fp=m(/(?:Forma de pagamento|Pagamento)\s+(.{10,260}?)(?:\.\s+[A-ZÀ-Ú]|$)/);
+  if(fp){ const bk=/\bBanco\s+([A-ZÀ-Ú][\wÀ-ú.&\/ ]*?)(?=,|\.\s|\sag[êe]ncia)/.exec(fp); d.pagamentos.push({forma:/financiament/i.test(fp)?'Financiamento Bancário':(/quita[çc][ãa]o|vista|transfer|\bTED\b|\bPIX\b|dinheiro/i.test(fp)?'À Vista':'Outro'),valor:d.valorTotalAquisicao,banco:bk?'Banco '+bk[1].trim():'',parcelas:'',obs:fp.slice(0,220)}); }
+  // observações: resumo + pendências/divergências que o próprio documento aponta
+  const obs=[]; const brl=v=>'R$ '+Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const id=[d.descricaoSugerida,(d.tipoImovel&&!new RegExp(d.tipoImovel,'i').test(d.descricaoSugerida||'')?d.tipoImovel:null)].filter(Boolean).join(' — ');
+  if(id) obs.push(id+(d.logradouro?', '+d.logradouro+(d.numero?', '+d.numero:'')+(d.cidade?' — '+d.cidade+'/'+d.uf:''):'')+(d.numeroMatricula?'. Matrícula '+d.numeroMatricula+(d.cartorioRegistro?' ('+d.cartorioRegistro+')':''):'')+'.');
+  if(d.valorTotalAquisicao) obs.push('Valor de aquisição '+brl(d.valorTotalAquisicao)+(d.dataAquisicao?' (escritura de '+d.dataAquisicao+')':'')+'.');
+  if(d.outrosCustos.length) obs.push('ITBI '+brl(d.outrosCustos[0].valor)+'.');
+  const dv=[]; let dx; const reDiv=/Diverg[êe]ncia[^.]*\./g; while((dx=reDiv.exec(t))&&dv.length<2) dv.push(dx[0].trim());
+  if(dv.length) obs.push(dv.join(' '));
+  const px=/Pontos (?:pendentes|a confirmar)[^•]{0,80}((?:•[^•]{5,700})+)/i.exec(t);
+  if(px){ const pend=px[1].split('•').slice(1).map(s=>s.replace(/\s*(?:Fonte documental|Fontes? por p[áa]gina|ANEXO).*$/i,'').trim()).filter(Boolean).slice(0,4).map(s=>s.length>240?s.slice(0,237)+'…':s); if(pend.length) obs.push('Pendências apontadas no documento: '+pend.join(' | '));
+  }
+  d.observacoes=obs.length?obs.join(' '):null;
+  return d;
+}
+// Junta vários arquivos: o 1º valor encontrado (na ordem dos arquivos) vale; listas usam a 1ª que tiver conteúdo. Arquivo sem texto é reportado.
+function _imovLerDocsSemIA(itens){
+  const res={dados:null,lidos:[],escaneados:[]};
+  const total={};
+  (itens||[]).forEach(it=>{
+    if(String(it.texto||'').replace(/\s+/g,'').length<80){ res.escaneados.push(it.nome); return; }
+    const d=_imovLerDocPuro(it.texto); res.lidos.push(it.nome);
+    Object.keys(d).forEach(k=>{ const v=d[k]; const vazio=v==null||v===''||(Array.isArray(v)&&!v.length); const atual=total[k]; const atualVazio=atual==null||atual===''||(Array.isArray(atual)&&!atual.length); if(!vazio&&atualVazio) total[k]=v; else if(!(k in total)) total[k]=v; });
+  });
+  res.dados=res.lidos.length?total:null;
+  return res;
+}
+// Aplica no formulário o resultado da leitura (IA ou sem IA — mesmo formato). Só preenche o que veio; o usuário sempre revisa antes de salvar.
+function _imovAplicarExtracao(d){
+  const setIf=(id,val)=>{ if(val==null||val==='') return; const el=document.getElementById(id); if(el) el.value=val; };
+  const setMoneyIf=(id,val)=>{ if(val==null) return; const el=document.getElementById(id); if(el) el.value=_fmtMoneyOpt(parseFloat(val)||0); };
+  setIf('imovDesc',d.descricaoSugerida);
+  if(d.tipoImovel){ const sel=document.getElementById('imovTipo'); if(sel&&IMOVEL_TIPOS.includes(d.tipoImovel)) sel.value=d.tipoImovel; }
+  setIf('imovDataAq',d.dataAquisicao);
+  setMoneyIf('imovValor',d.valorTotalAquisicao);
+  setIf('imovCep',d.cep);
+  setIf('imovEnd',d.logradouro);
+  setIf('imovNum',d.numero);
+  setIf('imovComp',d.complemento);
+  setIf('imovBairro',d.bairro);
+  setIf('imovCidade',d.cidade);
+  setIf('imovUf',d.uf);
+  setIf('imovArea',d.areaTotal);
+  setIf('imovMatricula',d.numeroMatricula);
+  setIf('imovCartorio',d.cartorioRegistro);
+  setIf('imovIptu',d.iptuInscricao);
+  setIf('imovObs',d.observacoes);
+  // Origem da aquisição (compra, doação, integralização de capital...)
+  if(d.origemAquisicao){ const so=document.getElementById('imovOrigem'); if(so&&IMOVEL_ORIGENS.some(o=>o.v===d.origemAquisicao)) so.value=d.origemAquisicao; }
+  setIf('imovOrigemDet',d.origemDetalhe);
+  setMoneyIf('imovValorMercado',d.valorMercadoAtual);
+  if(Array.isArray(d.vendedores)&&d.vendedores.length){
+    _imovVends=d.vendedores.map(v=>({nome:v.nome||'',cpfCnpj:v.cpfCnpj||'',participacao:v.participacao||''}));
+  }
+  _imovAtualizarRotuloOrigem(); // atualiza título/rótulos da parte transmitente e redesenha
+  if(Array.isArray(d.outrosCustos)&&d.outrosCustos.length){
+    _imovCustos=d.outrosCustos.map(c=>({data:c.data||'',fornecedor:c.fornecedor||'',valor:c.valor||''}));
+    _renderCustos();
+  }
+  if(Array.isArray(d.pagamentos)&&d.pagamentos.length){
+    _imovPags=d.pagamentos.map(p=>({forma:IMOVEL_PAG_FORMAS.includes(p.forma)?p.forma:'Outro',valor:p.valor||'',banco:p.banco||'',parcelas:p.parcelas||'',obs:p.obs||''}));
+    _renderPagamentos();
+  }
+  if(d.alienacao&&(d.alienacao.data||d.alienacao.valor||d.alienacao.comprador)){
+    setIf('imovAlienData',d.alienacao.data);
+    setIf('imovAlienComprador',d.alienacao.comprador);
+    setMoneyIf('imovAlienValor',d.alienacao.valor);
+    setIf('imovAlienForma',d.alienacao.forma);
+    setIf('imovAlienObs',d.alienacao.obs);
+  }
+  // Depreciação/mensuração: terreno e edificação separados quando o documento traz;
+  // início na aquisição; vida útil sugerida 25 anos (edificações — IN RFB 1.700/2017).
+  // Só sugere — o usuário confere o modelo (custo / valor justo / sem depreciação).
+  if(document.getElementById('imovDepModelo')){
+    const vt=parseFloat(d.valorTerreno)||0, ve=parseFloat(d.valorEdificacao)||0;
+    if(vt>0) setMoneyIf('imovDepTerreno',vt);
+    if(ve>0&&!(d.tipoImovel==='Terreno')) setMoneyIf('imovDepEdif',ve);
+    if(d.dataAquisicao) setIf('imovDepInicio',d.dataAquisicao);
+    const vidaEl=document.getElementById('imovDepVida'); if(vidaEl&&!vidaEl.value) vidaEl.value=25;
+    document.getElementById('imovDepModelo').value=(d.tipoImovel==='Terreno')?'nao_deprecia':'custo';
+  }
+  // Classificação contábil: 1ª linha na data de aquisição com o valor total, se ainda vazia
+  if(!_imovClasses.some(c=>c.classif)&&d.dataAquisicao&&d.valorTotalAquisicao){
+    _imovClasses=[{data:d.dataAquisicao,classif:'',valor:d.valorTotalAquisicao}];
+    _renderClassificacoes();
+  }
+  _imovDepRender();
+  calcularGanhoCapital();
+}
+async function _imovExtrairDocsSemIA(){
+  const input=document.getElementById('imovArquivosDocs');
+  const statusEl=document.getElementById('imovStatusExtracao');
+  const btn=document.getElementById('imovBtnLerSemIA');
+  if(!input||!input.files||!input.files.length){ toast('Anexe ao menos um PDF primeiro.','err'); return; }
+  const btnTextoOriginal=btn.textContent;
+  btn.disabled=true; btn.textContent='Lendo PDF(s)...';
+  statusEl.style.color='var(--slate)'; statusEl.textContent='Lendo o texto dos arquivos (sem IA)...';
+  try{
+    const itens=[];
+    for(const file of input.files){ itens.push({nome:file.name,texto:await _empExtrairTextoPDF(file,12)}); }
+    const r=_imovLerDocsSemIA(itens);
+    const aviso=r.escaneados.length?' Sem texto (digitalizado — só a IA ou a digitação resolvem): '+r.escaneados.join('; ')+'.':'';
+    if(!r.dados){
+      statusEl.style.color='#dc2626';
+      statusEl.textContent='Nenhum arquivo tem texto que dê pra ler sem IA.'+aviso;
+      toast('PDF digitalizado (imagem): use "Extrair com IA" ou preencha à mão.','err');
+      return;
+    }
+    const d=r.dados;
+    _imovAplicarExtracao(d);
+    const campos=[['valor','valorTotalAquisicao'],['data','dataAquisicao'],['tipo','tipoImovel'],['endereço','logradouro'],['CEP','cep'],['matrícula','numeroMatricula'],['cartório','cartorioRegistro'],['inscrição IPTU','iptuInscricao'],['vendedor','vendedores'],['ITBI','outrosCustos']];
+    const vazio=k=>{ const v=d[k]; return v==null||v===''||(Array.isArray(v)&&!v.length); };
+    const achou=campos.filter(c=>!vazio(c[1])).map(c=>c[0]), falta=campos.filter(c=>vazio(c[1])).map(c=>c[0]);
+    statusEl.style.color=achou.length?'var(--green)':'#b45309';
+    statusEl.textContent='✓ Lido sem IA: '+(achou.join(', ')||'nada reconhecido')+'.'+(falta.length?' Não encontrei: '+falta.join(', ')+' — confira/preencha.':'')+' Revise antes de salvar.'+aviso;
+    toast('Documento lido sem IA — confira os campos antes de salvar.','ok');
+  }catch(e){
+    console.error('_imovExtrairDocsSemIA erro:',e);
+    statusEl.style.color='#dc2626'; statusEl.textContent='Erro: '+e.message;
+    toast('Erro ao ler os documentos: '+e.message,'err');
+  }finally{
+    btn.disabled=false; btn.textContent=btnTextoOriginal;
+  }
+}
 async function _imovExtrairDocsIA(){
   const input=document.getElementById('imovArquivosDocs');
   const statusEl=document.getElementById('imovStatusExtracao');
@@ -38301,65 +38484,7 @@ async function _imovExtrairDocsIA(){
     if(!resp.ok) throw await _iaErroResposta(resp);
     const d=await resp.json();
     if(d.error) throw new Error(d.error);
-    const setIf=(id,val)=>{ if(val==null||val==='') return; const el=document.getElementById(id); if(el) el.value=val; };
-    const setMoneyIf=(id,val)=>{ if(val==null) return; const el=document.getElementById(id); if(el) el.value=_fmtMoneyOpt(parseFloat(val)||0); };
-    setIf('imovDesc',d.descricaoSugerida);
-    if(d.tipoImovel){ const sel=document.getElementById('imovTipo'); if(sel&&IMOVEL_TIPOS.includes(d.tipoImovel)) sel.value=d.tipoImovel; }
-    setIf('imovDataAq',d.dataAquisicao);
-    setMoneyIf('imovValor',d.valorTotalAquisicao);
-    setIf('imovCep',d.cep);
-    setIf('imovEnd',d.logradouro);
-    setIf('imovNum',d.numero);
-    setIf('imovComp',d.complemento);
-    setIf('imovBairro',d.bairro);
-    setIf('imovCidade',d.cidade);
-    setIf('imovUf',d.uf);
-    setIf('imovArea',d.areaTotal);
-    setIf('imovMatricula',d.numeroMatricula);
-    setIf('imovCartorio',d.cartorioRegistro);
-    setIf('imovIptu',d.iptuInscricao);
-    setIf('imovObs',d.observacoes);
-    // Origem da aquisição (compra, doação, integralização de capital...)
-    if(d.origemAquisicao){ const so=document.getElementById('imovOrigem'); if(so&&IMOVEL_ORIGENS.some(o=>o.v===d.origemAquisicao)) so.value=d.origemAquisicao; }
-    setIf('imovOrigemDet',d.origemDetalhe);
-    setMoneyIf('imovValorMercado',d.valorMercadoAtual);
-    if(Array.isArray(d.vendedores)&&d.vendedores.length){
-      _imovVends=d.vendedores.map(v=>({nome:v.nome||'',cpfCnpj:v.cpfCnpj||'',participacao:v.participacao||''}));
-    }
-    _imovAtualizarRotuloOrigem(); // atualiza título/rótulos da parte transmitente e redesenha
-    if(Array.isArray(d.outrosCustos)&&d.outrosCustos.length){
-      _imovCustos=d.outrosCustos.map(c=>({data:c.data||'',fornecedor:c.fornecedor||'',valor:c.valor||''}));
-      _renderCustos();
-    }
-    if(Array.isArray(d.pagamentos)&&d.pagamentos.length){
-      _imovPags=d.pagamentos.map(p=>({forma:IMOVEL_PAG_FORMAS.includes(p.forma)?p.forma:'Outro',valor:p.valor||'',banco:p.banco||'',parcelas:p.parcelas||'',obs:p.obs||''}));
-      _renderPagamentos();
-    }
-    if(d.alienacao&&(d.alienacao.data||d.alienacao.valor||d.alienacao.comprador)){
-      setIf('imovAlienData',d.alienacao.data);
-      setIf('imovAlienComprador',d.alienacao.comprador);
-      setMoneyIf('imovAlienValor',d.alienacao.valor);
-      setIf('imovAlienForma',d.alienacao.forma);
-      setIf('imovAlienObs',d.alienacao.obs);
-    }
-    // Depreciação/mensuração: terreno e edificação separados quando o documento traz;
-    // início na aquisição; vida útil sugerida 25 anos (edificações — IN RFB 1.700/2017).
-    // Só sugere — o usuário confere o modelo (custo / valor justo / sem depreciação).
-    if(document.getElementById('imovDepModelo')){
-      const vt=parseFloat(d.valorTerreno)||0, ve=parseFloat(d.valorEdificacao)||0;
-      if(vt>0) setMoneyIf('imovDepTerreno',vt);
-      if(ve>0&&!(d.tipoImovel==='Terreno')) setMoneyIf('imovDepEdif',ve);
-      if(d.dataAquisicao) setIf('imovDepInicio',d.dataAquisicao);
-      const vidaEl=document.getElementById('imovDepVida'); if(vidaEl&&!vidaEl.value) vidaEl.value=25;
-      document.getElementById('imovDepModelo').value=(d.tipoImovel==='Terreno')?'nao_deprecia':'custo';
-    }
-    // Classificação contábil: 1ª linha na data de aquisição com o valor total, se ainda vazia
-    if(!_imovClasses.some(c=>c.classif)&&d.dataAquisicao&&d.valorTotalAquisicao){
-      _imovClasses=[{data:d.dataAquisicao,classif:'',valor:d.valorTotalAquisicao}];
-      _renderClassificacoes();
-    }
-    _imovDepRender();
-    calcularGanhoCapital();
+    _imovAplicarExtracao(d);
     let msg='✓ Dados extraídos — revise os campos antes de salvar.';
     if(d.observacoes) msg+=' '+d.observacoes;
     statusEl.style.color='var(--green)';
