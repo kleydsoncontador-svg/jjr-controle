@@ -36045,7 +36045,22 @@ async function _lancctbAplicParseItauAutMaisOcrDet(file){
   // Líquido Resgatado, Rendimento Bruto, Rendimento Líquido].
   const linhas=[];
   const resgatesParaConferir=[];
+  // Dados diários COMPLETOS (inclui Rendimento Pago e Posição em Ser no Dia,
+  // que o formato {colunas,linhas} acima não carrega) — usado pelo "Extrair
+  // sem IA" dos Ganhos/Rendimentos (_aplicfinItauAutMaisViaOcr).
+  const diario=[];
   linhasNumeros.forEach(L=>{
+    if(!L.ehAcum&&L.data&&L.numeros.length>=5){
+      const nn=L.numeros.length, ex=L.numeros.slice(0,nn-5), posicao=L.numeros.slice(nn-5);
+      if(ex.length===7||ex.length===8){
+        const rg=ex.length===8?ex.slice(1):ex;
+        diario.push({data:L.data,aplicacao:ex.length===8?ex[0]:0,principal:rg[0],bruto:rg[1],iof:rg[2],irrf:rg[3],liquido:rg[4],rendBruto:rg[5],rendLiq:rg[6],posicao});
+      } else if(ex.length===1){
+        diario.push({data:L.data,aplicacao:ex[0],principal:0,bruto:0,iof:0,irrf:0,liquido:0,rendBruto:0,rendLiq:0,posicao});
+      } else if(ex.length===0){
+        diario.push({data:L.data,aplicacao:0,principal:0,bruto:0,iof:0,irrf:0,liquido:0,rendBruto:0,rendLiq:0,posicao});
+      }
+    }
     // Linha "Acum. Mês" é só o totalizador do mês — não vira movimento (o
     // que é realmente importado é a soma das linhas diárias, mais
     // confiável que uma célula do totalizador que pode vir em branco
@@ -36073,7 +36088,56 @@ async function _lancctbAplicParseItauAutMaisOcrDet(file){
     if(Math.abs(calc-r.liquidoResg)>0.02) console.warn('[aplicautmais] resgate de '+r.data+' não fecha: bruto-iof-irrf='+calc+' vs líquido='+r.liquidoResg);
   });
 
-  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas };
+  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, diario };
+}
+
+// Adaptador pro "Extrair sem IA" dos Ganhos/Rendimentos: o PDF do Itaú Aut
+// Mais que é IMAGEM (sem texto — ex: Pulse Marketing) só é lido pelo OCR acima
+// (achado 23/09/2026: "Importar PDF" das Aplicações lia, o "Extrair sem IA" dos
+// Ganhos não, porque o dispatcher só tinha o leitor de texto). Devolve o mesmo
+// contrato e as MESMAS chaves de _aplicfinParseItauAplicAutMais (itau_aplic_aut_mais.*),
+// então o mapeamento de colunas já ensinado continua valendo. Os totais do mês
+// saem da SOMA das linhas diárias (mais confiável que a linha "Acum. Mês" em OCR).
+async function _aplicfinItauAutMaisViaOcr(file,pageCount){
+  const ocr=await _lancctbAplicParseItauAutMaisOcrDet(file);
+  if(!ocr||!ocr.diario||!ocr.diario.length) return null;
+  const r2=v=>Math.round((v||0)*100)/100;
+  const soma=k=>r2(ocr.diario.reduce((s,d)=>s+(d[k]||0),0));
+  const chaveData=d=>d.data.slice(6,10)+d.data.slice(3,5)+d.data.slice(0,2);
+  const cont={};
+  ocr.diario.forEach(d=>{ const m=d.data.slice(6,10)+'-'+d.data.slice(3,5); cont[m]=(cont[m]||0)+1; });
+  const competence=Object.entries(cont).sort((a,b)=>b[1]-a[1])[0][0];
+  const ordenado=[...ocr.diario].sort((a,b)=>chaveData(a).localeCompare(chaveData(b)));
+  const posFinal=ordenado[ordenado.length-1].posicao||[];
+  const M='itau_aplic_aut_mais';
+  const mk=(sec,k,lbl,val,ct)=>({key:M+'.'+sec+'.'+k,label:lbl,section:sec==='month_total'?'Acum. Mês':'Posição em Ser no Dia (final)',product:null,value:(val==null?null:r2(val)),calculationType:ct});
+  const tot={ applications:soma('aplicacao'), principal_redeemed:soma('principal'), gross_redeemed:soma('bruto'), iof_retido:soma('iof'), irrf_retido:soma('irrf'), net_redeemed:soma('liquido'), paid_yield_gross:soma('rendBruto'), paid_yield_net:soma('rendLiq') };
+  const sources=[
+    mk('month_total','applications','Soma diária → Aplicações',tot.applications,'SUM'),
+    mk('month_total','principal_redeemed','Soma diária → Valor Principal Resgatado',tot.principal_redeemed,'SUM'),
+    mk('month_total','gross_redeemed','Soma diária → Valor Bruto Resgatado',tot.gross_redeemed,'SUM'),
+    mk('month_total','iof_retido','Soma diária → IOF Retido',tot.iof_retido,'SUM'),
+    mk('month_total','irrf_retido','Soma diária → IRRF Retido',tot.irrf_retido,'SUM'),
+    mk('month_total','net_redeemed','Soma diária → Valor Líquido Resgatado',tot.net_redeemed,'SUM'),
+    mk('month_total','paid_yield_gross','Soma diária → Rendimento Pago (Bruto)',tot.paid_yield_gross,'SUM'),
+    mk('month_total','paid_yield_net','Soma diária → Rendimento Pago (Líquido)',tot.paid_yield_net,'SUM'),
+    mk('final_position','principal','Última Posição → Saldo Principal',posFinal[0],'LAST_POSITION'),
+    mk('final_position','gross','Última Posição → Saldo Bruto',posFinal[1],'LAST_POSITION'),
+    mk('final_position','iof','Última Posição → Provisão de IOF',posFinal[2],'LAST_POSITION'),
+    mk('final_position','irrf','Última Posição → Provisão de IRRF',posFinal[3],'LAST_POSITION'),
+    mk('final_position','net','Última Posição → Saldo Líquido',posFinal[4],'LAST_POSITION'),
+  ];
+  const warnings=['Extrato em IMAGEM lido por OCR — confira os valores (principalmente vírgulas) antes de confirmar.'];
+  const validations=[];
+  const calc=r2(tot.gross_redeemed-tot.iof_retido-tot.irrf_retido);
+  const ok=Math.abs(calc-tot.net_redeemed)<=0.05;
+  validations.push({name:'bruto_menos_impostos_igual_liquido',ok,detail:`${tot.gross_redeemed} − ${tot.iof_retido} − ${tot.irrf_retido} = ${calc.toFixed(2)} (esperado ${tot.net_redeemed})`});
+  if(!ok) warnings.push('VALIDATION_FAILED: Bruto Resgatado − IOF − IRRF ≠ Líquido Resgatado ('+calc.toFixed(2)+' vs '+tot.net_redeemed+') — o OCR pode ter errado algum número.');
+  return {
+    bank:'ITAU', model:M, competence, account:null,
+    fingerprint:_aplicfinFingerprint('ITAU',M,['APLIC AUT MAIS - EXTRATO CONSOLIDADO DE MOVIMENTAÇÃO','DATA','APLICAÇÕES','RESGATES ANTECIPADOS/VENCIMENTOS','POSIÇÃO EM SER NO DIA']),
+    productMode:'single', products:[], sources, validations, warnings, pageCount:pageCount||1,
+  };
 }
 
 // ── MODELO 3: Bradesco "Extrato de CDBs/LETRAS" MULTIPRODUTO ──
@@ -36208,6 +36272,9 @@ async function _aplicfinExtrairSemIA(file){
   for(const fn of parsers){
     try{ const r=await fn(pdf); if(r) return r; }catch(e){ console.error('Parser aplicfin sem IA:',e); }
   }
+  // Último recurso: PDF em IMAGEM do Itaú Aut Mais (só o OCR consegue ler) —
+  // mesmo leitor que o "Importar PDF" das Aplicações Financeiras já usa.
+  try{ const r=await _aplicfinItauAutMaisViaOcr(file,pdf.numPages); if(r) return r; }catch(e){ console.error('Parser aplicfin Itaú Aut Mais OCR:',e); }
   return null;
 }
 
