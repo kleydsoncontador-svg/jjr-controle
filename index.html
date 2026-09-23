@@ -31215,6 +31215,30 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
 
   let dataAtual=null, saldoAnteriorDoc=null, saldoFinalDoc=null;
   const lancamentos=[];
+  // Correção de sinal por conferência de saldo (achado real 23/09/2026: o OCR
+  // às vezes PERDE o "−" de uma saída — SISPAG -1.627,07 virou entrada). A
+  // cada "SALDO TOTAL DISPONÍVEL DIA" impresso, confere saldo anterior +
+  // movimentos do trecho; se a diferença for EXATAMENTE 2× o valor de UM
+  // único lançamento do trecho, é o sinal que se perdeu — inverte esse.
+  let saldoBaseConf=null, segmentoConf=[], sinaisCorrigidos=0;
+  const conferirSegmento=(saldoDoc)=>{
+    if(saldoBaseConf!=null&&saldoDoc!=null){
+      const calc=segmentoConf.reduce((s,l)=>s+(l.valor_entrada||0)-(l.valor_saida||0),saldoBaseConf);
+      const diff=Math.round((calc-saldoDoc)*100)/100;
+      if(Math.abs(diff)>0.05){
+        const cands=diff>0
+          ? segmentoConf.filter(l=>l.valor_entrada>0&&Math.abs(2*l.valor_entrada-diff)<0.02)
+          : segmentoConf.filter(l=>l.valor_saida>0&&Math.abs(2*l.valor_saida+diff)<0.02);
+        if(cands.length===1){
+          const l=cands[0];
+          if(diff>0){ l.valor_saida=l.valor_entrada; l.valor_entrada=0; } else { l.valor_entrada=l.valor_saida; l.valor_saida=0; }
+          sinaisCorrigidos++;
+        }
+      }
+    }
+    if(saldoDoc!=null) saldoBaseConf=saldoDoc;
+    segmentoConf=[];
+  };
   transacoes.forEach(c=>{
     if(c.data) dataAtual=c.data;
     if(!dataAtual) return;
@@ -31222,18 +31246,23 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
     if(!hist) return;
     // "SALDO ANTERIOR"/"SALDO TOTAL DISPONÍVEL DIA" são posição de caixa,
     // nunca lançamento — pedido explícito do usuário (achado real 23/09/2026).
-    if(/^SALDO ANTERIOR/i.test(hist)){ if(c.saldo) saldoAnteriorDoc=_lancctbParseValorBR(c.saldo); return; }
-    if(/^SALDO TOTAL DISPON[ÍI]VEL DIA/i.test(hist)){ if(c.saldo) saldoFinalDoc=_lancctbParseValorBR(c.saldo); return; }
+    if(/^SALDO ANTERIOR/i.test(hist)){ if(c.saldo){ saldoAnteriorDoc=_lancctbParseValorBR(c.saldo); saldoBaseConf=saldoAnteriorDoc; segmentoConf=[]; } return; }
+    if(/^SALDO TOTAL DISPON[ÍI]VEL DIA/i.test(hist)){ if(c.saldo){ saldoFinalDoc=_lancctbParseValorBR(c.saldo); conferirSegmento(saldoFinalDoc); } return; }
     if(!c.valor) return; // sem valor de movimentação reconhecido — nunca inventa
     const valor=_lancctbParseValorBR(c.valor);
     const dataIso=_itaubbaDataBrIso(dataAtual);
     if(!dataIso) return;
-    lancamentos.push({ data_pagamento:dataIso, valor_entrada:valor>0?valor:0, valor_saida:valor<0?-valor:0, historico_bancario:hist });
+    // Nomes de campo = contrato dos demais leitores (data/historico) — o
+    // preview e o salvar leem esses; com data_pagamento/historico_bancario
+    // a Data e o Histórico saíam VAZIOS na tela (achado real 23/09/2026).
+    const novoLanc={ data:dataIso, historico:hist, valor_entrada:valor>0?valor:0, valor_saida:valor<0?-valor:0, documento:null };
+    lancamentos.push(novoLanc);
+    segmentoConf.push(novoLanc);
   });
   if(!lancamentos.length) return null;
   return {
     lancamentos, saldoAnteriorDoc, saldoFinalDoc, layout:'Itaú BBA (OCR local)',
-    observacao:`Lido via OCR local (Tesseract.js) — PDF sem texto selecionável.${mPeriodo?` Período do documento: ${mPeriodo[1]} a ${mPeriodo[2]}.`:''} O "Saldo total" do cabeçalho do documento NÃO foi usado como saldo final (pode refletir a posição em uma data posterior ao período do extrato) — o saldo final considerado é o da última linha "SALDO TOTAL DISPONÍVEL DIA" dentro do período. Confira os valores antes de salvar.`,
+    observacao:`Lido via OCR local (Tesseract.js) — PDF sem texto selecionável.${sinaisCorrigidos?` ${sinaisCorrigidos} sinal(is) de valor corrigido(s) automaticamente pela conferência com o "SALDO TOTAL DISPONÍVEL DIA" (o OCR havia perdido o "−").`:''}${mPeriodo?` Período do documento: ${mPeriodo[1]} a ${mPeriodo[2]}.`:''} O "Saldo total" do cabeçalho do documento NÃO foi usado como saldo final (pode refletir a posição em uma data posterior ao período do extrato) — o saldo final considerado é o da última linha "SALDO TOTAL DISPONÍVEL DIA" dentro do período. Confira os valores antes de salvar.`,
   };
 }
 
