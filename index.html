@@ -22633,11 +22633,23 @@ async function excluirLancctbAplicacaoMovimento(movId){
 // o rendimento tbm". Não é o TXT de partida dobrada do Registro Contábil
 // (esse já existe, ver exportarLancctbRegistroContabilTxt) — é uma
 // listagem simples, por Aplicação/data, pra apoiar o lançamento manual.
+// Pedido do usuário 23/09/2026: "Esse é o padrão. rendimento é sempre
+// credito na conta 432, IOF sempre debito na conta 708, e IRRF sempre
+// debito na conta 31. A conta da aplicação financeira já foi informada no
+// cadastro dela" — o botão gerava um relatório de texto solto (tabulado,
+// só pra leitura); vira lançamento contábil de verdade, no MESMO formato
+// pipe-delimitado |6100|...| do TXT principal (gerarTxtMisterContador),
+// pra colar direto no Mister Contador junto com o resto. Conta da
+// Aplicação Financeira sempre no lado oposto (contrapartida) das 3 contas
+// fixas — nunca precisa ser perguntada, já vem do cadastro de cada uma.
+const LANCCTB_APLIC_CONTA_RENDIMENTO='432'; // sempre Crédito
+const LANCCTB_APLIC_CONTA_IOF='708'; // sempre Débito
+const LANCCTB_APLIC_CONTA_IRRF='31'; // sempre Débito
 async function baixarLancctbAplicIrIofTxt(){
   const eid=_lancctbEidAtual;
   const aplicacoes=_lancctbUltimasAplicacoes||[];
   if(!aplicacoes.length){ toast('Nenhuma Aplicação Financeira cadastrada.','err'); return; }
-  const nomePorId={}; aplicacoes.forEach(a=>nomePorId[a.id]=a.nome);
+  const contaPorId={}; aplicacoes.forEach(a=>contaPorId[a.id]={nome:a.nome,numeroConta:a.plano_contas?.numero_conta||''});
 
   const { data: movsResgate, error: e1 } = await _lancctbFetchTudo(()=>_supaClient.from('aplicacoes_financeiras_movimentos')
     .select('aplicacao_id,data,valor_ir,valor_iof')
@@ -22654,19 +22666,25 @@ async function baixarLancctbAplicIrIofTxt(){
 
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   const dataFmt=d=>new Date(d+'T00:00:00').toLocaleDateString('pt-BR');
-  let totalIr=0, totalIof=0, totalRendimento=0;
-  const corpoIrIof=linhasIrIof.map(m=>{
-    totalIr+=m.valor_ir||0; totalIof+=m.valor_iof||0;
-    return `${dataFmt(m.data)}\t${(nomePorId[m.aplicacao_id]||'').padEnd(35)}\tIRRF ${_fmt(m.valor_ir||0)}\tIOF ${_fmt(m.valor_iof||0)}`;
-  }).join('\r\n');
-  const corpoRendimento=linhasRendimento.map(m=>{
-    totalRendimento+=m.valor_bruto||0;
-    return `${dataFmt(m.data)}\t${(nomePorId[m.aplicacao_id]||'').padEnd(35)}\tRendimento ${_fmt(m.valor_bruto||0)}`;
-  }).join('\r\n');
-  const conteudo=`IRRF, IOF E RENDIMENTOS — ${(emp?.nome||eid).toUpperCase()}\r\nGerado em ${new Date().toLocaleString('pt-BR')}\r\n\r\n`
-    +(linhasIrIof.length?`Data\t\tAplicação\t\t\t\t\tIRRF\tIOF\r\n${corpoIrIof}\r\n\r\nTOTAL IRRF: R$ ${_fmt(totalIr)}\r\nTOTAL IOF:  R$ ${_fmt(totalIof)}\r\n\r\n`:'')
-    +(linhasRendimento.length?`Data\t\tAplicação\t\t\t\t\tRendimento\r\n${corpoRendimento}\r\n\r\nTOTAL RENDIMENTOS: R$ ${_fmt(totalRendimento)}\r\n`:'');
+  const semConta=new Set();
+  const linhasTxt=[];
+  linhasIrIof.forEach(m=>{
+    const conta=contaPorId[m.aplicacao_id]; if(!conta){ return; }
+    if(!conta.numeroConta){ semConta.add(conta.nome); return; }
+    if((m.valor_ir||0)>0) linhasTxt.push({ data:dataFmt(m.data), debito:LANCCTB_APLIC_CONTA_IRRF, credito:conta.numeroConta, valor:m.valor_ir, historico:`IRRF s/ Resgate - ${conta.nome}` });
+    if((m.valor_iof||0)>0) linhasTxt.push({ data:dataFmt(m.data), debito:LANCCTB_APLIC_CONTA_IOF, credito:conta.numeroConta, valor:m.valor_iof, historico:`IOF s/ Resgate - ${conta.nome}` });
+  });
+  linhasRendimento.forEach(m=>{
+    const conta=contaPorId[m.aplicacao_id]; if(!conta){ return; }
+    if(!conta.numeroConta){ semConta.add(conta.nome); return; }
+    linhasTxt.push({ data:dataFmt(m.data), debito:conta.numeroConta, credito:LANCCTB_APLIC_CONTA_RENDIMENTO, valor:m.valor_bruto, historico:`Rendimento - ${conta.nome}` });
+  });
+  if(semConta.size){ toast(`Aplicação(ões) sem Conta Contábil cadastrada, ignorada(s) no TXT: ${[...semConta].join(', ')}. Cadastre em "Editar" na Aplicação Financeira.`,'err'); }
+  if(!linhasTxt.length){ toast('Nenhuma linha com Conta Contábil cadastrada pra gerar o TXT.','err'); return; }
 
+  const cnpjLimpo=(emp?.cnpj||'').replace(/\D/g,'');
+  if(!cnpjLimpo){ toast('Empresa sem CNPJ cadastrado — não é possível gerar o TXT.','err'); return; }
+  const conteudo=gerarTxtMisterContador(cnpjLimpo,linhasTxt);
   const nomeEmpSlug=(emp?.nome||eid).normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-zA-Z0-9]/g,'_');
   const nomeArquivo=`IRRF_IOF_Rendimentos_${nomeEmpSlug}_${new Date().toISOString().split('T')[0]}.txt`;
   // Pedido do usuário 23/09/2026: "esse aqui tbm, deveria ir pra mesma pasta
@@ -22682,7 +22700,7 @@ async function baixarLancctbAplicIrIofTxt(){
     a.href=url; a.download=nomeArquivo; a.click();
     URL.revokeObjectURL(url);
   }
-  toast(salvouNaRede?'TXT salvo em Arquivos de Transferência de Rede.':'TXT baixado pelo navegador (conceda acesso à pasta de rede pra salvar direto lá).','ok');
+  toast(`TXT gerado com ${linhasTxt.length} lançamento(s).${salvouNaRede?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador (conceda acesso à pasta de rede pra salvar direto lá).'}`,'ok');
 }
 
 // ─── Importar Aplicações/Resgates em massa via PDF (IA) ────────────────────
