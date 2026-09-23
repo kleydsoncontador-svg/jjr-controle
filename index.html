@@ -35993,24 +35993,43 @@ async function _lancctbAplicParseItauAutMaisOcrDet(file){
 
   const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
   const REGEX_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
+  // Achado real 23/09/2026 (reproduzido rodando o mesmo Tesseract.js 5.1.1
+  // contra o PDF real de julho da Pulse): com o padrão (escala 2.3 + modo
+  // automático de página) o OCR DESCARTAVA linhas inteiras da tabela densa
+  // (01/07 e 21/07 nem apareciam) e PERDIA A VÍRGULA de números pequenos
+  // ("0,12"→"012", "1,71"→"171", "0,45"→"045") — a contagem de números da
+  // linha mudava e a classificação por contagem dropava a linha (só 02/07
+  // sobrava). Escala 3.5 + modo "bloco único de texto" (PSM 6) recuperou
+  // as 24 linhas com todas as vírgulas em julho E agosto. O modo é
+  // restaurado ao final (worker compartilhado com outros leitores OCR).
+  const ESCALA_DADOS=3.5;
   const linhasNumeros=[];
-  for(let p=1;p<=pdf.numPages;p++){
-    const page=p===1?page1:await pdf.getPage(p);
-    const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,2.3);
-    const {data}=await worker.recognize(canvas);
-    const linhasOcr=(data.lines&&data.lines.length)
-      ? data.lines.map(ln=>(ln.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text})))
-      : _lancctbAgruparLinhasPorY((data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0})),12).map(l=>l.itens);
-    linhasOcr.forEach(itens=>{
-      if(!itens.length) return;
-      const textoLinha=itens.map(i=>i.str).join(' ');
-      const dataMatch=itens.find(i=>REGEX_DATA.test(i.str));
-      const ehAcum=/acum/i.test(textoLinha);
-      const numeros=itens.filter(i=>REGEX_NUM.test(i.str)).map(i=>_lancctbParseValorBR(i.str));
-      if((!dataMatch&&!ehAcum)||!numeros.length) return; // cabeçalho/rodapé/linha sem número — ignora
-      console.log('[aplicautmais-debug] itens:',itens.map(i=>i.str).join(' | '),'-> numeros:',JSON.stringify(numeros),'qtd:',numeros.length);
-      linhasNumeros.push({ data:dataMatch?dataMatch.str:null, numeros, ehAcum });
-    });
+  try{
+    await worker.setParameters({tessedit_pageseg_mode:'6'});
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=p===1?page1:await pdf.getPage(p);
+      const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,ESCALA_DADOS);
+      const {data}=await worker.recognize(canvas);
+      const linhasOcr=(data.lines&&data.lines.length)
+        ? data.lines.map(ln=>(ln.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text})))
+        : _lancctbAgruparLinhasPorY((data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0})),12).map(l=>l.itens);
+      // Tolerância a vírgula perdida ainda assim (todo valor deste layout
+      // tem exatamente 2 casas): token só de dígitos com 3+ caracteres,
+      // sem ponto/vírgula, vira "N,NN" ("012"→"0,12"). Não mexe em token
+      // que já tem vírgula.
+      const arrumarNum=s=>/^-?\d{3,}$/.test(s)?s.replace(/^(-?\d+)(\d{2})$/,'$1,$2'):s;
+      linhasOcr.forEach(itens=>{
+        if(!itens.length) return;
+        const textoLinha=itens.map(i=>i.str).join(' ');
+        const dataMatch=itens.find(i=>REGEX_DATA.test(i.str));
+        const ehAcum=/acum/i.test(textoLinha);
+        const numeros=itens.map(i=>arrumarNum(i.str)).filter(s=>REGEX_NUM.test(s)).map(s=>_lancctbParseValorBR(s));
+        if((!dataMatch&&!ehAcum)||!numeros.length) return; // cabeçalho/rodapé/linha sem número — ignora
+        linhasNumeros.push({ data:dataMatch?dataMatch.str:null, numeros, ehAcum });
+      });
+    }
+  } finally {
+    try{ await worker.setParameters({tessedit_pageseg_mode:'3'}); }catch(e){}
   }
   if(!linhasNumeros.length) return null;
 
