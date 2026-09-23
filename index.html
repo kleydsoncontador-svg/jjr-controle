@@ -22792,12 +22792,12 @@ async function _lancctbAplicUploadExtrair(usarIA){
       // Achado real 22/09/2026 (CLD): existe mais de um layout Bradesco de
       // Aplicações/Resgates ("Extrato Padrão" e "Extrato de CDBs/LETRAS") —
       // tenta cada leitor determinístico em sequência antes de cair pra IA.
-      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file));
+      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file));
       if(!extraido){
         statusEl.textContent='';
         if(btn) btn.disabled=false;
         if(btnIa) btnIa.disabled=false;
-        toast('Não reconheci esse layout automaticamente (só padrões Bradesco por enquanto) — tente "Usar IA Gemini".','err');
+        toast('Não reconheci esse layout automaticamente (padrões Bradesco/Itaú Aut Mais) — tente "Usar IA Gemini".','err');
         return;
       }
     }
@@ -35950,6 +35950,105 @@ async function _lancctbAplicParseBradescoCdbMultiDet(file){
   });
   if(!resultado.length) return null;
   return { colunas:[...colunasSet], linhas: resultado };
+}
+
+// ── MODELO: Itaú "APLIC AUT MAIS - Extrato Consolidado de Movimentação",
+// OCR local (achado real 23/09/2026, Pulse Marketing, PDFs de jul/ago sem
+// texto nativo). Reaproveita o mesmo worker/renderizador Tesseract.js já
+// usados no OCR de Ganhos/Itaú Fundo e no Extrato Itaú BBA — nunca cria um
+// 2º pipeline de OCR. Layout: 1 linha por dia, colunas Aplicações |
+// Resgates Antecipados/Vencimentos (Principal/Bruto/IOF/IRRF/Líquido
+// Resgatado) | Rendimento Pago (Bruto/Líquido) | Posição em Ser no Dia
+// (Saldo Principal/Bruto, Provisão IOF/IRRF, Saldo Líquido) — a posição
+// aparece em TODA linha (mesmo sem resgate naquele dia); os 5 números dela
+// vêm sempre por último. Conferido no PDF real: Valor Líquido Resgatado =
+// Valor Principal Resgatado + Rendimento Pago Líquido (274,85+0,05=274,90)
+// — ou seja "Rendimento Pago" é só o detalhamento de quanto do resgate era
+// rendimento, não um evento de caixa separado; só o Resgate (com
+// Principal/Bruto/IOF/IRRF/Líquido) vira movimento, no mesmo formato de
+// coluna já usado pelos leitores Bradesco acima (Data/Principal/Bruto/IOF/
+// IRRF/Liquido/Historico — a detecção automática de mapeamento já existente
+// em _lancctbAplicDetectarMapeamentoAutomatico reconhece esses nomes sem
+// precisar de nenhum código novo).
+const APLICAUTMAIS_ANCORAS=[/aplic\s*aut\s*mais/i,/extrato\s*consolidado\s*de\s*movimenta[çc][ãa]o/i,/resgates\s*antecipados/i,/posi[çc][ãa]o\s*em\s*ser\s*no\s*dia/i,/acum\.?\s*m[êe]s/i];
+function _aplicautmaisScoreAncoras(t){ return APLICAUTMAIS_ANCORAS.reduce((s,rx)=>s+(rx.test(t||'')?1:0),0); }
+async function _lancctbAplicParseItauAutMaisOcrDet(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const page1=await pdf.getPage(1);
+  const content1=await page1.getTextContent();
+  // Tem texto nativo de sobra — não é esse layout-imagem, deixa outro
+  // leitor (ou a IA) reconhecer; nunca roda OCR à toa num PDF normal.
+  if(content1.items.map(i=>i.str).join('').trim().length>=50) return null;
+
+  const worker=await _ganhoOcrWorker();
+  let melhorRotacao=0, melhorScore=-1, melhorTexto='';
+  for(const rot of [0,90,180,270]){
+    const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,1.3);
+    const {data}=await worker.recognize(canvas);
+    const score=_aplicautmaisScoreAncoras(data.text);
+    if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; melhorTexto=data.text; }
+  }
+  if(melhorScore<1) return null; // nem de longe parece esse layout
+
+  const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const REGEX_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
+  const linhasNumeros=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=p===1?page1:await pdf.getPage(p);
+    const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,2.3);
+    const {data}=await worker.recognize(canvas);
+    const linhasOcr=(data.lines&&data.lines.length)
+      ? data.lines.map(ln=>(ln.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text})))
+      : _lancctbAgruparLinhasPorY((data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0})),12).map(l=>l.itens);
+    linhasOcr.forEach(itens=>{
+      if(!itens.length) return;
+      const textoLinha=itens.map(i=>i.str).join(' ');
+      const dataMatch=itens.find(i=>REGEX_DATA.test(i.str));
+      const ehAcum=/acum/i.test(textoLinha);
+      const numeros=itens.filter(i=>REGEX_NUM.test(i.str)).map(i=>_lancctbParseValorBR(i.str));
+      if((!dataMatch&&!ehAcum)||!numeros.length) return; // cabeçalho/rodapé/linha sem número — ignora
+      linhasNumeros.push({ data:dataMatch?dataMatch.str:null, numeros, ehAcum });
+    });
+  }
+  if(!linhasNumeros.length) return null;
+
+  // Toda linha de data tem SEMPRE os 5 números de "Posição em Ser no Dia"
+  // por último — o que vier ANTES (0, 1, 7 ou 8 números) é Aplicação e/ou
+  // Resgate+Rendimento daquele dia, sempre nessa ordem: [Aplicação?,
+  // Principal Resgatado, Bruto Resgatado, IOF Retido, IRRF Retido, Valor
+  // Líquido Resgatado, Rendimento Bruto, Rendimento Líquido].
+  const linhas=[];
+  const resgatesParaConferir=[];
+  linhasNumeros.forEach(L=>{
+    // Linha "Acum. Mês" é só o totalizador do mês — não vira movimento (o
+    // que é realmente importado é a soma das linhas diárias, mais
+    // confiável que uma célula do totalizador que pode vir em branco
+    // quando o valor é zero, em vez de imprimir "0,00").
+    if(L.ehAcum||!L.data) return;
+    const n=L.numeros.length;
+    if(n<5) return; // sem nem a posição do dia — não confia nessa linha
+    const extras=L.numeros.slice(0,n-5);
+    if(extras.length===7||extras.length===8){
+      const resg=extras.length===8?extras.slice(1):extras; // extras[0] seria Aplicação, descarta aqui
+      const [principalResg,brutoResg,iofResg,irrfResg,liquidoResg]=resg;
+      linhas.push({ Data:L.data, Principal:principalResg, Bruto:brutoResg, IOF:iofResg, IRRF:irrfResg, Liquido:liquidoResg, Historico:'Resgate' });
+      resgatesParaConferir.push({data:L.data,brutoResg,iofResg,irrfResg,liquidoResg});
+    } else if(extras.length===1){
+      linhas.push({ Data:L.data, Principal:extras[0], Bruto:null, IOF:null, IRRF:null, Liquido:null, Historico:'Aplicação' });
+    }
+    // outras contagens (2-6, 9+): linha ambígua — não arrisca gravar errado.
+  });
+  if(!linhas.length) return null;
+
+  // Conferência matemática (nunca bloqueia, só avisa no console) — pedido
+  // do usuário: Bruto − IOF − IRRF = Líquido em cada resgate.
+  resgatesParaConferir.forEach(r=>{
+    const calc=Math.round((r.brutoResg-r.iofResg-r.irrfResg)*100)/100;
+    if(Math.abs(calc-r.liquidoResg)>0.02) console.warn('[aplicautmais] resgate de '+r.data+' não fecha: bruto-iof-irrf='+calc+' vs líquido='+r.liquidoResg);
+  });
+
+  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas };
 }
 
 // ── MODELO 3: Bradesco "Extrato de CDBs/LETRAS" MULTIPRODUTO ──
