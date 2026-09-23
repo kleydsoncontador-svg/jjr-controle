@@ -31061,6 +31061,135 @@ async function _lancctbParsearExtratoItauModelosNovos(pdf){
   return {lancamentos:r.lancamentos,saldoAnteriorDoc:r.saldoAnteriorDoc!=null?r.saldoAnteriorDoc:null,saldoFinalDoc:r.saldoFinalDoc!=null?r.saldoFinalDoc:null,layout:r.layout,observacao:r.observacao||(r.validacoes&&r.validacoes.length?('⚠ '+r.validacoes.length+' saldo(s) do dia não batem com o movimento'):(r.saldosDoDia&&r.saldosDoDia.length?' ✓ saldos do dia conferem.':''))};
 }
 
+// ─── Extrato Itaú BBA (Conta Corrente), layout SEM texto nativo (PDF-imagem) ─
+// Achado real 23/09/2026 (Pulse Marketing, 0 caracteres de texto no PDF —
+// extraído do internet banking como imagem): layout próprio do Itaú BBA
+// (colunas Data | Lançamentos | Razão Social | CNPJ/CPF | Valor (R$) |
+// Saldo (R$)), diferente do Itaú "normal" já tratado acima. Só entra na
+// cadeia quando NÃO há texto nativo suficiente (spec do usuário: "PDF.js
+// detecta ausência de texto → OCR local → reconstrução da tabela → parser
+// determinístico. Não mandar automaticamente para Gemini"). Reaproveita o
+// MESMO worker Tesseract.js compartilhado (_ganhoOcrWorker) e o MESMO
+// renderizador de página com detecção de rotação (_ganhoItauFundoRenderizarPagina)
+// já usados no OCR de Ganhos/Itaú Fundo — nunca cria um 2º pipeline de OCR.
+//
+// Regras confirmadas pelo usuário direto no PDF real:
+// - "SALDO ANTERIOR" e "SALDO TOTAL DISPONÍVEL DIA" NÃO são lançamento —
+//   são a posição de caixa naquele instante. Nunca viram entrada/saída.
+// - O "Saldo total" do CABEÇALHO do documento (ex: "R$ 14.649,53") é só o
+//   retrato de quando o PDF foi atualizado — pode ser de DEPOIS do período
+//   pedido (o de teste real: julho, mas atualizado em setembro). NUNCA usar
+//   como saldo final do período — o saldo final vem da ÚLTIMA linha "SALDO
+//   TOTAL DISPONÍVEL DIA" dentro do período (aqui: 29/07, R$ 16.426,47).
+// - Parser é DO LAYOUT, não da empresa: nome/CNPJ/agência/conta/competência
+//   são sempre lidos do próprio documento (nunca fixos) — a trava de CNPJ
+//   já existente em processarLancctbUploadExtrato (raizesEmpresa) cobre a
+//   validação de "não importar pra empresa errada", sem precisar duplicar
+//   aqui.
+const ITAUBBA_ANCORAS=[/ita[uú]\s*bba/i,/lan[çc]amentos do per[íi]odo/i,/raz[ãa]o social/i,/cnpj\s*\/?\s*cpf/i,/saldo\s*\(?r\$\)?/i];
+function _itaubbaScoreAncoras(texto){ return ITAUBBA_ANCORAS.reduce((s,rx)=>s+(rx.test(texto||'')?1:0),0); }
+function _itaubbaDataBrIso(dataBr){
+  const m=String(dataBr||'').match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+  return m?`${m[3]}-${m[2]}-${m[1]}`:null;
+}
+async function _lancctbParsearExtratoItauBBAOcr(pdf){
+  const page1=await pdf.getPage(1);
+  const content1=await page1.getTextContent();
+  // Tem texto nativo de sobra — não é esse layout-imagem, deixa outro
+  // parser (ou o genérico) reconhecer; nunca roda OCR à toa num PDF normal.
+  if(content1.items.map(i=>i.str).join('').trim().length>=50) return null;
+
+  const worker=await _ganhoOcrWorker();
+  let melhorRotacao=0, melhorScore=-1, melhorTexto='';
+  for(const rot of [0,90,180,270]){
+    const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,1.3);
+    const {data}=await worker.recognize(canvas);
+    const score=_itaubbaScoreAncoras(data.text);
+    if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; melhorTexto=data.text; }
+  }
+  if(melhorScore<3) return null; // não parece Itaú BBA — não força esse parser
+
+  const mPeriodo=melhorTexto.match(/(\d{2}\/\d{2}\/\d{4})\s*at[ée]\s*(\d{2}\/\d{2}\/\d{4})/i);
+
+  let colunas=null;
+  const linhasTabela=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=p===1?page1:await pdf.getPage(p);
+    const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,2.3);
+    const {data}=await worker.recognize(canvas);
+    const palavras=(data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0}));
+    const linhas=_lancctbAgruparLinhasPorY(palavras,12);
+    linhas.forEach(l=>{
+      const textoLinha=l.itens.map(i=>i.str).join(' ').toLowerCase();
+      if(!colunas){
+        if(/\bdata\b/.test(textoLinha)&&/lan[çc]amentos/.test(textoLinha)&&/valor/.test(textoLinha)&&/saldo/.test(textoLinha)){
+          const achar=re=>l.itens.find(i=>re.test(i.str.toLowerCase()));
+          const itData=achar(/^data$/), itLanc=achar(/lan[çc]amentos/), itRazao=achar(/raz[ãa]o/), itCnpj=achar(/cnpj/), itValor=achar(/valor/), itSaldo=achar(/saldo/);
+          if(itData&&itLanc&&itValor&&itSaldo) colunas={data:itData.x,lancamentos:itLanc.x,razao:itRazao?itRazao.x:(itCnpj?itCnpj.x-1:(itValor.x-200)),cnpj:itCnpj?itCnpj.x:(itValor.x-100),valor:itValor.x,saldo:itSaldo.x};
+        }
+        return;
+      }
+      const limites=[
+        {nome:'data',fim:(colunas.data+colunas.lancamentos)/2},
+        {nome:'lancamentos',fim:(colunas.lancamentos+colunas.razao)/2},
+        {nome:'razao',fim:(colunas.razao+colunas.cnpj)/2},
+        {nome:'cnpj',fim:(colunas.cnpj+colunas.valor)/2},
+        {nome:'valor',fim:(colunas.valor+colunas.saldo)/2},
+        {nome:'saldo',fim:Infinity},
+      ];
+      const celulas={data:'',lancamentos:'',razao:'',cnpj:'',valor:'',saldo:''};
+      l.itens.forEach(it=>{
+        const col=limites.find(li=>it.x<li.fim)||limites[limites.length-1];
+        celulas[col.nome]+=(celulas[col.nome]?' ':'')+it.str;
+      });
+      Object.keys(celulas).forEach(k=>celulas[k]=celulas[k].trim());
+      linhasTabela.push(celulas);
+    });
+  }
+  if(!colunas||!linhasTabela.length) return null;
+
+  // "Lançamentos" pode quebrar em 2 linhas visuais (ex: "RENDIMENTOS REND
+  // PAGO APLIC" + "AUT MAIS", com o Valor alinhado na 2ª linha) — uma linha
+  // OCR SEM DATA é sempre continuação da transação anterior (nunca uma nova),
+  // mesmo quando é ELA que carrega o Valor/Saldo daquela transação — por
+  // isso funde o texto E também aproveita o valor/saldo dessa linha,
+  // nunca só a presença de valor/saldo pra decidir se é continuação (testado
+  // contra o PDF real: usar valor/saldo como âncora perdia a 1ª metade do
+  // histórico, "RENDIMENTOS REND PAGO APLIC" sumia, ficava só "AUT MAIS").
+  const linhasUnidas=[];
+  linhasTabela.forEach(c=>{
+    const temData=c.data&&/^\d{2}\/\d{2}\/\d{4}$/.test(c.data);
+    if(temData||!linhasUnidas.length){ linhasUnidas.push({...c}); return; }
+    const ultima=linhasUnidas[linhasUnidas.length-1];
+    ultima.lancamentos=(ultima.lancamentos+' '+c.lancamentos).trim();
+    if(c.valor) ultima.valor=c.valor;
+    if(c.saldo) ultima.saldo=c.saldo;
+  });
+
+  let dataAtual=null, saldoAnteriorDoc=null, saldoFinalDoc=null;
+  const lancamentos=[];
+  linhasUnidas.forEach(c=>{
+    if(c.data&&/^\d{2}\/\d{2}\/\d{4}$/.test(c.data)) dataAtual=c.data;
+    if(!dataAtual) return;
+    const hist=c.lancamentos.replace(/\s+/g,' ').trim();
+    if(!hist) return;
+    // "SALDO ANTERIOR"/"SALDO TOTAL DISPONÍVEL DIA" são posição de caixa,
+    // nunca lançamento — pedido explícito do usuário (achado real 23/09/2026).
+    if(/^SALDO ANTERIOR/i.test(hist)){ if(c.saldo) saldoAnteriorDoc=_lancctbParseValorBR(c.saldo); return; }
+    if(/^SALDO TOTAL DISPON[ÍI]VEL DIA/i.test(hist)){ if(c.saldo) saldoFinalDoc=_lancctbParseValorBR(c.saldo); return; }
+    if(!c.valor) return; // sem valor de movimentação reconhecido — nunca inventa
+    const valor=_lancctbParseValorBR(c.valor);
+    const dataIso=_itaubbaDataBrIso(dataAtual);
+    if(!dataIso) return;
+    lancamentos.push({ data_pagamento:dataIso, valor_entrada:valor>0?valor:0, valor_saida:valor<0?-valor:0, historico_bancario:hist });
+  });
+  if(!lancamentos.length) return null;
+  return {
+    lancamentos, saldoAnteriorDoc, saldoFinalDoc, layout:'Itaú BBA (OCR local)',
+    observacao:`Lido via OCR local (Tesseract.js) — PDF sem texto selecionável.${mPeriodo?` Período do documento: ${mPeriodo[1]} a ${mPeriodo[2]}.`:''} O "Saldo total" do cabeçalho do documento NÃO foi usado como saldo final (pode refletir a posição em uma data posterior ao período do extrato) — o saldo final considerado é o da última linha "SALDO TOTAL DISPONÍVEL DIA" dentro do período. Confira os valores antes de salvar.`,
+  };
+}
+
 // Leitor GENÉRICO (sem IA): aprende as colunas pelo cabeçalho do próprio PDF e SÓ é aceito se o saldo conferir (saldo por linha, saldo
 // anterior + movimento = saldo final, ou totais de entradas/saídas). Fica por último na cadeia: só roda se nenhum leitor específico serviu.
 // ── BTG Pactual "Conta corrente - PJ" (BTG_PACTUAL_CONTA_CORRENTE_PJ) — pedido do usuário 22/09/2026 ──
@@ -31986,7 +32115,8 @@ async function processarLancctbUploadExtrato(forcarIA){
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
           ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))
-          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoGenerico(pdf));
+          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
+          ||(await _lancctbParsearExtratoItauBBAOcr(pdf));
       })();
       if(reconhecido){
         origem='pdf_estruturado';
