@@ -25692,8 +25692,8 @@ async function _lancctbProcessarTributos(){
   const faltamMaisComposicoes=composicoesParaAbrir.length>1?`, ${composicoesParaAbrir.length-1} outra(s) composição(ões) ainda aguardando classificação`:'';
   toast(`Tributos: ${resolvidos} resolvido(s) sozinho(s)${tributosDivididos?`, ${tributosDivididos} Guia(s) com composição identificada${composicoesParaAbrir.length?' — abrindo pra você classificar agora'+faltamMaisComposicoes:''}`:''}${!tributosDivididos&&composicaoJaExistente?', 1 composição já identificada antes ainda pendente — abrindo pra você classificar agora':''}, ${comSugestao} com PDF encontrado (falta Regra), ${semAchado} sem PDF no mês${detalheSemAchado}.`,'ok');
   await renderLancctbRegistroContabil();
-  if(composicoesParaAbrir.length) await abrirLancctbRegraModalDeLinha({extrato:composicoesParaAbrir[0]});
-  else if(composicaoJaExistente) await abrirLancctbRegraModalDeLinha({extrato:composicaoJaExistente});
+  if(composicoesParaAbrir.length) await _lancctbRegistroAbrirInline(composicoesParaAbrir[0].id);
+  else if(composicaoJaExistente) await _lancctbRegistroAbrirInline(composicaoJaExistente.id);
 }
 
 // Botão "🤖 Processar via IA" (último recurso, pedido do usuário
@@ -25918,6 +25918,149 @@ let _lancctbRegistroSelecionados=new Map();
 // desassociar essas classificações, em lote"). Só CONCILIADAS entram
 // aqui — o inverso exato de _lancctbRegistroSelecionados.
 let _lancctbRegistroSelecionadosDesclass=new Map();
+// Pedido do usuário 23/09/2026: "é pra fazer a abertura do DARF direto na
+// tela de registro geral" — pendência com composicao_tributo (2+ impostos
+// numa Guia sem Regra ainda) não abre mais a janela "Cadastrar regra";
+// vira N+1 linhas EDITÁVEIS direto dentro da própria tabela do Registro
+// Contábil (1 crédito banco fixo + N débitos com select de conta). Só uma
+// linha por vez fica expandida (guarda o id do lancamentos_extrato).
+let _lancctbInlineExpandidoId=null;
+let _lancctbInlineContasOptions=[];
+async function _lancctbRegistroAbrirInline(extratoId){
+  const { data } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas')
+    .select('id,numero_conta,classificacao,descricao,tipo,grau').eq('empresa_eid',_lancctbEidAtual).eq('ignorada_em_regras',false).order('classificacao'));
+  _lancctbInlineContasOptions=data||[];
+  _lancctbInlineExpandidoId=extratoId;
+  renderLancctbRegistroContabil();
+}
+function _lancctbRegistroFecharInline(){
+  _lancctbInlineExpandidoId=null;
+  renderLancctbRegistroContabil();
+}
+function _lancctbInlineContasOptionsHtml(){
+  return '<option value="">Selecione…</option>'+_lancctbInlineContasOptions.map(c=>{
+    const indent='&nbsp;&nbsp;&nbsp;&nbsp;'.repeat(Math.max(0,(c.grau||1)-1));
+    return `<option value="${c.id}" data-classificacao="${esc(c.classificacao)}" data-descricao="${esc(c.descricao)}" ${c.tipo==='S'?'disabled':''}>${indent}${esc(c.numero_conta)} - ${esc(c.classificacao)} - ${esc(c.descricao)}</option>`;
+  }).join('');
+}
+// onchange do <select> de conta de uma linha inline — só espelha
+// Classificação/Descrição nas 2 células vizinhas, puramente visual.
+function _lancctbInlineContaMudou(selectEl,idx,extratoId){
+  const opt=selectEl.selectedOptions[0];
+  const classifEl=document.getElementById(`lancctbInlineClassif_${extratoId}_${idx}`);
+  const descrEl=document.getElementById(`lancctbInlineDescr_${extratoId}_${idx}`);
+  if(classifEl) classifEl.textContent=opt?opt.dataset.classificacao||'':'';
+  if(descrEl) descrEl.textContent=opt?opt.dataset.descricao||'':'';
+}
+function _lancctbInlineAtualizarTotal(extratoId,valorTotal){
+  const comp=(_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId)?.extrato.composicao_tributo)||[];
+  let soma=0;
+  comp.forEach((c,idx)=>{
+    const v=document.getElementById(`lancctbInlineValor_${extratoId}_${idx}`);
+    if(v) soma+=_lancctbParseValorInput(v.value);
+  });
+  const feedback=document.getElementById(`lancctbInlineTotal_${extratoId}`);
+  if(!feedback) return;
+  const bate=Math.abs(soma-valorTotal)<0.01;
+  feedback.innerHTML=`Soma: <strong>R$ ${_fmt(soma)}</strong> / <strong>R$ ${_fmt(valorTotal)}</strong> ${bate?'<span style="color:var(--teal)">✓ bate</span>':'<span style="color:#dc2626">✗ não bate</span>'}`;
+  const btnSalvar=document.getElementById(`lancctbInlineSalvarBtn_${extratoId}`);
+  if(btnSalvar) btnSalvar.disabled=!bate;
+}
+// Salva a partida dobrada (1 crédito banco : N débitos) direto das linhas
+// editáveis da tabela, sem passar pela janela "Cadastrar regra" — e já cria
+// a Regra (+ linhas do rateio) automaticamente, mesmo comportamento padrão
+// de "aprender" ligado que a janela usava.
+async function _lancctbRegistroSalvarInline(extratoId){
+  const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
+  if(!item){ toast('Lançamento não encontrado — atualize a tela.','err'); return; }
+  const r=item.extrato;
+  const comp=r.composicao_tributo||[];
+  const ehSaida=r.valor_saida>0;
+  const valorTotal=r.valor_saida||r.valor_entrada;
+  const linhasContrapartida=[];
+  for(let idx=0;idx<comp.length;idx++){
+    const contaSel=document.getElementById(`lancctbInlineConta_${extratoId}_${idx}`);
+    const histInput=document.getElementById(`lancctbInlineHist_${extratoId}_${idx}`);
+    const valorInput=document.getElementById(`lancctbInlineValor_${extratoId}_${idx}`);
+    const contaId=contaSel?contaSel.value:'';
+    if(!contaId){ toast('Selecione a conta em todas as linhas.','err'); return; }
+    linhasContrapartida.push({ conta_contabil_id:contaId, historico:(histInput?histInput.value.trim():''), valor:_lancctbParseValorInput(valorInput?valorInput.value:'0') });
+  }
+  const soma=linhasContrapartida.reduce((s,l)=>s+(l.valor||0),0);
+  if(Math.abs(soma-valorTotal)>0.01){ toast('A soma das linhas precisa bater com o valor do lançamento.','err'); return; }
+  const btnSalvar=document.getElementById(`lancctbInlineSalvarBtn_${extratoId}`);
+  if(btnSalvar) btnSalvar.disabled=true;
+  const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id',r.conta_bancaria_id).single();
+  if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada.','err'); if(btnSalvar) btnSalvar.disabled=false; return; }
+  const idsContrapartida=linhasContrapartida.map(l=>l.conta_contabil_id);
+  const { data: contasInfo } = await _supaClient.from('plano_contas').select('id,classificacao').in('id',idsContrapartida);
+  const contasPorId=new Map((contasInfo||[]).map(c=>[String(c.id),c]));
+  const bancoTipo=ehSaida?'C':'D', dc=ehSaida?'D':'C';
+  const historicosResolvidos=linhasContrapartida.map(l=>l.historico||r.historico_bancario||'');
+  const historicoBanco=new Set(historicosResolvidos).size<=1?historicosResolvidos[0]:'Pagamentos Diversos';
+  const registro={
+    empresa_eid:_lancctbEidAtual, descricao:r.historico_bancario||'', historico_fixo:null, tipo_regra:'historico',
+    historico_gatilho:r.historico_bancario||'', valor_gatilho:null, cnpj_cpf_gatilho:null, dc,
+    conta_contabil_id:linhasContrapartida[0].conta_contabil_id, agencia_bancaria_id:null,
+  };
+  const { data: regraSalva, error: erroRegra } = await _supaClient.from('regras_matching').insert(registro).select('id').single();
+  if(erroRegra){ toast('Erro ao criar regra: '+erroRegra.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
+  await _lancctbSalvarLinhasRateio(regraSalva.id,linhasContrapartida,dc);
+  const linhas=[
+    { empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor:valorTotal, historico:historicoBanco, lancamento_extrato_id:r.id, regra_matching_id:regraSalva.id, origem_match:'regra' },
+  ];
+  linhasContrapartida.forEach(l=>{
+    const conta=contasPorId.get(String(l.conta_contabil_id));
+    linhas.push({ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:conta?.classificacao||'', conta_contabil_id:l.conta_contabil_id, tipo:dc, valor:l.valor, historico:l.historico, lancamento_extrato_id:r.id, regra_matching_id:regraSalva.id, origem_match:'regra' });
+  });
+  const { error: erroLanc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{linhas});
+  if(erroLanc){ toast('Erro ao gerar lançamento: '+erroLanc.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
+  await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',r.id);
+  toast('Lançamento classificado — regra criada pros próximos meses.','ok');
+  _lancctbInlineExpandidoId=null;
+  renderLancctbRegistroContabil();
+}
+// N+1 linhas editáveis (1 crédito banco fixo + N débitos com select de
+// conta) — substitui a linha "pendente" única quando esta é a pendência
+// expandida (_lancctbInlineExpandidoId).
+function _lancctbInlineLinhaHtml(item,contaAtual){
+  const r=item.extrato;
+  const ehSaida=r.valor_saida>0;
+  const valor=r.valor_saida||r.valor_entrada;
+  const dataFmt=r.data_pagamento?new Date(r.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'';
+  const comp=r.composicao_tributo||[];
+  const contaBancoNum=contaAtual.plano_contas?.numero_conta||'', contaBancoClassif=contaAtual.plano_contas?.classificacao||'', contaBancoDesc=contaAtual.plano_contas?.descricao||'';
+  const bancoEhD=!ehSaida;
+  const optsHtml=_lancctbInlineContasOptionsHtml();
+  const blank='<td></td>';
+  let html=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)">
+    <td style="padding:7px 6px;text-align:center"><button class="icon-btn" title="Cancelar" onclick="_lancctbRegistroFecharInline()" style="padding:2px;background:none;border:none;cursor:pointer;color:var(--slate)">✖</button></td>
+    <td style="padding:7px 10px">${dataFmt}</td>
+    <td style="padding:7px 10px;font-family:var(--mono);color:var(--slate)">${bancoEhD?esc(contaBancoNum):''}</td>
+    <td style="padding:7px 6px;font-family:var(--mono);color:var(--slate);font-size:10px">${bancoEhD?esc(contaBancoClassif):''}</td>
+    <td style="padding:7px 6px;color:var(--slate);font-size:10.5px">${bancoEhD?esc(contaBancoDesc):''}</td>
+    <td style="padding:7px 10px;font-family:var(--mono);color:var(--slate)">${!bancoEhD?esc(contaBancoNum):''}</td>
+    <td style="padding:7px 6px;font-family:var(--mono);color:var(--slate);font-size:10px">${!bancoEhD?esc(contaBancoClassif):''}</td>
+    <td style="padding:7px 6px;color:var(--slate);font-size:10.5px">${!bancoEhD?esc(contaBancoDesc):''}</td>
+    <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(valor)}</td>
+    <td style="padding:7px 10px" title="${esc(r.historico_bancario||'')}">${esc(r.historico_bancario||'')}</td>
+    <td style="padding:7px 6px;text-align:center"><button class="btn bp bsm" id="lancctbInlineSalvarBtn_${r.id}" onclick="_lancctbRegistroSalvarInline(${r.id})">✓ Salvar</button></td>
+    <td colspan="8" style="padding:7px 10px;font-size:11.5px;color:var(--slate)" id="lancctbInlineTotal_${r.id}">Soma: <strong>R$ ${_fmt(comp.reduce((s,c)=>s+(c.valor||0),0))}</strong> / <strong>R$ ${_fmt(valor)}</strong> <span style="color:var(--teal)">✓ bate</span></td>
+  </tr>`;
+  comp.forEach((c,idx)=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)">
+      <td></td><td></td>
+      <td style="padding:4px 10px 4px 24px" colspan="1"><select class="si" id="lancctbInlineConta_${r.id}_${idx}" style="width:100%;font-size:11.5px" onchange="_lancctbInlineContaMudou(this,${idx},${r.id})">${optsHtml}</select></td>
+      <td style="padding:4px 6px;font-family:var(--mono);font-size:10px;color:var(--slate)" id="lancctbInlineClassif_${r.id}_${idx}"></td>
+      <td style="padding:4px 6px;font-size:10.5px;color:var(--slate)" id="lancctbInlineDescr_${r.id}_${idx}"></td>
+      ${bancoEhD?`<td colspan="3"></td>`:blank+blank+blank}
+      <td style="padding:4px 10px;text-align:right"><input class="fi" id="lancctbInlineValor_${r.id}_${idx}" type="text" inputmode="decimal" value="${_fmt(c.valor||0)}" style="width:100px;text-align:right;font-size:11.5px" oninput="_lancctbInlineAtualizarTotal(${r.id},${valor})"></td>
+      <td colspan="2" style="padding:4px 10px"><input class="fi" id="lancctbInlineHist_${r.id}_${idx}" value="${esc(c.resumo||c.denominacao||'')}" style="width:100%;font-size:11.5px"></td>
+      <td colspan="8"></td>
+    </tr>`;
+  });
+  return html;
+}
 let _lancctbRegistroValor='';
 let _lancctbRegistroDataDe='';
 let _lancctbRegistroDataAte='';
@@ -26374,6 +26517,13 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       </tr>`;
     }).join('');
   }
+  // Pedido do usuário 23/09/2026: pendência com composição de tributo (2+
+  // impostos numa Guia sem Regra ainda) expandida pro modo inline — vira
+  // N+1 linhas editáveis dentro da própria tabela, sem passar pela janela
+  // "Cadastrar regra".
+  if(!item.ctb.length&&Array.isArray(r.composicao_tributo)&&r.composicao_tributo.length>=2&&String(_lancctbInlineExpandidoId)===String(r.id)){
+    return _lancctbInlineLinhaHtml(item,contaAtual);
+  }
   // Pendente — ainda sem classificação; a ponta do banco já é conhecida.
   const contaBancoNum=contaAtual.plano_contas?.numero_conta||'', contaBancoClassif=contaAtual.plano_contas?.classificacao||'', contaBancoDesc=contaAtual.plano_contas?.descricao||'';
   const bancoEhD=!ehSaida;
@@ -26401,7 +26551,13 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
 }
 function abrirLancctbRegraModalDeExtratoId(extratoId){
   const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
-  if(item) return abrirLancctbRegraModalDeLinha(item);
+  if(!item) return;
+  // Pendência com composição de tributo (2+ impostos, sem Regra ainda) abre
+  // inline na própria tabela em vez da janela "Cadastrar regra" — pedido do
+  // usuário 23/09/2026.
+  const comp=item.extrato.composicao_tributo;
+  if(!item.ctb.length&&Array.isArray(comp)&&comp.length>=2) return _lancctbRegistroAbrirInline(extratoId);
+  return abrirLancctbRegraModalDeLinha(item);
 }
 // Desconciliar — pedido do usuário 16/09/2026: clicar em "conciliado"
 // pergunta se quer desfazer, e sendo confirmado desamarra TUDO que esse
