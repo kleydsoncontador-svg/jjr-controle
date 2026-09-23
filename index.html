@@ -25703,6 +25703,31 @@ async function _lancctbProcessarTributos(){
           if(eU){ console.error('Erro ao marcar composição do tributo:',eU); }
           else { tributosDivididos++; l.historico_bancario=`[TRIBUTO COMPOSTO: ${resumo}] ${semMarcaComp}`.trim(); l.composicao_tributo=composicaoParaSalvar; composicoesParaAbrir.push(l); }
         }
+      } else if(!comp||comp.length<=1){
+        // Pedido do usuário 23/09/2026 (DAS Pravatto, 1 imposto só): "o DAS
+        // deveria aparecer mesmo sendo uma linha apenas, da mesma forma dos
+        // outros impostos" / "quero que já identifique na tabela". Guia de 1
+        // imposto sem Regra ainda também é IDENTIFICADA na própria linha
+        // (histórico bancário ganha o colchete "[DAS ref. 06/2026]") e abre a
+        // classificação inline (1 crédito banco : 1 débito), igual à guia
+        // composta. "gatilho" é a parte do nome do arquivo que se repete todo
+        // mês (ex: "DAS" de "DAS 06.2026") — é contra ela que a Regra criada
+        // aqui volta a ser encontrada nos meses seguintes pelo caminho normal
+        // (nome do arquivo), com o histórico "Pagamento ref. DAS <competência>"
+        // atualizando a competência sozinho (historico_fixo).
+        const compet1=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao)||'';
+        const nomeGuia=(_lancctbNomeTributoLegivel(info.descricao).nomeCompleto||info.descricao||'').trim();
+        const gatilhoGuia=String(info.descricao||'').replace(/\s*\d{1,2}[.\/-]\d{4}.*$/,'').trim()||nomeGuia;
+        const semMarca1=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
+        const resumo1=`${nomeGuia}${compet1?' ref. '+compet1:''}`;
+        const item1={ codigo:(comp&&comp[0]&&comp[0].codigo)||null, denominacao:nomeGuia, valor:Math.round(valor*100)/100, resumo:resumo1, competencia:compet1||null, gatilho:gatilhoGuia, historico:`Pagamento ref. ${nomeGuia}${compet1?' '+compet1:''}` };
+        const { error: eU1 } = await _supaClient.from('lancamentos_extrato').update({
+          historico_bancario: `[${resumo1}] ${semMarca1}`.trim(),
+          origem_importacao: 'tributo_composicao',
+          composicao_tributo: [item1],
+        }).eq('id',l.id);
+        if(eU1){ console.error('Erro ao identificar guia de 1 imposto:',eU1); }
+        else { tributosDivididos++; l.historico_bancario=`[${resumo1}] ${semMarca1}`.trim(); l.composicao_tributo=[item1]; composicoesParaAbrir.push(l); }
       }
       comSugestao++; continue;
     }
@@ -26091,9 +26116,15 @@ async function _lancctbRegistroSalvarInline(extratoId){
     .replace(/ref\.\s*\d{2}\/\d{4}/gi,'')
     .replace(/\d{1,3}(?:\.\d{3})*,\d{2}/g,'')
     .replace(/\s{2,}/g,' ').replace(/\s+\]/g,']').trim();
+  // Guia de 1 imposto só (ex: DAS): o gatilho é a parte do nome do arquivo
+  // que se repete todo mês (comp[0].gatilho, ver _lancctbProcessarTributos —
+  // o caminho normal de Processar Tributos casa Regra por ele) e o histórico
+  // fica como Histórico Fixo, que troca a competência sozinho nos meses
+  // seguintes ("Pagamento ref. DAS 06/2026" → "... 07/2026").
+  const ehGuiaUnica=comp.length===1&&comp[0].gatilho;
   const registro={
-    empresa_eid:_lancctbEidAtual, descricao:r.historico_bancario||'', historico_fixo:null, tipo_regra:'historico',
-    historico_gatilho:historicoGatilhoGenerico, valor_gatilho:null, cnpj_cpf_gatilho:null, dc,
+    empresa_eid:_lancctbEidAtual, descricao:r.historico_bancario||'', historico_fixo:ehGuiaUnica?(linhasContrapartida[0].historico||null):null, tipo_regra:'historico',
+    historico_gatilho:ehGuiaUnica?comp[0].gatilho:historicoGatilhoGenerico, valor_gatilho:null, cnpj_cpf_gatilho:null, dc,
     conta_contabil_id:linhasContrapartida[0].conta_contabil_id, agencia_bancaria_id:null,
   };
   const { data: regraSalva, error: erroRegra } = await _supaClient.from('regras_matching').insert(registro).select('id').single();
@@ -26154,7 +26185,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
       ${(bancoEhD?blankGroup:selectCell).replace('@@IDX@@',idx)}
       ${(bancoEhD?selectCell:blankGroup).replace('@@IDX@@',idx)}
       <td style="padding:4px 10px;text-align:right"><input class="fi" id="lancctbInlineValor_${r.id}_${idx}" type="text" inputmode="decimal" value="${_fmt(c.valor||0)}" style="width:100px;text-align:right;font-size:11.5px" oninput="_lancctbInlineAtualizarTotal(${r.id},${valor})"></td>
-      <td colspan="2" style="padding:4px 10px"><input class="fi" id="lancctbInlineHist_${r.id}_${idx}" value="${esc(_lancctbPrefixarPagtoRef(c.resumo||c.denominacao||''))}" style="width:100%;font-size:11.5px"></td>
+      <td colspan="2" style="padding:4px 10px"><input class="fi" id="lancctbInlineHist_${r.id}_${idx}" value="${esc(c.historico||_lancctbPrefixarPagtoRef(c.resumo||c.denominacao||''))}" style="width:100%;font-size:11.5px"></td>
       <td colspan="8"></td>
     </tr>`;
   });
@@ -26620,7 +26651,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   // impostos numa Guia sem Regra ainda) expandida pro modo inline — vira
   // N+1 linhas editáveis dentro da própria tabela, sem passar pela janela
   // "Cadastrar regra".
-  if(!item.ctb.length&&Array.isArray(r.composicao_tributo)&&r.composicao_tributo.length>=2&&String(_lancctbInlineExpandidoId)===String(r.id)){
+  if(!item.ctb.length&&Array.isArray(r.composicao_tributo)&&r.composicao_tributo.length>=1&&String(_lancctbInlineExpandidoId)===String(r.id)){
     return _lancctbInlineLinhaHtml(item,contaAtual);
   }
   // Pendente — ainda sem classificação; a ponta do banco já é conhecida.
@@ -26655,7 +26686,7 @@ function abrirLancctbRegraModalDeExtratoId(extratoId){
   // inline na própria tabela em vez da janela "Cadastrar regra" — pedido do
   // usuário 23/09/2026.
   const comp=item.extrato.composicao_tributo;
-  if(!item.ctb.length&&Array.isArray(comp)&&comp.length>=2) return _lancctbRegistroAbrirInline(extratoId);
+  if(!item.ctb.length&&Array.isArray(comp)&&comp.length>=1) return _lancctbRegistroAbrirInline(extratoId);
   return abrirLancctbRegraModalDeLinha(item);
 }
 // Desconciliar — pedido do usuário 16/09/2026: clicar em "conciliado"
