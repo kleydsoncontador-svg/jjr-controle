@@ -25437,6 +25437,50 @@ function _lancctbItensDaCombinacao(comb){
   });
   return itens;
 }
+// Pedido do usuário 23/09/2026 (Pravatto, DARF INSS 1099+0561): "se eu já
+// ensinei em julho, agosto deveria ser feito de forma automática a
+// classificação dos débitos". A Regra ensinada no rateio inline/modal
+// (1 crédito banco : N débitos) tem o gatilho preso ao texto do histórico
+// bancário daquele mês (competência/valores mudam) e o motor de Processar
+// Tributos só casa Regra pelo nome do ARQUIVO — então nunca reencontrava a
+// Regra no mês seguinte e sempre pedia pra ensinar de novo. Aqui o casamento
+// é pela COMPOSIÇÃO da guia, que é o que se repete: mesmos códigos de
+// receita (ex: 1099+0561) = mesma Regra. Os códigos vêm do próprio
+// historico_gatilho ("cód. 1099 ... cód. 0561", na ordem das linhas do
+// rateio: 1ª = conta da Regra, demais = regras_matching_linhas por ordem).
+// Valor de cada linha = o desta guia (nunca o do mês ensinado). Devolve
+// true se classificou (crédito banco + N débitos gravados).
+async function _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,comp,compet,l,valor,contaBancoInfo,contaId,eid}){
+  const codigosDe=t=>[...String(t||'').matchAll(/c[óo]d\.?\s*(\d{3,5})/gi)].map(m=>m[1]);
+  const compCodigos=comp.map(c=>String(c.codigo));
+  const regra=regras.find(r=>{
+    if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
+    const cods=codigosDe(r.historico_gatilho);
+    if(cods.length!==compCodigos.length||new Set(cods).size!==cods.length) return false;
+    if(!cods.every(c=>compCodigos.includes(c))) return false;
+    return (linhasRateioPorRegra[r.id]||[]).length===cods.length-1;
+  });
+  if(!regra) return false;
+  const cods=codigosDe(regra.historico_gatilho);
+  const filhas=(linhasRateioPorRegra[regra.id]||[]).slice().sort((a,b)=>a.ordem-b.ordem);
+  const itens=cods.map(cd=>comp.find(c=>String(c.codigo)===cd));
+  if(itens.some(x=>!x)) return false;
+  const nomeCurto=c=>String(c.denominacao||'').split(' - ')[0].trim();
+  const histDe=c=>`Pagamento ref. ${nomeCurto(c)} cód. ${c.codigo}${compet?' ref. '+compet:''}`;
+  const soma=Math.round(itens.reduce((s,c)=>s+(c.valor||0),0)*100)/100;
+  const ajuste=Math.round((valor-soma)*100)/100;
+  const hists=itens.map(histDe);
+  const histBanco=new Set(hists).size===1?hists[0]:'Pagamentos Diversos';
+  const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:histBanco, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' }];
+  itens.forEach((c,k)=>{
+    const dest=k===0?{conta:regra.conta_contabil_id,classif:regra.plano_contas?.classificacao||'',dc:regra.dc}:{conta:filhas[k-1].conta_contabil_id,classif:filhas[k-1].plano_contas?.classificacao||'',dc:filhas[k-1].dc};
+    linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:dest.classif, conta_contabil_id:dest.conta, tipo:dest.dc, valor:Math.round(((c.valor||0)+(k===0?ajuste:0))*100)/100, historico:hists[k], lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' });
+  });
+  const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+  if(error){ console.error('Erro ao aplicar Regra por composição:',error); return false; }
+  await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+  return true;
+}
 async function _lancctbProcessarTributos(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   // Achado real 15/09/2026 (Accurare, TFE 27/07 duplicada 2x): o botão só
@@ -25631,6 +25675,9 @@ async function _lancctbProcessarTributos(){
         const compet=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao)||'';
         const somaComp=Math.round(comp.reduce((s,c)=>s+(c.valor||0),0)*100)/100;
         if(Math.abs(somaComp-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR){
+          // Já ensinado em outro mês (mesmos códigos de receita)? Classifica
+          // sozinho — 1 crédito banco : N débitos, sem pedir de novo.
+          if(await _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,comp,compet,l,valor,contaBancoInfo,contaId,eid})){ resolvidos++; continue; }
           const nomeCurto=(c)=>String(c.denominacao||'').split(' - ')[0].trim();
           const resumoDe=(c)=>{
             const partes=[nomeCurto(c)];
@@ -25715,12 +25762,22 @@ async function _lancctbProcessarTributos(){
   // ambos zerados pra tributo), busca também composições JÁ marcadas e ainda
   // pendentes, pra sempre abrir alguma coisa quando existir trabalho a fazer.
   let composicaoJaExistente=null;
-  if(!composicoesParaAbrir.length){
+  {
     const { data: pendentesComComposicao } = await _supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,origem_importacao,composicao_tributo')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
-      .eq('origem_importacao','tributo_composicao').not('composicao_tributo','is',null).limit(1);
-    composicaoJaExistente=(pendentesComComposicao||[])[0]||null;
+      .eq('origem_importacao','tributo_composicao').not('composicao_tributo','is',null);
+    const idsJaNaFila=new Set(composicoesParaAbrir.map(x=>x.id));
+    for(const row of (pendentesComComposicao||[])){
+      if(idsJaNaFila.has(row.id)) continue;
+      // Composição marcada numa execução anterior, ANTES de a Regra existir —
+      // se agora já existe Regra pros mesmos códigos, classifica sozinho.
+      const comp=Array.isArray(row.composicao_tributo)?row.composicao_tributo:[];
+      const compet=(comp[0]&&comp[0].competencia)||'';
+      const ok=comp.length>=2&&await _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,comp,compet,l:row,valor:row.valor_saida,contaBancoInfo,contaId,eid});
+      if(ok){ resolvidos++; continue; }
+      if(!composicaoJaExistente&&!composicoesParaAbrir.length) composicaoJaExistente=row;
+    }
   }
   const totalParaClassificar=composicoesParaAbrir.length||(composicaoJaExistente?1:0);
   const faltamMaisComposicoes=composicoesParaAbrir.length>1?`, ${composicoesParaAbrir.length-1} outra(s) composição(ões) ainda aguardando classificação`:'';
