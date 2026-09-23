@@ -31146,7 +31146,7 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
         if(/\bdata\b/.test(textoLinha)&&/lan[çc]amentos/.test(textoLinha)&&/valor/.test(textoLinha)&&/saldo/.test(textoLinha)){
           const achar=re=>itens.find(i=>re.test(i.str.toLowerCase()));
           const itData=achar(/^data$/), itLanc=achar(/lan[çc]amentos/), itValor=achar(/valor/), itSaldo=achar(/saldo/);
-          if(itData&&itLanc&&itValor&&itSaldo){ colunas={data:itData.x,lancamentos:itLanc.x,valor:itValor.x,saldo:itSaldo.x}; console.log('[itaubba-debug] colunas:',colunas,'usouDataLines:',!!(data.lines&&data.lines.length)); }
+          if(itData&&itLanc&&itValor&&itSaldo) colunas={data:itData.x,lancamentos:itLanc.x,valor:itValor.x,saldo:itSaldo.x};
         }
         return;
       }
@@ -31176,40 +31176,42 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
         else celulas.lancamentos+=(celulas.lancamentos?' ':'')+it.str;
       }
       Object.keys(celulas).forEach(k=>celulas[k]=celulas[k].trim());
-      if(linhasTabela.length<15) console.log('[itaubba-debug] linha itens:',itens.map(i=>i.str+'@'+Math.round(i.x)).join(' | '),'-> celulas:',JSON.stringify(celulas));
       linhasTabela.push(celulas);
     });
   }
   if(!colunas||!linhasTabela.length) return null;
 
   // "Lançamentos" pode quebrar em 2 linhas visuais (ex: "RENDIMENTOS REND
-  // PAGO APLIC" + "AUT MAIS", com o Valor alinhado na 2ª linha) — uma linha
-  // OCR SEM DATA é sempre continuação da transação anterior (nunca uma nova),
-  // mesmo quando é ELA que carrega o Valor/Saldo daquela transação — por
-  // isso funde o texto E também aproveita o valor/saldo dessa linha,
-  // nunca só a presença de valor/saldo pra decidir se é continuação (testado
-  // contra o PDF real: usar valor/saldo como âncora perdia a 1ª metade do
-  // histórico, "RENDIMENTOS REND PAGO APLIC" sumia, ficava só "AUT MAIS").
-  // Data pode vir com ruído do OCR grudado (ex: "30/06/2026," ou "3O/06/2026")
-  // — extrai o padrão de dentro da célula em vez de exigir a célula inteira
-  // igual ao padrão, senão qualquer caractere espúrio faz a linha inteira
-  // ser tratada como continuação por engano.
+  // PAGO APLIC" + "AUT MAIS"). Achado real 23/09/2026 (diagnóstico via
+  // console.log direto no PDF real da Pulse): a Data e o Valor NÃO ficam
+  // sempre na 1ª linha visual — nesse layout eles ficam alinhados com a
+  // ÚLTIMA linha do texto quebrado (ex: "RENDIMENTOS REND PAGO APLIC" sai
+  // sozinha SEM data, e só a linha seguinte "AUT MAIS" já vem com a Data E
+  // o Valor juntos). Tentar decidir "nova transação" pela presença de Data
+  // juntava o texto na linha errada (a 1ª metade do histórico ficava presa
+  // na transação ANTERIOR). Critério correto: uma transação só está
+  // completa quando aparece Valor OU Saldo — vai acumulando texto (e
+  // guardando a Data mais recente vista) até esse momento.
   const extrairData=s=>{ const m=String(s||'').match(/(\d{2})\s*\/\s*(\d{2})\s*\/\s*(\d{4})/); return m?`${m[1]}/${m[2]}/${m[3]}`:null; };
-  const linhasUnidas=[];
+  const transacoes=[];
+  let bufferTexto=null, dataVista=null;
+  const fecharTransacao=(valor,saldo)=>{
+    if(bufferTexto==null) return;
+    transacoes.push({ data:dataVista, lancamentos:bufferTexto.trim(), valor:valor||'', saldo:saldo||'' });
+    bufferTexto=null;
+  };
   linhasTabela.forEach(c=>{
-    const dataExtraida=extrairData(c.data);
-    if(dataExtraida||!linhasUnidas.length){ linhasUnidas.push({...c,data:dataExtraida||c.data}); return; }
-    const ultima=linhasUnidas[linhasUnidas.length-1];
-    ultima.lancamentos=(ultima.lancamentos+' '+c.lancamentos).trim();
-    if(c.valor) ultima.valor=c.valor;
-    if(c.saldo) ultima.saldo=c.saldo;
+    const d=extrairData(c.data);
+    if(d) dataVista=d;
+    bufferTexto=(bufferTexto?bufferTexto+' ':'')+c.lancamentos;
+    if(c.valor||c.saldo) fecharTransacao(c.valor,c.saldo);
   });
+  fecharTransacao('','');
 
   let dataAtual=null, saldoAnteriorDoc=null, saldoFinalDoc=null;
   const lancamentos=[];
-  linhasUnidas.forEach(c=>{
-    const dataExtraida=extrairData(c.data);
-    if(dataExtraida) dataAtual=dataExtraida;
+  transacoes.forEach(c=>{
+    if(c.data) dataAtual=c.data;
     if(!dataAtual) return;
     const hist=c.lancamentos.replace(/\s+/g,' ').trim();
     if(!hist) return;
