@@ -31121,37 +31121,60 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
 
   const mPeriodo=melhorTexto.match(/(\d{2}\/\d{2}\/\d{4})\s*at[ée]\s*(\d{2}\/\d{2}\/\d{4})/i);
 
+  // Achado real 23/09/2026 (Pulse Marketing): a 1ª versão reconstruía linha
+  // por Y-tolerância própria (12px, chutado) e tentava separar Razão
+  // Social/CNPJ-CPF como colunas à parte — o texto largo de "Lançamentos"
+  // (até ~570px) ultrapassava esse limite e vazava pra coluna "razão"
+  // (nunca usada na saída), esvaziando o histórico. Duas correções:
+  // 1) usa data.lines do próprio Tesseract (já agrupado por linha de
+  //    verdade, sem chute de tolerância); 2) só 4 colunas funcionais —
+  //    Data | Lançamentos (absorve Razão/CNPJ-CPF, sempre vazios neste
+  //    layout — ver comentário do usuário) | Valor | Saldo.
   let colunas=null;
   const linhasTabela=[];
   for(let p=1;p<=pdf.numPages;p++){
     const page=p===1?page1:await pdf.getPage(p);
     const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,2.3);
     const {data}=await worker.recognize(canvas);
-    const palavras=(data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0}));
-    const linhas=_lancctbAgruparLinhasPorY(palavras,12);
-    linhas.forEach(l=>{
-      const textoLinha=l.itens.map(i=>i.str).join(' ').toLowerCase();
+    const linhasOcr=(data.lines&&data.lines.length)
+      ? data.lines.map(ln=>(ln.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2})))
+      : _lancctbAgruparLinhasPorY((data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0})),12).map(l=>l.itens);
+    linhasOcr.forEach(itens=>{
+      if(!itens.length) return;
+      const textoLinha=itens.map(i=>i.str).join(' ').toLowerCase();
       if(!colunas){
         if(/\bdata\b/.test(textoLinha)&&/lan[çc]amentos/.test(textoLinha)&&/valor/.test(textoLinha)&&/saldo/.test(textoLinha)){
-          const achar=re=>l.itens.find(i=>re.test(i.str.toLowerCase()));
-          const itData=achar(/^data$/), itLanc=achar(/lan[çc]amentos/), itRazao=achar(/raz[ãa]o/), itCnpj=achar(/cnpj/), itValor=achar(/valor/), itSaldo=achar(/saldo/);
-          if(itData&&itLanc&&itValor&&itSaldo) colunas={data:itData.x,lancamentos:itLanc.x,razao:itRazao?itRazao.x:(itCnpj?itCnpj.x-1:(itValor.x-200)),cnpj:itCnpj?itCnpj.x:(itValor.x-100),valor:itValor.x,saldo:itSaldo.x};
+          const achar=re=>itens.find(i=>re.test(i.str.toLowerCase()));
+          const itData=achar(/^data$/), itLanc=achar(/lan[çc]amentos/), itValor=achar(/valor/), itSaldo=achar(/saldo/);
+          if(itData&&itLanc&&itValor&&itSaldo) colunas={data:itData.x,lancamentos:itLanc.x,valor:itValor.x,saldo:itSaldo.x};
         }
         return;
       }
-      const limites=[
-        {nome:'data',fim:(colunas.data+colunas.lancamentos)/2},
-        {nome:'lancamentos',fim:(colunas.lancamentos+colunas.razao)/2},
-        {nome:'razao',fim:(colunas.razao+colunas.cnpj)/2},
-        {nome:'cnpj',fim:(colunas.cnpj+colunas.valor)/2},
-        {nome:'valor',fim:(colunas.valor+colunas.saldo)/2},
-        {nome:'saldo',fim:Infinity},
-      ];
-      const celulas={data:'',lancamentos:'',razao:'',cnpj:'',valor:'',saldo:''};
-      l.itens.forEach(it=>{
-        const col=limites.find(li=>it.x<li.fim)||limites[limites.length-1];
-        celulas[col.nome]+=(celulas[col.nome]?' ':'')+it.str;
-      });
+      // Valor/Saldo são identificados pelo PRÓPRIO FORMATO do número
+      // (dígitos+vírgula+2 casas, "-" opcional — inclusive quando o OCR
+      // separa o "-" como palavra própria antes do número), não só pela
+      // posição x — um erro de poucos pixels no limite entre colunas não
+      // pode fazer o sinal negativo sumir (achado real 23/09/2026: SISPAG
+      // FORNECEDORES -1.627,07 virou entrada positiva). Só decide Valor×
+      // Saldo pela posição (são bem mais distantes um do outro que a
+      // margem de erro do OCR). Tudo que não é número vira Data ou
+      // Lançamentos (2 blocos só, também mais tolerante a erro de posição).
+      const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+      const meioDataLanc=(colunas.data+colunas.lancamentos)/2;
+      const meioValorSaldo=(colunas.valor+colunas.saldo)/2;
+      const celulas={data:'',lancamentos:'',valor:'',saldo:''};
+      for(let idx=0;idx<itens.length;idx++){
+        const it=itens[idx];
+        if(it.str==='-'&&itens[idx+1]&&REGEX_NUM.test(itens[idx+1].str)) continue; // funde no número seguinte
+        if(REGEX_NUM.test(it.str)){
+          const negativo=it.str.startsWith('-')||(itens[idx-1]&&itens[idx-1].str==='-');
+          const numTxt=(negativo&&!it.str.startsWith('-')?'-':'')+it.str;
+          if(it.x<meioValorSaldo) celulas.valor=numTxt; else celulas.saldo=numTxt;
+          continue;
+        }
+        if(it.x<meioDataLanc) celulas.data+=(celulas.data?' ':'')+it.str;
+        else celulas.lancamentos+=(celulas.lancamentos?' ':'')+it.str;
+      }
       Object.keys(celulas).forEach(k=>celulas[k]=celulas[k].trim());
       linhasTabela.push(celulas);
     });
@@ -31166,10 +31189,15 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
   // nunca só a presença de valor/saldo pra decidir se é continuação (testado
   // contra o PDF real: usar valor/saldo como âncora perdia a 1ª metade do
   // histórico, "RENDIMENTOS REND PAGO APLIC" sumia, ficava só "AUT MAIS").
+  // Data pode vir com ruído do OCR grudado (ex: "30/06/2026," ou "3O/06/2026")
+  // — extrai o padrão de dentro da célula em vez de exigir a célula inteira
+  // igual ao padrão, senão qualquer caractere espúrio faz a linha inteira
+  // ser tratada como continuação por engano.
+  const extrairData=s=>{ const m=String(s||'').match(/(\d{2})\s*\/\s*(\d{2})\s*\/\s*(\d{4})/); return m?`${m[1]}/${m[2]}/${m[3]}`:null; };
   const linhasUnidas=[];
   linhasTabela.forEach(c=>{
-    const temData=c.data&&/^\d{2}\/\d{2}\/\d{4}$/.test(c.data);
-    if(temData||!linhasUnidas.length){ linhasUnidas.push({...c}); return; }
+    const dataExtraida=extrairData(c.data);
+    if(dataExtraida||!linhasUnidas.length){ linhasUnidas.push({...c,data:dataExtraida||c.data}); return; }
     const ultima=linhasUnidas[linhasUnidas.length-1];
     ultima.lancamentos=(ultima.lancamentos+' '+c.lancamentos).trim();
     if(c.valor) ultima.valor=c.valor;
@@ -31179,7 +31207,8 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
   let dataAtual=null, saldoAnteriorDoc=null, saldoFinalDoc=null;
   const lancamentos=[];
   linhasUnidas.forEach(c=>{
-    if(c.data&&/^\d{2}\/\d{2}\/\d{4}$/.test(c.data)) dataAtual=c.data;
+    const dataExtraida=extrairData(c.data);
+    if(dataExtraida) dataAtual=dataExtraida;
     if(!dataAtual) return;
     const hist=c.lancamentos.replace(/\s+/g,' ').trim();
     if(!hist) return;
