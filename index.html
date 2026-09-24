@@ -32370,6 +32370,104 @@ async function _lancctbParsearExtratoC6MultiMes(pdf){
   return { layout:'C6 Bank (várias competências)', model:'C6_CURRENT_ACCOUNT_MULTI_MONTH', lancamentos, meses,
     titular:{ nome:empresaNome, cnpj, agencia, conta }, documentPeriod:{ start:periodoIni, end:periodoFim } };
 }
+// ─── Banco Inter — conta corrente (BANCO_INTER_CONTA_CORRENTE) ───────────
+// Texto nativo (pdf.js), sem OCR/IA, vale pra qualquer empresa. O Inter
+// agrupa por DIA: "2 de Julho de 2026 Saldo do dia: R$ x" NÃO é movimento
+// (fechamento do dia); cada movimento tem Valor (sinal = entrada/saída) e
+// "Saldo por transação" (posição, nunca somada). O grupo do dia atravessa
+// quebra de página (o lançamento de 21/07 aparece no topo da pág. 2).
+// O "Saldo total" do cabeçalho é da data em que o extrato foi SOLICITADO —
+// nunca é o saldo final da competência. Saldo inicial não vem impresso:
+// é inferido (fechamento − movimento líquido) e marcado como INFERRED.
+async function _lancctbParsearExtratoBancoInter(pdf){
+  const semAcento=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    paginas.push(_lancctbAgruparLinhasPorY(itens,2).map(l=>l.itens));
+  }
+  const txt=l=>l.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+  const todo=semAcento(paginas.flat().map(txt).join(' ')).toUpperCase();
+  if(!/BANCO INTER/.test(todo)||!/CPF\/CNPJ:/.test(todo)||!/SALDO POR TRANSACAO/.test(todo)||!/SALDO DO DIA:/.test(todo)||!/SALDO BLOQUEADO/.test(todo)) return null;
+  const parseBR=s=>{ const neg=/^-/.test(String(s).trim()); const v=parseFloat(String(s).replace(/[^\d,]/g,'').replace(',','.'))||0; return neg?-v:v; };
+  const r2=v=>Math.round(v*100)/100;
+  const MES={janeiro:1,fevereiro:2,marco:3,abril:4,maio:5,junho:6,julho:7,agosto:8,setembro:9,outubro:10,novembro:11,dezembro:12};
+  const iso=(d,m,a)=>`${a}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+  // cabeçalho
+  let empresaNome=null,cnpj=null,agencia=null,conta=null,instituicao=null,periodoIni=null,periodoFim=null,solicitado=null;
+  let hdrTotal=null,hdrDisp=null,hdrBloq=null;
+  const linhasP1=paginas[0]||[];
+  linhasP1.forEach((l,idx)=>{
+    const t=txt(l);
+    const mc=t.match(/CPF\/CNPJ:\s*([\d.\/-]+)\s*,\s*Institui[çc][ãa]o:\s*(.+?)\s*,\s*Ag[êe]ncia:\s*(\S+)\s*,\s*Conta:\s*(\S+)/i);
+    if(mc){ cnpj=mc[1].replace(/\D/g,''); instituicao=mc[2].trim(); agencia=mc[3]; conta=mc[4]; const ant=linhasP1[idx-1]; if(ant) empresaNome=txt(ant); }
+    const mp=t.match(/Per[íi]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s*a\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+    if(mp){ periodoIni=iso(mp[1],mp[2],mp[3]); periodoFim=iso(mp[4],mp[5],mp[6]); }
+    const ms=t.match(/Solicitado em:\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{1,2})h(\d{2})/i);
+    if(ms) solicitado=`${iso(ms[1],ms[2],ms[3])} ${ms[4].padStart(2,'0')}:${ms[5]}`;
+    const vals=t.match(/^R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)$/);
+    if(vals){ hdrTotal=parseBR(vals[1]); hdrDisp=parseBR(vals[2]); hdrBloq=parseBR(vals[3]); }
+  });
+  if(!cnpj||!periodoIni) return null;
+  const reDia=/^(\d{1,2}) de ([A-Za-zÀ-ú]+) de (\d{4})\s+Saldo do dia:\s*R\$\s*(-?[\d.,]+)/i;
+  const reVal=/^-?R\$\s*[\d.,]+$/;
+  const movs=[], saldosDia={}; let dataAtual=null, ultima=null, seq=0;
+  paginas.forEach((linhas,pi)=>{
+    let rodape=false;
+    linhas.forEach(l=>{
+      const t=txt(l);
+      if(/^Fale com a gente/i.test(t)){ rodape=true; ultima=null; return; }
+      if(rodape) return; // SAC, ouvidoria, telefones — nunca são movimento
+      const md=t.match(reDia);
+      if(md){
+        const m=MES[semAcento(md[2]).toLowerCase()]; if(!m) return;
+        dataAtual=iso(md[1],m,md[3]); saldosDia[dataAtual]=parseBR(md[4]); ultima=null; return; // dia NÃO é movimento
+      }
+      if(!dataAtual) return;
+      const n=l.length;
+      if(n>=3&&reVal.test(l[n-1].str.trim())&&reVal.test(l[n-2].str.trim())){
+        const valor=parseBR(l[n-2].str), saldo=parseBR(l[n-1].str);
+        const desc=l.slice(0,n-2).map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+        const mt=desc.match(/^(.+?):\s*"(.*)"$/);
+        const op=mt?mt[1].trim():desc;
+        const nome=mt?mt[2]:'';
+        const mcp=nome.match(/^Cp\s*:(\d+)-(.*)$/i);
+        ultima={ data:dataAtual, historico:desc, operationType:semAcento(op).toUpperCase().replace(/\s+/g,'_'),
+          counterpartyReference:mcp?mcp[1]:null, counterpartyName:mcp?mcp[2].trim():(nome||null),
+          signed:valor, saldo, pagina:pi+1, seq:++seq,
+          valor_entrada:valor>0?r2(valor):0, valor_saida:valor<0?r2(-valor):0, competencia:dataAtual.slice(0,7) };
+        movs.push(ultima); return;
+      }
+      // descrição que quebrou em outra linha
+      if(ultima&&!/^Valor\b|^Saldo por/i.test(t)&&!/R\$/.test(t)){ ultima.historico=(ultima.historico+' '+t).trim(); }
+    });
+  });
+  if(!movs.length) return null;
+  // validações
+  const avisos=[];
+  movs.forEach((m,i)=>{ if(i>0&&Math.abs(r2(movs[i-1].saldo+m.signed)-m.saldo)>0.005) avisos.push(`RECONCILIACAO ${m.data}: saldo ${m.saldo} ≠ ${r2(movs[i-1].saldo+m.signed)}`); });
+  Object.keys(saldosDia).forEach(d=>{ const doDia=movs.filter(m=>m.data===d); if(doDia.length&&Math.abs(doDia[doDia.length-1].saldo-saldosDia[d])>0.005) avisos.push(`DAILY_BALANCE_MISMATCH ${d}`); });
+  const competencias=[...new Set(movs.map(m=>m.competencia))].sort();
+  const meses=competencias.map(c=>{
+    const doMes=movs.filter(m=>m.competencia===c);
+    const [a,mm]=c.split('-').map(Number);
+    const ultimoDia=iso(new Date(a,mm,0).getDate(),mm,a);
+    const startDate=periodoIni>c+'-01'?periodoIni:c+'-01';
+    const endDate=periodoFim<ultimoDia?periodoFim:ultimoDia;
+    const totalIn=r2(doMes.reduce((s,x)=>s+x.valor_entrada,0)), totalOut=r2(doMes.reduce((s,x)=>s+x.valor_saida,0));
+    const closing=doMes[doMes.length-1].saldo, net=r2(totalIn-totalOut);
+    const chainOk=!avisos.some(x=>doMes.some(m=>x.includes(m.data)));
+    return { competencia:c, label:`${String(mm).padStart(2,'0')}/${a}`, startDate, endDate, totalIn, totalOut, netMovement:net,
+      transactionCount:doMes.length, closingBalance:closing, openingBalance:r2(closing-net), openingBalanceSource:'INFERRED',
+      status:endDate<ultimoDia?'PARTIAL':'COMPLETE', totaisConferem:chainOk, lancamentos:doMes };
+  });
+  const lancamentos=movs.map(x=>({ data:x.data, historico:x.historico, valor_entrada:x.valor_entrada, valor_saida:x.valor_saida,
+    informacao:[`Tipo: ${x.operationType}`,x.counterpartyReference?`Ref. contraparte: ${x.counterpartyReference}`:''].filter(Boolean).join(' | '),
+    competencia:x.competencia }));
+  return { layout:'Banco Inter (conta corrente)', model:'BANCO_INTER_CONTA_CORRENTE', lancamentos, meses, avisos,
+    titular:{ nome:empresaNome, cnpj, agencia, conta, instituicao }, documentPeriod:{ start:periodoIni, end:periodoFim }, solicitadoEm:solicitado,
+    headerBalances:{ total:hdrTotal, available:hdrDisp, blocked:hdrBloq } };
+}
 // Modal obrigatório de seleção de competências (nada vem marcado). Devolve
 // Promise<array de competências escolhidas | null se cancelou>.
 function _lancctbC6EscolherCompetencias(meses,existentes){
@@ -32460,7 +32558,7 @@ async function processarLancctbUploadExtrato(forcarIA){
 
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
-        return (await _lancctbParsearExtratoC6MultiMes(pdf))||(await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
+        return (await _lancctbParsearExtratoC6MultiMes(pdf))||(await _lancctbParsearExtratoBancoInter(pdf))||(await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
           ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
           ||(await _lancctbParsearExtratoItauBBAOcr(pdf));
@@ -32468,7 +32566,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       if(reconhecido&&reconhecido.meses){
         // PDF ≠ competência: pergunta quais meses importar (nada pré-marcado)
         const t=reconhecido.titular||{};
-        status.textContent=`Layout C6 Bank reconhecido — ${reconhecido.meses.length} competência(s). Escolha quais importar.`;
+        status.textContent=`Layout ${reconhecido.layout} reconhecido — ${reconhecido.meses.length} competência(s).${reconhecido.meses.length>1?' Escolha quais importar.':''}`;
         const ex={};
         try{
           const ini=reconhecido.meses[0].startDate, fim=reconhecido.meses[reconhecido.meses.length-1].endDate;
@@ -32476,11 +32574,12 @@ async function processarLancctbUploadExtrato(forcarIA){
             .eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel).gte('data_pagamento',ini).lte('data_pagamento',fim));
           (jaTem||[]).forEach(r=>{ const c=String(r.data_pagamento).slice(0,7); ex[c]=(ex[c]||0)+1; });
         }catch(e){ console.warn('Checagem de competências já importadas falhou',e); }
-        const escolhidas=await _lancctbC6EscolherCompetencias(reconhecido.meses,ex);
+        const escolhidas=reconhecido.meses.length>1?await _lancctbC6EscolherCompetencias(reconhecido.meses,ex):reconhecido.meses;
         if(!escolhidas){ status.textContent='Importação cancelada — nenhuma competência selecionada.'; btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; } return; }
         const set=new Set(escolhidas.map(b=>b.competencia));
         reconhecido.lancamentos=reconhecido.lancamentos.filter(l=>set.has(l.competencia));
         reconhecido.observacao=' Competências: '+escolhidas.map(b=>`${b.label}${b.status==='PARTIAL'?' (parcial)':''}${b.totaisConferem?' ✓':' ⚠ totais não conferem'}`).join(', ')+(t.cnpj?` · titular ${t.nome||''} ${t.cnpj} ag ${t.agencia} cc ${t.conta}`:'')+'.';
+        if(reconhecido.model==='BANCO_INTER_CONTA_CORRENTE'){ const m0=escolhidas[0]; reconhecido.observacao+=` Saldo inicial calculado pela movimentação do período: R$ ${_fmt(m0.openingBalance)} (inferido) → saldo final R$ ${_fmt(m0.closingBalance)}.`+(reconhecido.avisos.length?' ⚠ '+reconhecido.avisos.join('; '):' ✓ saldos por transação e saldo do dia conferem.'); }
       }
       if(reconhecido){
         origem='pdf_estruturado';
