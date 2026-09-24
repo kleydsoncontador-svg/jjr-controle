@@ -32269,6 +32269,133 @@ async function _lancctbExtratoPdfPertenceAEmpresa(pdf,raizesEmpresa){
     return { ok:false, raizExtrato:raizes[0] };
   }catch(e){ return { ok:true }; }
 }
+// ─── C6 Bank — conta corrente, VÁRIAS competências num PDF só ────────────
+// model = C6_CURRENT_ACCOUNT_MULTI_MONTH. Texto nativo (pdf.js), sem OCR/IA.
+// Vale pra qualquer empresa: nada de razão/CNPJ/conta fixos. Um PDF NÃO é
+// uma competência: o parser devolve todos os blocos mensais e quem chama
+// pergunta ao usuário quais importar (_lancctbC6EscolherCompetencias).
+// Cada bloco: cabeçalho "Mês AAAA ( ini - fim ) Entradas: R$ x • Saídas: R$ y"
+// (totalizadores OFICIAIS, só pra conferir a soma) + linhas
+// Data lançamento | Data contábil | Tipo | Descrição | Valor; "Saldo do dia"
+// NÃO é movimento (só saldo de posição, nunca somado).
+const LANCCTB_C6_MESES={janeiro:1,fevereiro:2,marco:3,abril:4,maio:5,junho:6,julho:7,agosto:8,setembro:9,outubro:10,novembro:11,dezembro:12};
+async function _lancctbParsearExtratoC6MultiMes(pdf){
+  const semAcento=s=>String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'');
+  const linhas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    _lancctbAgruparLinhasPorY(itens,2).forEach(l=>linhas.push(l.itens));
+  }
+  const txt=l=>l.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+  const todo=semAcento(linhas.map(txt).join(' ')).toUpperCase();
+  // âncoras do layout (não depende de nome de empresa)
+  if(!/EXTRATO EXPORTADO NO DIA/.test(todo)||!/CONTABIL/.test(todo)||!/SALDO DO DIA/.test(todo)||!/ENTRADAS:.*SAIDAS:/.test(todo)) return null;
+  const parseBR=s=>{ const neg=/^-/.test(s.trim()); const v=parseFloat(String(s).replace(/[^\d,]/g,'').replace(',','.'))||0; return neg?-v:v; };
+  const r2=v=>Math.round(v*100)/100;
+  const iso=(d,m,a)=>`${a}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+  // cabeçalho do documento
+  let empresaNome=null, cnpj=null, agencia=null, conta=null, periodoIni=null, periodoFim=null;
+  for(const l of linhas){
+    const t=txt(l);
+    const mc=t.match(/^(.*?)\s*•\s*(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/);
+    if(mc&&!cnpj){ empresaNome=mc[1].trim(); cnpj=mc[2].replace(/\D/g,''); }
+    const ma=t.match(/Ag[êe]ncia:\s*(\S+)\s*•\s*Conta:\s*(\S+)/i);
+    if(ma&&!agencia){ agencia=ma[1]; conta=ma[2]; }
+    const mp=semAcento(t).match(/Periodo\s*•\s*(\d{1,2}) de (\w+) de (\d{4})\s*ate\s*(\d{1,2}) de (\w+) de (\d{4})/i);
+    if(mp&&!periodoIni){ periodoIni=iso(mp[1],LANCCTB_C6_MESES[mp[2].toLowerCase()],mp[3]); periodoFim=iso(mp[4],LANCCTB_C6_MESES[mp[5].toLowerCase()],mp[6]); }
+  }
+  const reMes=/^([A-Za-zÀ-ú]+)\s+(\d{4})\s*\(\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})\s*\)\s*Entradas:\s*R\$\s*([\d.,]+)\s*•\s*Sa[íi]das:\s*R\$\s*([\d.,]+)/i;
+  const meses=[]; let bloco=null, descX=225, ultimaTx=null;
+  for(const l of linhas){
+    const t=txt(l);
+    const mm=t.match(reMes);
+    if(mm&&LANCCTB_C6_MESES[semAcento(mm[1]).toLowerCase()]){
+      const m=LANCCTB_C6_MESES[semAcento(mm[1]).toLowerCase()];
+      bloco={ competencia:`${mm[2]}-${String(m).padStart(2,'0')}`, label:`${String(m).padStart(2,'0')}/${mm[2]}`,
+        startDate:iso(mm[3],mm[4],mm[5]), endDate:iso(mm[6],mm[7],mm[8]), totalIn:0,totalOut:0,
+        oficialIn:parseBR(mm[9]), oficialOut:parseBR(mm[10]), transactionCount:0, closingBalance:null, semLancamentos:false, lancamentos:[] };
+      meses.push(bloco); ultimaTx=null; continue;
+    }
+    if(!bloco) continue;
+    if(/^Sem lan[çc]amentos no m[êe]s/i.test(t)){ bloco.semLancamentos=true; continue; }
+    const hd=l.find(i=>/^Descri[çc][ãa]o$/i.test(i.str.trim())); if(hd){ descX=hd.x-8; continue; }
+    const ms=t.match(/^Saldo do dia\s+\d{2}\/\d{2}\/\d{2}\s+(-?)R\$\s*([\d.,]+)/i);
+    if(ms){ bloco.closingBalance=r2((ms[1]?-1:1)*parseBR(ms[2])); ultimaTx=null; continue; } // DAILY_BALANCE: fora da tabela
+    if(/^Informa/i.test(t)||/^(Data|lan[çc]amento)\b/i.test(t)){ ultimaTx=null; continue; }
+    const md=l.length>=4&&/^\d{2}\/\d{2}$/.test(l[0].str.trim())&&/^\d{2}\/\d{2}$/.test(l[1].str.trim());
+    const ultimo=l[l.length-1].str.trim();
+    if(md&&/^-?R\$\s*[\d.,]+$/.test(ultimo)){
+      const [d1,m1]=l[0].str.trim().split('/'), [d2,m2]=l[1].str.trim().split('/');
+      const ano=+bloco.competencia.slice(0,4);
+      const meio=l.slice(2,l.length-1);
+      const tipo=meio.filter(i=>i.x<descX).map(i=>i.str).join(' ').trim();
+      const desc=meio.filter(i=>i.x>=descX).map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+      const valor=parseBR(ultimo);
+      const tx={ data:iso(d1,m1,ano), dataContabil:iso(d2,m2,ano), tipo, historico:desc,
+        valor_entrada:valor>0?r2(valor):0, valor_saida:valor<0?r2(-valor):0, competencia:bloco.competencia };
+      bloco.lancamentos.push(tx); ultimaTx=tx; continue;
+    }
+    // continuação de descrição que quebrou em 2 linhas
+    if(ultimaTx&&l[0].x>=descX-2&&!md){ ultimaTx.historico=(ultimaTx.historico+' '+t).trim(); }
+  }
+  if(!meses.length) return null;
+  meses.forEach(b=>{
+    b.totalIn=r2(b.lancamentos.reduce((s,x)=>s+x.valor_entrada,0));
+    b.totalOut=r2(b.lancamentos.reduce((s,x)=>s+x.valor_saida,0));
+    b.transactionCount=b.lancamentos.length;
+    const [a,m]=b.competencia.split('-').map(Number);
+    const ultimoDia=new Date(a,m,0).getDate();
+    b.status=b.semLancamentos&&!b.transactionCount?'NO_MOVEMENTS':(b.endDate<iso(ultimoDia,m,a)?'PARTIAL':'COMPLETE');
+    b.totaisConferem=Math.abs(b.totalIn-b.oficialIn)<0.005&&Math.abs(b.totalOut-b.oficialOut)<0.005;
+  });
+  const lancamentos=[]; meses.forEach(b=>b.lancamentos.forEach(x=>{
+    const info=[x.tipo?`Tipo: ${x.tipo}`:'',x.dataContabil!==x.data?`Data contábil: ${x.dataContabil.split('-').reverse().join('/')}`:''].filter(Boolean).join(' | ');
+    lancamentos.push({ data:x.data, historico:x.historico, valor_entrada:x.valor_entrada, valor_saida:x.valor_saida, informacao:info||null, competencia:x.competencia });
+  }));
+  return { layout:'C6 Bank (várias competências)', model:'C6_CURRENT_ACCOUNT_MULTI_MONTH', lancamentos, meses,
+    titular:{ nome:empresaNome, cnpj, agencia, conta }, documentPeriod:{ start:periodoIni, end:periodoFim } };
+}
+// Modal obrigatório de seleção de competências (nada vem marcado). Devolve
+// Promise<array de competências escolhidas | null se cancelou>.
+function _lancctbC6EscolherCompetencias(meses,existentes){
+  return new Promise(resolve=>{
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px';
+    const rot=b=>{
+      const n=b.transactionCount;
+      let r=b.status==='NO_MOVEMENTS'?'Sem lançamentos':`${n} lançamento(s)`;
+      if(b.status==='PARTIAL') r=`Parcial até ${b.endDate.split('-').reverse().join('/')} — ${r}`;
+      return r;
+    };
+    ov.innerHTML=`<div style="background:var(--white,#fff);color:var(--ink,#111);border-radius:10px;max-width:560px;width:100%;max-height:90vh;overflow:auto;padding:18px;box-shadow:0 10px 40px rgba(0,0,0,.4)">
+      <div style="font-weight:700;font-size:15px;margin-bottom:4px">Este extrato contém várias competências</div>
+      <div style="font-size:12.5px;color:var(--slate);margin-bottom:12px">Selecione quais deseja importar. Cada mês é importado separadamente.</div>
+      <div id="c6SelLista" style="display:flex;flex-direction:column;gap:6px"></div>
+      <div id="c6SelAviso" style="font-size:12px;color:#b45309;margin-top:10px"></div>
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-top:14px;gap:8px;flex-wrap:wrap">
+        <button class="btn bo bsm" id="c6SelTodos">Selecionar todos</button>
+        <span style="display:flex;gap:8px"><button class="btn bo" id="c6SelCancelar">Cancelar</button><button class="btn bp" id="c6SelOk">Importar selecionados</button></span>
+      </div></div>`;
+    document.body.appendChild(ov);
+    const lista=ov.querySelector('#c6SelLista');
+    meses.forEach((b,i)=>{
+      const ex=existentes&&existentes[b.competencia]||0;
+      const lb=document.createElement('label');
+      lb.style.cssText='display:flex;gap:8px;align-items:flex-start;padding:7px 9px;border:1px solid var(--border);border-radius:6px;cursor:pointer;font-size:13px';
+      lb.innerHTML=`<input type="checkbox" data-i="${i}" style="margin-top:2px"><span><strong>${b.label}</strong> — ${rot(b)}
+        ${b.totaisConferem?'':'<br><span style="color:#dc2626;font-size:11.5px">⚠ MONTH_TOTAL_MISMATCH: soma das linhas ≠ totais do cabeçalho do mês</span>'}
+        ${ex?`<br><span style="color:#b45309;font-size:11.5px">${b.label} já possui ${ex} lançamento(s) importado(s) nesta conta — só os que ainda não existem serão adicionados (duplicados são ignorados).</span>`:''}</span>`;
+      lista.appendChild(lb);
+    });
+    const boxes=()=>[...lista.querySelectorAll('input[type=checkbox]')];
+    const aviso=()=>{ const parc=boxes().some(c=>c.checked&&meses[+c.dataset.i].status==='PARTIAL'); ov.querySelector('#c6SelAviso').textContent=parc?'Este mês ainda não está completo (extrato parcial).':''; };
+    lista.addEventListener('change',aviso);
+    ov.querySelector('#c6SelTodos').onclick=()=>{ const t=!boxes().every(c=>c.checked); boxes().forEach(c=>c.checked=t); aviso(); };
+    const fechar=v=>{ ov.remove(); resolve(v); };
+    ov.querySelector('#c6SelCancelar').onclick=()=>fechar(null);
+    ov.querySelector('#c6SelOk').onclick=()=>{ const esc=boxes().filter(c=>c.checked).map(c=>meses[+c.dataset.i]); if(!esc.length){ toast('Marque pelo menos uma competência','err'); return; } fechar(esc); };
+  });
+}
 async function processarLancctbUploadExtrato(forcarIA){
   const file=document.getElementById('lancctbExtratoArquivo')?.files[0];
   const status=document.getElementById('lancctbExtratoStatus');
@@ -32290,7 +32417,15 @@ async function processarLancctbUploadExtrato(forcarIA){
     if(ehPdf){
       _convItauGarantirWorker();
       const buf=await file.arrayBuffer();
-      const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+      let pdf;
+      try{ pdf=await pdfjsLib.getDocument({data:buf.slice(0)}).promise; }
+      catch(e){
+        if(e&&e.name==='PasswordException'){
+          const senha=prompt('Este PDF tem senha. Digite a senha do extrato:');
+          if(!senha) throw new Error('PDF protegido por senha — senha não informada.');
+          pdf=await pdfjsLib.getDocument({data:buf.slice(0),password:senha}).promise;
+        } else throw e;
+      }
 
       // Trava (pedido do usuário 18/09/2026): extrato que traz o CNPJ do titular
       // não pode ser subido em empresa de outro CNPJ (extrato da Peixoto
@@ -32310,11 +32445,28 @@ async function processarLancctbUploadExtrato(forcarIA){
 
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
-        return (await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
+        return (await _lancctbParsearExtratoC6MultiMes(pdf))||(await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
           ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
           ||(await _lancctbParsearExtratoItauBBAOcr(pdf));
       })();
+      if(reconhecido&&reconhecido.meses){
+        // PDF ≠ competência: pergunta quais meses importar (nada pré-marcado)
+        const t=reconhecido.titular||{};
+        status.textContent=`Layout C6 Bank reconhecido — ${reconhecido.meses.length} competência(s). Escolha quais importar.`;
+        const ex={};
+        try{
+          const ini=reconhecido.meses[0].startDate, fim=reconhecido.meses[reconhecido.meses.length-1].endDate;
+          const { data: jaTem } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('data_pagamento')
+            .eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',_lancctbExtratoContaSel).gte('data_pagamento',ini).lte('data_pagamento',fim));
+          (jaTem||[]).forEach(r=>{ const c=String(r.data_pagamento).slice(0,7); ex[c]=(ex[c]||0)+1; });
+        }catch(e){ console.warn('Checagem de competências já importadas falhou',e); }
+        const escolhidas=await _lancctbC6EscolherCompetencias(reconhecido.meses,ex);
+        if(!escolhidas){ status.textContent='Importação cancelada — nenhuma competência selecionada.'; btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; } return; }
+        const set=new Set(escolhidas.map(b=>b.competencia));
+        reconhecido.lancamentos=reconhecido.lancamentos.filter(l=>set.has(l.competencia));
+        reconhecido.observacao=' Competências: '+escolhidas.map(b=>`${b.label}${b.status==='PARTIAL'?' (parcial)':''}${b.totaisConferem?' ✓':' ⚠ totais não conferem'}`).join(', ')+(t.cnpj?` · titular ${t.nome||''} ${t.cnpj} ag ${t.agencia} cc ${t.conta}`:'')+'.';
+      }
       if(reconhecido){
         origem='pdf_estruturado';
         lancamentos=reconhecido.lancamentos;
@@ -32516,6 +32668,7 @@ async function confirmarLancctbImportExtrato(){
       valor_entrada: l.valor_entrada||0,
       historico_bancario: l.historico||null,
       documento: l.documento||null,
+      informacao: l.informacao||null,
       origem_importacao: l._origem||'excel',
       hash_dedup: _lancctbHashLancamento(contaId,l,ocorrencia),
     };
