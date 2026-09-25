@@ -19833,7 +19833,7 @@ async function _lancctbProcessarFopag(){
         Math.abs((f.valor_saida||0)-l.valor_saida)<=LANCCTB_MATCH_TOLERANCIA_VALOR &&
         _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
 
-    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0;
+    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null;
     // Recibos de Férias (pasta "Relatórios FOPAG para Contábil"): casa a saída
     // com o TOTAL LÍQUIDO EXATO do recibo da MESMA empresa; se houver mais de
     // um recibo com o mesmo valor, desempata pelo início do gozo (pago poucos
@@ -19934,6 +19934,32 @@ async function _lancctbProcessarFopag(){
       // e o Relatório de Líquidos tem exatamente 1 pessoa com esse valor —
       // sem nome, casa pelo VALOR EXATO quando ele é único na folha (2 pessoas
       // com o mesmo líquido continuam sem resolver, nunca chuta).
+      // O Pix traz o miolo do CPF ("***.994.216-**"): se esse trecho já foi visto
+      // num pagamento desta empresa que JÁ está conciliado com o nome da pessoa,
+      // usa o nome aprendido (aprende sozinho a cada mês; ajuda quando 2 pessoas
+      // têm o mesmo líquido ou o nome veio cortado).
+      if(!matchIndiv){
+        const fr=(textoIdent.match(/\*{3}\.(\d{3}\.\d{3})-\*{2}/)||[])[1];
+        if(fr){
+          if(!cpfFragNome){
+            cpfFragNome={};
+            const { data: jaConc } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,historico_bancario')
+              .eq('empresa_eid',eid).eq('status_conciliacao','conciliado').ilike('historico_bancario','%***.%'));
+            const ids=(jaConc||[]).map(x=>x.id);
+            for(let k=0;k<ids.length;k+=200){
+              const { data: cts } = await _supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id,cliente_fornecedor_nome').in('lancamento_extrato_id',ids.slice(k,k+200)).not('cliente_fornecedor_nome','is',null);
+              (cts||[]).forEach(c=>{ const h=(jaConc.find(x=>x.id===c.lancamento_extrato_id)||{}).historico_bancario||''; const f=(h.match(/\*{3}\.(\d{3}\.\d{3})-\*{2}/)||[])[1]; if(f&&c.cliente_fornecedor_nome) cpfFragNome[f]=cpfFragNome[f]||c.cliente_fornecedor_nome; });
+            }
+          }
+          const nomeAprendido=cpfFragNome[fr];
+          if(nomeAprendido){
+            for(const r of relatorios){
+              const p=identificaPessoa(nomeAprendido, r.dados.pessoas);
+              if(p && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
+            }
+          }
+        }
+      }
       if(!matchIndiv){
         for(const r of relatorios){
           const iguais=r.dados.pessoas.filter(pp=>Math.abs(pp.valor-l.valor_saida)<=0.01);
