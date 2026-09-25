@@ -21488,30 +21488,50 @@ const LANCCTB_ISS_TXT_CONTA_CREDITO='10000';
 async function gerarLancctbIssRetidoTxt(){
   const eid=String(_lancctbEidAtual);
   if(!LANCCTB_ISS_TXT_EMPRESAS.includes(eid)) return;
-  const nfs=[], vistas=new Set();
-  (_lancctbUltimaLeitura||[]).forEach(({nf,nomeTerc})=>{
-    const chave=String(nf.numero)+'|'+(nf.data_emissao||'');
-    if(vistas.has(chave)) return; vistas.add(chave);
-    if((nf.iss_valor||0)>0) nfs.push({nf,nomeTerc});
-  });
-  if(!nfs.length){ toast('Nenhuma NFS-e com ISS retido na lista atual (ajuste os filtros).','err'); return; }
+  // Período escolhido pelo usuário (pedido 25/09/2026) — busca no banco todas
+  // as NFS-e emitidas no intervalo, sem depender da página/filtro da tela.
+  const hoje=new Date(), ini0=new Date(hoje.getFullYear(),hoje.getMonth()-1,1), fim0=new Date(hoje.getFullYear(),hoje.getMonth(),0);
+  const iso=d=>d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
   const chaveConta='lancctb_iss_conta_deb_'+eid;
-  const atual=S.g(chaveConta)||'';
-  const conta=(prompt(`Conta DÉBITO do ISS retido (crédito será sempre ${LANCCTB_ISS_TXT_CONTA_CREDITO}):`,atual)||'').trim();
-  if(!conta){ toast('Conta débito não informada — TXT não gerado.','err'); return; }
-  if(!/^\d+$/.test(conta)){ toast('A conta débito deve ser numérica.','err'); return; }
-  S.s(chaveConta,conta);
+  const esc_=await new Promise(resolve=>{
+    const ov=document.createElement('div');
+    ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99999;display:flex;align-items:center;justify-content:center;padding:16px';
+    ov.innerHTML=`<div style="background:var(--white,#fff);color:var(--ink,#111);border-radius:10px;max-width:420px;width:100%;padding:18px;box-shadow:0 10px 40px rgba(0,0,0,.4)">
+      <div style="font-weight:700;font-size:15px;margin-bottom:10px">TXT do ISS retido</div>
+      <div style="display:flex;gap:10px;margin-bottom:10px">
+        <label style="flex:1;font-size:12px">Emissão de<input type="date" class="fi" id="issTxtIni" value="${iso(ini0)}" style="width:100%"></label>
+        <label style="flex:1;font-size:12px">até<input type="date" class="fi" id="issTxtFim" value="${iso(fim0)}" style="width:100%"></label>
+      </div>
+      <label style="font-size:12px">Conta débito<input class="fi" id="issTxtConta" value="${esc(S.g(chaveConta)||'')}" placeholder="ex: 12345" style="width:100%"></label>
+      <div style="font-size:11.5px;color:var(--slate);margin-top:6px">Crédito: sempre ${LANCCTB_ISS_TXT_CONTA_CREDITO}. Entram as NFS-e prestadas com ISS maior que zero.</div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn bo" id="issTxtCancel">Cancelar</button><button class="btn bp" id="issTxtOk">Gerar TXT</button></div></div>`;
+    document.body.appendChild(ov);
+    ov.querySelector('#issTxtCancel').onclick=()=>{ ov.remove(); resolve(null); };
+    ov.querySelector('#issTxtOk').onclick=()=>{
+      const r={ ini:ov.querySelector('#issTxtIni').value, fim:ov.querySelector('#issTxtFim').value, conta:ov.querySelector('#issTxtConta').value.trim() };
+      if(!r.ini||!r.fim||r.ini>r.fim){ toast('Informe um período válido','err'); return; }
+      if(!/^\d+$/.test(r.conta)){ toast('A conta débito deve ser numérica','err'); return; }
+      ov.remove(); resolve(r);
+    };
+  });
+  if(!esc_) return;
+  S.s(chaveConta,esc_.conta);
+  const { data: rows, error } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais')
+    .select('numero,data_emissao,iss_valor,nome_destinatario')
+    .eq('empresa_eid',eid).eq('tipo','nfse').eq('direcao','venda')
+    .gte('data_emissao',esc_.ini).lte('data_emissao',esc_.fim).gt('iss_valor',0).order('data_emissao').order('numero'));
+  if(error){ toast('Erro ao buscar NFS-e: '+error.message,'err'); return; }
+  if(!rows||!rows.length){ toast('Nenhuma NFS-e com ISS no período informado.','err'); return; }
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const cnpj=String((emp&&(emp.cnpjNum||emp.cnpj))||'').replace(/\D/g,'');
-  const br=iso=>iso?iso.slice(8,10)+'/'+iso.slice(5,7)+'/'+iso.slice(0,4):'';
-  const linhas=nfs.map(({nf,nomeTerc})=>({ data:br(nf.data_emissao), debito:conta, credito:LANCCTB_ISS_TXT_CONTA_CREDITO,
-    valor:nf.iss_valor, historico:`ISS retido NFS-e ${nf.numero}${nomeTerc?' - '+nomeTerc:''}` }));
-  const nomeArq=`ISS_Retido_${String((emp&&emp.nome)||eid).replace(/[^a-zA-Z0-9]/g,'_')}_${new Date().toISOString().split('T')[0]}.txt`;
-  const conteudo=gerarTxtMisterContador(cnpj,linhas);
-  const salvou=await _lancctbSalvarTxtNaPastaTransfRede(nomeArq,conteudo);
+  const br=d=>d?d.slice(8,10)+'/'+d.slice(5,7)+'/'+d.slice(0,4):'';
+  const linhas=rows.map(nf=>({ data:br(nf.data_emissao), debito:esc_.conta, credito:LANCCTB_ISS_TXT_CONTA_CREDITO,
+    valor:nf.iss_valor, historico:`ISS retido NFS-e ${nf.numero}${nf.nome_destinatario?' - '+nf.nome_destinatario:''}` }));
+  const nomeArq=`ISS_Retido_${String((emp&&emp.nome)||eid).replace(/[^a-zA-Z0-9]/g,'_')}_${esc_.ini}_a_${esc_.fim}.txt`;
+  const salvou=await _lancctbSalvarTxtNaPastaTransfRede(nomeArq,gerarTxtMisterContador(cnpj,linhas));
   if(!salvou) baixarTxtMisterContador(cnpj,linhas,nomeArq);
-  const total=nfs.reduce((a,x)=>a+x.nf.iss_valor,0);
-  toast(`TXT gerado: ${nfs.length} NFS-e, ISS total R$ ${_fmt(total)}.${salvou?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador.'}`,'ok');
+  const total=Math.round(rows.reduce((a,x)=>a+x.iss_valor,0)*100)/100;
+  toast(`TXT gerado: ${rows.length} NFS-e, ISS total R$ ${_fmt(total)}.${salvou?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador.'}`,'ok');
 }
 function exportarLancctbNotasExcel(abaId){
   const aba=LANCCTB_ABAS.find(a=>a.id===abaId);
