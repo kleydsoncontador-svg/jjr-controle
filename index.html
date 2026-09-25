@@ -21274,6 +21274,7 @@ async function renderLancctbNotas(aba){
       ${!ehServico?`<span id="lancctbPreencherNaturezaStatus" style="font-size:11px;color:var(--slate)"></span>
       <button class="btn bo bsm" id="lancctbPreencherNaturezaBtn" onclick="_lancctbPreencherNaturezaOperacao('${aba.tipoDoc}','${aba.direcaoNf}')" title="Reabre o XML já salvo de cada NF sem Natureza da Operação preenchida e completa sozinho">🔄 Preencher Natureza (NFs já importadas)</button>`:''}
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico})" title="Apaga todas as NFs que batem com os filtros ativos acima — NFs já conciliadas (com lançamento contábil gerado) nunca são apagadas">🗑️ Excluir todas as filtradas</button>
+      ${(ehServico&&aba.direcaoNf==='venda'&&LANCCTB_ISS_TXT_EMPRESAS.includes(String(_lancctbEidAtual)))?`<button class="btn bo bsm" onclick="gerarLancctbIssRetidoTxt()" title="TXT de lançamentos do ISS retido das NFS-e listadas (débito = conta que você informa, crédito = 10000)">📄 Gerar TXT ISS Retido</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
     <div style="margin-bottom:8px">${_lancctbPagGenericaHtml(_lancctbNfePagina,count,from,to,totalPaginas,'_lancctbNfePagina','renderLancctbConteudo')}</div>
@@ -21477,6 +21478,40 @@ async function _lancctbExecutarExclusaoNotasFiltradas(){
   closeModal('mLancctbConfirmarExclusao');
   _lancctbNfePagina=0;
   renderLancctbConteudo();
+}
+// Pedido do usuário 25/09/2026: só DM7 Fadel (#105) e Adelpe (#89) — botão na
+// aba NFS-e Prestado que gera TXT (layout |6100|) dos ISS retidos: uma linha
+// por NFS-e com ISS > 0 da lista filtrada na tela; débito = conta informada
+// aqui (lembrada por empresa), crédito SEMPRE 10000.
+const LANCCTB_ISS_TXT_EMPRESAS=['105','89'];
+const LANCCTB_ISS_TXT_CONTA_CREDITO='10000';
+async function gerarLancctbIssRetidoTxt(){
+  const eid=String(_lancctbEidAtual);
+  if(!LANCCTB_ISS_TXT_EMPRESAS.includes(eid)) return;
+  const nfs=[], vistas=new Set();
+  (_lancctbUltimaLeitura||[]).forEach(({nf,nomeTerc})=>{
+    const chave=String(nf.numero)+'|'+(nf.data_emissao||'');
+    if(vistas.has(chave)) return; vistas.add(chave);
+    if((nf.iss_valor||0)>0) nfs.push({nf,nomeTerc});
+  });
+  if(!nfs.length){ toast('Nenhuma NFS-e com ISS retido na lista atual (ajuste os filtros).','err'); return; }
+  const chaveConta='lancctb_iss_conta_deb_'+eid;
+  const atual=S.g(chaveConta)||'';
+  const conta=(prompt(`Conta DÉBITO do ISS retido (crédito será sempre ${LANCCTB_ISS_TXT_CONTA_CREDITO}):`,atual)||'').trim();
+  if(!conta){ toast('Conta débito não informada — TXT não gerado.','err'); return; }
+  if(!/^\d+$/.test(conta)){ toast('A conta débito deve ser numérica.','err'); return; }
+  S.s(chaveConta,conta);
+  const emp=S.emps().find(e=>String(e.eid)===eid);
+  const cnpj=String((emp&&(emp.cnpjNum||emp.cnpj))||'').replace(/\D/g,'');
+  const br=iso=>iso?iso.slice(8,10)+'/'+iso.slice(5,7)+'/'+iso.slice(0,4):'';
+  const linhas=nfs.map(({nf,nomeTerc})=>({ data:br(nf.data_emissao), debito:conta, credito:LANCCTB_ISS_TXT_CONTA_CREDITO,
+    valor:nf.iss_valor, historico:`ISS retido NFS-e ${nf.numero}${nomeTerc?' - '+nomeTerc:''}` }));
+  const nomeArq=`ISS_Retido_${String((emp&&emp.nome)||eid).replace(/[^a-zA-Z0-9]/g,'_')}_${new Date().toISOString().split('T')[0]}.txt`;
+  const conteudo=gerarTxtMisterContador(cnpj,linhas);
+  const salvou=await _lancctbSalvarTxtNaPastaTransfRede(nomeArq,conteudo);
+  if(!salvou) baixarTxtMisterContador(cnpj,linhas,nomeArq);
+  const total=nfs.reduce((a,x)=>a+x.nf.iss_valor,0);
+  toast(`TXT gerado: ${nfs.length} NFS-e, ISS total R$ ${_fmt(total)}.${salvou?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador.'}`,'ok');
 }
 function exportarLancctbNotasExcel(abaId){
   const aba=LANCCTB_ABAS.find(a=>a.id===abaId);
