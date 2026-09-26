@@ -1024,6 +1024,12 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
           <option value="Comércio e Serviços">Comércio e Serviços</option>
           <option value="Indústria e Comércio">Indústria e Comércio</option>
         </select></div>
+        <div class="fg"><label class="fl">Capital social (Receita Federal)</label><input class="fi" id="feCapital" inputmode="decimal" placeholder="Preenchido pelo Buscar — ex: 1.000.000,00"></div>
+        <div class="fg" style="grid-column:1/-1">
+          <label class="fl">Sócios (Receita Federal) — participação % editável</label>
+          <div id="feSocios" style="display:flex;flex-direction:column;gap:6px"></div>
+          <button type="button" class="btn bo bsm" onclick="addSocioRfbForm()" style="align-self:flex-start;margin-top:4px">+ Adicionar</button>
+        </div>
         <div class="fg" style="grid-column:1/-1"><label class="fl">Grupo econômico</label><select class="fi" id="feGrupo"><option value="">&#8212; Nenhum &#8212;</option></select></div>
         <div class="fg" style="grid-column:1/-1">
           <label class="fl">Contatos</label>
@@ -1061,6 +1067,9 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
           <div class="fg"><label class="fl">Data de saída</label><input class="fi" type="month" id="feFsDesde"></div>
         </div>
       </div>
+
+      <div class="sh">Observações</div>
+      <div class="fg" style="margin-bottom:0"><textarea class="fi" id="feObsAuto" readonly rows="6" placeholder="As alterações do cadastro na Receita Federal (capital, CNAE, sócios, natureza jurídica, porte, razão social) aparecem aqui sozinhas, com o valor de antes, quando você clica em Buscar." style="width:100%;resize:vertical;line-height:1.5"></textarea></div>
 
       <div style="display:flex;gap:10px;justify-content:flex-end;margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
         <button class="btn bo" onclick="voltarListaEmpresas()">Cancelar</button>
@@ -7331,12 +7340,21 @@ async function buscarTodosCNPJs(){
       const r=await fetch('https://brasilapi.com.br/api/cnpj/v1/'+raw);
       if(!r.ok){ err++; await new Promise(r=>setTimeout(r,600)); continue; }
       const d=await r.json();
+      // Compara com o cadastro ANTES de sobrescrever (observações automáticas de alteração)
+      const novoRfb=_rfbNormalizar(d), hojeRfb=new Date().toISOString().slice(0,10);
+      let difRfb=[]; try{ difRfb=_rfbDiff(emps[i],novoRfb); }catch(e){}
       // Atualiza APENAS campos originados do CNPJ
       if(d.razao_social) emps[i].nome=d.razao_social;
       if(d.nome_fantasia !== undefined) emps[i].fantasia=d.nome_fantasia||'';
       if(d.cnae_fiscal_descricao) emps[i].atividade=d.cnae_fiscal_descricao;
       if(d.natureza_juridica) emps[i].natJur=d.natureza_juridica;
       if(d.porte) emps[i].porte=d.porte;
+      try{
+        if(difRfb.length) emps[i].obsAlteracoes=difRfb.map(t=>({data:hojeRfb,texto:t})).concat(emps[i].obsAlteracoes||[]);
+        if(novoRfb.capital!=null) emps[i].capitalSocial=novoRfb.capital;
+        if(novoRfb.socios.length||Array.isArray(emps[i].sociosRfb)) emps[i].sociosRfb=_rfbSociosComPercentual(emps[i].sociosRfb,novoRfb.socios);
+        if(novoRfb.cnaes.length) emps[i].atividadeSec=novoRfb.cnaes.join('; ');
+      }catch(e){ console.warn('RFB em massa',e); }
       ok++;
       // Salva a cada 5 empresas para não perder progresso
       if(ok%5===0) S.saveEmps(emps);
@@ -7575,6 +7593,7 @@ function abrirCadastroEmpresa(eid){
     setV('feGrupo',''); setV('feFsTipo','ativo');
     document.getElementById('feFsExtra').style.display='none';
     document.getElementById('feEmailFields').innerHTML='';
+    setV('feCapital',''); document.getElementById('feSocios').innerHTML=''; _feObsAlt=[]; _renderObsAlt();
     document.getElementById('feCnpjStatus').textContent='';
     return;
   }
@@ -7604,7 +7623,11 @@ function abrirCadastroEmpresa(eid){
   // Emails
   const ef = document.getElementById('feEmailFields');
   ef.innerHTML='';
-  (emp.emails||[]).forEach(({email})=>addEmailFieldForm(email));
+  (emp.emails||[]).forEach(function(em){ if(typeof em==='string') addEmailFieldForm(em); else addEmailFieldForm(em.email||'',em.nome||'',em.whatsapp||''); });
+  setV('feCapital', emp.capitalSocial!=null?_fmtCapital(emp.capitalSocial):'');
+  document.getElementById('feSocios').innerHTML='';
+  (emp.sociosRfb||[]).forEach(function(so){ addSocioRfbForm(so); });
+  _feObsAlt=(emp.obsAlteracoes||[]).slice(); _renderObsAlt();
   document.getElementById('feCnpjStatus').textContent='';
 }
 
@@ -9522,6 +9545,53 @@ function onFeTipoChange(){
   if(extra) extra.style.display = (v==='ativo')?'none':'grid';
 }
 
+// ─── Capital social, sócios da Receita e observações automáticas (pedido 26/09/2026) ───
+let _feObsAlt=[]; // [{data:'AAAA-MM-DD', texto}] — mais recente primeiro
+function _fmtCapital(n){ return Number(n||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function _parseCapital(t){ t=String(t||'').replace(/[^\d.,]/g,''); if(!t) return null; const v=parseFloat(t.replace(/\./g,'').replace(',','.')); return isNaN(v)?null:v; }
+function _renderObsAlt(){ const el=document.getElementById('feObsAuto'); if(el) el.value=_feObsAlt.map(o=>o.data.split('-').reverse().join('/')+' — '+o.texto).join('\n'); }
+function addSocioRfbForm(so){
+  const wrap=document.getElementById('feSocios'); if(!wrap) return; so=so||{};
+  const row=document.createElement('div'); row.className='socio-rfb-row'; row.style.cssText='display:flex;gap:8px;align-items:center';
+  row.innerHTML=`<input class="fi" type="text" value="${esc(so.nome||'')}" placeholder="Nome do sócio" style="flex:1.4">
+    <input class="fi" type="text" value="${esc(so.qualificacao||'')}" placeholder="Qualificação (ex: Sócio-Administrador)" style="flex:1">
+    <input class="fi" type="text" value="${esc(so.percentual!=null&&so.percentual!==''?so.percentual:'')}" placeholder="% participação" style="flex:0.5;min-width:90px">
+    <button type="button" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:16px;padding:0 4px;flex-shrink:0" onclick="this.parentElement.remove()">&#10005;</button>`;
+  row.dataset.entrada=so.entrada||'';
+  wrap.appendChild(row);
+}
+function _lerSociosRfbForm(){
+  return [...document.querySelectorAll('#feSocios .socio-rfb-row')].map(r=>{ const i=r.querySelectorAll('input'); return {nome:(i[0].value||'').trim(),qualificacao:(i[1].value||'').trim(),percentual:(i[2].value||'').trim(),entrada:r.dataset.entrada||''}; }).filter(x=>x.nome);
+}
+function _rfbNormalizar(d){
+  return {nome:d.razao_social||'',fantasia:d.nome_fantasia||'',atividade:d.cnae_fiscal_descricao||'',
+    cnaes:(d.cnaes_secundarios||[]).map(c=>c.descricao).filter(Boolean),natJur:d.natureza_juridica||'',porte:d.porte||'',
+    capital:(d.capital_social!=null&&d.capital_social!=='')?Number(d.capital_social):null,
+    socios:(d.qsa||[]).map(q=>({nome:(q.nome_socio||'').trim(),qualificacao:q.qualificacao_socio||'',entrada:q.data_entrada_sociedade||''})).filter(q=>q.nome)};
+}
+// Compara o cadastro SALVO (antes da atualização) com o que a Receita devolveu agora. Só registra mudança de algo
+// que já estava preenchido (a 1ª carga de capital/sócios vira base, sem ruído). Sempre mostra "era X → agora Y".
+function _rfbDiff(ant, novo){
+  const out=[], nz=t=>String(t||'').trim().toUpperCase().replace(/\s+/g,' ');
+  const cmp=(rot,a,b)=>{ if(a&&b&&nz(a)!==nz(b)) out.push(rot+' alterada: era "'+a+'" → agora "'+b+'"'); };
+  cmp('Razão social',ant.nome,novo.nome); cmp('Nome fantasia',ant.fantasia,novo.fantasia); cmp('Atividade principal (CNAE)',ant.atividade,novo.atividade);
+  cmp('Natureza jurídica',ant.natJur,novo.natJur); cmp('Porte',ant.porte,novo.porte);
+  if(ant.capitalSocial!=null&&novo.capital!=null&&Math.abs(ant.capitalSocial-novo.capital)>=0.005) out.push('Capital social alterado: era R$ '+_fmtCapital(ant.capitalSocial)+' → agora R$ '+_fmtCapital(novo.capital));
+  if(ant.atividadeSec){
+    const a=String(ant.atividadeSec).split(/;\s*/).filter(Boolean), b=novo.cnaes, aS=new Set(a.map(nz)), bS=new Set(b.map(nz));
+    b.filter(x=>!aS.has(nz(x))).forEach(x=>out.push('CNAE secundário incluído: '+x));
+    a.filter(x=>!bS.has(nz(x))).forEach(x=>out.push('CNAE secundário excluído: '+x));
+  }
+  if(Array.isArray(ant.sociosRfb)&&ant.sociosRfb.length){
+    const aS=new Set(ant.sociosRfb.map(x=>nz(x.nome))), bS=new Set(novo.socios.map(x=>nz(x.nome)));
+    novo.socios.filter(x=>!aS.has(nz(x.nome))).forEach(x=>out.push('Sócio entrou: '+x.nome+(x.qualificacao?' ('+x.qualificacao+')':'')));
+    ant.sociosRfb.filter(x=>!bS.has(nz(x.nome))).forEach(x=>out.push('Sócio saiu: '+x.nome+(x.qualificacao?' ('+x.qualificacao+')':'')+(x.percentual?' — participação era '+x.percentual:'')));
+  }
+  return out;
+}
+function _rfbSociosComPercentual(antSocios, novos){
+  return novos.map(n=>{ const a=(antSocios||[]).find(x=>String(x.nome||'').trim().toUpperCase()===n.nome.toUpperCase()); return Object.assign({},n,{percentual:a?(a.percentual||''):''}); });
+}
 function addEmailFieldForm(val='', nome='', whatsapp=''){
   const wrap = document.getElementById('feEmailFields');
   if(!wrap) return;
@@ -9570,6 +9640,17 @@ async function buscarCNPJForm(){
       if(d.natureza_juridica) setV('feNatJur', d.natureza_juridica);
       // Porte
       if(d.porte) setV('fePOorte', d.porte);
+      try{
+        const novoRfb=_rfbNormalizar(d);
+        const antEmp=S.emps().find(e=>String(e.eid)===String(_formEmpEid))||{};
+        const hoje=new Date().toISOString().slice(0,10);
+        _rfbDiff(antEmp,novoRfb).reverse().forEach(t=>{ if(!_feObsAlt.some(o=>o.texto===t&&o.data===hoje)) _feObsAlt.unshift({data:hoje,texto:t}); });
+        _renderObsAlt();
+        if(novoRfb.capital!=null) setV('feCapital',_fmtCapital(novoRfb.capital));
+        const atuais=_lerSociosRfbForm();
+        document.getElementById('feSocios').innerHTML='';
+        _rfbSociosComPercentual(atuais.length?atuais:antEmp.sociosRfb,novoRfb.socios).forEach(so=>addSocioRfbForm(so));
+      }catch(e){ console.warn('RFB capital/sócios',e); }
       const nireValF=d.nire||d.numero_nire||'';
       if(nireValF) setV('feNire',nireValF);
       mskCNPJ(document.getElementById('feCNPJ'));
@@ -9647,6 +9728,9 @@ function _saveEmpresaFormData(){
     fiscal: getV('feFiscal'),
     financeiro: getV('feFinanceiro'),
     emails: emails,
+    capitalSocial: _parseCapital(getV('feCapital')),
+    sociosRfb: _lerSociosRfbForm(),
+    obsAlteracoes: _feObsAlt.slice(),
     status: 'ativo',
     fechamentoStatus: fs,
   };
