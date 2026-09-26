@@ -19882,6 +19882,7 @@ async function _lancctbProcessarFopag(){
         _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
 
     let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null;
+    const comprovSociosCache={};
     // Recibos de Férias (pasta "Relatórios FOPAG para Contábil"): casa a saída
     // com o TOTAL LÍQUIDO EXATO do recibo da MESMA empresa; se houver mais de
     // um recibo com o mesmo valor, desempata pelo início do gozo (pago poucos
@@ -19963,6 +19964,66 @@ async function _lancctbProcessarFopag(){
         await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
         resolvidos++;
         continue;
+      }
+
+      // ── Caminho 1b (pedido do usuário 26/09/2026, Peixoto Serviços): o Sispag Salários pagou a
+      // folha dos empregados MAIS sócios com comprovante (o comprovante sai com a data do dia
+      // que o pagamento foi agendado — ex: sábado 04/07 — e o banco só debita na segunda 06/07).
+      // Ex: 18.594,47 = folha 06/2026 (4.489,61) + comprovantes de sócios 5.904,86 + 4.200,00 + 4.000,00.
+      // Só resolve quando UMA combinação de comprovantes de sócios (pendentes, até 6 dias antes)
+      // fecha exatamente o que sobra depois da folha; ambíguo ou sem combinação = deixa pendente.
+      {
+        let mix=null;
+        if(socios&&socios.length){
+          for(const r of relatorios){
+            const resto=Math.round((l.valor_saida-r.dados.total)*100)/100;
+            if(resto<=0.009) continue;
+            if(!comprovSociosCache[l.id]){
+              const d0=new Date(l.data_pagamento+'T00:00:00'); d0.setDate(d0.getDate()-6);
+              const ini=d0.toISOString().slice(0,10);
+              const { data: cs } = await _supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id')
+                .eq('empresa_eid',eid).eq('status_conciliacao','pendente').gte('data_pagamento',ini).lte('data_pagamento',l.data_pagamento);
+              comprovSociosCache[l.id]=(cs||[]).filter(c=>(!c.conta_bancaria_id||String(c.conta_bancaria_id)===String(contaId))&&_lancctbAcharSocioPorHistorico(socios,(c.cliente_fornecedor_nome||'')+' '+(c.cnpj_cpf||''))).slice(0,16);
+            }
+            const cands=comprovSociosCache[l.id];
+            if(!cands.length) continue;
+            const alvo=Math.round(resto*100), vals=cands.map(c=>Math.round(Number(c.valor_pago)*100));
+            const achados=[];
+            for(let m=1;m<(1<<cands.length);m++){ let soma=0; for(let i=0;i<cands.length;i++) if(m&(1<<i)) soma+=vals[i]; if(soma===alvo) achados.push(m); }
+            if(!achados.length) continue;
+            const menor=Math.min(...achados.map(m=>m.toString(2).split('1').length-1));
+            const melhores=achados.filter(m=>m.toString(2).split('1').length-1===menor);
+            if(melhores.length!==1) continue; // ambíguo: não chuta
+            mix={r,itens:cands.filter((c,i)=>melhores[0]&(1<<i))};
+            break;
+          }
+        }
+        if(mix){
+          const linhas=[
+            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'regra' },
+          ];
+          let ok=true;
+          const compRef=mix.r.dados.competencia||mix.r.competencia;
+          mix.r.dados.pessoas.forEach(p=>{
+            const c=contaDaPessoa(p,mix.r.tipo);
+            if(!c){ ok=false; return; }
+            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. salário ${compRef} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+          });
+          mix.itens.forEach(cp=>{
+            const socio=_lancctbAcharSocioPorHistorico(socios,(cp.cliente_fornecedor_nome||'')+' '+(cp.cnpj_cpf||''));
+            const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
+            if(!conta){ ok=false; return; }
+            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta.classificacao, conta_contabil_id:conta.id, tipo:'D', valor:Math.round(Number(cp.valor_pago)*100)/100, historico:`Pagamento ref. salário ${compRef} - ${cp.cliente_fornecedor_nome}`, cliente_fornecedor_nome:cp.cliente_fornecedor_nome||null, cnpj_cpf:cp.cnpj_cpf||null, comprovante_id:cp.id, lancamento_extrato_id:l.id, origem_match:'regra' });
+          });
+          const somaD=Math.round(linhas.filter(x=>x.tipo==='D').reduce((a,x)=>a+x.valor,0)*100)/100;
+          if(ok&&linhas.length>=3&&Math.abs(somaD-l.valor_saida)<=0.01){
+            const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+            if(error){ console.error('Erro FOPAG (folha + sócios):',error); semAchado++; continue; }
+            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+            await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',mix.itens.map(x=>x.id));
+            resolvidos++; continue;
+          }
+        }
       }
 
       // ── Caminho 2: saída individual identificada pelo histórico (nome/CPF)
