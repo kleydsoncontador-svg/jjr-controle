@@ -20437,6 +20437,9 @@ async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
   // o Tesseract de novo).
   const textoOcr=String(data.text||'').replace(/\s+/g,' ');
   const mTotal=textoOcr.match(/(?:total a recolher|valor total(?: do documento)?|total geral|valor a pagar|total\s*\(r\$\))[^,]{0,30}?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
+  // FGTS Digital escaneado: o que é pago é o "Total da Guia" (FGTS + consignado), não o 1º "Total…"
+  const mGuia=textoOcr.match(/total\s*da\s*guia:?\s*(?:R\$\s*)?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
+  if(mGuia&&/fgts/i.test(textoOcr)) return { valor:_lancctbParseValorBR2(mGuia[1]), composicao:null, competencia:null, viaOcr:true };
   if(mTotal) return { valor:_lancctbParseValorBR2(mTotal[1]), composicao:null, competencia:null, viaOcr:true };
   return null;
 }
@@ -20448,9 +20451,26 @@ async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
 // não tinha texto selecionável nenhum. `permitirIA` (opt-in explícito —
 // nunca automático, ver checkbox do botão "Processar Tributos") só entra
 // como ÚLTIMO recurso, se nem o OCR local conseguiu.
+async function _lancctbExtrairGuiaFgtsDigital(pdf){
+  try{
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+    const texto=itens.map(it=>it.str).join(' ').replace(/\s+/g,' ');
+    if(!/Guia do FGTS Digital/i.test(texto)) return null;
+    const mTotal=texto.match(/Total da Guia:?\s*([\d]{1,3}(?:\.\d{3})*,\d{2})/i)||texto.match(/Valor a recolher[^\d]{0,120}?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
+    if(!mTotal) return null;
+    const mComp=texto.match(/recolhimentos do FGTS[\s\S]{0,400}?\b(\d{2}\/\d{4})\b/i);
+    return { valor:_lancctbParseValorBR2(mTotal[1]), composicao:null, competencia:mComp?mComp[1]:null };
+  }catch(e){ return null; }
+}
 async function _lancctbExtrairValorPdfTributo(pdf,permitirIA,statusCb){
   const darf=await _lancctbExtrairComposicaoDarf(pdf);
   if(darf) return { valor:darf.valorTotal, composicao:darf.itens, competencia:darf.competencia };
+  // GFD — Guia do FGTS Digital (achado real 26/09/2026, Peixoto Serviços): traz
+  // "Total FGTS" e "Total Consignado" (partes) e "Total da Guia" (o que é pago de
+  // verdade, ex: 883,66 + 600,79 = 1.484,45). Sem este leitor, o modelo de guia da
+  // Prefeitura pegava o 1º "Total…" da página (883,66) e nunca batia com o pagamento.
+  const gfd=await _lancctbExtrairGuiaFgtsDigital(pdf);
+  if(gfd) return gfd;
   const damsp=await _lancctbExtrairComposicaoDamsp(pdf);
   if(damsp) return { valor:damsp.valorTotal, composicao:damsp.itens.length>1?damsp.itens:null, competencia:damsp.competencia };
   const generico=await _lancctbExtrairValorTotalGenerico(pdf);
