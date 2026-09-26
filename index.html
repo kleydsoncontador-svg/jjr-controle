@@ -21358,6 +21358,8 @@ async function renderLancctbNotas(aba){
   let html=`<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:10px">
       ${!ehServico?`<span id="lancctbPreencherNaturezaStatus" style="font-size:11px;color:var(--slate)"></span>
       <button class="btn bo bsm" id="lancctbPreencherNaturezaBtn" onclick="_lancctbPreencherNaturezaOperacao('${aba.tipoDoc}','${aba.direcaoNf}')" title="Reabre o XML já salvo de cada NF sem Natureza da Operação preenchida e completa sozinho">🔄 Preencher Natureza (NFs já importadas)</button>`:''}
+      <button class="btn bo bsm" onclick="ignorarLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico},true)" title="Marca como Ignorado as parcelas PENDENTES das NFs que batem com os filtros da tela: deixam de ser oferecidas na amarração (automática e manual). Nada é apagado.">🚫 Ignorar filtradas p/ amarração</button>
+      <button class="btn bo bsm" onclick="ignorarLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico},false)" title="Volta pra Pendente as parcelas IGNORADAS das NFs que batem com os filtros da tela (filtre Status = Ignorado)">↩ Reativar filtradas</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico})" title="Apaga todas as NFs que batem com os filtros ativos acima — NFs já conciliadas (com lançamento contábil gerado) nunca são apagadas">🗑️ Excluir todas as filtradas</button>
       ${(ehServico&&aba.direcaoNf==='venda'&&LANCCTB_ISS_TXT_EMPRESAS.includes(String(_lancctbEidAtual)))?`<button class="btn bo bsm" onclick="gerarLancctbIssRetidoTxt()" title="TXT de lançamentos do ISS retido das NFS-e listadas (débito = conta que você informa, crédito = 10000)">📄 Gerar TXT ISS Retido</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
@@ -21501,6 +21503,41 @@ async function _lancctbPreencherNaturezaOperacao(tipoDoc,direcaoNf){
 // lançamento contábil de verdade) — protege dado histórico real, mesmo
 // espírito do "Excluir todas as contas" do Plano de Contas.
 let _lancctbExclusaoNotasFiltro=null; // {tipoDoc,direcaoNf,idsApagar,qtdBloqueadas}
+// Pedido do usuário 25/09/2026: "quero poder ignorar para amarração algumas
+// NFS, que eu filtrar, aí não pode pegar elas, pois está associando notas do
+// passado que foram recebidas". Marca como 'ignorado' (estado que já existe
+// em notas_fiscais_parcelas) só as parcelas PENDENTES das NFs que batem com os
+// filtros da tela; nunca mexe em conciliadas. Reativar faz o caminho inverso.
+async function ignorarLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico,ignorar){
+  const eid=_lancctbEidAtual;
+  const btn=event&&event.target; if(btn) btn.disabled=true;
+  try{
+    const campoNomeTerc=direcaoNf==='venda'?'notas_fiscais.nome_destinatario':'notas_fiscais.nome_emitente';
+    const campoCnpjTerc=direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
+    let q=_supaClient.from('notas_fiscais_parcelas')
+      .select('id,nf_id,numero_parcela,status_conciliacao,notas_fiscais!inner(natureza_operacao,empresa_eid,tipo,direcao)')
+      .eq('empresa_eid',eid).eq('tipo',tipoDoc).eq('direcao',direcaoNf);
+    q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc);
+    const { data: parcelasFiltradas } = await _lancctbFetchTudo(()=>q);
+    if(!parcelasFiltradas||!parcelasFiltradas.length){ toast('Nenhuma NF bate com os filtros ativos.','err'); return; }
+    const nfIds=[...new Set(parcelasFiltradas.map(p=>p.nf_id))];
+    const { data: todas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas').select('nf_id').in('nf_id',nfIds));
+    const qtdPorNf={}; (todas||[]).forEach(r=>{ qtdPorNf[r.nf_id]=(qtdPorNf[r.nf_id]||0)+1; });
+    const linhas=parcelasFiltradas.map(p=>({ nf:p.notas_fiscais, qtdParcelas:qtdPorNf[p.nf_id]||1, _nfId:p.nf_id, _pid:p.id, _st:p.status_conciliacao }));
+    const filtradas=_lancctbNotasAplicarFiltrosCliente(linhas,ehServico);
+    const de=ignorar?'pendente':'ignorado', para=ignorar?'ignorado':'pendente';
+    const ids=filtradas.filter(l=>l._st===de).map(l=>l._pid);
+    if(!ids.length){ toast(ignorar?'Nenhuma parcela PENDENTE entre as NFs filtradas.':'Nenhuma parcela IGNORADA entre as NFs filtradas (filtre Status = Ignorado).','err'); return; }
+    const ok=confirm(ignorar
+      ? 'Ignorar '+ids.length+' parcela(s) pendente(s) das NFs filtradas?\n\nElas deixam de ser oferecidas na amarração (automática e manual). Nada é apagado, e dá para reativar depois filtrando Status = Ignorado.'
+      : 'Reativar '+ids.length+' parcela(s) ignorada(s)? Elas voltam a ficar Pendentes e a ser oferecidas na amarração.');
+    if(!ok) return;
+    const { error } = await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:para}).in('id',lote).eq('status_conciliacao',de));
+    if(error){ toast('Erro ao atualizar: '+error.message,'err'); return; }
+    toast(ids.length+' parcela(s) '+(ignorar?'ignorada(s) para a amarração':'reativada(s)')+'.','ok');
+    renderLancctbConteudo();
+  } finally { if(btn) btn.disabled=false; }
+}
 async function excluirLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico){
   const eid=_lancctbEidAtual;
   const btn=event?.target;
@@ -23821,7 +23858,7 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     const ehSaida=r.valor_saida>0;
     const valor=r.valor_saida||r.valor_entrada;
     const { data: parcela } = await _supaClient.from('notas_fiscais_parcelas')
-      .select('id,numero_parcela,valor_parcela,notas_fiscais(numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario)')
+      .select('id,nf_id,data_vencimento,numero_parcela,valor_parcela,notas_fiscais(numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario)')
       .eq('id',parcelaId).single();
     if(!parcela){ toast('Parcela não encontrada — pode já ter sido usada por outro lançamento.','err'); return; }
     const nf=parcela.notas_fiscais;
@@ -23872,6 +23909,7 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
           nomeTerceiro, cnpjTerceiro, contaBancoInfo, bancoTipo,
           classifContrapartida, contaContrapartidaId, contrapartidaTipo,
           rId:r.id, dataPagamento:r.data_pagamento, nfNumero:nf?.numero||'',
+          nfId:parcela.nf_id, dataVencParcela:parcela.data_vencimento, numeroParcela:parcela.numero_parcela,
         });
         return;
       }
@@ -23915,6 +23953,7 @@ function _lancctbAbrirEscolhaContaDiferenca(ctx){
       NF ${esc(ctx.nfNumero)} vale <b>R$ ${_fmt(ctx.valorNf)}</b>, mas o lançamento é <b>R$ ${_fmt(ctx.valor)}</b> —
       diferença de <b>R$ ${_fmt(Math.abs(ctx.diferenca))}</b> (${maisQueNf?'pagou a mais':'pagou a menos'}). Em qual conta lançar essa diferença?
     </div>
+    ${maisQueNf?'':_lancctbParcelarSaldoHtml(ctx)}
     ${_lancctbBotoesContaPadraoDiferencaHtml(ctx)}
     <div class="fg" style="margin-bottom:8px">
       <div class="fl">Conta contábil da diferença</div>
@@ -23951,6 +23990,91 @@ function _lancctbBotoesContaPadraoDiferencaHtml(ctx){
   const botoes=opcoes.filter(([k])=>cpad[k]).map(([k,rot])=>`<button class="btn bp bsm" type="button" onclick="_lancctbConfirmarNfDiferencaManual('${cpad[k]}')">✓ ${esc(rot)} (${esc(cpad[k])})</button>`).join('');
   if(!botoes) return `<div style="font-size:11px;color:var(--slate);margin-bottom:8px">Dica: defina as 🏷️ Contas padrão desta empresa (barra de abas) pra classificar juros/multa/desconto com 1 clique.</div>`;
   return `<div style="margin-bottom:8px"><div class="fl">Classificar a diferença como (Contas padrão)</div><div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:4px">${botoes}</div></div>`;
+}
+// Pedido do usuário 25/09/2026: pagou a MENOS que a NF — além de lançar a
+// diferença numa conta, dá pra gerar novas parcelas (pendentes) com o que
+// sobrou, informando quantas. A parcela original passa a valer só o que foi
+// pago (fica conciliada) e a soma das novas fecha o restante da NF.
+function _lancctbParcelarSaldoDatas(dataBase,qtd){
+  const out=[]; const b=new Date(dataBase+'T00:00:00'); const dia=b.getDate();
+  for(let i=0;i<qtd;i++){
+    const d=new Date(b.getFullYear(),b.getMonth()+i,1);
+    const ult=new Date(d.getFullYear(),d.getMonth()+1,0).getDate();
+    d.setDate(Math.min(dia,ult));
+    out.push(d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'));
+  }
+  return out;
+}
+function _lancctbParcelarSaldoValores(saldo,qtd){
+  const base=Math.floor(saldo*100/qtd)/100; const v=Array(qtd).fill(base);
+  v[qtd-1]=Math.round((saldo-base*(qtd-1))*100)/100; return v;
+}
+function _lancctbParcelarSaldoHtml(ctx){
+  const saldo=Math.round(Math.abs(ctx.diferenca)*100)/100;
+  const d=new Date((ctx.dataPagamento||new Date().toISOString().slice(0,10))+'T00:00:00'); d.setDate(d.getDate()+30);
+  const dataPadrao=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  setTimeout(_lancctbParcelarSaldoPrevia,0);
+  return `<div style="border:1px dashed var(--teal);border-radius:6px;padding:10px;margin-bottom:10px">
+    <div style="font-size:12px;font-weight:600;margin-bottom:6px">Ou gerar parcela(s) com o que sobrou (R$ ${_fmt(saldo)})</div>
+    <div style="display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap">
+      <label style="font-size:11.5px">Quantas parcelas<br><input class="fi" id="lancctbNfParcQtd" type="number" min="1" max="60" value="1" style="width:90px" oninput="_lancctbParcelarSaldoPrevia()"></label>
+      <label style="font-size:11.5px">1º vencimento<br><input class="fi" id="lancctbNfParcData" type="date" value="${dataPadrao}" onchange="_lancctbParcelarSaldoPrevia()"></label>
+      <button class="btn bp bsm" type="button" id="lancctbNfParcBtn" onclick="_lancctbConfirmarNfParcelarSaldo()">✓ Associar e gerar parcelas</button>
+    </div>
+    <div id="lancctbNfParcPrevia" style="font-size:11.5px;color:var(--slate);margin-top:6px"></div>
+  </div>`;
+}
+function _lancctbParcelarSaldoPrevia(){
+  const ctx=_lancctbNfDiferencaCtx, el=document.getElementById('lancctbNfParcPrevia'); if(!ctx||!el) return;
+  const qtd=parseInt(document.getElementById('lancctbNfParcQtd')?.value,10)||0, data=document.getElementById('lancctbNfParcData')?.value;
+  if(qtd<1||qtd>60||!data){ el.textContent='Informe de 1 a 60 parcelas e o 1º vencimento.'; return; }
+  const saldo=Math.round(Math.abs(ctx.diferenca)*100)/100, vals=_lancctbParcelarSaldoValores(saldo,qtd), datas=_lancctbParcelarSaldoDatas(data,qtd);
+  const br=iso=>iso.slice(8,10)+'/'+iso.slice(5,7)+'/'+iso.slice(0,4);
+  el.innerHTML='A parcela atual passa a valer <b>R$ '+_fmt(ctx.valor)+'</b> (o que foi pago) e '+qtd+' nova(s) parcela(s) pendente(s): '+vals.map((v,i)=>'R$ '+_fmt(v)+' em '+br(datas[i])).slice(0,6).join('; ')+(qtd>6?'; …':'')+'.';
+}
+async function _lancctbConfirmarNfParcelarSaldo(){
+  const ctx=_lancctbNfDiferencaCtx;
+  if(!ctx||!ctx.nfId){ toast('Contexto perdido — feche e reabra o modal.','err'); return; }
+  if(ctx.diferenca>=0){ toast('Só vale quando o pagamento é MENOR que a parcela da NF.','err'); return; }
+  const qtd=parseInt(document.getElementById('lancctbNfParcQtd')?.value,10)||0, data=document.getElementById('lancctbNfParcData')?.value;
+  if(qtd<1||qtd>60||!data){ toast('Informe de 1 a 60 parcelas e o 1º vencimento.','err'); return; }
+  const saldo=Math.round(Math.abs(ctx.diferenca)*100)/100;
+  const vals=_lancctbParcelarSaldoValores(saldo,qtd), datas=_lancctbParcelarSaldoDatas(data,qtd);
+  const btn=document.getElementById('lancctbNfParcBtn'); if(btn){ btn.disabled=true; btn.textContent='Gerando…'; }
+  let novasIds=[];
+  try{
+    // 1) parcela original (pra clonar tipo/direção/emissão) e último número já usado na NF
+    const { data: orig } = await _supaClient.from('notas_fiscais_parcelas').select('*').eq('id',ctx.parcelaId).single();
+    if(!orig||orig.status_conciliacao!=='pendente'){ toast('A parcela não está mais pendente — feche e reabra o modal.','err'); return; }
+    const { data: todas } = await _supaClient.from('notas_fiscais_parcelas').select('numero_parcela').eq('nf_id',ctx.nfId);
+    const prox=Math.max(0,...(todas||[]).map(p=>p.numero_parcela||0))+1;
+    // 2) cria as novas parcelas PRIMEIRO (se falhar, nada mais foi gravado)
+    const novas=vals.map((v,i)=>({ nf_id:ctx.nfId, empresa_eid:orig.empresa_eid, numero_parcela:prox+i, data_vencimento:datas[i], valor_parcela:v, status_conciliacao:'pendente',
+      data_emissao:orig.data_emissao||null, tipo:orig.tipo||null, direcao:orig.direcao||null }));
+    const { data: ins, error: eIns } = await _supaClient.from('notas_fiscais_parcelas').insert(novas).select('id');
+    if(eIns){ toast('Erro ao criar as parcelas: '+eIns.message,'err'); return; }
+    novasIds=(ins||[]).map(x=>x.id);
+    // 3) lançamento contábil pelo valor PAGO (banco x contrapartida da NF)
+    const linhas=[
+      { empresa_eid:ctx.eid, data:ctx.dataPagamento, classificacao:ctx.contaBancoInfo.plano_contas.classificacao, conta_contabil_id:ctx.contaBancoInfo.conta_contabil_id, tipo:ctx.bancoTipo, valor:ctx.valor, historico:ctx.historicoUtilizado, cliente_fornecedor_nome:ctx.nomeTerceiro||null, cnpj_cpf:ctx.cnpjTerceiro||null, lancamento_extrato_id:ctx.rId, origem_match:'manual' },
+      { empresa_eid:ctx.eid, data:ctx.dataPagamento, classificacao:ctx.classifContrapartida, conta_contabil_id:ctx.contaContrapartidaId, tipo:ctx.contrapartidaTipo, valor:ctx.valor, historico:ctx.historicoUtilizado, cliente_fornecedor_nome:ctx.nomeTerceiro||null, cnpj_cpf:ctx.cnpjTerceiro||null, nf_parcela_id:ctx.parcelaId, lancamento_extrato_id:ctx.rId, origem_match:'manual' },
+    ];
+    const { error: eRpc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(eRpc){
+      await _supaClient.from('notas_fiscais_parcelas').delete().in('id',novasIds).eq('status_conciliacao','pendente'); // desfaz
+      novasIds=[]; toast('Erro ao gravar o lançamento (nada foi alterado): '+eRpc.message,'err'); return;
+    }
+    // 4) parcela original passa a valer o pago e fica conciliada; extrato conciliado
+    const { error: eUp } = await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:ctx.valor, status_conciliacao:'conciliado', lancamento_extrato_id:ctx.rId }).eq('id',ctx.parcelaId);
+    if(eUp){ toast('Lançamento gravado e parcelas criadas, mas falhou ao atualizar a parcela original: '+eUp.message+' — confira a NF '+ctx.nfNumero+'.','err'); }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',ctx.rId);
+    toast('Lançamento amarrado à NF '+ctx.nfNumero+' e '+qtd+' parcela(s) gerada(s) com o saldo de R$ '+_fmt(saldo)+'.','ok');
+    _lancctbNfDiferencaCtx=null;
+    closeModal('mLancctbRegra');
+    if(typeof renderLancctbRegistroContabil==='function') renderLancctbRegistroContabil();
+  } finally {
+    if(btn){ btn.disabled=false; btn.textContent='✓ Associar e gerar parcelas'; }
+  }
 }
 function _lancctbCancelarEscolhaContaDiferenca(){
   _lancctbNfDiferencaCtx=null;
