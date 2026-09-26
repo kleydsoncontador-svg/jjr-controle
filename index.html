@@ -9851,21 +9851,42 @@ function _aplicarResultadoToggleFechCell(emps, r){
 // (sem sequer chamar S.s()/subir pra nuvem ainda) e só depois, em segundo
 // plano, confirma com a versão mais recente da nuvem antes de salvar de
 // verdade, pra não sobrescrever o progresso de outro operador.
+// Pedido do usuário 26/09/2026 ("estou flegando e está travando ou saindo em
+// seguida"): marcando vários checks em sequência, cada clique buscava a nuvem
+// ANTES do clique anterior terminar de gravar e regravava o array inteiro —
+// o clique novo apagava o anterior (o "✓" sumia). Agora os cliques entram numa
+// FILA (um grava por vez, com gravação atômica) e os ainda pendentes são
+// reaplicados por cima de qualquer atualização que chegue, então nada some.
+let _fechFila=Promise.resolve();
+let _fechPend=[];
+function _reaplicarFechPend(){
+  if(!_fechPend.length) return;
+  const c=JSON.parse(JSON.stringify(S.emps()));
+  _fechPend.forEach(p=>_aplicarResultadoToggleFechCell(c,p));
+  cccCache['emps']=c;
+}
 function toggleFechCell(evt, eid, campo){
   evt.stopPropagation();
   const r = _calcToggleFechCell(S.emps(), eid, campo);
   if(!r) return;
-
-  const copiaOtimista = JSON.parse(JSON.stringify(S.emps()));
-  _aplicarResultadoToggleFechCell(copiaOtimista, r);
-  cccCache['emps'] = copiaOtimista;
+  _fechPend.push(r);
+  _reaplicarFechPend();
   renderEmpsTable();
-
-  fetchFreshEmps().then(function(freshEmps){
-    const base = freshEmps || S.emps();
-    _aplicarResultadoToggleFechCell(base, r);
-    S.saveEmps(base);
-    renderEmpsTable();
+  _fechFila=_fechFila.then(async function(){
+    try{
+      await ccGravarAtomico('emps', function(valor){
+        const base=Array.isArray(valor)&&valor.length?valor:S.emps();
+        _aplicarResultadoToggleFechCell(base, r);
+        return base;
+      });
+    }catch(e){
+      console.warn('toggleFechCell falhou',e);
+      toast('Não consegui salvar esse check. Confira a conexão e marque de novo.','err');
+    }finally{
+      _fechPend=_fechPend.filter(p=>p!==r);
+      _reaplicarFechPend();
+      renderEmpsTable();
+    }
   });
 }
 
@@ -10442,6 +10463,7 @@ function _applyRealtimePayload(payload){
     if(payload.eventType==='DELETE'){delete cccCache[key];}
     else{cccCache[key]=row.value;cccIdbSet(key,row.value);}
     if(rowTs)cccLocalUpdatedAt[key]=rowTs;
+    if(key==='emps'&&typeof _reaplicarFechPend==='function') _reaplicarFechPend(); // checks ainda gravando não podem sumir
     _refreshCurrentView();
   }catch(e){console.warn('realtime apply err',e);}
 }
