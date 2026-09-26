@@ -27911,6 +27911,34 @@ async function exportarLancctbRegistroContabilTxt(){
   const salvouNaRede=await _lancctbSalvarTxtNaPastaTransfRede(nomeArquivoTxt,gerarTxtMisterContador(cnpjLimpo,linhasTxt));
   if(!salvouNaRede) baixarTxtMisterContador(cnpjLimpo,linhasTxt,nomeArquivoTxt);
   toast(`TXT gerado com ${lotesMap.size} lançamento(s).${salvouNaRede?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador (conceda acesso à pasta de rede pra salvar direto lá).'}`,'ok');
+  await _lancctbMarcarPeriodoFinalizadoAuto(eid,contaId);
+}
+// Pedido do usuário 26/09/2026: gerar o TXT de um MÊS INTEIRO (dia 1 ao último dia) de uma conta registra que
+// aquela conta foi finalizada naquele mês; quando TODAS as contas bancárias da empresa que têm extrato no mês
+// já tiveram o TXT gerado, o "Período finalizado" da empresa (lista de Lançamentos Contábeis) é marcado com o
+// mês sozinho. Só avança (nunca volta pra um mês anterior); período que não é 1 mês fechado não marca nada.
+async function _lancctbMarcarPeriodoFinalizadoAuto(eid,contaId){
+  try{
+    const de=_lancctbRegistroDataDe, ate=_lancctbRegistroDataAte;
+    if(!de||!ate||de.slice(0,7)!==ate.slice(0,7)) return;
+    const mes=de.slice(0,7), ultimo=new Date(+mes.slice(0,4),+mes.slice(5,7),0).getDate();
+    if(!de.endsWith('-01')||+ate.slice(8,10)!==ultimo) return; // só mês fechado (dia 1 ao último dia)
+    const chave='lancctb_txts_gerados_'+eid;
+    const reg=Object.assign({},S.g(chave)||{});
+    const geradas=new Set((reg[mes]||[]).map(String)); geradas.add(String(contaId)); reg[mes]=[...geradas]; S.s(chave,reg);
+    // contas bancárias da empresa COM extrato no mês
+    const { data: contas } = await _supaClient.from('agencias_bancarias').select('id,banco_nome').eq('empresa_eid',eid).eq('ativo',true);
+    const precisam=[];
+    for(const c of (contas||[])){
+      const { count } = await _supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true}).eq('empresa_eid',eid).eq('conta_bancaria_id',c.id).gte('data_pagamento',mes+'-01').lte('data_pagamento',mes+'-'+String(ultimo).padStart(2,'0'));
+      if(count>0) precisam.push(c);
+    }
+    const faltam=precisam.filter(c=>!geradas.has(String(c.id)));
+    const rot=mes.slice(5)+'/'+mes.slice(0,4);
+    if(faltam.length){ toast(`Falta gerar o TXT de ${rot} em ${faltam.length} outra(s) conta(s) com extrato (${faltam.map(c=>c.banco_nome).join(', ')}) pra marcar o período finalizado.`,'info'); return; }
+    const atual=getMenuFinalizado('lancctb',eid);
+    if(!atual||mes>atual){ setMenuFinalizado('lancctb',eid,mes); toast(`Período finalizado marcado: ${rot}.`,'ok'); }
+  }catch(e){ console.warn('Período finalizado automático falhou:',e); }
 }
 
 // ─── Comprovantes bancários (upload PDF → IA → preview → confirmar) ───────
