@@ -19944,7 +19944,7 @@ async function _lancctbProcessarFopag(){
         try{ const dados=await _lancctbParsearRelatorioLiquidos(file); if(dados) relatorios.push({...t,dados}); }
         catch(e){ console.error('Falha ao ler Relatório de Líquidos:',e); }
       }
-      if(!relatorios.length){ semAchado++; continue; }
+      // (sem Relatório de Líquidos o Sispag ainda pode ser só sócios — o Caminho 1b abaixo trata; se nada casar, cai em semAchado no fim)
 
       // ── Caminho 1: uma saída = o TOTAL da folha (paga todo mundo de uma vez)
       const achou=relatorios.find(r=>Math.abs(r.dados.total-l.valor_saida)<=0.01);
@@ -19966,36 +19966,37 @@ async function _lancctbProcessarFopag(){
         continue;
       }
 
-      // ── Caminho 1b (pedido do usuário 26/09/2026, Peixoto Serviços): o Sispag Salários pagou a
-      // folha dos empregados MAIS sócios com comprovante (o comprovante sai com a data do dia
-      // que o pagamento foi agendado — ex: sábado 04/07 — e o banco só debita na segunda 06/07).
-      // Ex: 18.594,47 = folha 06/2026 (4.489,61) + comprovantes de sócios 5.904,86 + 4.200,00 + 4.000,00.
-      // Só resolve quando UMA combinação de comprovantes de sócios (pendentes, até 6 dias antes)
-      // fecha exatamente o que sobra depois da folha; ambíguo ou sem combinação = deixa pendente.
+      // ── Caminho 1b (pedido do usuário 26/09/2026, Peixoto Serviços): o Sispag Salários pode pagar
+      // SÓ sócios (ex: 06/08: 19.273,56 = 11.073,56 + 4.200,00 + 4.000,00) OU a folha dos empregados
+      // MAIS sócios (ex: 06/07: 18.594,47 = folha 06/2026 4.489,61 + 5.904,86 + 4.200,00 + 4.000,00).
+      // O comprovante sai com a data do agendamento (pode ser sábado) e o banco debita depois
+      // (segunda) — por isso olha até 6 dias antes. Os sócios são os cadastrados em Lucros/Dividendos.
+      // Só resolve quando há UMA solução (uma combinação de comprovantes pendentes que fecha exato,
+      // com ou sem folha); ambíguo, sem combinação ou sócio sem conta = deixa pendente, nada é gravado.
       {
         let mix=null;
         if(socios&&socios.length){
-          for(const r of relatorios){
-            const resto=Math.round((l.valor_saida-r.dados.total)*100)/100;
-            if(resto<=0.009) continue;
-            if(!comprovSociosCache[l.id]){
-              const d0=new Date(l.data_pagamento+'T00:00:00'); d0.setDate(d0.getDate()-6);
-              const ini=d0.toISOString().slice(0,10);
-              const { data: cs } = await _supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id')
-                .eq('empresa_eid',eid).eq('status_conciliacao','pendente').gte('data_pagamento',ini).lte('data_pagamento',l.data_pagamento);
-              comprovSociosCache[l.id]=(cs||[]).filter(c=>(!c.conta_bancaria_id||String(c.conta_bancaria_id)===String(contaId))&&_lancctbAcharSocioPorHistorico(socios,(c.cliente_fornecedor_nome||'')+' '+(c.cnpj_cpf||''))).slice(0,16);
+          if(!comprovSociosCache[l.id]){
+            const d0=new Date(l.data_pagamento+'T00:00:00'); d0.setDate(d0.getDate()-6);
+            const ini=d0.toISOString().slice(0,10);
+            const { data: cs } = await _supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id')
+              .eq('empresa_eid',eid).eq('status_conciliacao','pendente').gte('data_pagamento',ini).lte('data_pagamento',l.data_pagamento);
+            comprovSociosCache[l.id]=(cs||[]).filter(c=>(!c.conta_bancaria_id||String(c.conta_bancaria_id)===String(contaId))&&_lancctbAcharSocioPorHistorico(socios,(c.cliente_fornecedor_nome||'')+' '+(c.cnpj_cpf||''))).slice(0,16);
+          }
+          const cands=comprovSociosCache[l.id];
+          if(cands.length){
+            const vals=cands.map(c=>Math.round(Number(c.valor_pago)*100));
+            const opcoes=[{r:null,resto:Math.round(l.valor_saida*100)/100},...relatorios.map(r=>({r,resto:Math.round((l.valor_saida-r.dados.total)*100)/100}))].filter(o=>o.resto>0.009);
+            const sols=[];
+            for(const o of opcoes){
+              const alvo=Math.round(o.resto*100), achados=[];
+              for(let m=1;m<(1<<cands.length);m++){ let soma=0; for(let k=0;k<cands.length;k++) if(m&(1<<k)) soma+=vals[k]; if(soma===alvo) achados.push(m); }
+              if(!achados.length) continue;
+              const menor=Math.min(...achados.map(m=>m.toString(2).split('1').length-1));
+              const melhores=achados.filter(m=>m.toString(2).split('1').length-1===menor);
+              if(melhores.length===1) sols.push({r:o.r,itens:cands.filter((c,k)=>melhores[0]&(1<<k))}); else sols.push({amb:true});
             }
-            const cands=comprovSociosCache[l.id];
-            if(!cands.length) continue;
-            const alvo=Math.round(resto*100), vals=cands.map(c=>Math.round(Number(c.valor_pago)*100));
-            const achados=[];
-            for(let m=1;m<(1<<cands.length);m++){ let soma=0; for(let i=0;i<cands.length;i++) if(m&(1<<i)) soma+=vals[i]; if(soma===alvo) achados.push(m); }
-            if(!achados.length) continue;
-            const menor=Math.min(...achados.map(m=>m.toString(2).split('1').length-1));
-            const melhores=achados.filter(m=>m.toString(2).split('1').length-1===menor);
-            if(melhores.length!==1) continue; // ambíguo: não chuta
-            mix={r,itens:cands.filter((c,i)=>melhores[0]&(1<<i))};
-            break;
+            if(sols.length===1&&!sols[0].amb) mix=sols[0];
           }
         }
         if(mix){
@@ -20003,8 +20004,8 @@ async function _lancctbProcessarFopag(){
             { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'regra' },
           ];
           let ok=true;
-          const compRef=mix.r.dados.competencia||mix.r.competencia;
-          mix.r.dados.pessoas.forEach(p=>{
+          const compRef=mix.r?(mix.r.dados.competencia||mix.r.competencia):cAnt.replace('-','/');
+          if(mix.r) mix.r.dados.pessoas.forEach(p=>{
             const c=contaDaPessoa(p,mix.r.tipo);
             if(!c){ ok=false; return; }
             linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. salário ${compRef} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
@@ -20016,9 +20017,9 @@ async function _lancctbProcessarFopag(){
             linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta.classificacao, conta_contabil_id:conta.id, tipo:'D', valor:Math.round(Number(cp.valor_pago)*100)/100, historico:`Pagamento ref. salário ${compRef} - ${cp.cliente_fornecedor_nome}`, cliente_fornecedor_nome:cp.cliente_fornecedor_nome||null, cnpj_cpf:cp.cnpj_cpf||null, comprovante_id:cp.id, lancamento_extrato_id:l.id, origem_match:'regra' });
           });
           const somaD=Math.round(linhas.filter(x=>x.tipo==='D').reduce((a,x)=>a+x.valor,0)*100)/100;
-          if(ok&&linhas.length>=3&&Math.abs(somaD-l.valor_saida)<=0.01){
+          if(ok&&linhas.length>=2&&Math.abs(somaD-l.valor_saida)<=0.01){
             const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
-            if(error){ console.error('Erro FOPAG (folha + sócios):',error); semAchado++; continue; }
+            if(error){ console.error('Erro FOPAG (sócios / folha + sócios):',error); semAchado++; continue; }
             await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
             await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',mix.itens.map(x=>x.id));
             resolvidos++; continue;
