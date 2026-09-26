@@ -19518,6 +19518,7 @@ function _lancctbRenderBotoesAcessoPastas(){
     <span style="font-size:11.5px;color:var(--slate)">Acesso a pastas locais (1x pra todas as empresas):</span>
     ${btn('lancctbAcessoConfiBackupBtn','_lancctbConcederAcessoPastaConfiBackup','ConfiBackup')}
     ${btn('lancctbAcessoTributosBtn','_lancctbConcederAcessoPastaTributos','Tributos do Mês')}
+    ${btn('lancctbAcessoFopagMesBtn','_lancctbConcederAcessoPastaFopagMes','FOPAG do Mês')}
     ${btn('lancctbAcessoFopagBtn','_lancctbConcederAcessoPastaFopag','Relatórios FOPAG para Contábil')}
     ${btn('lancctbAcessoTransfRedeBtn','_lancctbConcederAcessoPastaTransfRede','Arquivos de Transferência de Rede')}
   </div>`;
@@ -19532,6 +19533,7 @@ async function _lancctbAtualizarEstadoBotoesAcesso(){
   };
   try{ marca('lancctbAcessoConfiBackupBtn','ConfiBackup', await _lancctbTemAcessoPastaConfiBackup()); }catch{}
   try{ marca('lancctbAcessoTributosBtn','Tributos do Mês', await _lancctbTemAcessoPastaTributos()); }catch{}
+  try{ marca('lancctbAcessoFopagMesBtn','FOPAG do Mês', await _lancctbTemAcessoPastaFopagMes()); }catch{}
   try{ marca('lancctbAcessoFopagBtn','Relatórios FOPAG para Contábil', await _lancctbTemAcessoPastaFopag()); }catch{}
   try{ marca('lancctbAcessoTransfRedeBtn','Arquivos de Transferência de Rede', await _lancctbTemAcessoPastaTransfRede()); }catch{}
 }
@@ -19661,6 +19663,193 @@ async function _lancctbBuscarRelatorioLiquidos(pastaEmpresa,competenciaMMAAAA,ti
 // conferência de valor, mais confiável que somar linha por linha) e cada
 // funcionário/sócio (nome+CPF+valor), separando "Empregados" de
 // "Contribuintes" (sócios, vão pra conta 1.2.9.x — ver _lancctbContaDoSocio).
+// ─── DOMINIO_RELACAO_GERAL_LIQUIDOS ──────────────────────────────────────
+// UM leitor pra toda a família "RELAÇÃO GERAL DOS LÍQUIDOS" do Domínio: o que
+// muda é o campo "Cálculo:" (Folha Mensal, Adiantamento, Férias, 13o.
+// Adiantamento, Rescisões). Um PDF traz VÁRIAS empresas (PDF ≠ empresa) e uma
+// empresa pode ocupar várias páginas. Empresa = CNPJ/CPF do cabeçalho (o nome
+// vem truncado — nunca comparar por nome). Valores em CENTAVOS (inteiros).
+// Estrutura: DOCUMENTO → BLOCO DA EMPRESA (doc+competência+cálculo) → PESSOAS.
+const LIQ_TIPOS_CALCULO=[
+  [/folha\s*mensal|^sal[aá]rio/i,'MONTHLY_PAYROLL'],
+  [/adiantamento/i,'SALARY_ADVANCE'], // 13o. Adiantamento é testado ANTES (abaixo)
+  [/f[eé]rias/i,'VACATION'],
+  [/rescis/i,'TERMINATION'],
+];
+function _liqTipoCalculo(raw){
+  const n=String(raw||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+  if(/13\s*(o|º|°)?\.?\s*(adiantamento|salario|parcela)|decimo/.test(n)) return 'THIRTEENTH_ADVANCE';
+  for(const [re,t] of LIQ_TIPOS_CALCULO) if(re.test(n)) return t;
+  return 'UNKNOWN';
+}
+function _liqNormalizarNome(s){ return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim(); }
+function _liqCpfValido(d){
+  if(!/^\d{11}$/.test(d)||/^(\d)\1{10}$/.test(d)) return false;
+  const dig=(n)=>{ let s=0; for(let i=0;i<n;i++) s+=(+d[i])*(n+1-i); const r=(s*10)%11; return r===10?0:r; };
+  return dig(9)===+d[9]&&dig(10)===+d[10];
+}
+function _liqCnpjValido(d){
+  if(!/^\d{14}$/.test(d)) return false;
+  const calc=(b)=>{ let s=0,p=b.length-7; for(let i=0;i<b.length;i++){ s+=(+b[i])*p--; if(p<2)p=9; } const r=s%11; return r<2?0:11-r; };
+  return calc(d.slice(0,12))===+d[12]&&calc(d.slice(0,13))===+d[13];
+}
+const _liqCentavos=s=>{ const t=String(s).trim(); if(!/^\d{1,3}(?:\.\d{3})*,\d{2}$/.test(t)) return null; return parseInt(t.replace(/\./g,'').replace(',',''),10); };
+async function _lancctbParsearLiquidosDominio(pdf){
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    paginas.push(_lancctbAgruparLinhasPorY(itens,2).map(l=>l.itens));
+  }
+  const txt=l=>l.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+  if(!/RELA[ÇC][ÃA]O GERAL DOS L[ÍI]QUIDOS/i.test(paginas.slice(0,3).map(pg=>pg.map(txt).join(' ')).join(' '))) return null;
+  const valorDe=(linha,rotulo)=>{ const k=linha.findIndex(i=>i.str.trim().toLowerCase()===rotulo.toLowerCase()); return k>=0&&linha[k+1]?linha[k+1].str.trim():null; };
+  const blocos=new Map(); const ordem=[];
+  let atual=null;
+  paginas.forEach((linhas,pi)=>{
+    // cabeçalho da página
+    let nome=null,doc=null,tipoDoc=null,calc=null,comp=null,emissao=null,hora=null,pagina=null;
+    for(const l of linhas){
+      const t=txt(l);
+      if(nome===null&&/^Empresa:/i.test(t)){ nome=valorDe(l,'Empresa:'); const pg=valorDe(l,'Página:'); if(pg) pagina=pg; }
+      else if(doc===null&&/^(CNPJ|CPF):/i.test(t)){ tipoDoc=/^CPF:/i.test(t)?'CPF':'CNPJ'; doc=(valorDe(l,tipoDoc+':')||'').replace(/\D/g,''); const em=valorDe(l,'Emissão:'); if(em) emissao=em; }
+      else if(calc===null&&/^C[áa]lculo:/i.test(t)){ calc=valorDe(l,'Cálculo:')||valorDe(l,'Calculo:'); const h=valorDe(l,'Horas:'); if(h) hora=h; }
+      else if(comp===null&&/^Compet[êe]ncia:/i.test(t)){ comp=valorDe(l,'Competência:')||valorDe(l,'Competencia:'); }
+    }
+    if(!doc||!comp) return; // página sem cabeçalho reconhecível
+    const mc=String(comp).match(/^(\d{2})\/(\d{4})$/); if(!mc) return;
+    const competence=`${mc[2]}-${mc[1]}`;
+    const tipo=_liqTipoCalculo(calc);
+    const chave=`${doc}|${competence}|${tipo}|${_liqNormalizarNome(calc)}`;
+    let b=blocos.get(chave);
+    if(!b){
+      b={ entityName:nome, entityDocument:doc, entityDocumentType:tipoDoc, entityDocumentValid:tipoDoc==='CNPJ'?_liqCnpjValido(doc):_liqCpfValido(doc),
+        calculationRaw:calc, calculationType:tipo, competence, competenceYear:+mc[2], competenceMonth:+mc[1],
+        pages:[], emissionDate:emissao, emissionTime:hora, people:[], counts:{employees:null,interns:null,contributors:null}, companyTotals:[], flags:[] };
+      blocos.set(chave,b); ordem.push(b);
+    }
+    if(pagina) b.pages.push(pagina);
+    let categoria=null, seq=b.people.length;
+    for(const l of linhas){
+      const t=txt(l);
+      if(/^Empregados$/i.test(t)){ categoria='EMPLOYEE'; continue; }
+      if(/^Estagi[áa]rios$/i.test(t)){ categoria='INTERN'; continue; }
+      if(/^Contribuintes$/i.test(t)){ categoria='CONTRIBUTOR'; continue; }
+      if(/Total da Empresa:/i.test(t)){
+        const me=t.match(/Empregados:\s*(\d+)/i), mi=t.match(/Estagi[áa]rios:\s*(\d+)/i), mcn=t.match(/Contribuintes:\s*(\d+)/i);
+        if(me) b.counts.employees=(b.counts.employees||0)+ +me[1]; if(mi) b.counts.interns=(b.counts.interns||0)+ +mi[1]; if(mcn) b.counts.contributors=(b.counts.contributors||0)+ +mcn[1];
+        const tot=_liqCentavos(l[l.length-1].str); if(tot!=null) b.companyTotals.push(tot);
+        continue;
+      }
+      // linha de pessoa: 1º campo = código numérico; último = valor
+      const n=l.length;
+      if(n<3||!/^\d+$/.test(l[0].str.trim())||l[0].x>60) continue;
+      const cents=_liqCentavos(l[n-1].str); if(cents==null) continue;
+      const meio=l.slice(1,n-1);
+      let iCpf=meio.findIndex(i=>/^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(i.str.trim()));
+      let cpf=null, identity=null, nomeItens;
+      if(iCpf>=0){
+        cpf=meio[iCpf].str.replace(/\D/g,'');
+        const ant=meio[iCpf-1];
+        if(ant&&iCpf-1>=0&&/\d/.test(ant.str)&&/^[0-9A-Za-z.\-]{5,16}$/.test(ant.str.trim())){ identity=ant.str.trim(); nomeItens=meio.slice(0,iCpf-1); }
+        else nomeItens=meio.slice(0,iCpf);
+      } else nomeItens=meio;
+      const name=nomeItens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+      if(!name) continue;
+      b.people.push({ code:l[0].str.trim(), name, nameNormalized:_liqNormalizarNome(name), cpf, cpfValid:cpf?_liqCpfValido(cpf):false, identity,
+        category:categoria||'EMPLOYEE', categoryInferred:!categoria, amountCents:cents, page:pi+1, seq:++seq });
+    }
+  });
+  ordem.forEach(b=>{
+    b.sumCents=b.people.reduce((s,p)=>s+p.amountCents,0);
+    const totais=[...new Set(b.companyTotals)];
+    b.companyTotalCents=totais.length?totais[totais.length-1]:null;
+    if(totais.length>1) b.flags.push('PAYROLL_TOTAL_CONFLICT');
+    if(b.companyTotalCents==null) b.flags.push('PAYROLL_TOTAL_MISSING');
+    else if(b.sumCents!==b.companyTotalCents) b.flags.push('PAYROLL_TOTAL_MISMATCH');
+    if(!b.entityDocumentValid) b.flags.push('ENTITY_DOCUMENT_INVALID');
+    b.pessoasComCpfInvalido=b.people.filter(p=>p.cpf&&!p.cpfValid).length;
+  });
+  return { fingerprint:'DOMINIO_RELACAO_GERAL_LIQUIDOS', parserVersion:1, blocks:ordem };
+}
+
+// ─── FOPAG do Mês — X:\03 - CONTABIL\Documentação Suporte para Conciliação\FOPAG do Mês\
+// FOPAG do Mês_AAAA-MM\{Salários,Adiantamentos,Férias,13º,Rescisões}.pdf — UM PDF por tipo, com
+// TODAS as empresas dentro (PDF ≠ empresa). O leitor (_lancctbParsearLiquidosDominio) separa por
+// CNPJ/CPF do cabeçalho; aqui só se pega o bloco da empresa aberta. O tipo vem do campo "Cálculo:"
+// do próprio relatório (não do nome do arquivo). Pedido do usuário 26/09/2026.
+const LIQ_TIPO_PARA_FOPAG={ MONTHLY_PAYROLL:'salario', SALARY_ADVANCE:'adiantamento', VACATION:'ferias', THIRTEENTH_ADVANCE:'decimo13', TERMINATION:'rescisao' };
+const LIQ_ROTULO_FOLHA={ salario:'salário', adiantamento:'adiantamento', ferias:'férias', decimo13:'13º salário', rescisao:'rescisão' };
+function _rotuloFolha(tipo){ return LIQ_ROTULO_FOLHA[tipo]||'salário'; }
+async function _lancctbSalvarHandleFopagMes(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{ const tx=db.transaction('handles','readwrite'); tx.objectStore('handles').put(handle,'raizFopagDoMes'); tx.oncomplete=()=>resolve(); tx.onerror=()=>reject(tx.error); });
+}
+async function _lancctbCarregarHandleFopagMes(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{ const tx=db.transaction('handles','readonly'); const req=tx.objectStore('handles').get('raizFopagDoMes'); req.onsuccess=()=>resolve(req.result||null); req.onerror=()=>reject(req.error); });
+}
+async function _lancctbTemAcessoPastaFopagMes(){
+  if(!window.showDirectoryPicker) return false;
+  try{ const h=await _lancctbCarregarHandleFopagMes(); if(!h) return false; return (await h.queryPermission({mode:'read'}))==='granted'; } catch { return false; }
+}
+async function _lancctbConcederAcessoPastaFopagMes(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    await _lancctbSalvarHandleFopagMes(handle);
+    toast('Acesso à pasta "FOPAG do Mês" concedido!','ok');
+    _lancctbAtualizarEstadoBotoesAcesso();
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+const _fopagMesCache={}; // 'FOPAG do Mês_2026-07' → { assinatura, blocos }
+async function _lancctbBlocosFopagMes(handleRaiz,anoMes){
+  const nomePasta='FOPAG do Mês_'+anoMes;
+  let dir; try{ dir=await handleRaiz.getDirectoryHandle(nomePasta); } catch { return []; }
+  const arquivos=[];
+  for await (const [nome,fh] of dir.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.pdf')) arquivos.push({nome,fh}); }
+  const files=[]; for(const a of arquivos){ try{ const f=await a.fh.getFile(); files.push({nome:a.nome,f}); }catch(e){} }
+  const assinatura=files.map(x=>x.nome+'|'+x.f.size+'|'+x.f.lastModified).sort().join(';');
+  const c=_fopagMesCache[nomePasta]; if(c&&c.assinatura===assinatura) return c.blocos;
+  const blocos=[];
+  for(const x of files){
+    try{
+      const pdf=await pdfjsLib.getDocument({data:await x.f.arrayBuffer()}).promise;
+      const r=await _lancctbParsearLiquidosDominio(pdf);
+      if(r) r.blocks.forEach(b=>{ b.arquivo=x.nome; blocos.push(b); });
+    }catch(e){ console.error('Falha ao ler '+x.nome+' (FOPAG do Mês):',e); }
+  }
+  _fopagMesCache[nomePasta]={assinatura,blocos};
+  return blocos;
+}
+// Relatórios (no formato do "Processar FOPAG") da EMPRESA aberta, achados pelo CNPJ/CPF do cabeçalho
+// — nunca por nome (o nome vem truncado) e nunca pesquisando pessoas de outras empresas. Olha a pasta
+// do mês do pagamento, a ANTERIOR e a SEGUINTE (férias às vezes ficam salvas no mês posterior a um
+// pagamento feito no fim do mês anterior).
+async function _lancctbRelatoriosFopagDoMes(eid,dataPagamento){
+  try{
+    const handleRaiz=await _lancctbCarregarHandleFopagMes();
+    if(!handleRaiz||(await handleRaiz.queryPermission({mode:'read'}))!=='granted') return [];
+    const emp=S.emps().find(e=>String(e.eid)===String(eid)); if(!emp) return [];
+    const docs=new Set([emp.cnpjNum,emp.cnpj,...(getFiliais(eid)||[]).map(f=>f.cnpj)].filter(Boolean).map(x=>String(x).replace(/\D/g,'')).filter(x=>x.length===14||x.length===11));
+    if(!docs.size) return [];
+    const [a,m]=dataPagamento.slice(0,7).split('-').map(Number);
+    const ym=(dm)=>{ const t=a*12+(m-1)+dm; return Math.floor(t/12)+'-'+String(t%12+1).padStart(2,'0'); };
+    const out=[];
+    for(const mes of [ym(0),ym(-1),ym(1)]){
+      const blocos=await _lancctbBlocosFopagMes(handleRaiz,mes);
+      blocos.filter(b=>docs.has(b.entityDocument)).forEach(b=>{
+        const tipo=LIQ_TIPO_PARA_FOPAG[b.calculationType]; if(!tipo) return;
+        const comp=String(b.competenceMonth).padStart(2,'0')+'-'+b.competenceYear;
+        out.push({ tipo, competencia:comp, fonte:'FOPAG do Mês', pastaMes:mes, arquivo:b.arquivo, flags:b.flags,
+          dados:{ competencia:comp, total:Math.round((b.companyTotalCents!=null?b.companyTotalCents:b.sumCents))/100,
+            pessoas:b.people.map(p=>({ codigo:p.code, nome:p.name, cpf:p.cpf, valor:p.amountCents/100, tipo:p.category==='CONTRIBUTOR'?'contribuinte':'empregado', categoria:p.category })) } });
+      });
+    }
+    // sem duplicar o mesmo relatório lido de duas pastas
+    const vistos=new Set(); return out.filter(r=>{ const k=r.tipo+'|'+r.competencia+'|'+r.dados.total; if(vistos.has(k)) return false; vistos.add(k); return true; });
+  }catch(e){ console.error('Relatórios do FOPAG do Mês:',e); return []; }
+}
+
 async function _lancctbParsearRelatorioLiquidos(file){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
@@ -19795,11 +19984,15 @@ function _lancctbFirmaEhDaEmpresa(firma,nomeEmp){
 async function _lancctbProcessarFopag(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  const temFopagMes=await _lancctbTemAcessoPastaFopagMes();
   const temAcesso=await _lancctbTemAcessoPastaConfiBackup();
-  if(!temAcesso){ toast('Conceda acesso à pasta ConfiBackup primeiro — o botão fica na tela de listagem de empresas (Lançamentos Contábeis, antes de abrir a empresa).','err'); return; }
-  const handleRaiz=await _lancctbCarregarHandleConfiBackup();
-  const perm=await handleRaiz.requestPermission({mode:'read'});
-  if(perm!=='granted'){ toast('Acesso à pasta não concedido.','err'); return; }
+  if(!temAcesso&&!temFopagMes){ toast('Conceda acesso à pasta "FOPAG do Mês" (ou ConfiBackup) primeiro — os botões ficam na tela de listagem de empresas (Lançamentos Contábeis, antes de abrir a empresa).','err'); return; }
+  let handleRaiz=null;
+  if(temAcesso){
+    handleRaiz=await _lancctbCarregarHandleConfiBackup();
+    const perm=await handleRaiz.requestPermission({mode:'read'});
+    if(perm!=='granted'){ handleRaiz=null; if(!temFopagMes){ toast('Acesso à pasta não concedido.','err'); return; } }
+  }
 
   const btn=document.getElementById('lancctbProcessarFopagBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
@@ -19807,8 +20000,8 @@ async function _lancctbProcessarFopag(){
   try{
     const emp=S.emps().find(e=>String(e.eid)===String(eid));
     if(!emp){ toast('Empresa não encontrada.','err'); return; }
-    const pastaEmpresa=await _lancctbAcharPastaEmpresaConfiBackup(handleRaiz,eid);
-    if(!pastaEmpresa){ toast(`Não achei a pasta "(${eid}) ..." dentro do ConfiBackup.`,'err'); return; }
+    const pastaEmpresa=handleRaiz?await _lancctbAcharPastaEmpresaConfiBackup(handleRaiz,eid):null;
+    if(!pastaEmpresa&&!temFopagMes){ toast(`Não achei a pasta "(${eid}) ..." dentro do ConfiBackup.`,'err'); return; }
 
     const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,historico_bancario')
@@ -19823,6 +20016,10 @@ async function _lancctbProcessarFopag(){
     const contaSalario=(contasFixas||[]).find(c=>c.numero_conta==='187');
     const contaAdiantamento=(contasFixas||[]).find(c=>c.numero_conta==='724');
     const contaFerias=(contasFixas||[]).find(c=>c.numero_conta==='567'); // férias debita 567 (pedido do usuário 18/09/2026)
+    // 13º e rescisão: sem conta padrão fixa — só usa se o plano da empresa tiver UMA conta analítica com essa descrição
+    const { data: contasExtraFolha } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao,tipo').eq('empresa_eid',eid).eq('tipo','A').eq('ativo',true).or('descricao.ilike.%13%sal%,descricao.ilike.%rescis%');
+    const unicaConta=re=>{ const l2=(contasExtraFolha||[]).filter(c=>re.test(_convMpRemoverAcentos(String(c.descricao||'')))); return l2.length===1?l2[0]:null; };
+    const contaDecimo13=unicaConta(/13\S*\s*sal|decimo\s*terceiro/i), contaRescisao=unicaConta(/rescis/i);
     const socios=lucSocGet(eid);
     const { data: contasSocios } = socios.length
       ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
@@ -19842,7 +20039,7 @@ async function _lancctbProcessarFopag(){
         const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
         return conta?{id:conta.id,classificacao:conta.classificacao}:null;
       }
-      const c=tipoRelatorio==='salario'?contaSalario:contaAdiantamento;
+      const c=tipoRelatorio==='salario'?contaSalario:tipoRelatorio==='ferias'?contaFerias:tipoRelatorio==='decimo13'?contaDecimo13:tipoRelatorio==='rescisao'?contaRescisao:contaAdiantamento;
       return c?{id:c.id,classificacao:c.classificacao}:null;
     };
     // Casa o histórico bancário com uma pessoa da folha pelo NOME (2+ tokens
@@ -19938,7 +20135,8 @@ async function _lancctbProcessarFopag(){
                        [ {tipo:'adiantamento',competencia:cMes}, {tipo:'adiantamento',competencia:cAnt}, {tipo:'salario',competencia:cAnt} ];
       // Carrega os relatórios que existem (usados nos 2 caminhos abaixo).
       const relatorios=[];
-      for(const t of tentativas){
+      if(temFopagMes){ const novos=await _lancctbRelatoriosFopagDoMes(eid,l.data_pagamento); novos.forEach(r=>relatorios.push(r)); }
+      if(!relatorios.length&&pastaEmpresa) for(const t of tentativas){
         const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,t.competencia,t.tipo);
         if(!file) continue;
         try{ const dados=await _lancctbParsearRelatorioLiquidos(file); if(dados) relatorios.push({...t,dados}); }
@@ -19956,7 +20154,7 @@ async function _lancctbProcessarFopag(){
         achou.dados.pessoas.forEach(p=>{
           const c=contaDaPessoa(p,achou.tipo);
           if(!c){ ok=false; return; }
-          linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. salário ${achou.dados.competencia||achou.competencia} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+          linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. ${_rotuloFolha(achou.tipo)} ${achou.dados.competencia||achou.competencia} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
         });
         if(!ok||linhas.length<2){ semAchado++; continue; }
         const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
@@ -20008,13 +20206,13 @@ async function _lancctbProcessarFopag(){
           if(mix.r) mix.r.dados.pessoas.forEach(p=>{
             const c=contaDaPessoa(p,mix.r.tipo);
             if(!c){ ok=false; return; }
-            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. salário ${compRef} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. ${_rotuloFolha(mix.r?mix.r.tipo:'salario')} ${compRef} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
           });
           mix.itens.forEach(cp=>{
             const socio=_lancctbAcharSocioPorHistorico(socios,(cp.cliente_fornecedor_nome||'')+' '+(cp.cnpj_cpf||''));
             const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
             if(!conta){ ok=false; return; }
-            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta.classificacao, conta_contabil_id:conta.id, tipo:'D', valor:Math.round(Number(cp.valor_pago)*100)/100, historico:`Pagamento ref. salário ${compRef} - ${cp.cliente_fornecedor_nome}`, cliente_fornecedor_nome:cp.cliente_fornecedor_nome||null, cnpj_cpf:cp.cnpj_cpf||null, comprovante_id:cp.id, lancamento_extrato_id:l.id, origem_match:'regra' });
+            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta.classificacao, conta_contabil_id:conta.id, tipo:'D', valor:Math.round(Number(cp.valor_pago)*100)/100, historico:`Pagamento ref. ${_rotuloFolha(mix.r?mix.r.tipo:'salario')} ${compRef} - ${cp.cliente_fornecedor_nome}`, cliente_fornecedor_nome:cp.cliente_fornecedor_nome||null, cnpj_cpf:cp.cnpj_cpf||null, comprovante_id:cp.id, lancamento_extrato_id:l.id, origem_match:'regra' });
           });
           const somaD=Math.round(linhas.filter(x=>x.tipo==='D').reduce((a,x)=>a+x.valor,0)*100)/100;
           if(ok&&linhas.length>=2&&Math.abs(somaD-l.valor_saida)<=0.01){
@@ -20106,8 +20304,8 @@ async function _lancctbProcessarFopag(){
       }
 
       const linhas=[
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:liquido, historico:`Pagamento ref. ${r.tipo==='adiantamento'?'adiantamento':'salário'} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaP.classificacao, conta_contabil_id:contaP.id, tipo:'D', valor:liquido, historico:`Pagamento ref. ${r.tipo==='adiantamento'?'adiantamento':'salário'} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:liquido, historico:`Pagamento ref. ${_rotuloFolha(r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaP.classificacao, conta_contabil_id:contaP.id, tipo:'D', valor:liquido, historico:`Pagamento ref. ${_rotuloFolha(r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
       ];
       const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
       if(error){ console.error('Erro FOPAG (individual):',error); semAchado++; continue; }
