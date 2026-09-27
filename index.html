@@ -19794,7 +19794,7 @@ function _lancctbTokensCompetencia(competenciaAAAAMM){
   const [ano,mes]=competenciaAAAAMM.split('-');
   const mesNum=String(Number(mes));
   return [`${mes}-${ano}`,`${mes}.${ano}`,`${mes}_${ano}`,`${mes}/${ano}`,`${ano}-${mes}`,`${ano}.${mes}`,`${ano}_${mes}`,
-    `${LANCCTB_MESES_EXTENSO[Number(mes)-1]} ${mesNum} de 20`, `${LANCCTB_MESES_EXTENSO[Number(mes)-1]}${ano.slice(2)}`, LANCCTB_MESES_EXTENSO[Number(mes)-1]+' '+ano, LANCCTB_MESES_EXTENSO[Number(mes)-1]+'-'+ano, LANCCTB_MESES_EXTENSO[Number(mes)-1]+'_'+ano].map(t=>_convMpRemoverAcentos(t.toLowerCase()));
+    `${LANCCTB_MESES_EXTENSO[Number(mes)-1]}${ano.slice(2)}`, `${LANCCTB_MESES_EXTENSO[Number(mes)-1]}${ano}`, LANCCTB_MESES_EXTENSO[Number(mes)-1]+' '+ano, LANCCTB_MESES_EXTENSO[Number(mes)-1]+'-'+ano, LANCCTB_MESES_EXTENSO[Number(mes)-1]+'_'+ano].map(t=>_convMpRemoverAcentos(t.toLowerCase()));
 }
 function _lancctbNomeCasaCompetencia(nome,tokens){
   const n=_convMpRemoverAcentos(String(nome||'').toLowerCase());
@@ -32041,6 +32041,82 @@ async function _lancctbBuscarNaPastaEExtrato(){
     toast('Arquivo encontrado: '+file.name+' — clique em "Extrair" pra processar.','ok');
   }catch(e){ toast('Erro ao buscar na pasta: '+e.message,'err'); }
   finally{ if(btn){ btn.disabled=false; btn.textContent='🔍 Buscar nas pastas associadas ('+competencia.split('-').reverse().join('/')+')'; } }
+}
+// ─── Importar Extratos de TODAS as empresas, de UMA competência (pedido do usuário 27/09/2026) ──
+// Monta a MESMA estrutura de "Upload de Extrato" dentro do container `lancctbUploadBody" — só que
+// sem abrir o modal (fica invisível) — pra reaproveitar processarLancctbUploadExtrato/
+// confirmarLancctbImportExtrato sem duplicar toda a lógica de leitura de PDF/Excel.
+function _lancctbPrepararUploadExtratoOculto(){
+  document.getElementById('lancctbUploadBody').innerHTML=`
+    <input class="fi" id="lancctbExtratoArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
+    <div id="lancctbExtratoStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
+    <div id="lancctbExtratoPreviewArea" style="margin-top:14px"></div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+      <button class="btn bsm btn-ia-gemini" id="lancctbExtratoProcessarIaBtn" onclick="processarLancctbUploadExtrato(true)">🤖 Usar IA Gemini</button>
+      <button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(false)">▶ Extrair (padrão, sem IA)</button>
+    </div>`;
+}
+function abrirLancctbImportarExtratosLoteModal(){
+  const mesEl=document.getElementById('lancctbImportExtratosLoteMes');
+  if(mesEl && !mesEl.value) mesEl.value=S.fechAtual();
+  document.getElementById('lancctbImportExtratosLoteStatus').textContent='';
+  openModal('mLancctbImportExtratosLote');
+}
+async function _lancctbRodarImportarExtratosLote(){
+  const mes=document.getElementById('lancctbImportExtratosLoteMes').value;
+  if(!mes){ toast('Escolha a competência (mês/ano).','err'); return; }
+  const statusEl=document.getElementById('lancctbImportExtratosLoteStatus');
+  const btn=document.getElementById('lancctbImportExtratosLoteConfirmarBtn');
+  btn.disabled=true;
+  const rot=mes.split('-').reverse().join('/');
+  // Preserva o contexto de quem estava aberto antes do lote (empresa/conta/mês do workspace),
+  // pra devolver exatamente como estava ao terminar — o lote roda por trás, sem trocar de tela.
+  const eidOriginal=_lancctbEidAtual, contaOriginal=_lancctbExtratoContaSel, mesOriginal=_lancctbExtratoMes;
+  let contasComPasta=0, importadas=0, duplicadas=0, semArquivo=0, comErro=0;
+  const detalhes=[];
+  const emps=S.emps().slice().sort((a,b)=>Number(a.eid)-Number(b.eid));
+  try{
+    for(let i=0;i<emps.length;i++){
+      const emp=emps[i];
+      statusEl.textContent=`[${i+1}/${emps.length}] ${emp.nome}…`;
+      let agencias=[];
+      try{
+        const { data } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,origem_extrato').eq('empresa_eid',emp.eid).eq('ativo',true);
+        agencias=data||[];
+      }catch(e){ continue; }
+      for(const ag of agencias){
+        let pastas=[];
+        try{ pastas=await _lancctbPastasParaBuscarExtrato(emp.eid,ag.id,ag.origem_extrato); }catch(e){}
+        if(!pastas.length) continue;
+        contasComPasta++;
+        let achado=null;
+        try{ for(const p of pastas){ achado=await _lancctbAcharArquivoExtratoNaPasta(p,mes); if(achado) break; } }catch(e){}
+        if(!achado){ semArquivo++; detalhes.push(`— ${emp.nome} / ${ag.banco_nome||''}: sem arquivo de ${rot} nas pasta(s) associada(s)`); continue; }
+        statusEl.textContent=`[${i+1}/${emps.length}] ${emp.nome} — lendo ${achado.name}…`;
+        try{
+          _lancctbEidAtual=emp.eid; _lancctbExtratoContaSel=String(ag.id); _lancctbExtratoMes=mes;
+          _lancctbPrepararUploadExtratoOculto();
+          _lancctbExtratoPreview=[];
+          await _lancctbCarregarFileHandleNoInput(achado,'lancctbExtratoArquivo');
+          await processarLancctbUploadExtrato(false);
+          if(!_lancctbExtratoPreview.length){
+            comErro++; detalhes.push(`✗ ${emp.nome} / ${ag.banco_nome||''}: ${achado.name} — não reconhecido/sem lançamentos (${document.getElementById('lancctbExtratoStatus')?.textContent||'ver'})`);
+            continue;
+          }
+          await confirmarLancctbImportExtrato();
+          importadas++;
+          detalhes.push(`✓ ${emp.nome} / ${ag.banco_nome||''}: ${achado.name} (${_lancctbExtratoPreview.length} lançamento(s) lido(s))`);
+        }catch(e){ comErro++; detalhes.push(`✗ ${emp.nome} / ${ag.banco_nome||''}: erro — ${e.message}`); }
+      }
+    }
+  } finally {
+    _lancctbEidAtual=eidOriginal; _lancctbExtratoContaSel=contaOriginal; _lancctbExtratoMes=mesOriginal;
+    btn.disabled=false;
+  }
+  statusEl.textContent=`Concluído (${rot}): ${contasComPasta} conta(s) com pasta associada, ${importadas} arquivo(s) importado(s), ${semArquivo} sem arquivo pra este mês, ${comErro} com erro.\n\n`+detalhes.join('\n');
+  toast(`Importação em lote de ${rot}: ${importadas} extrato(s) processado(s) de ${contasComPasta} conta(s) com pasta associada.${comErro?' '+comErro+' com erro.':''}`,comErro?'err':'ok');
+  if(String(currentEid)===String(eidOriginal)&&currentPage==='empresa') renderLancctbConteudo();
 }
 // ─── Parser determinístico do extrato mensal Itaú (por posição de coluna) ─
 // Estratégia pedida pelo usuário: IA só entra quando o site NÃO reconhece o
