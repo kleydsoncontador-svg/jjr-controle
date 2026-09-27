@@ -20589,6 +20589,11 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
   if(!/composi[cç][aã]o do documento de arrecada[cç][aã]o/i.test(texto)) return null;
   const linhas=_lancctbAgruparLinhasPorY(itens,tolY);
   const itensComp=[];
+  // Posição (x) das colunas Principal / Multa / Juros no cabeçalho da tabela de composição
+  let colsValores=null;
+  { const cab={}; itens.forEach(it=>{ const k=String(it.str||'').trim().toLowerCase(); if(typeof it.x==='number'&&(k==='principal'||k==='multa'||k==='juros')&&cab[k]===undefined) cab[k]=it.x; });
+    itens.forEach(it=>{ if(typeof it.x==='number'&&String(it.str||'').trim().toLowerCase()==='total'&&cab.total===undefined) cab.total=it.x; });
+    if(cab.principal!==undefined&&cab.total!==undefined&&(cab.multa!==undefined||cab.juros!==undefined)) colsValores=cab; }
   for(const linha of linhas){
     const t=linha.itens.map(i=>i.str).join(' ').trim();
     // Achado real 22/09/2026 (OCR local, guia real da CLD): o Tesseract às
@@ -20598,7 +20603,27 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
     const m=t.match(/^(\d{4})\s+[^A-ZÀ-Ü0-9]{0,3}\s*([A-ZÀ-Ü][A-ZÀ-Ü0-9\s\-\/\.]*?)\s+((?:[\d.,]+\s*)+)$/);
     if(!m) continue;
     const numeros=m[3].trim().split(/\s+/);
-    itensComp.push({ codigo:m[1], denominacao:m[2].trim(), valor:_lancctbParseValorBR2(numeros[numeros.length-1]) });
+    const totalLinha=_lancctbParseValorBR2(numeros[numeros.length-1]);
+    // Pedido do usuário 26/09/2026 (guia RECALCULADA da JF Fontana: principal 178,31 + multa 0,58): cada
+    // código de receita se abre em PRINCIPAL, MULTA e JUROS (colunas do DARF), cada um com seu próprio
+    // histórico ("Multa sobre CP DESCONTADA SEGURADO cód. 1099…"). Só quando as colunas são identificáveis
+    // pela posição e a soma fecha com o Total da linha; senão mantém 1 item com o total (comportamento antigo).
+    let partes=null;
+    if(colsValores){
+      const nums=linha.itens.filter(i=>typeof i.x==='number'&&LANCCTB_RE_MONETARIO.test(String(i.str).trim()));
+      if(nums.length){
+        partes={principal:0,multa:0,juros:0,total:0};
+        nums.forEach(n=>{ let melhor=null,dm=1e9; Object.keys(colsValores).forEach(k=>{ const d=Math.abs(colsValores[k]-n.x); if(d<dm){dm=d;melhor=k;} }); partes[melhor]+=_lancctbParseValorBR2(n.str); });
+        const soma=Math.round((partes.principal+partes.multa+partes.juros)*100)/100;
+        if(!(Math.abs(soma-totalLinha)<=0.02&&partes.principal>0)) partes=null;
+      }
+    }
+    const nome=m[2].trim();
+    if(partes&&(partes.multa>0||partes.juros>0)){
+      itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.principal*100)/100, encargo:'principal' });
+      if(partes.multa>0) itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.multa*100)/100, encargo:'multa' });
+      if(partes.juros>0) itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.juros*100)/100, encargo:'juros' });
+    } else itensComp.push({ codigo:m[1], denominacao:nome, valor:totalLinha });
   }
   if(!itensComp.length) return null;
   // DAS do Simples Nacional também usa o cabeçalho "Composição do Documento
@@ -26233,6 +26258,28 @@ function _lancctbItensDaCombinacao(comb){
 // rateio: 1ª = conta da Regra, demais = regras_matching_linhas por ordem).
 // Valor de cada linha = o desta guia (nunca o do mês ensinado). Devolve
 // true se classificou (crédito banco + N débitos gravados).
+// Rótulo do encargo de um item da composição ("Multa sobre ", "Juros sobre ", ou vazio pro principal)
+function _lancctbRotuloEncargo(c){ return c&&c.encargo==='multa'?'Multa sobre ':c&&c.encargo==='juros'?'Juros sobre ':''; }
+// Gatilho de UM item (uma Regra por código de receita): "[Multa sobre |Juros sobre ]NOME cód. 1099"
+function _lancctbGatilhoItemComposicao(c){ return `${_lancctbRotuloEncargo(c)}${String(c.denominacao||'').split(' - ')[0].trim()} cód. ${c.codigo}`; }
+// Pedido do usuário 26/09/2026: "criar uma regra por cada código de receita" (e uma pra multa/juros de cada um).
+// Se TODOS os itens da guia já têm sua Regra (gatilho igual), classifica sozinho: 1 crédito banco : N débitos.
+async function _lancctbAplicarRegraPorItens({regras,comp,compet,l,valor,contaBancoInfo,contaId,eid}){
+  const norm=t=>String(t||'').trim().toLowerCase();
+  const achadas=comp.map(c=>regras.find(r=>(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&norm(r.historico_gatilho)===norm(_lancctbGatilhoItemComposicao(c))));
+  if(achadas.some(r=>!r)) return false;
+  const soma=Math.round(comp.reduce((s,c)=>s+(c.valor||0),0)*100)/100;
+  if(Math.abs(soma-valor)>0.02) return false;
+  const histDe=(c,r)=>{ const base=`${_lancctbGatilhoItemComposicao(c)}${compet?' ref. '+compet:''}`; return r.historico_fixo?_lancctbSubstituirCompetenciaTexto(r.historico_fixo,compet):_lancctbPrefixarPagtoRef(base); };
+  const hists=comp.map((c,i)=>histDe(c,achadas[i]));
+  const histBanco=new Set(hists).size===1?hists[0]:'Pagamentos Diversos';
+  const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:histBanco, lancamento_extrato_id:l.id, regra_matching_id:achadas[0].id, origem_match:'regra' }];
+  comp.forEach((c,i)=>{ const r=achadas[i]; linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:r.plano_contas?.classificacao||'', conta_contabil_id:r.conta_contabil_id, tipo:r.dc, valor:Math.round((c.valor||0)*100)/100, historico:hists[i], lancamento_extrato_id:l.id, regra_matching_id:r.id, origem_match:'regra' }); });
+  const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+  if(error){ console.error('Erro ao aplicar Regras por item:',error); return false; }
+  await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+  return true;
+}
 async function _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,comp,compet,l,valor,contaBancoInfo,contaId,eid}){
   const codigosDe=t=>[...String(t||'').matchAll(/c[óo]d\.?\s*(\d{3,5})/gi)].map(m=>m[1]);
   const compCodigos=comp.map(c=>String(c.codigo));
@@ -26343,7 +26390,7 @@ async function _lancctbProcessarTributos(){
     // "(eid)", pasta errada, ou acesso não concedido) ou se tinha PDF(s) mas
     // nenhum bateu o valor — diagnósticos bem diferentes. Conta separado.
     if(!candidatos.length) semPdfNaPasta++;
-    let achou=null, folga=null;
+    let achou=null, folga=null, quase=null;
     for(const f of candidatos){
       const chaveArquivo=anoMes+'|'+f.nome;
       if(arquivosUsados.has(chaveArquivo)) continue;
@@ -26365,7 +26412,11 @@ async function _lancctbProcessarTributos(){
       // errada, não de sobra legítima.
       const dif=valor-extraido.valor;
       const ehDasArquivo=_lancctbNomeTributoLegivel(_lancctbParsearNomeArquivoTributo(f.nome).descricao).token==='DAS';
-      if(Math.abs(dif)<=LANCCTB_MATCH_TOLERANCIA_VALOR){ achou={f,extraido,diferenca:0}; arquivosUsados.add(chaveArquivo); break; }
+      // Pedido do usuário 26/09/2026 (JF Fontana): existia a guia ORIGINAL (502,51) e a RECALCULADA (504,15) — o pagamento
+      // era 504,15 e foi casado com a original por estar dentro da tolerância de ±2,00. Batida EXATA (±0,01) sempre vence;
+      // dentro da tolerância só vale se NENHUMA guia do mês bater exato.
+      if(Math.abs(dif)<=0.01){ achou={f,extraido,diferenca:0}; arquivosUsados.add(chaveArquivo); break; }
+      if(Math.abs(dif)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&!quase) quase={f,extraido,chaveArquivo};
       // Batida EXATA em qualquer PDF do mês sempre vence a folga de 30% (18/09/2026:
       // PIS/COFINS 7.623,80 podia ser "roubado" por outra guia mais barata que
       // aparecia antes na lista e cabia na folga) — guarda a 1ª folga e só usa
@@ -26374,6 +26425,7 @@ async function _lancctbProcessarTributos(){
       // (a folga de 30% pegou um pagamento de FGTS de 1.484,45 como se fosse o INSS de 1.156,01 + 'diferença' de 328,44).
       // (folga nunca é preenchida; os blocos abaixo que a consultam ficam inertes)
     }
+    if(!achou&&quase){ achou={f:quase.f,extraido:quase.extraido,diferenca:0}; arquivosUsados.add(quase.chaveArquivo); }
     // Pagamento único de VÁRIAS guias (ver _lancctbAcharCombinacaoGuias) — vem ANTES da folga de 30%, senão a soma vira "DIFERENÇA".
     if(!achou){
       if(!leiturasPorMes[anoMes]) leiturasPorMes[anoMes]=await _lancctbLerGuiasDoMes(eid,anoMes,_lancctbTributosPermitirIA);
@@ -26446,7 +26498,8 @@ async function _lancctbProcessarTributos(){
     // lido do PDF): "CP DESCONTADA SEGURADO", "DAS", "PIS", "COFINS"…
     const _nlR=_lancctbNomeTributoLegivel(info.descricao);
     const palheiroGuia=[info.descricao,_nlR.nomeCompleto,_nlR.token,...((achou.extraido&&achou.extraido.composicao)||[]).flatMap(c=>[c.denominacao,String(c.denominacao||'').split(' - ')[0],String(c.denominacao||'').split(' - ')[0]+' cód. '+c.codigo,c.denominacao+' cód. '+c.codigo])].filter(Boolean).join(' | ').toLowerCase();
-    const regra=regras.find(r=>{
+    const guiaComVariosItens=!!(achou.extraido&&achou.extraido.composicao&&achou.extraido.composicao.length>=2);
+    const regra=guiaComVariosItens?null:regras.find(r=>{
       if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
       return r.historico_gatilho&&palheiroGuia.includes(r.historico_gatilho.toLowerCase());
     });
@@ -26470,10 +26523,11 @@ async function _lancctbProcessarTributos(){
         if(Math.abs(somaComp-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR){
           // Já ensinado em outro mês (mesmos códigos de receita)? Classifica
           // sozinho — 1 crédito banco : N débitos, sem pedir de novo.
+          if(await _lancctbAplicarRegraPorItens({regras,comp,compet,l,valor,contaBancoInfo,contaId,eid})){ resolvidos++; continue; }
           if(await _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,comp,compet,l,valor,contaBancoInfo,contaId,eid})){ resolvidos++; continue; }
           const nomeCurto=(c)=>String(c.denominacao||'').split(' - ')[0].trim();
           const resumoDe=(c)=>{
-            const partes=[nomeCurto(c)];
+            const partes=[_lancctbRotuloEncargo(c)+nomeCurto(c)];
             if(c.codigo) partes.push(`cód. ${c.codigo}`);
             if(compet) partes.push(`ref. ${compet}`);
             return partes.join(' ');
@@ -26487,7 +26541,7 @@ async function _lancctbProcessarTributos(){
           // crédito do banco (resumoDe acima). O auto-match de meses
           // futuros (ver bateram/baseDescricaoImposto mais abaixo) ignora
           // esse sufixo decorado na hora de comparar, então não quebra.
-          const composicaoParaSalvar=comp.map(c=>({codigo:c.codigo,denominacao:c.denominacao,valor:Math.round((c.valor||0)*100)/100,resumo:resumoDe(c),competencia:compet||null}));
+          const composicaoParaSalvar=comp.map(c=>({codigo:c.codigo,denominacao:c.denominacao,encargo:c.encargo||null,valor:Math.round((c.valor||0)*100)/100,resumo:resumoDe(c),competencia:compet||null}));
           const { error: eU } = await _supaClient.from('lancamentos_extrato').update({
             historico_bancario: `[TRIBUTO COMPOSTO: ${resumo}] ${semMarcaComp}`.trim(),
             origem_importacao: 'tributo_composicao',
@@ -26606,7 +26660,7 @@ async function _lancctbProcessarTributos(){
       // se agora já existe Regra pros mesmos códigos, classifica sozinho.
       const comp=Array.isArray(row.composicao_tributo)?row.composicao_tributo:[];
       const compet=(comp[0]&&comp[0].competencia)||'';
-      const ok=comp.length>=2&&await _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,comp,compet,l:row,valor:row.valor_saida,contaBancoInfo,contaId,eid});
+      const ok=comp.length>=2&&(await _lancctbAplicarRegraPorItens({regras,comp,compet,l:row,valor:row.valor_saida,contaBancoInfo,contaId,eid})||await _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,comp,compet,l:row,valor:row.valor_saida,contaBancoInfo,contaId,eid}));
       if(ok){ resolvidos++; continue; }
       if(!composicaoJaExistente&&!composicoesParaAbrir.length) composicaoJaExistente=row;
     }
@@ -26938,15 +26992,33 @@ async function _lancctbRegistroSalvarInline(extratoId){
     historico_gatilho:ehGuiaUnica?gatilhoUnica:historicoGatilhoGenerico, valor_gatilho:null, cnpj_cpf_gatilho:null, dc,
     conta_contabil_id:linhasContrapartida[0].conta_contabil_id, agencia_bancaria_id:null,
   };
-  const { data: regraSalva, error: erroRegra } = await _supaClient.from('regras_matching').insert(registro).select('id').single();
-  if(erroRegra){ toast('Erro ao criar regra: '+erroRegra.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
-  await _lancctbSalvarLinhasRateio(regraSalva.id,linhasContrapartida,dc);
+  let regraSalva, regrasPorItem=null;
+  if(comp.length>=2&&comp.every(c=>c.codigo)){
+    // Uma Regra POR CÓDIGO DE RECEITA (e uma pra Multa/Juros de cada), pedido 26/09/2026. Reaproveita a que já existir
+    // com o mesmo gatilho (ex: o principal já ensinado antes) em vez de duplicar.
+    regrasPorItem=[];
+    const { data: existentes } = await _supaClient.from('regras_matching').select('id,historico_gatilho,agencia_bancaria_id').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('tipo_regra','historico');
+    for(let idx=0;idx<comp.length;idx++){
+      const gat=_lancctbGatilhoItemComposicao(comp[idx]);
+      const jaExiste=(existentes||[]).find(x=>!x.agencia_bancaria_id&&String(x.historico_gatilho||'').trim().toLowerCase()===gat.toLowerCase());
+      if(jaExiste){ regrasPorItem.push(jaExiste.id); continue; }
+      const { data: nova, error: eNova } = await _supaClient.from('regras_matching').insert({ empresa_eid:_lancctbEidAtual, descricao:`[${comp[idx].resumo||gat}] ${r.historico_bancario||''}`.trim(), historico_fixo:linhasContrapartida[idx].historico||null, tipo_regra:'historico', historico_gatilho:gat, valor_gatilho:null, cnpj_cpf_gatilho:null, dc, conta_contabil_id:linhasContrapartida[idx].conta_contabil_id, agencia_bancaria_id:null }).select('id').single();
+      if(eNova){ toast('Erro ao criar regra do item '+gat+': '+eNova.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
+      regrasPorItem.push(nova.id);
+    }
+    regraSalva={id:regrasPorItem[0]};
+  } else {
+    const resp=await _supaClient.from('regras_matching').insert(registro).select('id').single();
+    if(resp.error){ toast('Erro ao criar regra: '+resp.error.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
+    regraSalva=resp.data;
+    await _lancctbSalvarLinhasRateio(regraSalva.id,linhasContrapartida,dc);
+  }
   const linhas=[
     { empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor:valorTotal, historico:historicoBanco, lancamento_extrato_id:r.id, regra_matching_id:regraSalva.id, origem_match:'regra' },
   ];
-  linhasContrapartida.forEach(l=>{
+  linhasContrapartida.forEach((l,idxL)=>{
     const conta=contasPorId.get(String(l.conta_contabil_id));
-    linhas.push({ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:conta?.classificacao||'', conta_contabil_id:l.conta_contabil_id, tipo:dc, valor:l.valor, historico:l.historico, lancamento_extrato_id:r.id, regra_matching_id:regraSalva.id, origem_match:'regra' });
+    linhas.push({ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:conta?.classificacao||'', conta_contabil_id:l.conta_contabil_id, tipo:dc, valor:l.valor, historico:l.historico, lancamento_extrato_id:r.id, regra_matching_id:regrasPorItem?regrasPorItem[idxL]:regraSalva.id, origem_match:'regra' });
   });
   const { error: erroLanc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{linhas});
   if(erroLanc){ toast('Erro ao gerar lançamento: '+erroLanc.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
@@ -26963,7 +27035,7 @@ async function _lancctbRegistroSalvarInline(extratoId){
 // Fixo de um imposto simples (ver mColchete em abrirLancctbRegraModalDeLinha),
 // agora também no Histórico Utilizado de cada linha de débito do rateio.
 function _lancctbPrefixarPagtoRef(texto){
-  return /^pagamento ref\./i.test(String(texto||'').trim())?texto:`Pagamento ref. ${texto}`;
+  return /^(pagamento ref\.|multa sobre|juros sobre)/i.test(String(texto||'').trim())?texto:`Pagamento ref. ${texto}`;
 }
 function _lancctbInlineLinhaHtml(item,contaAtual){
   const r=item.extrato;
