@@ -27411,6 +27411,27 @@ async function renderLancctbRegistroContabil(){
   const { data: extratoRows, error, count } = await q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to);
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar registro contábil: ${esc(error.message)}</div>`; return; }
 
+  // Pedido do usuário 27/09/2026 ("preciso aqui da soma do que filtrei"): soma de TODAS as linhas
+  // que batem no filtro atual (não só as 50 da página) — mesmos filtros da consulta principal
+  // acima, só que buscando valor_saida/valor_entrada de todo mundo via _lancctbFetchTudo.
+  const { data: linhasSoma } = await _lancctbFetchTudo(()=>{
+    let qs=_supaClient.from('lancamentos_extrato').select('valor_saida,valor_entrada')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel);
+    if(_lancctbRegistroStatus) qs=qs.eq('status_conciliacao',_lancctbRegistroStatus);
+    else qs=qs.neq('status_conciliacao','ignorado');
+    if(_lancctbRegistroDataDe) qs=qs.gte('data_pagamento',_lancctbRegistroDataDe);
+    if(_lancctbRegistroDataAte) qs=qs.lte('data_pagamento',_lancctbRegistroDataAte);
+    if(_lancctbRegistroDataExata) qs=qs.eq('data_pagamento',_lancctbRegistroDataExata);
+    if(_lancctbRegistroDirecao==='entrada') qs=qs.gt('valor_entrada',0);
+    else if(_lancctbRegistroDirecao==='saida') qs=qs.gt('valor_saida',0);
+    if(_lancctbRegistroValor){ const v=+_lancctbRegistroValor, de=v-0.01, ate=v+0.01; qs=qs.or(`and(valor_saida.gte.${de},valor_saida.lte.${ate}),and(valor_entrada.gte.${de},valor_entrada.lte.${ate})`); }
+    if(idsInterseccao) qs=qs.in('id',idsInterseccao);
+    if(_lancctbRegistroBusca.trim()){ const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,''); qs=qs.ilike('historico_bancario',`%${t}%`); }
+    return qs;
+  });
+  const somaEntrada=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_entrada||0),0);
+  const somaSaida=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_saida||0),0);
+
   const idsExtrato=(extratoRows||[]).map(r=>r.id);
   let ctbPorExtrato={};
   if(idsExtrato.length){
@@ -27557,7 +27578,7 @@ async function renderLancctbRegistroContabil(){
   const { count: pendenciasTotaisConta } = await qPendencias;
 
   _lancctbUltimoRegistro=linhas;
-  _lancctbSetConteudo(el,_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0}));
+  _lancctbSetConteudo(el,_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida}));
   _lancctbAtivarScrollTopoRegistro();
 }
 // Pedido do usuário 09/09/2026: "barra de rolagem sempre na parte de cima,
@@ -27841,7 +27862,7 @@ async function _lancctbExecutarDesclassificarLote(){
   renderLancctbRegistroContabil();
 }
 
-function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta}){
+function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta,somaEntrada,somaSaida}){
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
@@ -27882,7 +27903,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <input class="si" data-filtro="registro-data-ate" type="date" value="${_lancctbRegistroDataAte}" onchange="_lancctbRegistroDataAte=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data final" style="width:145px">
     <span style="font-size:11px;color:var(--slate)">— use os campos abaixo do cabeçalho da tabela pra filtrar por coluna</span>
   </div>
-  ${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas)}
+  ${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida)}
   <div id="lancctbRegistroScrollTopo" style="overflow-x:auto;overflow-y:hidden;height:16px"><div id="lancctbRegistroScrollTopoEspacador" style="height:1px"></div></div>
   <div id="lancctbRegistroScrollWrap" style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 360px)">`;
   // Largura das colunas de histórico se ajusta ao maior texto carregado na
@@ -27980,7 +28001,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,contaAtual); });
   }
   html+=`</tbody></table></div>
-    <div style="margin-top:14px">${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas)}</div>`;
+    <div style="margin-top:14px">${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida)}</div>`;
   return html;
 }
 // Versão GENÉRICA da barra de paginação abaixo (pedido do usuário
@@ -28005,9 +28026,15 @@ function _lancctbPagGenericaHtml(paginaAtual,count,from,to,totalPaginas,incName,
 // Última — reaproveitada em cima E embaixo da tabela (pedido do usuário
 // 08/09/2026: só no rodapé obrigava rolar a página inteira pra trocar de
 // página numa tabela com muitas linhas).
-function _lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas){
-  return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--slate)">
-    <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados</span>
+function _lancctbRegistroSomaFiltradaTexto(somaEntrada,somaSaida){
+  somaEntrada=somaEntrada||0; somaSaida=somaSaida||0;
+  if(_lancctbRegistroDirecao==='entrada') return `Soma filtrada: R$ ${_fmt(somaEntrada)}`;
+  if(_lancctbRegistroDirecao==='saida') return `Soma filtrada: R$ ${_fmt(somaSaida)}`;
+  return `Soma filtrada: R$ ${_fmt(somaEntrada)} entrada / R$ ${_fmt(somaSaida)} saída`;
+}
+function _lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida){
+  return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--slate);gap:8px;flex-wrap:wrap">
+    <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados <strong style="color:var(--ink)">· ${_lancctbRegistroSomaFiltradaTexto(somaEntrada,somaSaida)}</strong></span>
     <button class="btn bo bsm lancctb-classificar-lote-btn" ${_lancctbRegistroSelecionados.size?'':'disabled'} onclick="abrirLancctbClassificarLoteModal()">🗂️ Classificar em lote${_lancctbRegistroSelecionados.size?` (${_lancctbRegistroSelecionados.size})`:''}</button>
     <button class="btn bo bsm lancctb-desclassificar-lote-btn" ${_lancctbRegistroSelecionadosDesclass.size?'':'disabled'} onclick="_lancctbExecutarDesclassificarLote()" title="Desfaz o lançamento contábil e devolve NF/Comprovante/Fluxo de Caixa pra pendente — em lote">🔓 Desclassificar em lote${_lancctbRegistroSelecionadosDesclass.size?` (${_lancctbRegistroSelecionadosDesclass.size})`:''}</button>
     <div style="display:flex;gap:6px">
