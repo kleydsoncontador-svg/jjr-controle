@@ -31094,12 +31094,201 @@ function _lancctbFluxoProcessarAbas(wb,nomesAbas){
   document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoMappingHtml(headers,mapa);
   document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
 }
-// PDF: reaproveita a MESMA Edge Function de extração do Extrato Bancário
-// (lancctb-parse-extrato) — o formato de saída (data/histórico/valor_saída/
-// valor_entrada) já é exatamente o que o Fluxo de Caixa precisa, então não
-// existe mapeamento de coluna aqui: a IA já lê o layout do PDF e devolve
-// cada linha com o lado (entrada/saída) identificado, por isso o seletor
-// "Pagamentos/Recebimentos" não vale pra esse caminho.
+// ─── Bling — "Relatório de Contas a Pagar" (pedido do usuário 28/09/2026) ──────────────────
+// Leitor SEM IA, dedicado a este layout exato do Bling — reaproveita a MESMA tabela de Fluxo
+// de Caixa já existente (nunca cria módulo paralelo). Reconstrói cada registro por POSIÇÃO
+// (x/y) dos tokens do pdf.js — igual ao resto do módulo (DARF/DAMSP/Itaú) — porque Fornecedor
+// e Histórico quebram em várias linhas visuais e o texto corrido do PDF não vem na ordem certa.
+const LANCCTB_BLING_CONTAS_PAGAR_COLS=['fornecedor','historico','documento','vencimento','liquidacao','situacao','pago'];
+function _lancctbBlingAcharColuna(itens,rotulo){
+  const alvo=_convMpRemoverAcentos(rotulo.toLowerCase());
+  const it=itens.find(i=>_convMpRemoverAcentos(String(i.str||'').trim().toLowerCase())===alvo);
+  return it?it.x:null;
+}
+// Fingerprint do modelo — só entra neste caminho se o PDF for mesmo este relatório do Bling;
+// qualquer outro PDF cai no caminho antigo (IA), sem risco de "forçar" um layout errado.
+function _lancctbBlingContasPagarDetectarColunas(itensPag1){
+  const texto=itensPag1.map(i=>i.str).join(' ');
+  if(!/Relat[oó]rio de Contas a Pagar/i.test(texto)) return null;
+  const xForn=_lancctbBlingAcharColuna(itensPag1,'Fornecedor');
+  const xHist=_lancctbBlingAcharColuna(itensPag1,'Histórico')||_lancctbBlingAcharColuna(itensPag1,'Historico');
+  const xDoc=_lancctbBlingAcharColuna(itensPag1,'Nro.')??_lancctbBlingAcharColuna(itensPag1,'documento');
+  const xVenc=_lancctbBlingAcharColuna(itensPag1,'Vencimento');
+  const xLiq=_lancctbBlingAcharColuna(itensPag1,'Liquidação')||_lancctbBlingAcharColuna(itensPag1,'Liquidacao');
+  const xSit=_lancctbBlingAcharColuna(itensPag1,'Situação')||_lancctbBlingAcharColuna(itensPag1,'Situacao');
+  const xPago=_lancctbBlingAcharColuna(itensPag1,'Pago');
+  if([xForn,xHist,xDoc,xVenc,xLiq,xSit,xPago].some(v=>v==null)) return null; // não é este layout (ou header não reconhecido) — cai no caminho antigo
+  const nomes=['fornecedor','historico','documento','vencimento','liquidacao','situacao','pago'];
+  const xs=[xForn,xHist,xDoc,xVenc,xLiq,xSit,xPago];
+  const ordenado=nomes.map((n,i)=>({n,x:xs[i]})).sort((a,b)=>a.x-b.x);
+  // Fronteira de cada coluna = ponto médio entre ela e a próxima; última vai até +infinito.
+  const bounds=ordenado.map((c,i)=>({nome:c.n, min:i===0?-1e9:(ordenado[i-1].x+c.x)/2, max:i===ordenado.length-1?1e9:(c.x+ordenado[i+1].x)/2}));
+  return bounds;
+}
+function _lancctbBlingColunaDoItem(bounds,x){ const b=bounds.find(b=>x>=b.min&&x<b.max); return b?b.nome:null; }
+// Linhas de cabeçalho/rodapé/paginação do PDF exportado direto do navegador (nunca são registro).
+const LANCCTB_BLING_RUIDO=[/^Relat[oó]rio de Contas a Pagar$/i,/^Per[ií]odo\s/i,/^Fornecedor\s+Hist[oó]rico/i,
+  /bling\.com\.br/i,/^Bling\s*-\s*Relat[oó]rio/i,/^\d{2}\/\d{2}\/\d{4},\s*\d{1,2}:\d{2}$/,/^\d\/\d$/,/^Total\s*=/i];
+function _lancctbBlingEhRuido(textoLinha){ return LANCCTB_BLING_RUIDO.some(re=>re.test(textoLinha.trim())); }
+const LANCCTB_RE_DATA_BR=/^\d{2}\/\d{2}\/\d{4}$/;
+// NÚMERO/PARCELA (pedido do usuário — não confundir "6/11" de parcelamento com NF+parcela):
+// só separa quando o padrão bate com documento real (parte antes de "/" com 4+ dígitos e a
+// parcela com 1-2). Preserva zeros à esquerda — NÚMERO é sempre string.
+function _lancctbBlingSplitDocParcela(raw){
+  const t=String(raw||'').trim();
+  if(!t) return {numero:null,parcela:null};
+  const m=t.match(/^(\d+)\/(\d+)$/);
+  if(!m) return {numero:t,parcela:null};
+  const [,a,b]=m;
+  if(a.length>=4&&b.length<=2) return {numero:a,parcela:parseInt(b,10)};
+  return {numero:t,parcela:null}; // ambíguo (ex: "6/11" de parcelamento) — mantém cru, sem adivinhar
+}
+// DESCRIÇÃO limpa: só remove os marcadores puramente visuais ("Pago"/"✅"), nunca apaga
+// observação nenhuma — o texto original inteiro fica preservado em raw_history.
+function _lancctbBlingLimparHistorico(raw){
+  let t=String(raw||'').trim();
+  t=t.replace(/✅/g,'').replace(/^\s*Pago\s*/i,'').trim();
+  t=t.replace(/\s{2,}/g,' ').trim();
+  return t||'Pago';
+}
+// Marcador entre parênteses no nome do Fornecedor (ex: "(1.6)", "(2.1)") — o site NUNCA decide
+// sozinho o que ele significa (pedido do usuário); só separa do nome e guarda em PORT/Negócio,
+// pra o contador vincular manualmente pelo filtro que já existe na tela.
+function _lancctbBlingExtrairMarcadorFornecedor(nomeCru){
+  const m=nomeCru.match(/^(.*?)\s*(\([\d.]+\))\s*$/);
+  if(m) return {nome:m[1].trim(),marcador:m[2]};
+  return {nome:nomeCru.trim(),marcador:null};
+}
+async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
+  const itensPag1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const bounds=_lancctbBlingContasPagarDetectarColunas(itensPag1);
+  if(!bounds) return null; // não é este layout — quem chamou cai pro caminho antigo (IA)
+  const registros=[];
+  let atual=null; // {fornecedorPartes:[], historicoPartes:[]}
+  let textoTudo='';
+  const iniciarRegistro=()=>{ atual={fornecedorPartes:[],historicoPartes:[]}; };
+  iniciarRegistro();
+  for(let p=1;p<=pdf.numPages;p++){
+    if(status) status.textContent=`Lendo página ${p}/${pdf.numPages} (Bling — Contas a Pagar)…`;
+    const itens=p===1?itensPag1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    textoTudo+=' '+itens.map(i=>i.str).join(' ');
+    const linhas=_lancctbAgruparLinhasPorY(itens,3);
+    for(const linha of linhas){
+      const textoLinha=linha.itens.map(i=>i.str).join(' ').trim();
+      if(!textoLinha||_lancctbBlingEhRuido(textoLinha)) continue;
+      const porColuna={fornecedor:[],historico:[],documento:[],vencimento:[],liquidacao:[],situacao:[],pago:[]};
+      linha.itens.forEach(it=>{ const c=_lancctbBlingColunaDoItem(bounds,it.x); if(c) porColuna[c].push(it); });
+      const juntar=arr=>arr.sort((a,b)=>a.x-b.x).map(i=>i.str).join(' ').trim();
+      const txtVenc=juntar(porColuna.vencimento), txtLiq=juntar(porColuna.liquidacao);
+      const ehAncora=LANCCTB_RE_DATA_BR.test(txtVenc)&&LANCCTB_RE_DATA_BR.test(txtLiq);
+      const txtForn=juntar(porColuna.fornecedor), txtHist=juntar(porColuna.historico);
+      if(txtForn) atual.fornecedorPartes.push(txtForn);
+      if(txtHist) atual.historicoPartes.push(txtHist);
+      if(ehAncora){
+        const fornecedorCru=atual.fornecedorPartes.join(' ').replace(/\s{2,}/g,' ').trim();
+        const {nome:fornecedorNome,marcador}=_lancctbBlingExtrairMarcadorFornecedor(fornecedorCru);
+        const rawHistory=atual.historicoPartes.join(' ').replace(/\s{2,}/g,' ').trim();
+        const documentoRaw=juntar(porColuna.documento);
+        const {numero,parcela}=_lancctbBlingSplitDocParcela(documentoRaw);
+        const situacao=juntar(porColuna.situacao);
+        const pagoStr=juntar(porColuna.pago);
+        const valor=_lancctbParseValorBR2(pagoStr);
+        const [dd,mm,aaaa]=txtLiq.split('/');
+        const [ddV,mmV,aaaaV]=txtVenc.split('/');
+        // Aviso (não bloqueia): uma data dentro do próprio texto do Histórico (ex: "03/08/26")
+        // divergindo da Liquidação — fica só pra conferência, nunca substitui a data oficial.
+        let avisoData=null;
+        const mDataNoHist=rawHistory.match(/(\d{2})\/(\d{2})\/(\d{2,4})/);
+        if(mDataNoHist){
+          const anoCurto=mDataNoHist[3].length===2?'20'+mDataNoHist[3]:mDataNoHist[3];
+          if(`${mDataNoHist[1]}/${mDataNoHist[2]}/${anoCurto}`!==`${dd}/${mm}/${aaaa}`) avisoData='HISTORY_DATE_DIFFERS_FROM_LIQUIDATION';
+        }
+        registros.push({
+          data:`${aaaa}-${mm}-${dd}`, vencimento:`${aaaaV}-${mmV}-${ddV}`,
+          descricao:_lancctbBlingLimparHistorico(rawHistory), raw_history:rawHistory,
+          cliente_fornecedor_nome:fornecedorNome, port_nom:marcador,
+          documento_numero:numero, parcela, situacao, valor,
+          aviso:avisoData, _incluir:true,
+        });
+        iniciarRegistro();
+      }
+    }
+  }
+  // Total oficial impresso no rodapé — validação, nunca vira lançamento.
+  const mTotal=textoTudo.match(/Total\s*=?\s*R\$\s*([\d.,]+)/i);
+  const totalOficial=mTotal?_lancctbParseValorBR2(mTotal[1]):null;
+  const soma=Math.round(registros.reduce((s,r)=>s+r.valor,0)*100)/100;
+  return { registros, totalOficial, soma, bate: totalOficial!=null&&Math.abs(soma-totalOficial)<0.01 };
+}
+function _lancctbBlingPreviewHtml(resultado){
+  const { registros, totalOficial, soma, bate } = resultado;
+  const qtdComAviso=registros.filter(r=>r.aviso).length;
+  let html=`<div style="font-size:12px;margin-bottom:8px">
+    <div>${registros.length} registro(s) lido(s) · soma <strong>R$ ${_fmt(soma)}</strong>${totalOficial!=null?` / total impresso no PDF <strong>R$ ${_fmt(totalOficial)}</strong> ${bate?'<span style="color:var(--teal)">✓ bate</span>':'<span style="color:#dc2626">⚠ BLING_TOTAL_MISMATCH — confira antes de importar</span>'}`:'<span style="color:#dc2626">⚠ não achei o "Total =" no PDF pra conferir</span>'}</div>
+    ${qtdComAviso?`<div style="color:#b45309">⚠ ${qtdComAviso} registro(s) com data dentro do Histórico diferente da Liquidação (HISTORY_DATE_DIFFERS_FROM_LIQUIDATION) — a data usada é sempre a Liquidação.</div>`:''}
+  </div>
+  <div style="overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+        <th style="padding:6px 8px"><input type="checkbox" checked onclick="_lancctbBlingToggleTodos(this.checked)"></th>
+        <th style="padding:6px 8px;text-align:left">Data</th>
+        <th style="padding:6px 8px;text-align:left">Descrição</th>
+        <th style="padding:6px 8px;text-align:left">Fornecedor</th>
+        <th style="padding:6px 8px;text-align:left">Número</th>
+        <th style="padding:6px 8px;text-align:center">Parc.</th>
+        <th style="padding:6px 8px;text-align:left">Port/Negócio</th>
+        <th style="padding:6px 8px;text-align:right">Valor</th>
+      </tr></thead><tbody>`;
+  registros.forEach((r,i)=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${r._incluir?1:.4}${r.aviso?';background:#fffbeb':''}">
+      <td style="padding:4px 8px"><input type="checkbox" ${r._incluir?'checked':''} onclick="_lancctbBlingPreview[${i}]._incluir=this.checked;document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbBlingPreviewHtml(_lancctbBlingResultado)"></td>
+      <td style="padding:4px 8px">${new Date(r.data+'T00:00:00').toLocaleDateString('pt-BR')}</td>
+      <td style="padding:4px 8px;max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.raw_history)}">${esc(r.descricao)}</td>
+      <td style="padding:4px 8px">${esc(r.cliente_fornecedor_nome)}</td>
+      <td style="padding:4px 8px;font-family:var(--mono)">${esc(r.documento_numero||'—')}</td>
+      <td style="padding:4px 8px;text-align:center">${r.parcela||'—'}</td>
+      <td style="padding:4px 8px">${esc(r.port_nom||'—')}</td>
+      <td style="padding:4px 8px;text-align:right">R$ ${_fmt(r.valor)}</td>
+    </tr>`;
+  });
+  const qtd=registros.filter(r=>r._incluir).length;
+  html+=`</tbody></table></div>
+  <div class="ma" style="margin-top:14px">
+    <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+    <button class="btn bp" onclick="confirmarLancctbFluxoImportBling()">✓ Importar ${qtd} lançamento(s)</button>
+  </div>`;
+  return html;
+}
+function _lancctbBlingToggleTodos(marcar){ _lancctbBlingPreview.forEach(r=>r._incluir=marcar); document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbBlingPreviewHtml(_lancctbBlingResultado); }
+let _lancctbBlingPreview=[], _lancctbBlingResultado=null;
+async function confirmarLancctbFluxoImportBling(){
+  const selecionados=_lancctbBlingPreview.filter(r=>r._incluir);
+  if(!selecionados.length){ toast('Nenhum lançamento selecionado','err'); return; }
+  const contaSel=document.getElementById('lancctbFluxoImportConta').value||null;
+  // Evita duplicar se o mesmo relatório for importado de novo — mesma empresa+data+documento
+  // (ou descrição, quando não há documento)+valor já contam como "já importado".
+  const { data: existentes } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    .select('data,documento_numero,valor_saida,descricao').eq('empresa_eid',_lancctbEidAtual));
+  const chave=r=>`${r.data}|${r.documento_numero||r.descricao}|${Math.round((r.valor_saida??r.valor)*100)}`;
+  const jaExistentes=new Set((existentes||[]).map(chave));
+  const registros=selecionados.map(r=>({
+    empresa_eid:_lancctbEidAtual, conta_bancaria_id:contaSel, data:r.data,
+    descricao:r.descricao, valor_saida:r.valor, valor_entrada:0,
+    cliente_fornecedor_nome:r.cliente_fornecedor_nome||null, documento_numero:r.documento_numero||null,
+    parcela:r.parcela||null, port_nom:r.port_nom||null,
+    arquivo_origem:_lancctbFluxoImportNomeArquivo,
+  })).filter(r=>!jaExistentes.has(chave(r)));
+  const puladas=selecionados.length-registros.length;
+  if(!registros.length){ toast('Todos os lançamentos selecionados já tinham sido importados antes.','err'); return; }
+  const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(registros);
+  if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
+  toast(`${registros.length} lançamento(s) do Bling importado(s)${puladas?` — ${puladas} já existiam e foram ignorados`:''}`,'ok');
+  closeModal('mLancctbUpload');
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
+}
+// PDF: primeiro tenta o leitor dedicado do Bling "Relatório de Contas a Pagar" (sem IA, ver
+// acima) — só cai na Edge Function genérica (IA) quando o PDF não é esse modelo específico.
 let _lancctbFluxoImportPreviewPdf=[];
 async function _lancctbFluxoLerPdf(file,status){
   document.getElementById('lancctbFluxoImportTipoWrap').style.display='none';
@@ -31108,6 +31297,15 @@ async function _lancctbFluxoLerPdf(file,status){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    const resultadoBling=await _lancctbParsearFluxoBlingContasPagar(pdf,status);
+    if(resultadoBling){
+      _lancctbBlingResultado=resultadoBling;
+      _lancctbBlingPreview=resultadoBling.registros;
+      status.textContent=`Modelo reconhecido: Bling — Relatório de Contas a Pagar (leitura direta, sem IA).`;
+      document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbBlingPreviewHtml(resultadoBling);
+      document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+      return;
+    }
     const paginasTexto=[];
     for(let p=1;p<=pdf.numPages;p++){
       const page=await pdf.getPage(p);
