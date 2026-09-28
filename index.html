@@ -19831,6 +19831,14 @@ async function _lancctbAcharPastaEmpresaExtratosMister(handleRaiz,eid){
   }
   return null;
 }
+// Normaliza nome de empresa/arquivo pra comparar: minúsculas, sem acento, só alfanumérico+espaço
+// (evita falha por "S.A." x "S/A", pontuação, espaços duplos etc). Pedido 28/09/2026: a pasta fixa
+// "Extratos Mister Contador" na prática guarda os arquivos SOLTOS na raiz (não numa subpasta por
+// empresa) — quando não existir subpasta "(eid)", a busca cai pra raiz filtrando pelo nome da
+// empresa no INÍCIO do nome do arquivo (padrão real: "RAZÃO SOCIAL - Banco X - Agência Y - C-C Z_AAAA-MM.pdf").
+function _lancctbNormalizarNomeEmpresa(s){
+  return _convMpRemoverAcentos(String(s||'').toLowerCase()).replace(/[^a-z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
+}
 // Até 2 pastas de rede próprias de UMA conta bancária (agencias_bancarias.id).
 async function _lancctbPastasExtratoDaConta(agenciaId){
   const [p1,p2]=await Promise.all([1,2].map(slot=>_lancctbCarregarHandleGenerico('pastaExtrato_'+agenciaId+'_'+slot)));
@@ -19910,14 +19918,17 @@ function _lancctbBancoApelidos(bancoNome){
 // associada à conta do Bradesco): quando a pasta contém arquivo de MAIS DE UM banco/conta no
 // mesmo mês, só considera quem também bate o Nº da conta corrente ou o nome do banco no nome
 // do arquivo — nunca entrega um extrato de outra conta só porque o mês bateu.
-async function _lancctbAcharArquivoExtratoNaPasta(handlePasta,competenciaAAAAMM,agInfo){
+async function _lancctbAcharArquivoExtratoNaPasta(handlePasta,competenciaAAAAMM,agInfo,nomeEmpresaFiltro){
   const tokens=_lancctbTokensCompetencia(competenciaAAAAMM);
+  const empresaNorm=nomeEmpresaFiltro?_lancctbNormalizarNomeEmpresa(nomeEmpresaFiltro):'';
   const candidatos=[];
   const ehArquivoValido=nome=>/\.(pdf|xlsx|xls|csv)$/i.test(nome);
   async function varrer(dir,nomePastaPai,prof){
     for await (const [nome,fh] of dir.entries()){
       if(fh.kind==='file'&&ehArquivoValido(nome)){
-        if(_lancctbNomeCasaCompetencia(nome,tokens)||_lancctbNomeCasaCompetencia(nomePastaPai,tokens)) candidatos.push(fh);
+        const casaComp=_lancctbNomeCasaCompetencia(nome,tokens)||_lancctbNomeCasaCompetencia(nomePastaPai,tokens);
+        const casaEmpresa=!empresaNorm||_lancctbNormalizarNomeEmpresa(nome).startsWith(empresaNorm);
+        if(casaComp&&casaEmpresa) candidatos.push(fh);
       } else if(fh.kind==='directory'&&prof<2){
         try{ await varrer(fh,nome,prof+1); }catch{}
       }
@@ -32383,13 +32394,14 @@ async function _lancctbCarregarFileHandleNoInput(fileHandle,inputId){
 // Junta as até 2 pastas próprias da conta + (se origem=Mister Contador) a subpasta da empresa
 // dentro da raiz fixa "Extratos Mister Contador".
 async function _lancctbPastasParaBuscarExtrato(eid,agenciaId,origemExtrato){
-  const pastas=await _lancctbPastasExtratoDaConta(agenciaId);
+  const pastas=(await _lancctbPastasExtratoDaConta(agenciaId)).map(h=>({handle:h,filtrarEmpresa:false}));
   if(origemExtrato==='mister_contador'){
     try{
       const raiz=await _lancctbCarregarHandleGenerico('raizExtratosMister');
       if(raiz&&(await raiz.queryPermission({mode:'read'}))==='granted'){
         const pastaEmp=await _lancctbAcharPastaEmpresaExtratosMister(raiz,eid);
-        if(pastaEmp) pastas.push(pastaEmp);
+        if(pastaEmp) pastas.push({handle:pastaEmp,filtrarEmpresa:false});
+        else pastas.push({handle:raiz,filtrarEmpresa:true});
       }
     }catch(e){ console.warn('Extratos Mister Contador:',e); }
   }
@@ -32405,8 +32417,9 @@ async function _lancctbBuscarNaPastaEExtrato(){
   try{
     const pastas=await _lancctbPastasParaBuscarExtrato(_lancctbEidAtual,_lancctbExtratoContaSel,ag&&ag.origem_extrato);
     if(!pastas.length){ toast('Esta conta ainda não tem nenhuma pasta associada — configure em "Agência Bancária".','err'); return; }
+    const empAtual=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
     let achado=null;
-    for(const p of pastas){ achado=await _lancctbAcharArquivoExtratoNaPasta(p,competencia,{bancoNome:ag&&ag.banco_nome,contaCorrente:ag&&ag.conta_corrente}); if(achado) break; }
+    for(const p of pastas){ achado=await _lancctbAcharArquivoExtratoNaPasta(p.handle,competencia,{bancoNome:ag&&ag.banco_nome,contaCorrente:ag&&ag.conta_corrente},p.filtrarEmpresa?(empAtual&&empAtual.nome):null); if(achado) break; }
     if(!achado){ toast(`Nenhum arquivo de ${competencia.split('-').reverse().join('/')} encontrado nas pasta(s) associada(s).`,'err'); return; }
     const file=await _lancctbCarregarFileHandleNoInput(achado,'lancctbExtratoArquivo');
     if(status) status.textContent='Encontrado: '+file.name;
@@ -32463,7 +32476,7 @@ async function _lancctbRodarImportarExtratosLote(){
         if(!pastas.length) continue;
         contasComPasta++;
         let achado=null;
-        try{ for(const p of pastas){ achado=await _lancctbAcharArquivoExtratoNaPasta(p,mes,{bancoNome:ag.banco_nome,contaCorrente:ag.conta_corrente}); if(achado) break; } }catch(e){}
+        try{ for(const p of pastas){ achado=await _lancctbAcharArquivoExtratoNaPasta(p.handle,mes,{bancoNome:ag.banco_nome,contaCorrente:ag.conta_corrente},p.filtrarEmpresa?emp.nome:null); if(achado) break; } }catch(e){}
         if(!achado){ semArquivo++; detalhes.push(`— ${emp.nome} / ${ag.banco_nome||''}: sem arquivo de ${rot} nas pasta(s) associada(s)`); continue; }
         statusEl.textContent=`[${i+1}/${emps.length}] ${emp.nome} — lendo ${achado.name}…`;
         try{
