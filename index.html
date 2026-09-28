@@ -22483,6 +22483,9 @@ async function salvarLancctbConta(){
   if(_lancctbPlanoEditandoId){
     ({ error } = await _supaClient.from('plano_contas').update(dados).eq('id',_lancctbPlanoEditandoId));
   } else {
+    // Conta nova: enviar_pontos_atencao é NOT NULL no banco, sem valor padrão — sem isso o
+    // INSERT falha (mesma causa do bug real 28/09/2026 achado na importação de Excel/PDF).
+    if(dados.enviar_pontos_atencao===undefined) dados.enviar_pontos_atencao=false;
     ({ error } = await _supaClient.from('plano_contas').insert({...dados, empresa_eid:_lancctbEidAtual}));
   }
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
@@ -22820,8 +22823,19 @@ async function processarLancctbImportPlano(){
       })).filter(r=>r.numero_conta && r.classificacao);
     }
     }
-    // Contas padrão do escritório (ver LANCCTB_CONTAS_PONTOS_ATENCAO_AUTO) sempre entram já marcadas.
-    registros.forEach(r=>{ if(_lancctbContaSempreAlertar(r.descricao)) r.enviar_pontos_atencao=true; });
+    // Bug real 28/09/2026 (Nasa Truck, 1ª importação da empresa): a coluna enviar_pontos_atencao
+    // não tem valor padrão no banco (NOT NULL) — os 3 parsers acima nunca preenchiam essa chave,
+    // então o INSERT de conta NOVA (sem linha prévia no banco pra herdar) quebrava com "null
+    // value ... violates not-null constraint". Só preenche `false` pra quem é REALMENTE novo
+    // (upsert de conta já existente sem essa chave não mexe no valor atual — não pode resetar
+    // uma conta que o contador marcou manualmente em "Pontos de Atenção" só por reimportar o
+    // Excel). Contas padrão do escritório (LANCCTB_CONTAS_PONTOS_ATENCAO_AUTO) sempre viram true.
+    const { data: contasExistentes } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('numero_conta').eq('empresa_eid',_lancctbEidAtual));
+    const numsExistentes=new Set((contasExistentes||[]).map(c=>String(c.numero_conta)));
+    registros.forEach(r=>{
+      if(_lancctbContaSempreAlertar(r.descricao)) r.enviar_pontos_atencao=true;
+      else if(!numsExistentes.has(String(r.numero_conta))) r.enviar_pontos_atencao=false;
+    });
 
     if(!registros.length){ status.textContent='Nenhuma linha válida encontrada (verifique as colunas Conta/Classificação).'; btn.disabled=false; btn.textContent='⬆ Importar'; return; }
 
