@@ -26136,6 +26136,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   const resolvidosPorNumeroNf=await tentarPorNumeroNfNoHistorico(lancamentos);
   if(resolvidosPorNumeroNf.size) lancamentos=lancamentos.filter(l=>!resolvidosPorNumeroNf.has(l.id));
 
+  // Quantos créditos (entrada) pendentes existem por data — usado pelo "Passo 0.6: LOTE do dia"
+  // (recebimentos) pra nunca tentar separar sozinho 2+ créditos ambíguos no mesmo dia.
+  const creditosPendentesPorDia={};
+  lancamentos.forEach(o=>{ if(o.valor_entrada>0) creditosPendentesPorDia[o.data_pagamento]=(creditosPendentesPorDia[o.data_pagamento]||0)+1; });
+
   for(let i=0;i<lancamentos.length;i++){
     const l=lancamentos[i];
     log(`Processando ${i+1}/${lancamentos.length}…`);
@@ -26186,69 +26191,105 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       }
     }
 
-    // Passo 0.5: grupo de operações do Comprovante de Recebimento (Itaú
-    // "Extrato de movimentação de boletos" — valor_boleto/liquidação/tarifa/
-    // juros do MESMO documento) — pedido do usuário 08/09/2026, exemplo real
-    // D.R. Goi Importação: banco recebeu 889,34 (liquidação), mas a NF vale
-    // 874,78 (valor_boleto) + 16,06 de juros, com 1,50 de tarifa descontada.
-    // Gera partida dobrada de N linhas: Débito Banco (liquidação) + Débito
-    // tarifa/desconto (valor negativo, é despesa) + Crédito NF/valor_boleto
-    // (tenta achar a Nota Fiscal pelo número embutido no documento_numero,
-    // "NF-parcela"; sem achar, usa a mesma conta fixa 10000 mesmo assim) +
-    // Crédito juros/multa (receita, via Regra por histórico_gatilho — texto
-    // igual ao rótulo da operação, ex: "Receita de Juros"). Só roda pra
-    // entrada (recebimento) nos modos 'completo' e 'comprovantes_recebimento'
-    // — nunca é acionado por "Processar Notas Fiscais"/"...via IA" isolados.
+    // Passo 0.5/0.6: operações do Comprovante de Recebimento (Itaú "Extrato de movimentação de
+    // boletos" — valor_boleto/liquidação/tarifa/juros do MESMO documento), comparando o crédito
+    // bancário com a LIQUIDAÇÃO (nunca com valor_boleto direto — pedido do usuário 08/09/2026,
+    // exemplo real D.R. Goi Importação: banco recebeu 889,34, mas a NF vale 874,78 + 16,06 de
+    // juros - 1,50 de tarifa). "_lancctbMontarGrupoLiquidacao" monta a partida dobrada de N
+    // linhas de UMA âncora (Débito Banco + Crédito NF/valor_boleto + tarifa/juros/multa via Regra
+    // ou Conta padrão). Só roda pra entrada nos modos 'completo'/'comprovantes_recebimento'.
+    const HISTORICO_LABEL_OP={liquidacao:'Recebimento',valor_boleto:'Liquidação',tarifa_cobranca:'Tarifa de Cobrança',juros:'Receita de Juros',multa:'Receita de Multa',desconto:'Desconto Concedido'};
+    async function _lancctbMontarGrupoLiquidacao(ancoraLiquidacao){
+      const grupo=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.documento_numero===ancoraLiquidacao.documento_numero&&c.cliente_fornecedor_nome===ancoraLiquidacao.cliente_fornecedor_nome);
+      const [nfNum,parcelaNum]=String(ancoraLiquidacao.documento_numero).split('-');
+      const refTexto=nfNum?` ref. NF ${nfNum}${parcelaNum?` (parcela ${parcelaNum})`:''} de ${ancoraLiquidacao.cliente_fornecedor_nome||''}`.trim():'';
+      // Tenta achar a NF real (empresa emitiu, direção=venda) pelo número —
+      // não achando, segue mesmo assim com a conta fixa 10000 (usuário:
+      // "eu não sei de qual mês é e se fiz upload" — não bloqueia o lançamento).
+      const parcelaNf=(nfNum&&!bloqueiaNf)?parcelas.find(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao==='venda'&&String(p.notas_fiscais?.numero)===String(nfNum)&&(!parcelaNum||String(p.numero_parcela)===String(parcelaNum))):null;
+      const regraClienteNF=parcelaNf&&regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&r.cnpj_cpf_gatilho===parcelaNf.notas_fiscais?.cnpj_destinatario);
+      const contaNF=regraClienteNF?{id:regraClienteNF.conta_contabil_id,classificacao:regraClienteNF.plano_contas.classificacao}:{id:contaEntradaNF.id,classificacao:contaEntradaNF.classificacao};
+      let todasResolvidas=true;
+      const linhasGrupoOp=[{ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:'D', valor:ancoraLiquidacao.valor_pago, historico:`${HISTORICO_LABEL_OP.liquidacao}${refTexto}`, cliente_fornecedor_nome:ancoraLiquidacao.cliente_fornecedor_nome||null, cnpj_cpf:ancoraLiquidacao.cnpj_cpf||null, comprovante_id:ancoraLiquidacao.id, lancamento_extrato_id:null, origem_match:'automatico_triangular' }];
+      for(const c of grupo){
+        if(c.tipo_operacao==='liquidacao') continue;
+        if(c.tipo_operacao==='valor_boleto'){
+          linhasGrupoOp.push({ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:contaNF.classificacao, conta_contabil_id:contaNF.id, tipo:'C', valor:c.valor_pago, historico:`${HISTORICO_LABEL_OP.valor_boleto}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:null, regra_matching_id:regraClienteNF?.id||null, origem_match:'automatico_triangular' });
+          continue;
+        }
+        const rotulo=HISTORICO_LABEL_OP[c.tipo_operacao];
+        const regraOp=rotulo&&regras.find(r=>r.tipo_regra==='historico'&&r.historico_gatilho&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&rotulo.toLowerCase().includes(r.historico_gatilho.toLowerCase()));
+        // Sem Regra por histórico, usa a Conta padrão (🏷️) do tipo de operação:
+        // juros/multa → receita (crédito); tarifa/desconto → despesa (débito).
+        const kPad={tarifa_cobranca:['tarifas_boletos','D'],juros:['juros_ativos','C'],multa:['multas_ativas','C'],desconto:['descontos_concedidos','D']}[c.tipo_operacao];
+        const cPad=kPad?contaPad(kPad[0]):null;
+        if(!regraOp&&cPad){
+          linhasGrupoOp.push({ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:kPad[1], valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:null, origem_match:'automatico_triangular' });
+          continue;
+        }
+        if(!regraOp){ todasResolvidas=false; break; }
+        linhasGrupoOp.push({ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:regraOp.plano_contas.classificacao, conta_contabil_id:regraOp.conta_contabil_id, tipo:regraOp.dc, valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:null, regra_matching_id:regraOp.id, origem_match:'regra' });
+      }
+      return { ok:todasResolvidas, linhas:linhasGrupoOp, grupo, parcelaNf, refTexto };
+    }
     if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')){
-      const HISTORICO_LABEL_OP={liquidacao:'Recebimento',valor_boleto:'Liquidação',tarifa_cobranca:'Tarifa de Cobrança',juros:'Receita de Juros',multa:'Receita de Multa',desconto:'Desconto Concedido'};
       const ancoraLiquidacao=comprovantesReceb.find(c=>
         !comprovantesUsadosReceb.has(c.id)&&c.tipo_operacao==='liquidacao'&&c.documento_numero
         &&Math.abs(c.valor_pago-valor)<=tolComp
         &&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
       if(ancoraLiquidacao){
-        const grupo=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.documento_numero===ancoraLiquidacao.documento_numero&&c.cliente_fornecedor_nome===ancoraLiquidacao.cliente_fornecedor_nome);
-        const [nfNum,parcelaNum]=String(ancoraLiquidacao.documento_numero).split('-');
-        const refTexto=nfNum?` ref. NF ${nfNum}${parcelaNum?` (parcela ${parcelaNum})`:''} de ${ancoraLiquidacao.cliente_fornecedor_nome||''}`.trim():'';
-        // Tenta achar a NF real (empresa emitiu, direção=venda) pelo número —
-        // não achando, segue mesmo assim com a conta fixa 10000 (usuário:
-        // "eu não sei de qual mês é e se fiz upload" — não bloqueia o lançamento).
-        const parcelaNf=(nfNum&&!bloqueiaNf)?parcelas.find(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao==='venda'&&String(p.notas_fiscais?.numero)===String(nfNum)&&(!parcelaNum||String(p.numero_parcela)===String(parcelaNum))):null;
-        const regraClienteNF=parcelaNf&&regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&r.cnpj_cpf_gatilho===parcelaNf.notas_fiscais?.cnpj_destinatario);
-        const contaNF=regraClienteNF?{id:regraClienteNF.conta_contabil_id,classificacao:regraClienteNF.plano_contas.classificacao}:{id:contaEntradaNF.id,classificacao:contaEntradaNF.classificacao};
-
-        let todasResolvidas=true;
-        const linhasGrupoOp=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:'D', valor:ancoraLiquidacao.valor_pago, historico:`${HISTORICO_LABEL_OP.liquidacao}${refTexto}`, cliente_fornecedor_nome:ancoraLiquidacao.cliente_fornecedor_nome||null, cnpj_cpf:ancoraLiquidacao.cnpj_cpf||null, comprovante_id:ancoraLiquidacao.id, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' }];
-        for(const c of grupo){
-          if(c.tipo_operacao==='liquidacao') continue;
-          if(c.tipo_operacao==='valor_boleto'){
-            linhasGrupoOp.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:contaNF.classificacao, conta_contabil_id:contaNF.id, tipo:'C', valor:c.valor_pago, historico:`${HISTORICO_LABEL_OP.valor_boleto}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:l.id, regra_matching_id:regraClienteNF?.id||null, origem_match:'automatico_triangular' });
-            continue;
-          }
-          const rotulo=HISTORICO_LABEL_OP[c.tipo_operacao];
-          const regraOp=rotulo&&regras.find(r=>r.tipo_regra==='historico'&&r.historico_gatilho&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&rotulo.toLowerCase().includes(r.historico_gatilho.toLowerCase()));
-          // Sem Regra por histórico, usa a Conta padrão (🏷️) do tipo de operação:
-          // juros/multa → receita (crédito); tarifa/desconto → despesa (débito).
-          const kPad={tarifa_cobranca:['tarifas_boletos','D'],juros:['juros_ativos','C'],multa:['multas_ativas','C'],desconto:['descontos_concedidos','D']}[c.tipo_operacao];
-          const cPad=kPad?contaPad(kPad[0]):null;
-          if(!regraOp&&cPad){
-            linhasGrupoOp.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:kPad[1], valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
-            continue;
-          }
-          if(!regraOp){ todasResolvidas=false; break; }
-          linhasGrupoOp.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:regraOp.plano_contas.classificacao, conta_contabil_id:regraOp.conta_contabil_id, tipo:regraOp.dc, valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:l.id, regra_matching_id:regraOp.id, origem_match:'regra' });
-        }
-        if(todasResolvidas){
-          const { error:erroGrupoOp } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasGrupoOp });
+        const montado=await _lancctbMontarGrupoLiquidacao(ancoraLiquidacao);
+        montado.linhas.forEach(ln=>{ ln.lancamento_extrato_id=l.id; });
+        if(montado.ok){
+          const { error:erroGrupoOp } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:montado.linhas });
           if(erroGrupoOp){
             erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${erroGrupoOp.message}`);
           } else {
             await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-            const idsGrupo=grupo.map(c=>c.id);
+            const idsGrupo=montado.grupo.map(c=>c.id);
             idsGrupo.forEach(id=>comprovantesUsadosReceb.add(id));
             await _lancctbEmLotesDb(idsGrupo,200,lote=>_supaClient.from('comprovantes_recebimento').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',lote));
-            if(parcelaNf){ parcelasUsadas.add(parcelaNf.id); await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',parcelaNf.id); }
-            await checarAlertaAutomatico(linhasGrupoOp,l,valor,HISTORICO_LABEL_OP.liquidacao+refTexto,ancoraLiquidacao.cliente_fornecedor_nome);
+            if(montado.parcelaNf){ parcelasUsadas.add(montado.parcelaNf.id); await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',montado.parcelaNf.id); }
+            await checarAlertaAutomatico(montado.linhas,l,valor,HISTORICO_LABEL_OP.liquidacao+montado.refTexto,ancoraLiquidacao.cliente_fornecedor_nome);
             resolvRegra++; resolvido=true;
+          }
+        }
+      }
+    }
+    if(resolvido) continue;
+
+    // Passo 0.6: LOTE do dia — pedido do usuário 29/09/2026 (Kazangil): um crédito bancário só
+    // (ex.: "Mov Tit Cob Disp 03/08") pode representar a SOMA de vários boletos liquidados no
+    // mesmo dia. Só tenta quando NÃO há outro crédito de entrada pendente no mesmo dia+conta
+    // (senão fica ambíguo demais pra separar sozinho — regra do usuário: "não forçar subset-sum",
+    // melhor deixar pendente do que chutar uma combinação arbitrária).
+    if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')&&!(creditosPendentesPorDia[l.data_pagamento]>1)){
+      const candidatas=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.tipo_operacao==='liquidacao'&&c.documento_numero&&c.data_pagamento===l.data_pagamento);
+      const somaCent=Math.round(candidatas.reduce((s,c)=>s+c.valor_pago,0)*100);
+      if(candidatas.length>=2&&Math.abs(somaCent-Math.round(valor*100))<=1){
+        const montagens=[]; let todasOk=true;
+        for(const ancora of candidatas){
+          const m=await _lancctbMontarGrupoLiquidacao(ancora);
+          if(!m.ok){ todasOk=false; break; }
+          m.linhas.forEach(ln=>{ ln.lancamento_extrato_id=l.id; });
+          montagens.push(m);
+        }
+        if(todasOk){
+          let erroLote=null;
+          for(const m of montagens){
+            const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:m.linhas });
+            if(error){ erroLote=error; break; }
+          }
+          if(erroLote){
+            erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${erroLote.message}`);
+          } else {
+            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+            const idsGrupo=montagens.flatMap(m=>m.grupo.map(c=>c.id));
+            idsGrupo.forEach(id=>comprovantesUsadosReceb.add(id));
+            await _lancctbEmLotesDb(idsGrupo,200,lote=>_supaClient.from('comprovantes_recebimento').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',lote));
+            for(const m of montagens){ if(m.parcelaNf){ parcelasUsadas.add(m.parcelaNf.id); await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',m.parcelaNf.id); } }
+            await checarAlertaAutomatico(montagens.flatMap(m=>m.linhas),l,valor,`Lote do dia — ${montagens.length} recebimento(s)`,null);
+            resolvRegra+=montagens.length; resolvido=true;
           }
         }
       }
