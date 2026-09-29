@@ -37349,6 +37349,59 @@ async function _ganhoExtrairBBRendeFacil(file){
     })(),
   };
 }
+// ── Itaú Conta Corrente com a seção "Movimentação - Aplicações/Resgates Antecipados e
+// Vencimentos" EMBUTIDA (pedido do usuário 29/09/2026, Kazangil) — é o extrato BANCÁRIO comum
+// (C/C mensal), não um extrato dedicado de investimento: a aplicação automática (Aplic Aut Mais/
+// CDB) aparece como uma seção a mais dentro dele. Lê só os totais da linha "total" dessa tabela
+// (nunca do quadro "resumo - mês", que soma coisa diferente) — robusto a quebra de página porque
+// concatena o texto de TODAS as páginas antes de procurar, então a tabela pode continuar na
+// página seguinte sem repetir o cabeçalho/total que a leitura não se perde.
+async function _ganhoExtrairItauCcAplicAutMaisEmbutida(file){
+  _convItauGarantirWorker();
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  let textoCompleto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    textoCompleto+=' '+content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
+  }
+  textoCompleto=textoCompleto.trim();
+  const reSecao=/movimenta[çc][ãa]o\s*-\s*aplica[çc][õo]es\s*\/\s*resgates\s+antecipados\s+e\s+vencimentos/i;
+  if(!reSecao.test(textoCompleto)) return null;
+  const num=s=>_convCobrParseValor(s);
+  const mComp=textoCompleto.match(/resumo\s*-\s*m[êe]s\s+(\d{2})\/(\d{4})/i);
+  if(!mComp) return null;
+  const mk=mComp[1]+'/'+mComp[2];
+  const idxInicio=textoCompleto.search(reSecao);
+  const bloco=idxInicio>=0?textoCompleto.slice(idxInicio):textoCompleto;
+  const rs='([\\d.,]+)';
+  const reTotal=new RegExp('\\btotal\\s+'+rs+'\\s+'+rs+'\\s+'+rs+'\\s+'+rs+'\\s+'+rs+'\\s+'+rs,'i');
+  const mTotal=bloco.match(reTotal);
+  if(!mTotal) return null;
+  const aplicacoes=num(mTotal[1]), principalResgatado=num(mTotal[2]), rendBruto=num(mTotal[3]),
+    iof=num(mTotal[4]), irrf=num(mTotal[5]), rendLiquido=num(mTotal[6]);
+  const warnings=[];
+  const calc=Math.round((rendBruto-iof-irrf)*100)/100;
+  if(Math.abs(calc-rendLiquido)>0.02) warnings.push(`Rendimento bruto - IOF - IRRF (${calc.toFixed(2)}) não bate com o Rendimento líquido pago impresso (${rendLiquido.toFixed(2)}) — confira antes de salvar.`);
+  const [mm,aaaa]=mk.split('/');
+  const M='itau_cc_aplic_aut_mais';
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  const mkSrc=(k,label,v)=>({key:M+'.'+k,label,section:'Movimentação - Aplicações/Resgates Antecipados e Vencimentos',product:null,value:r2(v),calculationType:'DIRECT_TOTAL'});
+  const sources=[
+    mkSrc('total.applications','Total → Aplicações realizadas',aplicacoes),
+    mkSrc('total.redeemed_principal','Total → Valor principal resgat./venc.',principalResgatado),
+    mkSrc('total.gross_yield','Total → Rendimento bruto pago',rendBruto),
+    mkSrc('total.iof','Total → IOF retido',iof),
+    mkSrc('total.irrf','Total → IRRF retido',irrf),
+    mkSrc('total.net_yield','Total → Rendimento líquido pago',rendLiquido),
+  ];
+  return {
+    bank:'ITAU', model:M, competence:aaaa+'-'+mm, account:null,
+    fingerprint:_aplicfinFingerprint('ITAU',M,['MOVIMENTACAO - APLICACOES/RESGATES ANTECIPADOS E VENCIMENTOS']),
+    productMode:'single', products:[], sources, validations:[], warnings, pageCount:pdf.numPages,
+  };
+}
 // Empacota o resultado de _ganhoExtrairBBRendeFacil no contrato padrão
 // (source_keys) pra passar pela MESMA tela de mapeamento dos outros bancos —
 // pedido do usuário 11/09/2026, antes escrevia direto sem perguntar nada.
@@ -39051,6 +39104,11 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
   // aos outros bancos e reaplica sozinho nos meses seguintes.
   const bb=await _aplicfinParseBbRendeFacil(file);
   if(bb) return await _ganhoAplicarParserSemIA(eid,pid,bb,file,statusEl);
+
+  // Extrato de Conta Corrente Itaú com a seção "Movimentação - Aplicações/Resgates
+  // Antecipados e Vencimentos" embutida (Aplic Aut Mais/CDB dentro do extrato bancário comum).
+  const itauCc=await _ganhoExtrairItauCcAplicAutMaisEmbutida(file);
+  if(itauCc) return await _ganhoAplicarParserSemIA(eid,pid,itauCc,file,statusEl);
 
   // "Extrato de Fundos de Investimento" Itaú — pode ter vários fundos no
   // mesmo PDF; o CNPJ já cadastrado nesta aplicação (ganho.cnpj) escolhe qual
