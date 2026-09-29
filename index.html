@@ -34041,6 +34041,164 @@ async function _lancctbParsearExtratoBancoInter(pdf){
     titular:{ nome:empresaNome, cnpj, agencia, conta, instituicao }, documentPeriod:{ start:periodoIni, end:periodoFim }, solicitadoEm:solicitado,
     headerBalances:{ total:hdrTotal, available:hdrDisp, blocked:hdrBloq } };
 }
+// ─── Cora (conta corrente) — pedido do usuário 29/09/2026, empresa SuperVendedores (#95). PDF com
+// texto nativo, sem IA. Reconhece por "Cora SCFI"+"Saldo inicial/final disponível". Cada dia abre
+// com "Saldo do dia" (NÃO é movimento, só usado como marcador do bloco); cada linha de transação
+// traz tipo, nome da contraparte (pode vir truncado com "…" no PDF) e documento (CNPJ/CPF) — nunca
+// confundir o CNPJ da Cora SCFI (instituição) com o CNPJ da empresa.
+async function _lancctbParsearExtratoCoraPdf(pdf){
+  const semAcento=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    paginas.push(_lancctbAgruparLinhasPorY(itens,3));
+  }
+  const linhasP1=paginas[0]||[];
+  const txtP1=semAcento(linhasP1.map(l=>l.itens.map(i=>i.str).join(' ')).join(' ')).toUpperCase();
+  if(!/CORA SCFI/.test(txtP1)||!/SALDO INICIAL DISPON/.test(txtP1)||!/SALDO FINAL DISPON/.test(txtP1)) return null;
+  const parseBR=s=>parseFloat(String(s).replace(/[^\d,]/g,'').replace(',','.'))||0;
+  const r2=v=>Math.round(v*100)/100;
+  const reValComSinal=/^([+-])\s*R\$\s*([\d.,]+)$/;
+  const reDoc=/^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$|^\d{3}\.\d{3}\.\d{3}-\d{2}$/;
+  const reDia=/^(\d{2})\/(\d{2})\/(\d{4})\s+Saldo do dia\s+R\$\s*([\d.,]+)/i;
+  let cnpj=null,agencia=null,conta=null,periodoIni=null,periodoFim=null;
+  let saldoInicialDoc=null,totalEntradasDoc=null,totalSaidasDoc=null,saldoFinalDoc=null;
+  linhasP1.forEach(l=>{
+    const t=l.itens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+    let m;
+    if(m=t.match(/^CNPJ\s+([\d.\/-]+)$/)) cnpj=m[1].replace(/\D/g,'');
+    if(m=t.match(/^Ag[êe]ncia:\s*(\S+)\s*-\s*Conta:\s*(\S+)/i)){ agencia=m[1]; conta=m[2]; }
+    if(m=t.match(/(\d{2})\/(\d{2})\/(\d{4})\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/)){ periodoIni=`${m[3]}-${m[2]}-${m[1]}`; periodoFim=`${m[6]}-${m[5]}-${m[4]}`; }
+    if(m=t.match(/^Saldo inicial dispon[íi]vel\s+R\$\s*([\d.,]+)/i)) saldoInicialDoc=parseBR(m[1]);
+    if(m=t.match(/^Total de entradas\s*\+?\s*R\$\s*([\d.,]+)/i)) totalEntradasDoc=parseBR(m[1]);
+    if(m=t.match(/^Total de sa[íi]das\s*-?\s*R\$\s*([\d.,]+)/i)) totalSaidasDoc=parseBR(m[1]);
+    if(m=t.match(/^Saldo final dispon[íi]vel\s+R\$\s*([\d.,]+)/i)) saldoFinalDoc=parseBR(m[1]);
+  });
+  if(!cnpj||!periodoIni) return null;
+  const movs=[]; let dataAtual=null, seq=0;
+  paginas.forEach(linhas=>{
+    linhas.forEach(l=>{
+      const itens=(l.itens||[]).map(x=>x.str.trim()).filter(Boolean);
+      if(!itens.length) return;
+      const md=itens.join(' ').match(reDia);
+      if(md){ dataAtual=`${md[3]}-${md[2]}-${md[1]}`; return; } // "Saldo do dia" NUNCA é movimento
+      if(itens.length<4||!dataAtual) return;
+      const valorStr=itens[itens.length-1], documento=itens[itens.length-2];
+      const mv=valorStr.match(reValComSinal);
+      if(!mv||!reDoc.test(documento)) return;
+      const tipo=itens[0], nome=itens.slice(1,itens.length-2).join(' ').trim();
+      const valor=(mv[1]==='-'?-1:1)*parseBR(mv[2]);
+      movs.push({ data:dataAtual, tipo, nome, documento, valor, seq:++seq });
+    });
+  });
+  if(!movs.length) return null;
+  const lancamentos=movs.map(m=>({ data:m.data, historico:`${m.tipo} — ${m.nome}`,
+    valor_entrada:m.valor>0?r2(m.valor):0, valor_saida:m.valor<0?r2(-m.valor):0,
+    informacao:`Documento contraparte: ${m.documento}` }));
+  const somaE=r2(lancamentos.reduce((s,l)=>s+l.valor_entrada,0)), somaS=r2(lancamentos.reduce((s,l)=>s+l.valor_saida,0));
+  const avisos=[];
+  if(totalEntradasDoc!=null&&Math.abs(somaE-totalEntradasDoc)>0.005) avisos.push(`entradas somadas R$ ${_fmt(somaE)} ≠ total impresso R$ ${_fmt(totalEntradasDoc)}`);
+  if(totalSaidasDoc!=null&&Math.abs(somaS-totalSaidasDoc)>0.005) avisos.push(`saídas somadas R$ ${_fmt(somaS)} ≠ total impresso R$ ${_fmt(totalSaidasDoc)}`);
+  return { layout:'Cora (conta corrente)', model:'CORA_CURRENT_ACCOUNT', lancamentos,
+    saldoAnteriorDoc:saldoInicialDoc, saldoFinalDoc,
+    observacao:` Ag ${agencia||''} Cc ${conta||''} · período ${periodoIni.split('-').reverse().join('/')} a ${periodoFim.split('-').reverse().join('/')}.`+(avisos.length?' ⚠ '+avisos.join('; ')+'.':' ✓ totais de entradas/saídas impressos conferem com a soma dos lançamentos.') };
+}
+// ─── Hotmart / Launch Pad (carteira digital) — mesmo pedido 29/09/2026. PDF com texto nativo. A
+// data do dia ("31 AGO." + "2026" em linhas separadas) precisa SOBREVIVER à troca de página — os
+// lançamentos de um mesmo dia continuam na página seguinte sem repetir o cabeçalho do dia.
+async function _lancctbParsearExtratoHotmartLaunchpad(pdf){
+  const semAcento=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    paginas.push(_lancctbAgruparLinhasPorY(itens,3));
+  }
+  const linhasP1=paginas[0]||[];
+  const txtP1=semAcento(linhasP1.map(l=>l.itens.map(i=>i.str).join(' ')).join(' ')).toUpperCase();
+  if(!/EXTRATO DE CONTA/.test(txtP1)||!/LAUNCH PAD S\. DE CR/.test(txtP1)||!/PERIODO DO EXTRATO/.test(txtP1)) return null;
+  const parseBR=s=>{ const t=String(s).trim(); const neg=/^-/.test(t); const v=parseFloat(t.replace(/^-/,'').replace(/\./g,'').replace(',','.'))||0; return neg?-v:v; };
+  const r2=v=>Math.round(v*100)/100;
+  const reVal=/^-?\d{1,3}(\.\d{3})*,\d{2}$/;
+  const MES={JAN:1,FEV:2,MAR:3,ABR:4,MAI:5,JUN:6,JUL:7,AGO:8,SET:9,OUT:10,NOV:11,DEZ:12};
+  let cnpj=null,titular=null,periodoIni=null,periodoFim=null,saldoFinalDoc=null;
+  linhasP1.forEach(l=>{
+    const t=l.itens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+    let m;
+    if(m=t.match(/Titular:\s*(.+?)\s*Institui[çc][ãa]o:/i)) titular=m[1].trim();
+    if(m=t.match(/CNPJ:\s*([\d.\/-]+)/)) cnpj=m[1].replace(/\D/g,'');
+    if(m=t.match(/Per[íi]odo do extrato:\s*(\d{2})\/(\d{2})\/(\d{4})\s*at[ée]\s*(\d{2})\/(\d{2})\/(\d{4})/i)){
+      periodoIni=`${m[3]}-${m[2]}-${m[1]}`; periodoFim=`${m[6]}-${m[5]}-${m[4]}`;
+    }
+    if(m=t.match(/Saldo final do per[íi]odo:\s*R\$\s*([\d.,]+)/i)) saldoFinalDoc=parseBR(m[1]);
+  });
+  if(!cnpj||!periodoIni) return null;
+  const movs=[]; let dataAtual=null, seq=0;
+  paginas.forEach(linhas=>{
+    for(let i=0;i<linhas.length;i++){
+      const itens=(linhas[i].itens||[]).map(x=>x.str.trim()).filter(Boolean);
+      if(!itens.length) continue;
+      const mDia=itens[0].match(/^(\d{1,2})\s+([A-ZÇÃÕ]{3})\.?$/i);
+      if(mDia){
+        const mesN=MES[semAcento(mDia[2]).toUpperCase()];
+        const prox=linhas[i+1]&&linhas[i+1].itens.map(x=>x.str.trim()).filter(Boolean);
+        const ano=prox&&prox.length===1&&/^\d{4}$/.test(prox[0])?prox[0]:null;
+        if(mesN&&ano){ dataAtual=`${ano}-${String(mesN).padStart(2,'0')}-${String(mDia[1]).padStart(2,'0')}`; i++; }
+        continue;
+      }
+      if(itens.length===1&&/^\d{4}$/.test(itens[0])) continue; // ano isolado (defensivo — já consumido acima)
+      if(itens[0]==='Data'||/^P[áa]gina/i.test(itens[0])||/^Ouvidoria/i.test(itens[0])) continue;
+      const ultimo=itens[itens.length-1];
+      if(!reVal.test(ultimo)||!dataAtual) continue;
+      const valor=parseBR(ultimo);
+      const descricao=itens[0];
+      const referencia=itens.length>=3?itens[1]:null;
+      movs.push({ data:dataAtual, historico:descricao+(referencia?(' '+referencia):''), valor, referencia, seq:++seq });
+    }
+  });
+  if(!movs.length) return null;
+  const lancamentos=movs.map(m=>({ data:m.data, historico:m.historico,
+    valor_entrada:m.valor>0?r2(m.valor):0, valor_saida:m.valor<0?r2(-m.valor):0,
+    informacao:m.referencia?`Ref. Hotmart: ${m.referencia}`:'' }));
+  const somaE=r2(lancamentos.reduce((s,l)=>s+l.valor_entrada,0)), somaS=r2(lancamentos.reduce((s,l)=>s+l.valor_saida,0));
+  return { layout:'Hotmart / Launch Pad (carteira)', model:'HOTMART_LAUNCHPAD_ACCOUNT', lancamentos, saldoFinalDoc,
+    observacao:` Titular ${titular||''} CNPJ ${cnpj} · período ${periodoIni.split('-').reverse().join('/')} a ${periodoFim.split('-').reverse().join('/')} · Σ entradas R$ ${_fmt(somaE)} / Σ saídas R$ ${_fmt(somaS)}.` };
+}
+// ─── Banco Inter — CSV puro (não confundir com o PDF "Banco Inter" acima, que é outro modelo de
+// relatório). Sem XLSX/SheetJS: layout tem linhas de cabeçalho fora de tabela (Conta/Período/Saldo)
+// antes da linha real de colunas "Data Lançamento;Descrição;Valor;Saldo" — parseia o texto puro.
+function _lancctbParsearExtratoInterCSVTexto(texto){
+  if(!/Extrato Conta Corrente/i.test(texto)) return null;
+  const linhas=texto.split(/\r?\n/);
+  const parseBR=s=>parseFloat(String(s).replace(/\./g,'').replace(',','.'))||0;
+  const r2=v=>Math.round(v*100)/100;
+  let conta=null, saldoFinalDoc=null, periodoIni=null, periodoFim=null, headerIdx=-1;
+  linhas.forEach((l,i)=>{
+    let m;
+    if(m=l.match(/^Conta\s*;(.+)$/i)) conta=m[1].trim().replace(/\D/g,'');
+    if(m=l.match(/^Per[íi]odo\s*;(\d{2})\/(\d{2})\/(\d{4})\s*a\s*(\d{2})\/(\d{2})\/(\d{4})/i)){ periodoIni=`${m[3]}-${m[2]}-${m[1]}`; periodoFim=`${m[6]}-${m[5]}-${m[4]}`; }
+    if(m=l.match(/^Saldo:\s*;([\d.,]+)/i)) saldoFinalDoc=parseBR(m[1]);
+    if(/^Data Lan[çc]amento;Descri[çc][ãa]o;Valor;Saldo/i.test(l)) headerIdx=i;
+  });
+  if(headerIdx<0||!conta) return null;
+  const movs=[];
+  for(let i=headerIdx+1;i<linhas.length;i++){
+    const l=linhas[i];
+    if(!l||!l.trim()) continue;
+    const partes=l.split(';');
+    if(partes.length<4) continue;
+    const [dataStr,descRaw,valorStr,saldoStr]=partes;
+    const md=dataStr.trim().match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if(!md) continue;
+    const valor=parseBR(valorStr);
+    if(!valor) continue;
+    movs.push({ data:`${md[3]}-${md[2]}-${md[1]}`, historico:descRaw.replace(/^"|"$/g,'').trim(), valor });
+  }
+  if(!movs.length) return null;
+  const lancamentos=movs.map(m=>({ data:m.data, historico:m.historico,
+    valor_entrada:m.valor>0?r2(m.valor):0, valor_saida:m.valor<0?r2(-m.valor):0 }));
+  return { layout:'Banco Inter (CSV)', lancamentos, saldoFinalDoc,
+    observacao:` Conta ${conta} · período ${periodoIni?periodoIni.split('-').reverse().join('/'):''} a ${periodoFim?periodoFim.split('-').reverse().join('/'):''}.` };
+}
 // Modal obrigatório de seleção de competências (nada vem marcado). Devolve
 // Promise<array de competências escolhidas | null se cancelou>.
 function _lancctbC6EscolherCompetencias(meses,existentes){
@@ -34133,7 +34291,7 @@ async function processarLancctbUploadExtrato(forcarIA){
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoC6MultiMes(pdf))||(await _lancctbParsearExtratoBancoInter(pdf))||(await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
           ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))
-          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
+          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoCoraPdf(pdf))||(await _lancctbParsearExtratoHotmartLaunchpad(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
           ||(await _lancctbParsearExtratoItauBBAOcr(pdf));
       })();
       if(reconhecido&&reconhecido.meses){
@@ -34222,6 +34380,27 @@ async function processarLancctbUploadExtrato(forcarIA){
         }
       }
       if(!lancamentos.length) throw new Error('Não foi possível identificar lançamentos neste PDF.');
+    } else if(/\.csv$/i.test(file.name)){
+      // Banco Inter CSV (pedido 29/09/2026) — layout com cabeçalho fora de tabela, lido como
+      // texto puro (sem XLSX/SheetJS, que trataria a 1ª linha como header de tabela).
+      status.textContent='Lendo CSV…';
+      const recCsv=_lancctbParsearExtratoInterCSVTexto(await file.text());
+      if(recCsv){
+        origem='csv';
+        lancamentos=recCsv.lancamentos;
+        let confereCsv='';
+        if(recCsv.saldoFinalDoc!=null){
+          const somaE=lancamentos.reduce((s,l)=>s+(l.valor_entrada||0),0), somaS=lancamentos.reduce((s,l)=>s+(l.valor_saida||0),0);
+          confereCsv=` (Σ entradas R$ ${_fmt(somaE)} / Σ saídas R$ ${_fmt(somaS)})`;
+        }
+        status.textContent=`Layout reconhecido (${recCsv.layout}, leitura direta, sem IA) — ${lancamentos.length} lançamento(s).${confereCsv}${recCsv.observacao||''}`;
+        _lancctbExtratoPreview=lancamentos.map(l=>({...l,_incluir:true,_origem:origem}));
+        renderLancctbExtratoPreview();
+        btn.disabled=false; btn.textContent='▶ Extrair (padrão, sem IA)'; if(btnIa){ btnIa.disabled=false; btnIa.textContent='🤖 Usar IA Gemini'; }
+        return;
+      }
+      if(!forcarIA) throw new Error('Layout do CSV não reconhecido pelo leitor sem IA (Banco Inter). Clique em "🤖 Extrair via IA Gemini" se quiser tentar ler este arquivo com IA.');
+      throw new Error('Extração via IA para CSV ainda não implementada — verifique o layout do arquivo.');
     } else {
       const buf=await file.arrayBuffer();
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
