@@ -34166,6 +34166,51 @@ async function _lancctbParsearExtratoHotmartLaunchpad(pdf){
 // ─── Banco Inter — CSV puro (não confundir com o PDF "Banco Inter" acima, que é outro modelo de
 // relatório). Sem XLSX/SheetJS: layout tem linhas de cabeçalho fora de tabela (Conta/Período/Saldo)
 // antes da linha real de colunas "Data Lançamento;Descrição;Valor;Saldo" — parseia o texto puro.
+// ─── Conta Azul — exportação de "Extrato Financeiro" (pedido 29/09/2026). Apesar da extensão .xls,
+// o arquivo real costuma vir em formato Excel moderno por dentro — por isso NÃO se decide pelo
+// nome/extensão, só pelas colunas depois de já lido pelo XLSX.read. Funciona pra qualquer banco
+// exportado nesse layout (o nome do banco vem da própria coluna "Conta bancária").
+function _lancctbParsearExtratoContaAzulXlsx(wb){
+  const ws=wb.Sheets[wb.SheetNames[0]]; if(!ws) return null;
+  const linhas=XLSX.utils.sheet_to_json(ws,{defval:'',raw:false});
+  if(!linhas.length) return null;
+  const cols=Object.keys(linhas[0]);
+  if(!cols.includes('Data movimento')||!cols.includes('Situação')||!cols.includes('Valor (R$)')||!cols.includes('Saldo conta (R$)')||!cols.includes('Conta bancária')) return null;
+  const r2=v=>Math.round(v*100)/100;
+  const limpa=s=>String(s||'').trim();
+  const contaBancaria=limpa(linhas[0]['Conta bancária']);
+  const movs=[];
+  linhas.forEach((row,i)=>{
+    const situacao=limpa(row['Situação']);
+    // Só entra no extrato bancário o que já foi EFETIVADO — "Atrasado"/"Pendente"/"Previsto" ainda
+    // não movimentou a conta de verdade (achado real: linha Portobens +15.900,00 "Atrasado" onde o
+    // saldo da linha não muda em relação à linha anterior — não é dinheiro que entrou).
+    if(situacao!=='Quitado'&&situacao!=='Transferido') return;
+    const dataStr=limpa(row['Data movimento']);
+    const md=dataStr.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if(!md) return;
+    const valor=parseFloat(String(row['Valor (R$)']).replace(',','.'))||0;
+    if(!valor) return;
+    const saldo=parseFloat(String(row['Saldo conta (R$)']).replace(',','.'));
+    // Histórico Bancário = Nome + Descrição + Categoria 1, só os campos não-vazios, sem "null"/"-".
+    const partes=[row['Nome do fornecedor/cliente'],row['Descrição'],row['Categoria 1']].map(limpa).filter(v=>v.length>0);
+    const historico=partes.join(' | ');
+    const doc=limpa(row['Identificador do fornecedor/cliente']).replace(/\D/g,'');
+    movs.push({ data:`${md[3]}-${md[2]}-${md[1]}`, historico, valor, saldo, doc, situacao });
+  });
+  if(!movs.length) return null;
+  const lancamentos=movs.map(m=>({ data:m.data, historico:m.historico,
+    valor_entrada:m.valor>0?r2(m.valor):0, valor_saida:m.valor<0?r2(-m.valor):0,
+    informacao:[m.doc?`Documento contraparte: ${m.doc}`:'',`Situação: ${m.situacao}`].filter(Boolean).join(' | ') }));
+  const somaE=r2(lancamentos.reduce((s,l)=>s+l.valor_entrada,0)), somaS=r2(lancamentos.reduce((s,l)=>s+l.valor_saida,0));
+  const saldoFinalDoc=movs[movs.length-1].saldo;
+  // Não há linha explícita de "saldo inicial" — infere pelo saldo do 1º movimento efetivo menos o
+  // próprio valor dele (mesma técnica já usada no Banco Inter PDF/CSV).
+  const saldoAnteriorDoc=r2(movs[0].saldo-movs[0].valor);
+  return { layout:`Conta Azul (${contaBancaria||'exportação'})`, model:'CONTA_AZUL_BANK_STATEMENT', lancamentos,
+    saldoAnteriorDoc, saldoFinalDoc,
+    observacao:` ${contaBancaria} · ${linhas.length} linha(s) no arquivo, ${lancamentos.length} movimento(s) efetivos (Quitado/Transferido) · Σ entradas R$ ${_fmt(somaE)} / Σ saídas R$ ${_fmt(somaS)}.` };
+}
 function _lancctbParsearExtratoInterCSVTexto(texto){
   if(!/Extrato Conta Corrente/i.test(texto)) return null;
   const linhas=texto.split(/\r?\n/);
@@ -34406,7 +34451,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
       // Formatos de C/C de marketplace/fintech (Mercado Pago, ShopeePay) —
       // leitura direta, sem IA, antes do mapeador genérico de colunas.
-      const recExcel=_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb)||_lancctbParsearExtratoBBContaCorrenteXlsx(wb);
+      const recExcel=_lancctbParsearExtratoContaAzulXlsx(wb)||_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb)||_lancctbParsearExtratoBBContaCorrenteXlsx(wb);
       if(recExcel){
         // 'excel' — precisa ser um dos valores aceitos por
         // lancamentos_extrato_origem_importacao_check (achado real
