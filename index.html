@@ -30288,9 +30288,12 @@ function renderLancctbComprovPreview(){
         <th style="padding:6px 8px;text-align:left">Arquivo</th>
       </tr></thead><tbody>`;
   _lancctbComprovPreview.forEach((c,i)=>{
-    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${c._incluir?1:.4}">
+    const semData=!c.data_pagamento;
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${c._incluir?1:.4};${semData?'background:#FEF2F2':''}">
       <td style="padding:5px 8px"><input type="checkbox" ${c._incluir?'checked':''} onclick="_lancctbComprovPreview[${i}]._incluir=this.checked;renderLancctbComprovPreview()"></td>
-      <td style="padding:5px 8px">${c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+      <td style="padding:5px 8px">${semData
+        ?`<input type="date" class="si" style="font-size:11px;padding:2px 4px;border-color:#dc2626" title="Data não foi lida do PDF — preencha pra poder salvar" onchange="_lancctbComprovPreview[${i}].data_pagamento=this.value;renderLancctbComprovPreview()">`
+        :new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR')}</td>
       <td style="padding:5px 8px">${esc(c.cliente_fornecedor_nome||'')}</td>
       <td style="padding:5px 8px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
       <td style="padding:5px 8px;color:var(--slate)">${esc(c.observacao||'')}</td>
@@ -30311,8 +30314,15 @@ function _lancctbComprovToggleTodos(marcar){
 async function confirmarLancctbImportComprovantes(){
   const tipo=_lancctbUploadComprovTipo;
   const contaSel=tipo==='recebimento'?_lancctbComprovRecebContaSel:tipo==='salarios'?_lancctbComprovSalContaSel:_lancctbComprovContaSel;
-  const selecionados=_lancctbComprovPreview.filter(c=>c._incluir);
-  if(!selecionados.length){ toast('Nenhum comprovante selecionado','err'); return; }
+  const selecionadosTodos=_lancctbComprovPreview.filter(c=>c._incluir);
+  if(!selecionadosTodos.length){ toast('Nenhum comprovante selecionado','err'); return; }
+  // Achado real 29/09/2026 (Kazangil, 80 comprovantes): 1 único comprovante sem data extraída
+  // (data_pagamento NOT NULL) derrubava o insert do LOTE INTEIRO com um erro genérico do
+  // Postgres. Agora separa quem não tem data, salva o resto normalmente, e deixa só os
+  // problemáticos na tela (com campo de data editável) pro contador corrigir e salvar de novo.
+  const semData=selecionadosTodos.filter(c=>!c.data_pagamento);
+  const selecionados=selecionadosTodos.filter(c=>c.data_pagamento);
+  if(!selecionados.length){ toast(`${semData.length} comprovante(s) sem data — preencha a data (em vermelho) antes de salvar.`,'err'); return; }
   const registros=selecionados.map(c=>({
     empresa_eid: _lancctbEidAtual,
     conta_bancaria_id: contaSel||null,
@@ -30387,7 +30397,7 @@ async function confirmarLancctbImportComprovantes(){
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
   const salvos=(typeof count==='number')?count:registros.length;
   const ignorados=registros.length-salvos+duplicadosPulados;
-  toast(`${salvos} comprovante(s) salvo(s)${ignorados>0?` (${ignorados} já existiam, ignorados)`:''}`,'ok');
+  toast(`${salvos} comprovante(s) salvo(s)${ignorados>0?` (${ignorados} já existiam, ignorados)`:''}${semData.length?` — ${semData.length} sem data, ainda pendente(s) de correção`:''}`,'ok');
   // Vínculo com o Visão Geral (Fase 16) — só Comprovantes de Pagamento por
   // enquanto, pedido do usuário (05/09/2026); mesma ideia do Extrato/Aplicações.
   if(tipo==='pagamento'){
@@ -30396,6 +30406,12 @@ async function confirmarLancctbImportComprovantes(){
       const meses=[...new Set(registros.map(r=>r.data_pagamento).filter(Boolean).map(d=>d.slice(0,7)))];
       meses.forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,contaVinculada.doc_visao_geral_comprovantes_nome,m));
     }
+  }
+  if(semData.length){
+    // Fica na tela só com quem ainda falta corrigir — sem fechar o modal.
+    _lancctbComprovPreview=_lancctbComprovPreview.filter(c=>!c._incluir||!c.data_pagamento);
+    renderLancctbComprovPreview();
+    return;
   }
   closeModal('mLancctbUpload');
   if(tipo==='recebimento'){ _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb(); }
