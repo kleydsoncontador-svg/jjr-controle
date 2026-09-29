@@ -25665,7 +25665,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // fica false quando quem chama é o reaprendizado automático depois de
   // salvar uma Regra nova (linha ~22522), que precisa mesmo varrer a conta
   // inteira pra aplicar a regra recém-criada em qualquer mês pendente.
-  const { data: lancamentos } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato')
+  let { data: lancamentos } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
     .order('data_pagamento',{ascending:true})));
@@ -25841,6 +25841,51 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     return resultado;
   }
 
+  // ─── Associação por número de NF citado no Histórico Bancário — pedido do usuário 29/09/2026,
+  // só pra #95 LEANDRO MUNHOZ MOREIRA por ora (extratos da SuperVendedores/Conta Azul trazem
+  // "NFSe 1310"/"NFe 1234" direto no texto do lançamento bancário). Vale tanto pra recebimento
+  // quanto pra pagamento ("Isso pode ocorrer nos pagamentos tbm"). Agrupa TODAS as pendências
+  // (mesmo lado D/C) que citam o MESMO número, soma o grupo e baixa contra a parcela pendente
+  // daquela NF. Se a soma do mês não fechar o valor total da parcela, a parcela continua
+  // "pendente" de propósito (sem forçar nada) — completa sozinha quando aparecer outro
+  // lançamento citando o mesmo número de NF, inclusive em mês seguinte ("saldo da NF gera pro
+  // próximo mês", conforme pedido).
+  async function tentarPorNumeroNfNoHistorico(lista){
+    if(String(eid)!=='95') return new Set();
+    const reNf=/\bNFS?-?e\.?\s*(\d{2,})/i;
+    const grupos={};
+    lista.forEach(l=>{
+      const m=(l.historico_bancario||'').match(reNf);
+      if(!m) return;
+      const chave=m[1]+'|'+(l.valor_saida>0?'S':'E');
+      (grupos[chave]=grupos[chave]||[]).push(l);
+    });
+    const resolvidos=new Set();
+    for(const chave in grupos){
+      const [numero,lado]=chave.split('|'), ehSaida=lado==='S';
+      const par=(parcelas||[]).find(p=>p.notas_fiscais&&String(p.notas_fiscais.numero)===String(numero)&&p.notas_fiscais.direcao===(ehSaida?'compra':'venda'));
+      if(!par) continue;
+      const nf=par.notas_fiscais;
+      const cnpjT=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeT=ehSaida?nf.nome_emitente:nf.nome_destinatario;
+      const { data: jaLancado } = await _supaClient.from('lancamentos_contabeis').select('valor').eq('nf_parcela_id',par.id).eq('estornado',false).eq('tipo',ehSaida?'D':'C');
+      const jaSomado=(jaLancado||[]).reduce((s,x)=>s+Number(x.valor),0);
+      let somaGrupo=0;
+      for(const l of grupos[chave]){
+        const valor=ehSaida?l.valor_saida:l.valor_entrada;
+        const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjT,nomeT,[nf.numero],null,par.numero_parcela,par.id,valor);
+        if(error){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); continue; }
+        await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+        resolvidos.add(l.id); somaGrupo+=valor; resolvNF++;
+      }
+      const total=Math.round((jaSomado+somaGrupo)*100)/100;
+      if(total>=Math.round(Number(par.valor_parcela)*100)/100-0.02){
+        await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado'}).eq('id',par.id);
+        parcelasUsadas.add(par.id);
+      }
+    }
+    return resolvidos;
+  }
+
   // NF indicada pelo Fluxo de Caixa (pedido do usuário 18/09/2026): "o fluxo
   // serve de suporte pra aquilo que não conseguiu amarrar NF" e "pra abrir
   // pagamentos aglutinados no extrato, que o fluxo abre por pagamento".
@@ -25994,6 +26039,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     if(!resultado.error) await checarAlertaAutomatico(linhas,l,valor,histBanco,nomeTerceiro);
     return resultado;
   }
+
+  const resolvidosPorNumeroNf=await tentarPorNumeroNfNoHistorico(lancamentos);
+  if(resolvidosPorNumeroNf.size) lancamentos=lancamentos.filter(l=>!resolvidosPorNumeroNf.has(l.id));
 
   for(let i=0;i<lancamentos.length;i++){
     const l=lancamentos[i];
