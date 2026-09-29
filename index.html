@@ -26199,8 +26199,16 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // linhas de UMA âncora (Débito Banco + Crédito NF/valor_boleto + tarifa/juros/multa via Regra
     // ou Conta padrão). Só roda pra entrada nos modos 'completo'/'comprovantes_recebimento'.
     const HISTORICO_LABEL_OP={liquidacao:'Recebimento',valor_boleto:'Liquidação',tarifa_cobranca:'Tarifa de Cobrança',juros:'Receita de Juros',multa:'Receita de Multa',desconto:'Desconto Concedido'};
-    async function _lancctbMontarGrupoLiquidacao(ancoraLiquidacao){
-      const grupo=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.documento_numero===ancoraLiquidacao.documento_numero&&c.cliente_fornecedor_nome===ancoraLiquidacao.cliente_fornecedor_nome);
+    async function _lancctbMontarGrupoLiquidacao(ancoraLiquidacao, bruto){
+      const grupoCompleto=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.documento_numero===ancoraLiquidacao.documento_numero&&c.cliente_fornecedor_nome===ancoraLiquidacao.cliente_fornecedor_nome);
+      // "bruto" (Passo 0.6, LOTE do dia — pedido do usuário 29/09/2026, "CORREÇÃO DA
+      // CONCILIAÇÃO DOS RECEBIMENTOS ITAÚ"): pra crédito consolidado tipo "Mov Tit Cob
+      // Disp", o banco credita o valor ANTES da tarifa (liquidação − tarifa, tarifa
+      // negativa = soma). A tarifa NÃO entra nessa partida (nem é marcada conciliada
+      // aqui) — fica pendente, pra conciliar depois com seu próprio débito no extrato.
+      const tarifaItem=bruto?grupoCompleto.find(c=>c.tipo_operacao==='tarifa_cobranca'):null;
+      const grupo=tarifaItem?grupoCompleto.filter(c=>c.id!==tarifaItem.id):grupoCompleto;
+      const valorBanco=tarifaItem?Math.round((ancoraLiquidacao.valor_pago-tarifaItem.valor_pago)*100)/100:ancoraLiquidacao.valor_pago;
       const [nfNum,parcelaNum]=String(ancoraLiquidacao.documento_numero).split('-');
       const refTexto=nfNum?` ref. NF ${nfNum}${parcelaNum?` (parcela ${parcelaNum})`:''} de ${ancoraLiquidacao.cliente_fornecedor_nome||''}`.trim():'';
       // Tenta achar a NF real (empresa emitiu, direção=venda) pelo número —
@@ -26210,7 +26218,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const regraClienteNF=parcelaNf&&regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&r.cnpj_cpf_gatilho===parcelaNf.notas_fiscais?.cnpj_destinatario);
       const contaNF=regraClienteNF?{id:regraClienteNF.conta_contabil_id,classificacao:regraClienteNF.plano_contas.classificacao}:{id:contaEntradaNF.id,classificacao:contaEntradaNF.classificacao};
       let todasResolvidas=true;
-      const linhasGrupoOp=[{ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:'D', valor:ancoraLiquidacao.valor_pago, historico:`${HISTORICO_LABEL_OP.liquidacao}${refTexto}`, cliente_fornecedor_nome:ancoraLiquidacao.cliente_fornecedor_nome||null, cnpj_cpf:ancoraLiquidacao.cnpj_cpf||null, comprovante_id:ancoraLiquidacao.id, lancamento_extrato_id:null, origem_match:'automatico_triangular' }];
+      const linhasGrupoOp=[{ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:'D', valor:valorBanco, historico:`${HISTORICO_LABEL_OP.liquidacao}${refTexto}`, cliente_fornecedor_nome:ancoraLiquidacao.cliente_fornecedor_nome||null, cnpj_cpf:ancoraLiquidacao.cnpj_cpf||null, comprovante_id:ancoraLiquidacao.id, lancamento_extrato_id:null, origem_match:'automatico_triangular' }];
       for(const c of grupo){
         if(c.tipo_operacao==='liquidacao') continue;
         if(c.tipo_operacao==='valor_boleto'){
@@ -26265,11 +26273,18 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // melhor deixar pendente do que chutar uma combinação arbitrária).
     if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')&&!(creditosPendentesPorDia[l.data_pagamento]>1)){
       const candidatas=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.tipo_operacao==='liquidacao'&&c.documento_numero&&c.data_pagamento===l.data_pagamento);
-      const somaCent=Math.round(candidatas.reduce((s,c)=>s+c.valor_pago,0)*100);
+      // Crédito consolidado ("Mov Tit Cob Disp") = valor BRUTO por título (liquidação
+      // − tarifa, tarifa negativa = soma de volta) — nunca a liquidação líquida de
+      // tarifa. Ver "CORREÇÃO DA CONCILIAÇÃO DOS RECEBIMENTOS ITAÚ" (usuário 29/09/2026).
+      const valorBrutoCandidata=c=>{
+        const tarifa=comprovantesReceb.find(t=>t.tipo_operacao==='tarifa_cobranca'&&t.documento_numero===c.documento_numero&&t.cliente_fornecedor_nome===c.cliente_fornecedor_nome);
+        return tarifa?c.valor_pago-tarifa.valor_pago:c.valor_pago;
+      };
+      const somaCent=Math.round(candidatas.reduce((s,c)=>s+valorBrutoCandidata(c),0)*100);
       if(candidatas.length>=2&&Math.abs(somaCent-Math.round(valor*100))<=1){
         const montagens=[]; let todasOk=true;
         for(const ancora of candidatas){
-          const m=await _lancctbMontarGrupoLiquidacao(ancora);
+          const m=await _lancctbMontarGrupoLiquidacao(ancora,true);
           if(!m.ok){ todasOk=false; break; }
           m.linhas.forEach(ln=>{ ln.lancamento_extrato_id=l.id; });
           montagens.push(m);
