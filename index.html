@@ -29034,6 +29034,22 @@ function _lancctbDocumentoDeSeuNumero(str,fallback){
   if(!r||!r.nf) return fallback||'';
   return r.parcela?`${r.nf}-${r.parcela}`:r.nf;
 }
+// "Seu número" no PDF "Extrato de movimentação de boletos" (Itaú) vem com os tokens SEPARADOS
+// POR ESPAÇO (achado real 29/09/2026, Kazangil: "9179 3 3" = NF 9179, parcela 3 de 3; "9271"
+// sozinho = NF 9271, parcela única) — formato DIFERENTE do concatenado (1 número só, último
+// dígito = parcela) que _lancctbSeuNumeroNfParcela trata pra outro layout (Excel). Nunca
+// reaproveitar uma função pra outra — os dois formatos não são conversíveis entre si.
+function _lancctbSeuNumeroNfParcelaEspacado(str){
+  const tokens=String(str||'').trim().split(/\s+/).filter(t=>/^\d+$/.test(t));
+  if(!tokens.length) return null;
+  if(tokens.length===1) return { nf:tokens[0], parcela:'' };
+  return { nf:tokens[0], parcela:tokens[1] };
+}
+function _lancctbDocumentoDeSeuNumeroEspacado(str,fallback){
+  const r=_lancctbSeuNumeroNfParcelaEspacado(str);
+  if(!r||!r.nf) return fallback||'';
+  return r.parcela?`${r.nf}-${r.parcela}`:r.nf;
+}
 
 // Parser determinístico Itaú Comprovantes — usa "Autenticação:" como marcador de fim
 // Estratégia: cada comprovante Itaú termina com "Autenticação:" + hash
@@ -29360,7 +29376,21 @@ async function _lancctbParsearItauCobrancaPdf(pdf){
   // seria invertida — mas pdfplumber reagrupa linhas por Y de um jeito
   // diferente do pdf.js; o que importa é a ordem real do pdf.js, que É
   // esta aqui.)
-  const padraoInicioBoleto=/(?<![\d,.])(\d+)\s+(.{2,60}?)\s+boleto\s+(\d+)\s+(\S+)\s+(\S+)\s+(\d{2}\/\d{2}\/\d{4})\s+(\S+)\s+([\d.,]+)\s+(liquida[cç][aã]o|baixa para acertos|entrada por acertos\s*\(reentrada\)|baixa|entrada)\s+-\s+/gi;
+  // "Tipo" pode ser "boleto" OU "bolecode" (achado real 29/09/2026, Kazangil) — aceita os dois.
+  // "Seu número" (NF+parcela, ex: "9179 3 3") tem NÚMERO VARIÁVEL de tokens separados por espaço
+  // (1 token sem parcela, 2-3 com parcela/total) — captura tudo até a data de Vencimento com
+  // ".+?" não-guloso, em vez de assumir sempre 2 tokens fixos (bug real: regex antigo só batia
+  // quando "Seu número" tinha exatamente 2 tokens, perdendo tanto o caso de 1 token quanto o de 3).
+  // Alternância de descrição precisa cobrir TODAS as variações reais do PDF — achado real
+  // 29/09/2026 (Kazangil): faltavam "baixa por ter sido liquidado"/"tarifa de manutenção de
+  // título vencido"/"tarifa de protesto"/"custas de cartório distribuidor". Um boleto cuja
+  // descrição não bate em NADA da lista não gera match nenhum aqui — nesse ponto o regex global
+  // pula pra frente e pode acabar casando um boleto errado mais adiante usando pedaços de texto
+  // do boleto pulado (bug real: gerou um "documento_numero" fantasma "88021-109" misturando
+  // texto de 2 boletos diferentes). "baixa por ter sido liquidado" continua sendo filtrada
+  // depois (só é recebimento de fato quando bate literal "liquidação"), mas precisa aparecer
+  // aqui pra não quebrar o alinhamento dos boletos vizinhos.
+  const padraoInicioBoleto=/(?<![\d,.])(\d+)\s+(.{2,60}?)\s+(?:boleto|bolecode)\s+(\d+)\s+(.+?)\s+(\d{2}\/\d{2}\/\d{4})\s+(\S+)\s+([\d.,]+)\s+(liquida[cç][aã]o|baixa para acertos|entrada por acertos\s*\(reentrada\)|baixa por ter sido liquidado|tarifa de manuten[cç][aã]o de t[íi]tulo vencido|tarifa de protesto|custas de cart[óo]rio distribuidor|baixa|entrada)\s+-\s+/gi;
   const padraoOperacaoExtra=/(tarifa de cobran[cç]a|juros|multa|desconto)\s+(-?[\d.,]+)\s+/gi;
   const padraoValorFinal=/^(-?[\d.,]+)/;
 
@@ -29376,15 +29406,15 @@ async function _lancctbParsearItauCobrancaPdf(pdf){
       const m=matches[j];
       // Só "liquidação" é recebimento de fato — baixa/entrada/entrada por
       // acertos são só mudança de status do boleto, sem dinheiro creditado.
-      if(!/liquida[cç][aã]o/i.test(m[9])) continue;
+      if(!/liquida[cç][aã]o/i.test(m[8])) continue;
 
       const carteira=m[1];
       const nomePagador=m[2].trim();
       const nossoNumero=m[3];
-      const chaveDoc=_lancctbDocumentoDeSeuNumero(m[5],nossoNumero);
-      const vencimento=_lancctbFluxoParseData(m[6]);
-      const agRec=m[7];
-      const valorBoleto=_lancctbFluxoParseValorCel(m[8]);
+      const chaveDoc=_lancctbDocumentoDeSeuNumeroEspacado(m[4],nossoNumero);
+      const vencimento=_lancctbFluxoParseData(m[5]);
+      const agRec=m[6];
+      const valorBoleto=_lancctbFluxoParseValorCel(m[7]);
       const base={
         data_pagamento: dataPagina, cliente_fornecedor_nome: nomePagador, cnpj_cpf: '',
         documento_numero: chaveDoc, data_vencimento: vencimento, valor_documento: valorBoleto,
