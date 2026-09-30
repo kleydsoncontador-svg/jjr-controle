@@ -34606,6 +34606,76 @@ function _lancctbParsearExtratoInterCSVTexto(texto){
   return { layout:'Banco Inter (CSV)', lancamentos, saldoFinalDoc,
     observacao:` Conta ${conta} · período ${periodoIni?periodoIni.split('-').reverse().join('/'):''} a ${periodoFim?periodoFim.split('-').reverse().join('/'):''}.` };
 }
+// Hotmart CSV/TXT (Extrato de Conta C/C do Hotmart, pedido do usuário
+// 30/09/2026, SuperVendedores #95 — extensão em 30/09/2026 pra também aceitar
+// .txt com o MESMO conteúdo/regras, fingerprint HOTMART_DETAILED_TXT) —
+// detecta o separador pelo cabeçalho (";" ou TAB ou "|", nunca espaço — nomes
+// de produto/descrição têm várias palavras). Cabeçalho próprio de tabela
+// (diferente do Inter, que tem cabeçalho fora de tabela). Cada linha já É 1
+// movimentação de conta (Valor+Saldo cumulativo, igual extrato bancário
+// normal) — não agrupa Tarifa/Comissão/Estorno como no boleto Itaú: cada
+// linha vira 1 lançamento direto, preservando venda e reembolso, saque e
+// tarifa de saque, comissão e tarifa Hotmart sempre SEPARADOS (nunca
+// consolidar por Transação). "Data da efetivação" é a data financeira
+// principal — bate com a ordem do Saldo cumulativo (a "Data do lançamento"
+// pode ficar fora de ordem — ex.: comissão de uma venda de 28/07 só
+// efetivada/creditada em 27/08, aparecendo espremida entre linhas de 25/08).
+function _lancctbParsearExtratoHotmartCSV(texto){
+  const linhas=texto.split(/\r?\n/).filter(l=>l.trim());
+  if(!linhas.length) return null;
+  const header=linhas[0];
+  const delim=(header.match(/;/g)||[]).length>=5?';':(/\t/.test(header)?'\t':(header.includes('|')?'|':null));
+  if(!delim) return null;
+  const camposHeader=header.split(delim).map(c=>c.trim().toLowerCase());
+  const temCampo=(re)=>camposHeader.some(c=>re.test(c));
+  if(!(temCampo(/data do lan[çc]amento/)&&temCampo(/data da efetiva[çc][ãa]o/)&&temCampo(/transa[çc][ãa]o/)&&temCampo(/valor/)&&temCampo(/saldo/)&&temCampo(/categoria/))) return null;
+  const idx=(re)=>camposHeader.findIndex(c=>re.test(c));
+  const iDataLanc=idx(/data do lan[çc]amento/), iDataEfet=idx(/data da efetiva[çc][ãa]o/), iStatus=idx(/^status$/),
+    iTransacao=idx(/transa[çc][ãa]o/), iIdAntecip=idx(/identificador de antecipa[çc][ãa]o/), iStatusTrans=idx(/status da transa[çc][ãa]o/),
+    iDescricao=idx(/descri[çc][ãa]o/), iParcela=idx(/^parcela$/), iValor=idx(/^valor$/), iNomeProduto=idx(/nome do produto/),
+    iSaldo=idx(/^saldo$/), iCategoria=idx(/categoria/);
+  // Campos de texto só vêm entre aspas quando têm espaço/caractere especial —
+  // sem "," nem o delimitador dentro deles nestes arquivos, então split direto
+  // já respeita a estrutura; só remove aspas de borda por campo.
+  const semAspas=s=>String(s||'').replace(/^"|"$/g,'').trim();
+  const parseBR=s=>parseFloat(String(s).trim())||0; // Valor/Saldo já vêm em formato "27.00"/"-3.40" (ponto decimal), não BR
+  const movs=[];
+  for(let i=1;i<linhas.length;i++){
+    const partes=linhas[i].split(delim);
+    if(partes.length<=Math.max(iDataEfet,iValor,iSaldo,iCategoria)) continue;
+    const dataEfet=semAspas(partes[iDataEfet]), dataLanc=iDataLanc>=0?semAspas(partes[iDataLanc]):'';
+    const md=dataEfet.match(/^(\d{2})\/(\d{2})\/(\d{4})$/)||dataLanc.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+    if(!md) continue;
+    const valor=parseBR(partes[iValor]);
+    if(!valor) continue;
+    const transacao=iTransacao>=0?semAspas(partes[iTransacao]):'', idAntecip=iIdAntecip>=0?semAspas(partes[iIdAntecip]):'';
+    const descricao=iDescricao>=0?semAspas(partes[iDescricao]):'', nomeProd=iNomeProduto>=0?semAspas(partes[iNomeProduto]):'';
+    const categoria=iCategoria>=0?semAspas(partes[iCategoria]):'', parcela=iParcela>=0?semAspas(partes[iParcela]):'';
+    // Histórico = Descrição | Transação | Nome do produto | Categoria (campos
+    // vazios ignorados) — pedido explícito do usuário 30/09/2026, não simplificar.
+    const historico=[descricao,transacao,nomeProd,categoria].filter(Boolean).join(' | ');
+    movs.push({
+      data:`${md[3]}-${md[2]}-${md[1]}`,
+      historico,
+      documento:transacao||idAntecip||null,
+      parcela,
+      valor,
+      saldo:parseBR(partes[iSaldo]),
+    });
+  }
+  if(!movs.length) return null;
+  // Ordena por data (a ordem original do arquivo é do mais novo pro mais
+  // antigo) pra poder inferir saldoAnteriorDoc/saldoFinalDoc a partir do
+  // próprio Saldo cumulativo do arquivo.
+  const porData=[...movs].sort((a,b)=>a.data<b.data?-1:a.data>b.data?1:0);
+  const primeira=porData[0], ultima=porData[porData.length-1];
+  const saldoAnteriorDoc=Math.round((primeira.saldo-primeira.valor)*100)/100;
+  const saldoFinalDoc=ultima.saldo;
+  const r2=v=>Math.round(v*100)/100;
+  const lancamentos=movs.map(m=>({ data:m.data, historico:m.historico, documento:m.documento,
+    valor_entrada:m.valor>0?r2(m.valor):0, valor_saida:m.valor<0?r2(-m.valor):0 }));
+  return { layout:'Hotmart (detalhado)', lancamentos, saldoAnteriorDoc, saldoFinalDoc };
+}
 // Modal obrigatório de seleção de competências (nada vem marcado). Devolve
 // Promise<array de competências escolhidas | null se cancelou>.
 function _lancctbC6EscolherCompetencias(meses,existentes){
@@ -34787,11 +34857,15 @@ async function processarLancctbUploadExtrato(forcarIA){
         }
       }
       if(!lancamentos.length) throw new Error('Não foi possível identificar lançamentos neste PDF.');
-    } else if(/\.csv$/i.test(file.name)){
+    } else if(/\.(csv|txt)$/i.test(file.name)){
       // Banco Inter CSV (pedido 29/09/2026) — layout com cabeçalho fora de tabela, lido como
       // texto puro (sem XLSX/SheetJS, que trataria a 1ª linha como header de tabela).
-      status.textContent='Lendo CSV…';
-      const recCsv=_lancctbParsearExtratoInterCSVTexto(await file.text());
+      // Hotmart aceita .csv OU .txt com o MESMO conteúdo/regras (pedido 30/09/2026,
+      // fingerprint HOTMART_DETAILED_TXT) — nunca tratar como uma leitura diferente
+      // só por causa da extensão.
+      status.textContent='Lendo arquivo…';
+      const textoCsv=await file.text();
+      const recCsv=_lancctbParsearExtratoInterCSVTexto(textoCsv)||_lancctbParsearExtratoHotmartCSV(textoCsv);
       if(recCsv){
         origem='csv';
         lancamentos=recCsv.lancamentos;
