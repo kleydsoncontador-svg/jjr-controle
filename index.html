@@ -33994,6 +33994,91 @@ async function _lancctbParsearExtratoBradescoContaCorrente(pdf){
   if(!registros.length) return null;
   return {lancamentos:registros,saldoAnteriorDoc,saldoFinalDoc,layout:'Bradesco (Extrato de Movimentação C/C)'};
 }
+// ── Sicoob/SISBR "Extrato de Conta Corrente" (internet banking) — pedido do
+// usuário 29/09/2026 (Nasa Truck #250, arquivo real "Extrato Banco Sicoob
+// C-C ..._2026-08.pdf"): layout 100% determinístico, sem Gemini/IA. Regras
+// confirmadas pelo usuário nesse pedido (não vale pra nenhum outro banco):
+// 1) Sinal vem por SUFIXO de letra, não por "-": "D"=débito(saída negativa),
+//    "C"=crédito(entrada positiva) — inclusive nos saldos (SALDO ANTERIOR,
+//    SALDO DO DIA, "Saldo em conta:" do RESUMO).
+// 2) "SALDO DO DIA"/"SALDO ANTERIOR"/"SALDO BLOQUEADO ANTERIOR" e as linhas
+//    do quadro RESUMO/ENCARGOS/OUTRAS INFORMAÇÕES NUNCA viram lançamento —
+//    só "SALDO ANTERIOR" alimenta saldoAnteriorDoc e "Saldo em conta:" (do
+//    RESUMO, não "Saldo disponível:") alimenta saldoFinalDoc.
+// 3) Histórico pode continuar numa 2ª linha sem data/valor (ex.: "Pix" +
+//    "PIX EMITIDO OUTRA IF" na linha 1, "Pagamento Pix 62.173.620 0001-80
+//    Serasa" na linha seguinte) — concatenar com " | ", nunca criar uma 2ª
+//    movimentação pra essa linha de baixo.
+// 4) Documento é sempre 1 token sem espaço (número, "Pix", "DB.AUT.CRT",
+//    "AD/17-8", "LC-202607", "MASTERCARD", "CONSÓRCIOS", ...) — nunca tenta
+//    virar número, fica string igual veio.
+async function _lancctbParsearExtratoSicoobSisbr(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(!/SISTEMA DE COOPERATIVAS DE CR[ÉE]DITO DO BRASIL/i.test(textoPagina1)) return null;
+  if(!/EXTRATO DE CONTA CORRENTE/i.test(textoPagina1)) return null;
+  if(!/HIST[ÓO]RICO DE MOVIMENTA[ÇC][ÃA]O/i.test(textoPagina1)) return null;
+
+  const mPeriodo=textoPagina1.match(/Per[ií]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  const anoIni=mPeriodo?Number(mPeriodo[3]):null, mesIni=mPeriodo?Number(mPeriodo[2]):null;
+  const anoFim=mPeriodo?Number(mPeriodo[6]):null, mesFim=mPeriodo?Number(mPeriodo[5]):null;
+  const anoParaMes=(mes)=>{
+    if(mesFim!=null&&mes===mesFim) return anoFim;
+    if(mesIni!=null&&mes===mesIni) return anoIni;
+    return anoFim||anoIni||new Date().getFullYear();
+  };
+
+  const REGEX_LANCAMENTO=/^(\d{2})\/(\d{2})\s+(\S+)\s+(.+?)\s+R\$\s*([\d.,]+)\s*([DC])\*?$/;
+  const REGEX_SALDO_ANTERIOR=/^(\d{2})\/(\d{2})\s+SALDO\s+ANTERIOR\s+R\$\s*([\d.,]+)\s*([DC])/i;
+  const REGEX_SALDO_BLOQ_ANTERIOR=/^\d{2}\/\d{2}\s+SALDO\s+BLOQUEADO\s+ANTERIOR\b/i;
+  const REGEX_SALDO_DO_DIA=/^\d{2}\/\d{2}\s+SALDO\s+DO\s+DIA\b/i;
+  const REGEX_SALDO_EM_CONTA=/^Saldo em conta:\s*-?\s*([\d.,]+)\s*([DC])/i;
+  const REGEX_RUIDO=/^(EXTRATO DE CONTA CORRENTE|SISTEMA DE COOPERATIVAS|PLATAFORMA DE SERVI[ÇC]OS|Cooperativa:|Conta:|Per[ií]odo:|HIST[ÓO]RICO DE MOVIMENTA[ÇC][ÃA]O|Data\s+Documento\s+Hist[óo]rico\s+Valor|RESUMO$|Cheque especial contratado|Juros vencidos|Tarifas vencidas|Saldo dispon[íi]vel|Saldo bloqueado|ENCARGOS|Previs[ãa]o|OUTRAS INFORMA[ÇC][ÕO]ES|Vencimento de cheque|Taxa cheque|Custo Efetivo|INFORMA[ÇC][ÕO]ES$|SAC:|https?:\/\/|\d+\/\d+ Sicoob|Sicoob \| Internet Banking|\d{2}\/\d{2}\/\d{4},\s*\d{2}:\d{2})/i;
+  const REGEX_PAGINACAO=/^\d+\/\d+$/;
+
+  const registros=[];
+  let saldoAnteriorDoc=null, saldoFinalDoc=null, emResumo=false;
+
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens,3).map(l=>l.itens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim()).filter(Boolean);
+
+    for(const linhaTxt of linhas){
+      if(/^RESUMO$/i.test(linhaTxt)){ emResumo=true; continue; }
+      const mSaldoConta=linhaTxt.match(REGEX_SALDO_EM_CONTA);
+      if(mSaldoConta){ const v=_lancctbParseValorBR(mSaldoConta[1]); saldoFinalDoc=mSaldoConta[2].toUpperCase()==='D'?-v:v; continue; }
+      if(emResumo) continue; // resto do RESUMO/ENCARGOS/OUTRAS INFORMAÇÕES — nunca vira lançamento
+      if(REGEX_PAGINACAO.test(linhaTxt)||REGEX_RUIDO.test(linhaTxt)) continue;
+
+      const mSaldoAnt=linhaTxt.match(REGEX_SALDO_ANTERIOR);
+      if(mSaldoAnt){ const v=_lancctbParseValorBR(mSaldoAnt[3]); saldoAnteriorDoc=mSaldoAnt[4].toUpperCase()==='D'?-v:v; continue; }
+      if(REGEX_SALDO_BLOQ_ANTERIOR.test(linhaTxt)||REGEX_SALDO_DO_DIA.test(linhaTxt)) continue;
+
+      const mLanc=linhaTxt.match(REGEX_LANCAMENTO);
+      if(mLanc){
+        const [,dd,mm,documento,historico,valorTxt,dc]=mLanc;
+        const ano=anoParaMes(Number(mm));
+        const valor=_lancctbParseValorBR(valorTxt);
+        const ehDebito=dc.toUpperCase()==='D';
+        registros.push({
+          data:`${ano}-${mm}-${dd}`,
+          historico:historico.trim(),
+          documento:documento==='Pix'?null:documento, // "Pix" não é nº de documento real
+          valor_saida:ehDebito?valor:0,
+          valor_entrada:ehDebito?0:valor,
+        });
+        continue;
+      }
+
+      // Linha sem data/valor logo após um lançamento = continuação do
+      // histórico (regra 3 acima) — concatena com " | ", nunca cria linha nova.
+      if(registros.length) registros[registros.length-1].historico=`${registros[registros.length-1].historico} | ${linhaTxt}`.trim();
+    }
+  }
+  if(!registros.length) return null;
+  return {lancamentos:registros,saldoAnteriorDoc,saldoFinalDoc,layout:'Sicoob/SISBR (Extrato de Conta Corrente)'};
+}
 // ── Bradesco "EXTRATO MENSAL" (layout legado, mainframe/CICS) — pedido do
 // usuário 17/09/2026, mesmo dia: existe pelo menos um 2º layout de extrato
 // do Bradesco, bem diferente do "Extrato de: Ag:" acima (esse aqui tem
@@ -34587,7 +34672,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const reconhecido=forcarIA?null:await (async()=>{
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoC6MultiMes(pdf))||(await _lancctbParsearExtratoBancoInter(pdf))||(await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
-          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))
+          ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))||(await _lancctbParsearExtratoSicoobSisbr(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoCoraPdf(pdf))||(await _lancctbParsearExtratoHotmartLaunchpad(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
           ||(await _lancctbParsearExtratoItauBBAOcr(pdf));
       })();
