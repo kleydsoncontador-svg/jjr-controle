@@ -24001,7 +24001,7 @@ async function _lancctbAplicUploadExtrair(usarIA){
       // Achado real 22/09/2026 (CLD): existe mais de um layout Bradesco de
       // Aplicações/Resgates ("Extrato Padrão" e "Extrato de CDBs/LETRAS") —
       // tenta cada leitor determinístico em sequência antes de cair pra IA.
-      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file));
+      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisNativoDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file));
       if(!extraido){
         statusEl.textContent='';
         if(btn) btn.disabled=false;
@@ -39124,6 +39124,84 @@ async function _lancctbAplicParseItauAutMaisOcrDet(file){
   resgatesParaConferir.forEach(r=>{
     const calc=Math.round((r.brutoResg-r.iofResg-r.irrfResg)*100)/100;
     if(Math.abs(calc-r.liquidoResg)>0.02) console.warn('[aplicautmais] resgate de '+r.data+' não fecha: bruto-iof-irrf='+calc+' vs líquido='+r.liquidoResg);
+  });
+
+  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, diario };
+}
+
+// ── MODELO: Itaú "APLIC AUT MAIS - Extrato Consolidado de Movimentação",
+// TEXTO NATIVO — mesmo layout/contrato do leitor OCR acima
+// (_lancctbAplicParseItauAutMaisOcrDet), só que lendo direto os itens do
+// pdf.js (sem Tesseract) quando o PDF já tem texto selecionável. Achado
+// real 01/10/2026 (Rufato #4): o OCR acima tem uma guarda explícita pra
+// NUNCA rodar em PDF com texto nativo de sobra ("length>=50") — e o PDF
+// real da Rufato tem texto nativo, então o "Importar PDF" das Aplicações
+// Financeiras sempre caía em "não reconheci o layout, tente IA". Mesma
+// lógica de classificação por QUANTIDADE de números na linha (não precisa
+// de posição de coluna): toda linha de data tem sempre os 5 números de
+// "Posição em Ser no Dia" por último; o que vier antes (0, 1, 7 ou 8
+// números) é Aplicação e/ou Resgate+Rendimento daquele dia.
+async function _lancctbAplicParseItauAutMaisNativoDet(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const page1=await pdf.getPage(1);
+  const content1=await page1.getTextContent();
+  const texto1=content1.items.map(i=>i.str).join(' ');
+  if(_aplicautmaisScoreAncoras(texto1)<3) return null;
+
+  const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const REGEX_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
+  const linhasNumeros=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const content=p===1?content1:await (await pdf.getPage(p)).getTextContent();
+    const itens=content.items.filter(it=>it.str&&it.str.trim()).map(it=>({str:it.str.trim(),x:it.transform[4],y:it.transform[5]}));
+    const porY=_lancctbAgruparLinhasPorY(itens,2.5);
+    porY.forEach(linha=>{
+      const itensOrd=linha.itens.slice().sort((a,b)=>a.x-b.x);
+      if(!itensOrd.length) return;
+      const textoLinha=itensOrd.map(i=>i.str).join(' ');
+      const dataMatch=itensOrd.find(i=>REGEX_DATA.test(i.str));
+      const ehAcum=/acum/i.test(textoLinha);
+      const numeros=itensOrd.filter(i=>REGEX_NUM.test(i.str)).map(i=>_lancctbParseValorBR(i.str));
+      if((!dataMatch&&!ehAcum)||!numeros.length) return;
+      linhasNumeros.push({ data:dataMatch?dataMatch.str:null, numeros, ehAcum });
+    });
+  }
+  if(!linhasNumeros.length) return null;
+
+  const linhas=[];
+  const resgatesParaConferir=[];
+  const diario=[];
+  linhasNumeros.forEach(L=>{
+    if(!L.ehAcum&&L.data&&L.numeros.length>=5){
+      const nn=L.numeros.length, ex=L.numeros.slice(0,nn-5), posicao=L.numeros.slice(nn-5);
+      if(ex.length===7||ex.length===8){
+        const rg=ex.length===8?ex.slice(1):ex;
+        diario.push({data:L.data,aplicacao:ex.length===8?ex[0]:0,principal:rg[0],bruto:rg[1],iof:rg[2],irrf:rg[3],liquido:rg[4],rendBruto:rg[5],rendLiq:rg[6],posicao});
+      } else if(ex.length===1){
+        diario.push({data:L.data,aplicacao:ex[0],principal:0,bruto:0,iof:0,irrf:0,liquido:0,rendBruto:0,rendLiq:0,posicao});
+      } else if(ex.length===0){
+        diario.push({data:L.data,aplicacao:0,principal:0,bruto:0,iof:0,irrf:0,liquido:0,rendBruto:0,rendLiq:0,posicao});
+      }
+    }
+    if(L.ehAcum||!L.data) return;
+    const n=L.numeros.length;
+    if(n<5) return;
+    const extras=L.numeros.slice(0,n-5);
+    if(extras.length===7||extras.length===8){
+      const resg=extras.length===8?extras.slice(1):extras;
+      const [principalResg,brutoResg,iofResg,irrfResg,liquidoResg]=resg;
+      linhas.push({ Data:L.data, Principal:principalResg, Bruto:brutoResg, IOF:iofResg, IRRF:irrfResg, Liquido:liquidoResg, Historico:'Resgate' });
+      resgatesParaConferir.push({data:L.data,brutoResg,iofResg,irrfResg,liquidoResg});
+    } else if(extras.length===1){
+      linhas.push({ Data:L.data, Principal:extras[0], Bruto:null, IOF:null, IRRF:null, Liquido:null, Historico:'Aplicação' });
+    }
+  });
+  if(!linhas.length) return null;
+
+  resgatesParaConferir.forEach(r=>{
+    const calc=Math.round((r.brutoResg-r.iofResg-r.irrfResg)*100)/100;
+    if(Math.abs(calc-r.liquidoResg)>0.02) console.warn('[aplicautmais-nativo] resgate de '+r.data+' não fecha: bruto-iof-irrf='+calc+' vs líquido='+r.liquidoResg);
   });
 
   return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, diario };
