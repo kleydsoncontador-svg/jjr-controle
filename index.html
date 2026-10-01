@@ -5003,6 +5003,34 @@ async function _rufatoParsearExtratoPDF(files){
   });
 }
 
+// Mercado Pago usa um layout de PDF totalmente diferente (datas com hífen
+// "01-07-2026", não barra) — o parser genérico acima nunca reconhecia as
+// linhas dele. Reaproveita o parser já validado do módulo Lançamentos
+// Bancários (_lancctbParsearExtratoMercadoPagoPdf, fingerprint "EXTRATO DE
+// CONTA"/"DETALHE DOS MOVIMENTOS") em vez de duplicar a lógica, só
+// convertendo pro formato {data BR, valor assinado, docto, historico} que o
+// resto do Conversor Rufato já espera. Pedido do usuário 30/09/2026: aqui
+// no Mercado Pago, lançamentos do PDF ("Liberação de dinheiro") que não têm
+// par no Fluxo de Caixa em Excel do cliente devem ENTRAR como linha nova
+// (diferente do extrato de conta corrente normal, onde isso fica só no
+// relatório de conferência — ver comentário mais abaixo).
+async function _rufatoParsearExtratoMercadoPagoPDF(files){
+  var out=[];
+  for(var i=0;i<files.length;i++){
+    var buf=await files[i].arrayBuffer();
+    var pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    var r=await _lancctbParsearExtratoMercadoPagoPdf(pdf);
+    if(!r)continue;
+    r.lancamentos.forEach(function(l){
+      var v=(l.valor_entrada||0)-(l.valor_saida||0);
+      var mIso=String(l.data||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+      if(!mIso||!v)return;
+      out.push({data:mIso[3]+'/'+mIso[2]+'/'+mIso[1],valor:v,saldo:null,docto:l.documento||'',historico:l.historico||''});
+    });
+  }
+  return out;
+}
+
 // ── Parser do extrato de Aplicação Financeira / Invest Fácil (PDF, Bradesco) ──
 // Validado contra um extrato real: "Aplicações" tem 1 valor por linha (Vlr
 // Princ. — o quanto saiu da conta corrente); "Resgates / Vencimentos" tem 3
@@ -5379,22 +5407,39 @@ async function _rufatoProcessar(bancoId){
     var qtdForaCompetencia=0;
     var inputExtrato=document.getElementById('rufatoArqExtrato');
     var arqsExtrato=inputExtrato?Array.from(inputExtrato.files):[];
+    var ehMercadoPago=/mercado\s*pago/i.test((banco&&banco.banco_nome)||'');
     if(arqsExtrato.length){
       _rufatoSetStatus('Lendo extrato de conta corrente ('+arqsExtrato.length+' PDF)...','info');
-      var transacoesExtratoTodas=await _rufatoParsearExtratoPDF(arqsExtrato);
+      var transacoesExtratoTodas=ehMercadoPago?await _rufatoParsearExtratoMercadoPagoPDF(arqsExtrato):await _rufatoParsearExtratoPDF(arqsExtrato);
       var transacoesExtrato=transacoesExtratoTodas.filter(function(t){return _rufatoDataEhDaCompetencia(t.data,competenciaAno,competenciaMes);});
       var foraCompetenciaExtrato=transacoesExtratoTodas.length-transacoesExtrato.length;
 
-      // Só o relatório diário usa o extrato de conta corrente — por pedido do
-      // usuário, os lançamentos do extrato NÃO são mais inseridos como linha
-      // nova no Excel (fica só pro relatório mostrar a diferença); quem entra
-      // automaticamente no Excel são só as aplicações e os resgates líquidos
-      // do Invest Fácil, no bloco de baixo.
+      // Pra extrato de conta corrente normal, os lançamentos do PDF NÃO são
+      // inseridos como linha nova no Excel (fica só pro relatório mostrar a
+      // diferença) — pedido antigo do usuário, continua valendo pros bancos
+      // "de verdade" (o Fluxo de Caixa do cliente já cobre tudo lá).
+      // MERCADO PAGO é diferente (pedido do usuário 30/09/2026): os eventos
+      // de "Liberação de dinheiro" (repasse das vendas do marketplace) quase
+      // nunca aparecem no Fluxo de Caixa em Excel do cliente — por isso aqui
+      // os lançamentos do PDF que não acharem par no Fluxo ENTRAM como linha
+      // nova, pra fechar com o saldo final do PDF.
       var fluxoPorDia=_rufatoAgruparPorDia(linhasFinal,function(l){return l.data;},function(l){return l.valor;});
       var extratoPorDia=_rufatoAgruparPorDia(transacoesExtrato,function(t){return t.data;},function(t){return t.valor;});
       var comparacao=_rufatoCompararDiario(fluxoPorDia,extratoPorDia);
       relatorioHtml+=_rufatoRenderRelatorioDiario(comparacao);
       qtdForaCompetencia+=foraCompetenciaExtrato;
+
+      if(ehMercadoPago){
+        var poolFluxoMP=linhasFinal.map(function(l){return {valor:l.valor,dataObj:_rufatoDataParaDate(l.data),usado:false};});
+        var candidatasMP=transacoesExtrato.filter(function(t){
+          return !RUFATO_EXTRATO_NUNCA_INSERIR.some(function(re){return re.test(t.historico||'');});
+        });
+        var faltamMP=_rufatoEncontrarFaltantes(poolFluxoMP,candidatasMP,0);
+        faltamMP.forEach(function(t){
+          linhasFinal.push({data:t.data,pladeb:'',placre:'',valor:t.valor,descr:t.historico||'Liberação de dinheiro',contaContabil:''});
+        });
+        qtdInseridas+=faltamMP.length;
+      }
     }
 
     // ── Conferência com o extrato de Aplicação/Invest Fácil (se anexado) ──
