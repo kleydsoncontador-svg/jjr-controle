@@ -19637,6 +19637,25 @@ function _lancctbParsearNFSeXml(xml){
   const dataEmissaoBruta=_lancctbExtrairTag(xml,'dhEmi')||_lancctbExtrairTag(xml,'dCompet')||'';
   const valorTotal=parseFloat(_lancctbExtrairTag(xml,'vServ')||_lancctbExtrairTag(xml,'vLiq')||'0');
   const issValor=_lancctbExtrairTag(xml,'vISSQN');
+  // Retenções federais (pedido do usuário 01/10/2026: "precisa criar uma
+  // coluna valor líquido, onde serão deduzidos ISS, PIS, COFINS, CSLL
+  // (4,65%) quando houver na NF"). No layout Nacional da NFS-e, PIS+COFINS+
+  // CSLL retidos vêm SOMADOS num único campo (vRetCSLL, confirmado na Nota
+  // Técnica 007/SE-CGNFS-e/2026) — não dá pra ler cada um separado do XML.
+  // Quando esse campo existe (nota TEM retenção), aplica as alíquotas
+  // padrão (PIS 0,65% / COFINS 3,00% / CSLL 1,00% do valor do serviço) pra
+  // separar em 3, em vez de confiar na proporção que o emissor mandou —
+  // pedido explícito do usuário: "se não estiver 4,65%, vc arruma, pois o
+  // padrão de emissão mudou, e alguns estão vindo majoradas". IRRF
+  // (vRetIRRF) vem à parte e é gravado como está (a alíquota de IRRF varia
+  // por tipo de serviço, não tem um percentual fixo único pra corrigir).
+  const retCsll=_lancctbExtrairTag(xml,'vRetCSLL');
+  const temRetFederal=retCsll&&parseFloat(retCsll)>0;
+  const pisValor=temRetFederal?Math.round(valorTotal*0.0065*100)/100:null;
+  const cofinsValor=temRetFederal?Math.round(valorTotal*0.03*100)/100:null;
+  const csllValor=temRetFederal?Math.round(valorTotal*0.01*100)/100:null;
+  const retIrrf=_lancctbExtrairTag(xml,'vRetIRRF');
+  const irrfValor=retIrrf&&parseFloat(retIrrf)>0?parseFloat(retIrrf):null;
   return {
     chave_acesso: idMatch?idMatch[1]:null,
     numero, serie:null, modelo:'NFSe',
@@ -19646,8 +19665,18 @@ function _lancctbParsearNFSeXml(xml){
     nome_destinatario:_lancctbExtrairTag(tomaBloco,'xNome'),
     data_emissao:dataEmissaoBruta.slice(0,10),
     valor_total:valorTotal, iss_valor:issValor?parseFloat(issValor):null,
+    pis_valor:pisValor, cofins_valor:cofinsValor, csll_valor:csllValor, irrf_valor:irrfValor,
     parcelas:[{numero_parcela:1,data_vencimento:dataEmissaoBruta.slice(0,10),valor_parcela:valorTotal}],
   };
+}
+// Valor Líquido de uma NFS-e (pedido do usuário 01/10/2026): Valor Bruto
+// menos ISS, PIS, COFINS, CSLL e IRRF retidos — usado na coluna "Valor
+// Líquido" da tela e no matching (tenta bruto E líquido, ver
+// _lancctbNfseValoresParaMatching).
+function _lancctbNfValorLiquido(nf){
+  const bruto=Number(nf.valor_total)||0;
+  const deduzir=(Number(nf.iss_valor)||0)+(Number(nf.pis_valor)||0)+(Number(nf.cofins_valor)||0)+(Number(nf.csll_valor)||0)+(Number(nf.irrf_valor)||0);
+  return Math.round((bruto-deduzir)*100)/100;
 }
 // CNPJs do grupo (matriz + filiais) pra essa empresa — usado pelo parser de
 // CT-e pra descobrir qual bloco (rem/dest/exped/receb) do documento é "a
@@ -19761,6 +19790,7 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
       serie:nf.serie, modelo:nf.modelo, cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
       cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao,
       data_emissao:nf.data_emissao||dataCorte||hoje_(), valor_total:nf.valor_total, iss_valor:nf.iss_valor,
+      pis_valor:nf.pis_valor||null, cofins_valor:nf.cofins_valor||null, csll_valor:nf.csll_valor||null, irrf_valor:nf.irrf_valor||null,
       xml_storage_path:null, status_captura:'xml_completo', natureza_operacao:nf.natureza_operacao||null,
     },{onConflict: nf.chave_acesso?'empresa_eid,tipo,chave_acesso':'empresa_eid,tipo,cnpj_emitente,numero,serie'}).select('id').single();
     if(nfErro||!nfInserida) return 'erro';
@@ -22349,7 +22379,7 @@ async function renderLancctbNotas(aba){
     // volta a ser rápido — o problema de timeout de antes era causado por
     // filtrar tipo/direcao do lado de dentro do join (!inner), não pelo
     // count em si.
-    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,natureza_operacao)', { count: 'exact' })
+    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,natureza_operacao)', { count: 'exact' })
     // Filtra pelas colunas PRÓPRIAS de notas_fiscais_parcelas (duplicadas,
     // indexadas em idx_nfp_empresa_tipo_direcao) em vez de notas_fiscais.*
     // (via join !inner) — filtrar pelo lado relacionado ignora esse índice e
@@ -22426,7 +22456,12 @@ async function renderLancctbNotas(aba){
         <th style="padding:8px 10px;text-align:right">Valor Parcela</th>
         <th style="padding:8px 10px;text-align:center">Parcela</th>
         <th style="padding:8px 10px;text-align:center">Qtd Parcelas</th>
-        ${ehServico?'<th style="padding:8px 10px;text-align:right">ISS</th>':'<th style="padding:8px 10px;text-align:left">Natureza da Operação</th>'}
+        ${ehServico?`<th style="padding:8px 10px;text-align:right">ISS</th>
+        <th style="padding:8px 10px;text-align:right" title="0,65% do Valor Bruto — só quando a NF tem retenção federal (campo vRetCSLL)">PIS</th>
+        <th style="padding:8px 10px;text-align:right" title="3,00% do Valor Bruto — só quando a NF tem retenção federal (campo vRetCSLL)">COFINS</th>
+        <th style="padding:8px 10px;text-align:right" title="1,00% do Valor Bruto — só quando a NF tem retenção federal (campo vRetCSLL)">CSLL</th>
+        <th style="padding:8px 10px;text-align:right" title="Imposto de Renda Retido na Fonte, quando a NF tiver (campo vRetIRRF)">IRRF</th>
+        <th style="padding:8px 10px;text-align:right" title="Valor Bruto menos ISS, PIS, COFINS, CSLL e IRRF retidos">Valor Líquido</th>`:'<th style="padding:8px 10px;text-align:left">Natureza da Operação</th>'}
         <th style="padding:8px 10px;text-align:left">Modelo</th>
         <th style="padding:8px 10px;text-align:center">Status</th>
         <th style="padding:8px 10px;text-align:center"></th>
@@ -22441,7 +22476,7 @@ async function renderLancctbNotas(aba){
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-valor-parcela" placeholder="🔎 valor" inputmode="decimal" value="${esc(_lancctbNfeFiltroValorParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('valorParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-num-parcela" placeholder="🔎 nº" inputmode="numeric" value="${esc(_lancctbNfeFiltroNumParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('numParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-qtd-parcelas" placeholder="🔎 qtd" inputmode="numeric" value="${esc(_lancctbNfeFiltroQtdParcelas)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('qtdParcelas',this.value)"></th>
-        ${ehServico?'<th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><input class="si" list="lancctbNfeNaturezaDatalist" data-filtro="nf-natureza" placeholder="🔎 filtrar" value="${esc(_lancctbNfeFiltroNatureza)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('natureza',this.value)"><datalist id="lancctbNfeNaturezaDatalist">${naturezasSugeridas.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></th>`}
+        ${ehServico?'<th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><input class="si" list="lancctbNfeNaturezaDatalist" data-filtro="nf-natureza" placeholder="🔎 filtrar" value="${esc(_lancctbNfeFiltroNatureza)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('natureza',this.value)"><datalist id="lancctbNfeNaturezaDatalist">${naturezasSugeridas.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></th>`}
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-modelo" placeholder="🔎 modelo" value="${esc(_lancctbNfeFiltroModelo)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('modelo',this.value)"></th>
         <th style="padding:4px 6px"><select class="si" data-filtro="nf-status" style="width:100%;font-size:11px" onchange="_lancctbNfeFiltroStatusMudar(this.value)">
           <option value="" ${!_lancctbNfeFiltroStatus?'selected':''}>Todos</option>
@@ -22453,7 +22488,7 @@ async function renderLancctbNotas(aba){
       </tr></thead>
       <tbody>`;
   if(!_lancctbUltimaLeitura.length){
-    html+=`<tr><td colspan="13" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
+    html+=`<tr><td colspan="${ehServico?18:13}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
   } else {
     _lancctbUltimaLeitura.forEach(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
       const statusCor=p.status_conciliacao==='conciliado'?'var(--teal)':p.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
@@ -22467,7 +22502,12 @@ async function renderLancctbNotas(aba){
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(p.valor_parcela||0)}</td>
         <td style="padding:7px 10px;text-align:center">${p.numero_parcela}</td>
         <td style="padding:7px 10px;text-align:center">${qtdParcelas}</td>
-        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>`:`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
+        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>
+        <td style="padding:7px 10px;text-align:right">${nf.pis_valor?'R$ '+_fmt(nf.pis_valor):'—'}</td>
+        <td style="padding:7px 10px;text-align:right">${nf.cofins_valor?'R$ '+_fmt(nf.cofins_valor):'—'}</td>
+        <td style="padding:7px 10px;text-align:right">${nf.csll_valor?'R$ '+_fmt(nf.csll_valor):'—'}</td>
+        <td style="padding:7px 10px;text-align:right">${nf.irrf_valor?'R$ '+_fmt(nf.irrf_valor):'—'}</td>
+        <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(_lancctbNfValorLiquido(nf))}</td>`:`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
         <td style="padding:7px 10px;text-align:center"><button class="btn bo bsm" style="font-size:10.5px;padding:3px 6px" title="Editar/dividir a(s) parcela(s) desta NF — use quando o XML veio sem abertura de parcela mas o pagamento real foi parcelado" onclick="abrirLancctbDividirParcelaModal(${p.nf_id})">✂️ Parcela</button></td>
@@ -22710,7 +22750,7 @@ function exportarLancctbNotasExcel(abaId){
   const ehServico=aba.tipoDoc==='nfse';
   const colTerceiro=ehServico?(aba.direcaoNf==='venda'?'Prestado a':'Tomado de'):'Empresa';
   const header=['Dt Emissão','Data da Parcela','Número','CNPJ',colTerceiro,'Valor Bruto','Valor Parcela','Parcela','Qtd Parcelas'];
-  if(ehServico) header.push('ISS');
+  if(ehServico) header.push('ISS','PIS','COFINS','CSLL','IRRF','Valor Líquido');
   header.push('Modelo','Status');
   const rows=_lancctbUltimaLeitura.map(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
     const linha=[
@@ -22718,7 +22758,7 @@ function exportarLancctbNotasExcel(abaId){
       p.data_vencimento?new Date(p.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'',
       nf.numero||'', _fmtCnpjCpf(cnpjTerc), nomeTerc||'', nf.valor_total||0, p.valor_parcela||0, p.numero_parcela, qtdParcelas,
     ];
-    if(ehServico) linha.push(nf.iss_valor||0);
+    if(ehServico) linha.push(nf.iss_valor||0,nf.pis_valor||0,nf.cofins_valor||0,nf.csll_valor||0,nf.irrf_valor||0,_lancctbNfValorLiquido(nf));
     linha.push((nf.modelo||'').toUpperCase(), p.status_conciliacao||'');
     return linha;
   });
@@ -25694,6 +25734,20 @@ const LANCCTB_MATCH_JANELA_DIAS_NF=60;
 // vencimento é rotina normal de fornecedor — os 3 dias apertados fazem
 // sentido quando só o NOME bate (sinal mais fraco), não quando o CNPJ é
 // idêntico.
+// Valor "esperado" de uma parcela de NF pro matching: tenta o Valor Bruto
+// (valor_parcela) OU o Valor Líquido (bruto menos ISS/PIS/COFINS/CSLL/IRRF
+// retidos, ver _lancctbNfValorLiquido) — o que estiver mais perto do valor
+// que realmente chegou/saiu do banco. Pedido do usuário 01/10/2026:
+// "precisa tentar amarrar valor bruto e valor líquido" — o pagamento de um
+// serviço com retenção chega no banco pelo líquido, não pelo valor cheio
+// da NF. Sem retenção (líquido===bruto) não muda nada do comportamento
+// anterior.
+function _lancctbNfValorParaMatching(p,valorBanco){
+  const bruto=Number(p.valor_parcela)||0;
+  const liquido=p.notas_fiscais?_lancctbNfValorLiquido(p.notas_fiscais):bruto;
+  if(Math.abs(liquido-bruto)<0.005) return bruto;
+  return Math.abs(liquido-valorBanco)<Math.abs(bruto-valorBanco)?liquido:bruto;
+}
 function _lancctbNfDentroJanela(dataVencimento,dataPagamento,toleranciaAntecipado){
   const dv=new Date(dataVencimento+'T00:00:00'), dp=new Date(dataPagamento+'T00:00:00');
   const diffDias=Math.round((dp-dv)/86400000);
@@ -26059,7 +26113,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
-    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao)')
+    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
     .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
@@ -26831,10 +26885,10 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // vencimento forem EXATOS (nada de tolerância) — vira só sugestão
       // manual quando não bater exato, nunca classifica sozinho.
       if(docHistorico?.tipo==='CPF'&&cnpjNf&&cnpjNf.length===14){
-        if(p.valor_parcela!==valor) return false;
+        if(_lancctbNfValorParaMatching(p,valor)!==valor) return false;
         if(p.data_vencimento!==l.data_pagamento) return false;
       } else {
-        if(Math.abs(p.valor_parcela-valor)>tolNF&&!(comprovanteMatch&&Number(comprovanteMatch.valor_documento)>0&&(Number(comprovanteMatch.juros)||Number(comprovanteMatch.multa)||Number(comprovanteMatch.desconto))&&Math.abs(p.valor_parcela-Number(comprovanteMatch.valor_documento))<=tolNF)) return false;
+        if(Math.abs(_lancctbNfValorParaMatching(p,valor)-valor)>tolNF&&!(comprovanteMatch&&Number(comprovanteMatch.valor_documento)>0&&(Number(comprovanteMatch.juros)||Number(comprovanteMatch.multa)||Number(comprovanteMatch.desconto))&&Math.abs(p.valor_parcela-Number(comprovanteMatch.valor_documento))<=tolNF)) return false;
         const cnpjExatoDoHistorico=docHistorico?.tipo==='CNPJ'&&cnpjNf===docHistorico.doc;
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento,cnpjExatoDoHistorico?LANCCTB_MATCH_JANELA_DIAS_NF:undefined)) return false;
       }
@@ -26852,7 +26906,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // real: parcela 1 vencendo em 30/07 sendo escolhida em vez da parcela
       // 2, que vencia em 29/08, bem mais perto do pagamento em 31/08).
       nfCandidatas.sort((a,b)=>{
-        const diffValor=Math.abs(a.valor_parcela-valor)-Math.abs(b.valor_parcela-valor);
+        const diffValor=Math.abs(_lancctbNfValorParaMatching(a,valor)-valor)-Math.abs(_lancctbNfValorParaMatching(b,valor)-valor);
         if(Math.abs(diffValor)>0.005) return diffValor;
         return _lancctbDiffDias(a.data_vencimento,l.data_pagamento)-_lancctbDiffDias(b.data_vencimento,l.data_pagamento);
       });
@@ -26860,7 +26914,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const nf=escolhida.notas_fiscais;
       const cnpjTerceiro=(ehPonte?null:cnpjAncora)||(ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario);
       const nomeTerceiro=(ehPonte?null:comprovanteMatch?.cliente_fornecedor_nome)||(ehSaida?nf?.nome_emitente:nf?.nome_destinatario);
-      const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch,escolhida.numero_parcela,escolhida.id,escolhida.valor_parcela);
+      const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch,escolhida.numero_parcela,escolhida.id,_lancctbNfValorParaMatching(escolhida,valor));
       if(error){
         erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
       } else {
