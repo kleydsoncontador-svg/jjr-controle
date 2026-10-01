@@ -20466,6 +20466,11 @@ async function _lancctbProcessarFopag(){
     if(perm!=='granted'){ handleRaiz=null; if(!temFopagMes){ toast('Acesso à pasta não concedido.','err'); return; } }
   }
 
+  // Mesma trava de _lancctbRodarMatching (estendida 30/09/2026 pra TODOS os
+  // botões "Processar...") — esta função também grava partida dobrada.
+  const _chaveLock=`${eid}|${contaId}`;
+  if(_lancctbMatchingEmExecucao.has(_chaveLock)){ toast('Já tem um processamento rodando pra esta conta — aguarde terminar antes de clicar em outro "Processar..." (evita duplicar lançamento).','err'); return; }
+  _lancctbMatchingEmExecucao.add(_chaveLock);
   const btn=document.getElementById('lancctbProcessarFopagBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn) btn.disabled=true;
@@ -20801,6 +20806,7 @@ async function _lancctbProcessarFopag(){
   } finally {
     if(btn) btn.disabled=false;
     if(statusEl) statusEl.textContent='';
+    _lancctbMatchingEmExecucao.delete(_chaveLock);
   }
 }
 
@@ -25636,6 +25642,17 @@ async function _lancctbProcessarFluxo(){
 async function _lancctbProcessarFluxoRegras(silencioso){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ if(!silencioso) toast('Selecione uma conta bancária primeiro','err'); return; }
+  // Mesma trava de _lancctbRodarMatching (ver comentário ali, achado real
+  // 17/09/2026) — essa função também grava partida dobrada por Regra e
+  // precisa entrar na MESMA trava, senão clicar nela junto com "Processar
+  // Pagamentos"/"Processar via IA" ainda duplica (achado real 30/09/2026,
+  // Rufato: "Débito por dívida Faturas vencidas do Mercado Livre" duplicado).
+  const _chaveLock=`${eid}|${contaId}`;
+  if(_lancctbMatchingEmExecucao.has(_chaveLock)){
+    if(!silencioso) toast('Já tem um processamento rodando pra esta conta — aguarde terminar antes de clicar em outro "Processar..." (evita duplicar lançamento).','err');
+    return;
+  }
+  _lancctbMatchingEmExecucao.add(_chaveLock);
   const btn=document.getElementById('lancctbProcessarFluxoRegrasBtn');
   if(btn){ btn.disabled=true; btn.textContent='Processando…'; }
   const _toast=silencioso?(()=>{}):toast;
@@ -25691,6 +25708,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
     if(!silencioso) renderLancctbRegistroContabil();
   } finally {
     if(btn){ btn.disabled=false; btn.textContent='🎯 Processar Fluxo (Regras)'; }
+    _lancctbMatchingEmExecucao.delete(_chaveLock);
   }
 }
 // Subset-sum por força bruta sobre até 15 valores (2^15=32768 combinações,
@@ -26879,9 +26897,16 @@ async function _lancctbProcessarTributos(){
   // lançamento (D+C) duas vezes. Trava o botão ANTES de qualquer await.
   const btn=document.getElementById('lancctbProcessarTributosBtn');
   if(btn&&btn.disabled) return;
+  // Mesma trava de _lancctbRodarMatching (estendida 30/09/2026 pra TODOS os
+  // botões "Processar...") — protege contra rodar junto com "Processar
+  // Pagamentos"/"Processar via IA"/etc. na mesma conta, não só contra
+  // clique duplo neste MESMO botão (que já tinha trava própria acima).
+  const _chaveLock=`${_lancctbEidAtual}|${_lancctbExtratoContaSel}`;
+  if(_lancctbMatchingEmExecucao.has(_chaveLock)){ toast('Já tem um processamento rodando pra esta conta — aguarde terminar antes de clicar em outro "Processar..." (evita duplicar lançamento).','err'); return; }
+  _lancctbMatchingEmExecucao.add(_chaveLock);
   if(btn) btn.disabled=true;
   const temAcesso=await _lancctbTemAcessoPastaTributos();
-  if(!temAcesso){ toast('Conceda acesso à pasta "Tributos do Mês" primeiro — o botão fica na tela de listagem de empresas (Lançamentos Contábeis).','err'); if(btn) btn.disabled=false; return; }
+  if(!temAcesso){ toast('Conceda acesso à pasta "Tributos do Mês" primeiro — o botão fica na tela de listagem de empresas (Lançamentos Contábeis).','err'); if(btn) btn.disabled=false; _lancctbMatchingEmExecucao.delete(_chaveLock); return; }
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
 
@@ -26920,7 +26945,7 @@ async function _lancctbProcessarTributos(){
   (linhasRateioRows||[]).forEach(l=>{ (linhasRateioPorRegra[l.regra_id]=linhasRateioPorRegra[l.regra_id]||[]).push(l); });
   const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
     .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
-  if(!contaBancoInfo?.conta_contabil_id){ if(btn) btn.disabled=false; toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+  if(!contaBancoInfo?.conta_contabil_id){ if(btn) btn.disabled=false; _lancctbMatchingEmExecucao.delete(_chaveLock); toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
 
   const cachePorMes={}, leiturasPorMes={};
   // Bug real 15/09/2026 (Taylu): sem isso, a MESMA guia (ex: 1 DAS) podia
@@ -27229,6 +27254,7 @@ async function _lancctbProcessarTributos(){
   await renderLancctbRegistroContabil();
   if(composicoesParaAbrir.length) await _lancctbRegistroAbrirInline(composicoesParaAbrir[0].id);
   else if(composicaoJaExistente) await _lancctbRegistroAbrirInline(composicaoJaExistente.id);
+  _lancctbMatchingEmExecucao.delete(_chaveLock);
 }
 
 // Botão "🤖 Processar via IA" (último recurso, pedido do usuário
@@ -27287,6 +27313,16 @@ async function _lancctbCorrigirDataParcelaExistente(){
 async function _lancctbProcessarViaIA(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
+  // Mesma trava de _lancctbRodarMatching (achado real 17/09/2026, estendida
+  // 30/09/2026 pra cobrir TODOS os botões "Processar..." — essa função
+  // também grava partida dobrada e também pode duplicar se rodar junto com
+  // "Processar Pagamentos"/"Processar Fluxo (Regras)" na mesma conta).
+  const _chaveLock=`${eid}|${contaId}`;
+  if(_lancctbMatchingEmExecucao.has(_chaveLock)){
+    toast('Já tem um processamento rodando pra esta conta — aguarde terminar antes de clicar em outro "Processar..." (evita duplicar lançamento).','err');
+    return;
+  }
+  _lancctbMatchingEmExecucao.add(_chaveLock);
   const btn=document.getElementById('lancctbProcessarIaBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn) btn.disabled=true;
@@ -27426,6 +27462,7 @@ async function _lancctbProcessarViaIA(){
   } finally {
     if(btn) btn.disabled=false;
     if(statusEl) statusEl.textContent='';
+    _lancctbMatchingEmExecucao.delete(_chaveLock);
   }
 }
 
