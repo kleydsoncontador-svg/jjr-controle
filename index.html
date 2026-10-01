@@ -4939,8 +4939,42 @@ function _rufatoParseValorLinhaExtrato(linha){
   resto=resto.replace(/\s+/g,' ').trim();
   return {valor:valorM[0],saldo:saldoM[0],docto:docto,textoExtra:resto};
 }
+// Itaú BBA (Conta Corrente, "Lançamentos do período"/Razão Social/CNPJ-CPF)
+// usa um layout totalmente diferente do genérico abaixo (sem "valor+saldo"
+// juntos na mesma linha — ver _lancctbParsearExtratoItauBBANativo, já
+// validado e reaproveitado do módulo Lançamentos Bancários). Pedido real
+// 01/10/2026 (Rufato #4): o parser genérico nunca reconhecia nenhuma linha
+// desse layout (exige 2 valores por linha; aqui só tem 1), resultando em 0
+// lançamentos lidos sempre que esse banco era anexado.
+async function _rufatoParsearExtratoItauBBA(file){
+  var buf=await file.arrayBuffer();
+  var pdfDoc=await pdfjsLib.getDocument({data:buf}).promise;
+  var r=await _lancctbParsearExtratoItauBBANativo(pdfDoc);
+  if(!r)return null;
+  return r.lancamentos.map(function(l){
+    var v=(l.valor_entrada||0)-(l.valor_saida||0);
+    var mIso=String(l.data||'').match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if(!mIso)return null;
+    return {data:mIso[3]+'/'+mIso[2]+'/'+mIso[1],valor:v,saldo:null,docto:'',historico:l.historico||''};
+  }).filter(Boolean);
+}
 async function _rufatoParsearExtratoPDF(files){
   var transacoes=[];
+  var resultadosItauBBA=[];
+  var arquivosGenericos=[];
+  for(var fi=0;fi<files.length;fi++){
+    var txt1='';
+    try{
+      var bufFp=await files[fi].arrayBuffer();
+      var pdfFp=await pdfjsLib.getDocument({data:bufFp}).promise;
+      txt1=(await (await pdfFp.getPage(1)).getTextContent()).items.map(function(i){return i.str;}).join(' ');
+    }catch(e){}
+    if(_itaubbaScoreAncoras(txt1)>=3){
+      var rBBA=await _rufatoParsearExtratoItauBBA(files[fi]);
+      if(rBBA&&rBBA.length){ resultadosItauBBA=resultadosItauBBA.concat(rBBA); continue; }
+    }
+    arquivosGenericos.push(files[fi]);
+  }
   var dataAtual=null,bufferHist=[],pendente=null;
   function fecharPendente(){
     if(pendente){
@@ -4950,8 +4984,8 @@ async function _rufatoParsearExtratoPDF(files){
       pendente=null;
     }
   }
-  for(var f=0;f<files.length;f++){
-    var paginas=await _rufatoExtrairPaginasPDF(files[f]);
+  for(var f=0;f<arquivosGenericos.length;f++){
+    var paginas=await _rufatoExtrairPaginasPDF(arquivosGenericos[f]);
     for(var p=0;p<paginas.length;p++){
       var linhas=_convItauAgruparLinhas(paginas[p].itens).map(function(l){return l.texto;});
       for(var li=0;li<linhas.length;li++){
@@ -4998,7 +5032,7 @@ async function _rufatoParsearExtratoPDF(files){
   });
   return unicos.map(function(t){
     return {data:t.data,valor:_rufatoParseValorBR(t.valor),saldo:_rufatoParseValorBR(t.saldo),docto:t.docto,historico:t.historico};
-  });
+  }).concat(resultadosItauBBA);
 }
 
 // Mercado Pago usa um layout de PDF totalmente diferente (datas com hífen
@@ -5041,6 +5075,43 @@ async function _rufatoParsearExtratoMercadoPagoPDF(files){
 // abaixo filtra só as linhas do Invest Fácil, ignorando os outros produtos
 // (pedido do usuário 11/09/2026: aqui só interessam Resgates/Crédito e
 // Aplicações/Principal do Invest Fácil).
+// ── Parser do extrato de Aplicação Financeira (PDF, Itaú "Aut Mais" —
+// "Extrato Consolidado de Movimentação"). Achado real 01/10/2026 (Rufato
+// #4): layout totalmente diferente do Bradesco abaixo — cada linha é 1 DIA
+// (não 1 transação), com colunas fixas (Aplicações | bloco Resgate:
+// Principal/Bruto/IOF/IRRF/Líquido/RendBruto/RendLíquido [7] | bloco
+// Posição do dia: SaldoPrincipal/SaldoBruto/ProvIOF/ProvIRRF/SaldoLíquido
+// [5]). Resolvido pela QUANTIDADE de valores na linha, sem precisar
+// aprender posição de coluna: só Aplicação nesse dia → 6 valores (1 da
+// Aplicação + 5 da Posição), o 1º é o que saiu da conta corrente; só
+// Resgate → 12 valores (7 do bloco Resgate + 5 da Posição), o 5º é o
+// "Valor Líquido Resgatado" (o que efetivamente volta pra conta); os dois
+// no mesmo dia → 13 valores (não visto no arquivo real testado, tratado
+// por segurança); só a linha de abertura ("31/07/2026", 5 valores — só o
+// bloco Posição) é ignorada, não é movimento.
+async function _rufatoParsearAplicacaoAutMaisItauPDF(files){
+  var aplicacoes=[],resgates=[];
+  for(var f=0;f<files.length;f++){
+    var paginas=await _rufatoExtrairPaginasPDF(files[f]);
+    for(var p=0;p<paginas.length;p++){
+      var linhas=_convItauAgruparLinhas(paginas[p].itens);
+      for(var li=0;li<linhas.length;li++){
+        var mData=(linhas[li].texto||'').match(/^(\d{2}\/\d{2}\/\d{4})\b(.*)$/);
+        if(!mData)continue;
+        var valores=Array.from(mData[2].matchAll(RUFATO_RE_MONEY)).map(function(m){return m[0];});
+        if(valores.length===6){
+          aplicacoes.push({data:mData[1],valor:_rufatoParseValorBR(valores[0])});
+        }else if(valores.length===12){
+          resgates.push({data:mData[1],valor:_rufatoParseValorBR(valores[4])});
+        }else if(valores.length===13){
+          aplicacoes.push({data:mData[1],valor:_rufatoParseValorBR(valores[0])});
+          resgates.push({data:mData[1],valor:_rufatoParseValorBR(valores[5])});
+        }
+      }
+    }
+  }
+  return {aplicacoes:aplicacoes,resgates:resgates};
+}
 async function _rufatoParsearAplicacaoPDF(files){
   var aplicacoes=[],resgates=[];
   for(var f=0;f<files.length;f++){
@@ -5051,6 +5122,12 @@ async function _rufatoParsearAplicacaoPDF(files){
     for(var pp=1;pp<=Math.min(pdf0.numPages,2);pp++){
       var c0=await (await pdf0.getPage(pp)).getTextContent();
       t1+=' '+c0.items.map(function(it){return it.str;}).join(' ');
+    }
+    if(/APLIC\s+AUT\s+MAIS/i.test(t1)&&/EXTRATO\s+CONSOLIDADO\s+DE\s+MOVIMENTA[ÇC][ÃA]O/i.test(t1)){
+      var rAutMais=await _rufatoParsearAplicacaoAutMaisItauPDF([file]);
+      aplicacoes=aplicacoes.concat(rAutMais.aplicacoes);
+      resgates=resgates.concat(rAutMais.resgates);
+      continue;
     }
     if(/Extrato\s+do\s+Cliente\s*-\s*Movimentos/i.test(t1)&&/Extrato\s+de\s+CDBs\/LETRAS/i.test(t1)){
       var rMulti=await _rufatoParsearAplicacaoMultiprodutoPDF(pdf0,'invest facil');
@@ -33387,6 +33464,109 @@ async function _lancctbParsearExtratoItauBBAOcr(pdf){
     lancamentos, saldoAnteriorDoc, saldoFinalDoc, layout:'Itaú BBA (OCR local)',
     observacao:`Lido via OCR local (Tesseract.js) — PDF sem texto selecionável.${sinaisCorrigidos?` ${sinaisCorrigidos} sinal(is) de valor corrigido(s) automaticamente pela conferência com o "SALDO TOTAL DISPONÍVEL DIA" (o OCR havia perdido o "−").`:''}${mPeriodo?` Período do documento: ${mPeriodo[1]} a ${mPeriodo[2]}.`:''} O "Saldo total" do cabeçalho do documento NÃO foi usado como saldo final (pode refletir a posição em uma data posterior ao período do extrato) — o saldo final considerado é o da última linha "SALDO TOTAL DISPONÍVEL DIA" dentro do período. Confira os valores antes de salvar.`,
   };
+}
+
+// ─── Extrato Itaú BBA (Conta Corrente), layout COM texto nativo ───────────
+// Mesmas colunas/regras do parser OCR acima (Data | Lançamentos | Razão
+// Social | CNPJ/CPF | Valor (R$) | Saldo (R$)), mas pra quando o PDF já tem
+// texto selecionável — não precisa rodar Tesseract. Achado real 01/10/2026
+// (Rufato #4, extrato Itaú C-C real): cada transação tem só 1 valor (não
+// tem saldo por linha, só nos checkpoints "SALDO TOTAL DISPONÍVEL DIA"), e
+// quando o texto de "Lançamentos" quebra em 2 linhas visuais, a Data e o
+// Valor saem numa 3ª "linha" própria no meio das duas (mesma pegadinha do
+// layout-imagem acima, mas aqui por COORDENADA nativa, não leitura OCR) —
+// ex. real: "RENDIMENTOS REND PAGO APLIC" (y mais alto) / "04/08/2026 ...
+// 0,07" (y do meio) / "AUT MAIS" (y mais baixo). Resolvido com a MESMA
+// lógica de "cola vizinho de cima/baixo na linha-âncora se o gap em y for
+// pequeno" já usada em _lancctbParsearExtratoBradescoContaCorrente — aqui a
+// âncora é a linha que tem Valor OU Saldo (não só Saldo, porque a maioria
+// das linhas deste layout não tem saldo por transação).
+async function _lancctbParsearExtratoItauBBANativo(pdf){
+  const pagina1=await pdf.getPage(1);
+  const itens1=await _lancctbExtrairItensPagina(pagina1);
+  const textoPagina1=itens1.map(i=>i.str).join(' ');
+  if(_itaubbaScoreAncoras(textoPagina1)<3) return null;
+
+  let colunas=null;
+  for(const linha of _lancctbAgruparLinhasPorY(itens1)){
+    const achar=re=>linha.itens.find(i=>re.test(i.str.toLowerCase()));
+    const itData=achar(/^data$/), itLanc=achar(/^lan[çc]amentos$/), itValor=achar(/valor\s*\(r\$\)/), itSaldo=achar(/saldo\s*\(r\$\)/);
+    if(itData&&itLanc&&itValor&&itSaldo){ colunas={data:itData.x,lancamentos:itLanc.x,valor:itValor.x,saldo:itSaldo.x}; break; }
+  }
+  if(!colunas) return null;
+
+  const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const REGEX_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
+  const meioValorSaldo=(colunas.valor+colunas.saldo)/2;
+
+  let dataAtual=null, saldoAnteriorDoc=null, saldoFinalDoc=null;
+  const lancamentos=[];
+  // Pendência de texto de histórico cortado bem na virada de página (ex.:
+  // "RENDIMENTOS REND PAGO APLIC" como última linha da página 2, "AUT MAIS
+  // 1,59" como 1ª linha da página 3) — sem isso, o vizinho "de cima" da
+  // âncora na página seguinte nunca é encontrado (cada página começa do
+  // zero) e o histórico sai incompleto.
+  let pendenteEntrePaginas=null;
+
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens);
+    const classificadas=linhas.map(linha=>{
+      const cel={data:'',lancamentos:'',valor:'',saldo:''};
+      linha.itens.forEach(it=>{
+        const s=it.str.trim();
+        if(!s)return;
+        if(REGEX_DATA.test(s)){ cel.data=s; return; }
+        if(REGEX_NUM.test(s)){ if(it.x<meioValorSaldo) cel.valor=s; else cel.saldo=s; return; }
+        cel.lancamentos+=(cel.lancamentos?' ':'')+s;
+      });
+      cel.lancamentos=cel.lancamentos.trim();
+      return {y:linha.y,cel};
+    });
+    const usados=new Set();
+    for(let idx=0;idx<classificadas.length;idx++){
+      if(usados.has(idx)) continue;
+      const {y,cel}=classificadas[idx];
+      if(!cel.valor&&!cel.saldo) continue; // não é âncora — continuação tratada ao lado da âncora
+
+      if(/^total$/i.test(cel.lancamentos)) continue;
+      if(cel.data) dataAtual=cel.data;
+
+      let historico=cel.lancamentos;
+      const ant=classificadas[idx-1];
+      if(ant&&!usados.has(idx-1)&&!ant.cel.valor&&!ant.cel.saldo&&ant.cel.lancamentos&&(ant.y-y)>0&&(ant.y-y)<10){
+        historico=[ant.cel.lancamentos,historico].filter(Boolean).join(' ').trim();
+        usados.add(idx-1);
+      } else if(idx===0&&pendenteEntrePaginas){
+        historico=[pendenteEntrePaginas,historico].filter(Boolean).join(' ').trim();
+      }
+      pendenteEntrePaginas=null;
+      const prox=classificadas[idx+1];
+      if(prox&&!usados.has(idx+1)&&!prox.cel.valor&&!prox.cel.saldo&&prox.cel.lancamentos&&(y-prox.y)>0&&(y-prox.y)<10){
+        historico=[historico,prox.cel.lancamentos].filter(Boolean).join(' ').trim();
+        usados.add(idx+1);
+      }
+
+      if(/^SALDO ANTERIOR/i.test(historico)){ if(cel.saldo) saldoAnteriorDoc=_lancctbParseValorBR(cel.saldo); continue; }
+      if(/^SALDO TOTAL DISPON[ÍI]VEL DIA/i.test(historico)){ if(cel.saldo) saldoFinalDoc=_lancctbParseValorBR(cel.saldo); continue; }
+      if(!cel.valor) continue; // só saldo, sem valor de movimento — não é lançamento
+      if(!dataAtual) continue;
+      const dataIso=_itaubbaDataBrIso(dataAtual);
+      if(!dataIso) continue;
+
+      const valor=_lancctbParseValorBR(cel.valor);
+      lancamentos.push({ data:dataIso, historico, valor_entrada:valor>0?valor:0, valor_saida:valor<0?-valor:0, documento:null });
+    }
+    // Última linha da página sem valor/saldo e não usada como vizinha = pode
+    // ser a continuação que vai aparecer no topo da próxima página.
+    const ultimoIdx=classificadas.length-1;
+    if(ultimoIdx>=0&&!usados.has(ultimoIdx)){
+      const ult=classificadas[ultimoIdx];
+      if(!ult.cel.valor&&!ult.cel.saldo&&ult.cel.lancamentos) pendenteEntrePaginas=ult.cel.lancamentos;
+    }
+  }
+  if(!lancamentos.length) return null;
+  return { lancamentos, saldoAnteriorDoc, saldoFinalDoc, layout:'Itaú BBA (texto nativo)' };
 }
 
 // Leitor GENÉRICO (sem IA): aprende as colunas pelo cabeçalho do próprio PDF e SÓ é aceito se o saldo conferir (saldo por linha, saldo
