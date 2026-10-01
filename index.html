@@ -21134,8 +21134,27 @@ function _lancctbParseValorBR2(s){
 // de assumir 1 ocorrência só). Retorna null se não for esse formato (ex:
 // GNRE, DAS, FGTS — aí quem chama cai pro extrator genérico).
 async function _lancctbExtrairComposicaoDarf(pdf){
-  const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
-  return _lancctbComposicaoDarfDeItens(itens,3);
+  const porPagina=[];
+  for(let p=1;p<=pdf.numPages;p++) porPagina.push(await _lancctbExtrairItensPagina(await pdf.getPage(p)));
+  return _lancctbComposicaoDarfMultiPagina(porPagina,3);
+}
+// Junta a composição de VÁRIAS páginas (achado real 01/10/2026, Rufato: INSS
+// Pessoal 07/2026, R$531.506,60, 16 códigos de receita espalhados em 2
+// páginas, "Totais" só fecha na última) — lendo só a página 1,
+// _lancctbComposicaoDarfDeItens() achava só 9 dos 16 códigos e o valor nunca
+// batia com a pendência. Chama o parser de 1 página por página (cada uma já
+// detecta sozinha se tem o cabeçalho "Composição do Documento de
+// Arrecadação" — página sem isso só devolve null e é ignorada) e soma TODOS
+// os itens de TODAS as páginas pro valor total, em vez de confiar num rótulo
+// "Valor Total"/"Totais" que pode estar numa página só (ou faltar no OCR).
+function _lancctbComposicaoDarfMultiPagina(porPaginaItens,tolY){
+  const resultados=porPaginaItens.map(itensPagina=>_lancctbComposicaoDarfDeItens(itensPagina,tolY)).filter(Boolean);
+  if(!resultados.length) return null;
+  const ehDas=resultados.some(r=>r.itens===null);
+  const itensTodos=resultados.flatMap(r=>r.itens||[]);
+  const valorTotal=itensTodos.length?Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100:resultados[0].valorTotal;
+  const competencia=(resultados.find(r=>r.competencia)||{}).competencia||null;
+  return { itens:ehDas?null:itensTodos, valorTotal, competencia };
 }
 // Núcleo compartilhado entre a leitura por TEXTO NATIVO (pdf.js, tol=3 —
 // itens já vêm com coordenada exata) e a leitura por OCR local (Tesseract.js,
@@ -21386,7 +21405,8 @@ async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
   const worker=await _ganhoOcrWorker();
   const page1=await pdf.getPage(1);
   // Detecta orientação (0/90/180/270°) igual ao leitor de Itaú Fundos
-  // escaneado — guia de tributo digitalizada pode vir girada.
+  // escaneado — guia de tributo digitalizada pode vir girada. Só testa na
+  // página 1 (as demais páginas da mesma guia vêm sempre na mesma orientação).
   let melhorRotacao=0, melhorScore=-1;
   for(const rot of [0,90,180,270]){
     if(statusCb) statusCb(`Detectando orientação da guia (testando ${rot}°)…`);
@@ -21395,22 +21415,31 @@ async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
     const score=_lancctbDarfScoreAncoras(dataTeste.text);
     if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; }
   }
-  if(statusCb) statusCb('Lendo guia via OCR local (Tesseract.js)…');
-  const canvas=await _ganhoItauFundoRenderizarPagina(page1,melhorRotacao,3);
-  const { data } = await worker.recognize(canvas);
-  const itens=_lancctbOcrDataParaItens(data);
+  // Guia composta (DARF/DCTFWEB) pode ter o detalhamento por código de
+  // receita espalhado por VÁRIAS páginas, com o "Total"/"Totais" só na
+  // última (achado real 01/10/2026, Rufato: INSS Pessoal 07/2026,
+  // R$531.506,60, 16 códigos em 2 páginas — OCR só da página 1 achava 9 dos
+  // 16 códigos e o valor nunca batia com a pendência). OCR TODAS as páginas.
+  const porPagina=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    if(statusCb) statusCb(pdf.numPages>1?`Lendo guia via OCR local (Tesseract.js) — página ${p}/${pdf.numPages}…`:'Lendo guia via OCR local (Tesseract.js)…');
+    const page=p===1?page1:await pdf.getPage(p);
+    const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,3);
+    const { data } = await worker.recognize(canvas);
+    porPagina.push({ itens:_lancctbOcrDataParaItens(data), texto:String(data.text||'').replace(/\s+/g,' ') });
+  }
   // Tolerância de linha maior que o texto nativo (18 em vez de 3) — a bbox
   // de cada palavra do OCR varia mais entre si do que a posição exata de um
   // glyph nativo do pdf.js (achado real 22/09/2026: numa linha real da CLD
   // a parte do texto e a dos números da MESMA linha ficaram 14px
   // desalinhadas entre si, quebrando o agrupamento com tol=10).
-  const darf=_lancctbComposicaoDarfDeItens(itens,18);
+  const darf=_lancctbComposicaoDarfMultiPagina(porPagina.map(p=>p.itens),18);
   if(darf) return { valor:darf.valorTotal, composicao:darf.itens, competencia:darf.competencia, viaOcr:true };
   // Não é layout de composição (GNRE/DAS/FGTS sem tabela por código) — tenta
   // achar um total pelo mesmo rótulo genérico usado no texto nativo
-  // (_lancctbExtrairValorTotalGenerico), na mesma passada de OCR (não roda
-  // o Tesseract de novo).
-  const textoOcr=String(data.text||'').replace(/\s+/g,' ');
+  // (_lancctbExtrairValorTotalGenerico), juntando o texto OCR de TODAS as
+  // páginas já lidas acima (não roda o Tesseract de novo).
+  const textoOcr=porPagina.map(p=>p.texto).join(' ');
   const mTotal=textoOcr.match(/(?:total a recolher|valor total(?: do documento)?|total geral|valor a pagar|total\s*\(r\$\))[^,]{0,30}?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
   // FGTS Digital escaneado: o que é pago é o "Total da Guia" (FGTS + consignado), não o 1º "Total…"
   const mGuia=textoOcr.match(/total\s*da\s*guia:?\s*(?:R\$\s*)?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
