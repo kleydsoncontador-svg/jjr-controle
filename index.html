@@ -26101,6 +26101,13 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     return { erro:'A conta bancária selecionada não tem Conta Contábil vinculada — cadastre em "Agência Bancária" antes de rodar o matching.' };
   }
   const contaBanco={ id:contaBancoInfo.conta_contabil_id, classificacao:contaBancoInfo.plano_contas.classificacao };
+  // Conta 568 (Adiantamentos de Benefícios/VT) — existe com esse número em
+  // praticamente toda empresa (mesmo padrão de conta fixa entre empresas já
+  // usado pra 10000/10001). Pedido do usuário 01/10/2026: "sempre que houver
+  // referência no histórico do VT pago, como sendo do próximo mês ao do
+  // pagamento, contabilize de forma automática pra a conta 568" — ver Passo
+  // 0.1 abaixo.
+  const { data: contaVtRow } = await _supaClient.from('plano_contas').select('id,classificacao').eq('empresa_eid',eid).eq('numero_conta','568').eq('ativo',true).maybeSingle();
   // Contas fixas do matching por NF — a JJR não usa 1 conta por
   // fornecedor/cliente: toda saída amarrada numa NF debita 10001, toda
   // entrada amarrada numa NF credita 10000. Uma Regra tipo "cliente_fornecedor"
@@ -26113,7 +26120,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   }
 
   const comprovantesUsadosPag=new Set(), comprovantesUsadosReceb=new Set(), parcelasUsadas=new Set();
-  let resolvNF=0,resolvSubsetSum=0,resolvRegra=0,resolvSocio=0,aindaPendente=0;
+  let resolvNF=0,resolvSubsetSum=0,resolvRegra=0,resolvSocio=0,resolvVt=0,aindaPendente=0;
   const erros=[];
 
   // Verifica as linhas recém-gravadas contra contasAlertaMap e manda pro
@@ -26481,6 +26488,40 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
           resolvSocio++;
         }
         continue;
+      }
+    }
+
+    // Passo 0.1: VT (vale-transporte) pago com referência, no próprio
+    // histórico bancário, ao mês SEGUINTE ao do pagamento (ex.: pago em
+    // 26/08/2026, histórico "...VT SIM MAUA 09/2026") — é adiantamento, vai
+    // pra conta 568, nunca pro fallback genérico. "VT" como token isolado
+    // (não dentro de outra palavra, ex: "EVT"/"AVT") pra não disparar à toa.
+    if(ehSaida&&contaVtRow){
+      const histVt=String(l.historico_bancario||'');
+      const temVt=/\bVT\b/i.test(histVt);
+      const mMesRef=histVt.match(/\b(\d{2})\/(\d{4})\b/);
+      if(temVt&&mMesRef){
+        const [, mesRefStr, anoRefStr]=mMesRef;
+        const mesRef=parseInt(mesRefStr,10), anoRef=parseInt(anoRefStr,10);
+        const [anoPag,mesPagStr]=l.data_pagamento.split('-');
+        const mesPag=parseInt(mesPagStr,10), anoPagNum=parseInt(anoPag,10);
+        const mesSeguinte=mesPag===12?1:mesPag+1, anoSeguinte=mesPag===12?anoPagNum+1:anoPagNum;
+        if(mesRef===mesSeguinte&&anoRef===anoSeguinte){
+          const historicoVt=`Adiantamento de VT ref. ${mesRefStr}/${anoRefStr}`;
+          const linhasVt=[
+            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:'C', valor, historico:historicoVt, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' },
+            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaVtRow.classificacao, conta_contabil_id:contaVtRow.id, tipo:'D', valor, historico:historicoVt, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' },
+          ];
+          const { error:erroVt } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasVt });
+          if(erroVt){
+            erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${erroVt.message}`);
+          } else {
+            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+            await checarAlertaAutomatico(linhasVt,l,valor,historicoVt,null);
+            resolvVt++;
+          }
+          continue;
+        }
       }
     }
 
@@ -26940,7 +26981,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     if(!resolvido) aindaPendente++;
   }
 
-  return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, resolvSocio, aindaPendente, erros };
+  return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, resolvSocio, resolvVt, aindaPendente, erros };
 }
 async function _lancctbReprocessarPendencias(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -26956,6 +26997,7 @@ async function _lancctbReprocessarPendencias(){
   if(resultado.resolvSubsetSum) partes.push(`${resultado.resolvSubsetSum} por soma de NFs`);
   if(resultado.resolvRegra) partes.push(`${resultado.resolvRegra} por regra`);
   if(resultado.resolvSocio) partes.push(`${resultado.resolvSocio} por sócio`);
+  if(resultado.resolvVt) partes.push(`${resultado.resolvVt} VT ref. mês seguinte`);
   const resumo=partes.length?partes.join(', '):'nenhum';
   toast(`Matching concluído: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
   if(resultado.erros&&resultado.erros.length) console.warn('Erros no matching:',resultado.erros);
@@ -27003,6 +27045,7 @@ async function _lancctbProcessarFonteRegistro(modo){
   if(resultado.resolvNF) partes.push(`${resultado.resolvNF} por NF`);
   if(resultado.resolvSubsetSum) partes.push(`${resultado.resolvSubsetSum} por soma de NFs`);
   if(resultado.resolvSocio) partes.push(`${resultado.resolvSocio} por sócio`);
+  if(resultado.resolvVt) partes.push(`${resultado.resolvVt} VT ref. mês seguinte`);
   if(resultado.resolvRegra) partes.push(`${resultado.resolvRegra} por Regra`);
   const resumo=partes.length?partes.join(', '):'nenhum';
   toast(`${info.label}: ${resumo} resolvido(s) de ${resultado.total} pendente(s). ${resultado.aindaPendente} continuam pendentes.`,resultado.aindaPendente<resultado.total?'ok':'err');
