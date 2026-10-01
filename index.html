@@ -27233,6 +27233,42 @@ function _lancctbRufatoCteAcharArquivo(candidatos,info,valorEsperado){
   achado=pool.find(f=>f.nome.includes(valorTxt));
   return achado||null;
 }
+// Acha subpasta tolerando acento/maiúscula diferente (getDirectoryHandle
+// exige nome EXATO) e, achando por scan, cacheia o handle real pro próximo
+// nível não precisar escanear de novo.
+async function _lancctbAcharSubpastaFlex(dirHandle,nomeAlvo){
+  try{ return await dirHandle.getDirectoryHandle(nomeAlvo); }catch{}
+  const alvoNorm=_lancctbRufatoCteNormaliza(nomeAlvo);
+  try{
+    for await (const [nome,h] of dirHandle.entries()){
+      if(h.kind==='directory'&&_lancctbRufatoCteNormaliza(nome)===alvoNorm) return h;
+    }
+  }catch{}
+  return null;
+}
+// Achado real 01/10/2026 (Rufato): o usuário concedeu acesso direto na
+// pasta do MÊS ("Faturas com Relação de CTe_2026-08"), não na raiz da
+// empresa ("Rufato Distribuidora - 04") como o código assumia — toda
+// competência dava "sem pasta do mês" porque {ano}/Docs. Suporte.../ nunca
+// existia dentro da pasta escolhida. Agora tenta vários pontos de partida
+// possíveis (raiz = empresa, raiz = {ano}, raiz = "Docs. Suporte para
+// Pagamentos", ou a própria pasta escolhida JÁ SER a pasta do mês) antes de
+// desistir — cobre qualquer nível que o contador tenha escolhido no seletor.
+async function _lancctbRufatoCteLocalizarPastaMes(handleRaiz,ano,anoMes){
+  const nomeMes='Faturas com Relação de CTe_'+anoMes;
+  if(_lancctbRufatoCteNormaliza(handleRaiz.name||'')===_lancctbRufatoCteNormaliza(nomeMes)) return handleRaiz;
+  const candidatosCaminho=[ [ano,'Docs. Suporte para Pagamentos',nomeMes], ['Docs. Suporte para Pagamentos',nomeMes], [nomeMes] ];
+  for(const caminho of candidatosCaminho){
+    let atual=handleRaiz, ok=true;
+    for(const parte of caminho){
+      const prox=await _lancctbAcharSubpastaFlex(atual,parte);
+      if(!prox){ ok=false; break; }
+      atual=prox;
+    }
+    if(ok) return atual;
+  }
+  return null;
+}
 async function _lancctbRufatoCteBuscarArquivosDoMes(anoMes){
   const handleRaiz=await _lancctbCarregarHandleRufatoCte();
   if(!handleRaiz) return [];
@@ -27240,9 +27276,8 @@ async function _lancctbRufatoCteBuscarArquivosDoMes(anoMes){
   if(perm!=='granted') return [];
   const ano=anoMes.split('-')[0];
   try{
-    const dirAno=await handleRaiz.getDirectoryHandle(ano);
-    const dirSuporte=await dirAno.getDirectoryHandle('Docs. Suporte para Pagamentos');
-    const dirMes=await dirSuporte.getDirectoryHandle('Faturas com Relação de CTe_'+anoMes);
+    const dirMes=await _lancctbRufatoCteLocalizarPastaMes(handleRaiz,ano,anoMes);
+    if(!dirMes) return [];
     const out=[];
     for await (const [nome,fh] of dirMes.entries()){
       if(fh.kind==='file'&&nome.toLowerCase().endsWith('.pdf')) out.push({nome,fileHandle:fh});
