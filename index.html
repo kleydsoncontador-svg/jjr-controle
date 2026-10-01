@@ -27238,16 +27238,31 @@ function _lancctbRufatoCteTentarFamilia(linhas,nomeFamilia){
 }
 // Tenta cada família; só aceita a que achou 1+ CT-e cuja SOMA bate o valor
 // esperado (±0,02 — arredondamento de centavo em soma de várias linhas).
+// Devolve {itens, fechou} — fechou=true quando a soma bate exato (±0,02) com
+// a pendência (caso ideal, continua preferido: tenta cada família em ordem e
+// aceita a 1ª que fechar). Pedido do usuário 01/10/2026 (Rufato, RODONAVES
+// 20/08: fatura com MUITOS CT-es — a soma reconhecida pela família certa não
+// fechou com o valor da pendência, provavelmente por CT-e(s) extra na fatura
+// que os regex das famílias não cobrem ainda): antes disso ERA descartado
+// inteiro (fica pendente manual pra sempre) — agora, se nenhuma família
+// fechar exato, usa a que achou MAIS CT-es (maior cobertura) mesmo sem
+// fechar, e quem chama lança a diferença residual na 10001 como "Diferença"
+// em vez de perder a resolução inteira.
 async function _lancctbRufatoCteExtrairDoPdf(pdfDoc,valorEsperado){
   const linhas=await _lancctbRufatoCteLinhasTexto(pdfDoc);
   const nomes=[...LANCCTB_RUFATO_CTE_FAMILIAS_DIRETAS.map(f=>f.nome),...LANCCTB_RUFATO_CTE_FAMILIAS_ULTIMO.map(f=>f.nome),'iury'];
+  let melhor=null;
   for(const nome of nomes){
     const achados=_lancctbRufatoCteTentarFamilia(linhas,nome);
     if(!achados.length) continue;
     const soma=Math.round(achados.reduce((s,a)=>s+a.valor,0)*100)/100;
-    if(Math.abs(soma-valorEsperado)<=0.02) return achados;
+    if(Math.abs(soma-valorEsperado)<=0.02) return { itens:achados, fechou:true };
+    // Soma não pode passar do valor da pendência (senão provavelmente é a
+    // família errada lendo lixo) — só guarda como "melhor" quando fica
+    // dentro do valor esperado e tem mais itens que o candidato anterior.
+    if(soma<=valorEsperado&&(!melhor||achados.length>melhor.itens.length)) melhor={itens:achados,soma};
   }
-  return null;
+  return melhor?{ itens:melhor.itens, fechou:false }:null;
 }
 // "Pagamento ref. FATURA <num> - <TRANSPORTADORA>" — padrão real do histórico
 // bancário já gravado pra pagamento com Fatura casada (ver matching por NF).
@@ -27354,7 +27369,7 @@ async function _lancctbProcessarCtesRufato(){
     if(!conta10001){ toast('Cadastre a conta contábil padrão 10001 (débitos de compra com NF) no Plano de Contas antes de rodar.','err'); return; }
 
     const cachePorMes={}, arquivosUsados=new Set();
-    let resolvidos=0, semArquivo=0, semParser=0, semPasta=0;
+    let resolvidos=0, semArquivo=0, semParser=0, semPasta=0, resolvidosComDiferenca=0;
     for(let i=0;i<pendencias.length;i++){
       const l=pendencias[i];
       if(statusEl) statusEl.textContent=`Processando CT-es ${i+1}/${pendencias.length}…`;
@@ -27368,26 +27383,40 @@ async function _lancctbProcessarCtesRufato(){
       if(!arquivo){ semArquivo++; continue; }
       const chaveArquivo=anoMes+'|'+arquivo.nome;
       if(arquivosUsados.has(chaveArquivo)) continue;
-      let linhasCte=null;
+      let resultado=null;
       try{
         const arq=await arquivo.fileHandle.getFile();
         const pdfDoc=await pdfjsLib.getDocument({data:await arq.arrayBuffer()}).promise;
-        linhasCte=await _lancctbRufatoCteExtrairDoPdf(pdfDoc,l.valor_saida);
+        resultado=await _lancctbRufatoCteExtrairDoPdf(pdfDoc,l.valor_saida);
       }catch(e){ console.error('Falha ao ler PDF de CT-e '+arquivo.nome+':',e); }
-      if(!linhasCte||!linhasCte.length){ semParser++; continue; }
+      if(!resultado||!resultado.itens.length){ semParser++; continue; }
       arquivosUsados.add(chaveArquivo);
+      const linhasCte=resultado.itens;
       const soma=Math.round(linhasCte.reduce((s,c)=>s+c.valor,0)*100)/100;
       const ajuste=Math.round((l.valor_saida-soma)*100)/100;
       const linhasRpc=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:l.historico_bancario, lancamento_extrato_id:l.id, origem_match:'manual' }];
-      linhasCte.forEach((c,k)=>{
-        linhasRpc.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta10001.classificacao, conta_contabil_id:conta10001.id, tipo:'D', valor:Math.round((c.valor+(k===0?ajuste:0))*100)/100, historico:`Pagamento ref. CT-e ${c.cte} - ${info.fornecedor}`, lancamento_extrato_id:l.id, origem_match:'manual' });
+      linhasCte.forEach(c=>{
+        linhasRpc.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta10001.classificacao, conta_contabil_id:conta10001.id, tipo:'D', valor:c.valor, historico:`Pagamento ref. CT-e ${c.cte} - ${info.fornecedor}`, lancamento_extrato_id:l.id, origem_match:'manual' });
       });
+      // Achado real 01/10/2026 (Rufato, RODONAVES 20/08): quando a família
+      // reconhecida não fecha com o valor da pendência (provável CT-e extra
+      // na fatura que o regex ainda não cobre), em vez de descartar tudo e
+      // deixar pendente manual pra sempre, joga a diferença residual direto
+      // na 10001 como linha própria — "pode jogar a diferença contra 10001 a
+      // débito, e colocar que é diferença" (pedido do usuário).
+      if(!resultado.fechou&&Math.abs(ajuste)>0.009){
+        linhasRpc.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta10001.classificacao, conta_contabil_id:conta10001.id, tipo:'D', valor:ajuste, historico:`Diferença (CT-e não identificado) - ${info.fornecedor}`, lancamento_extrato_id:l.id, origem_match:'manual' });
+      } else if(resultado.fechou&&Math.abs(ajuste)>0.009){
+        linhasRpc[1].valor=Math.round((linhasRpc[1].valor+ajuste)*100)/100; // arredondamento de centavo só, absorve no 1º CT-e
+      }
       const { error: eRpc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasRpc });
       if(eRpc){ console.error('Erro ao gerar lançamento de CT-es:',eRpc); semParser++; continue; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
       resolvidos++;
+      if(!resultado.fechou) resolvidosComDiferenca++;
     }
     const partes=[`${resolvidos} resolvido(s)`];
+    if(resolvidosComDiferenca) partes.push(`${resolvidosComDiferenca} com diferença jogada na 10001 (CT-e não totalmente identificado — confira)`);
     if(semArquivo) partes.push(`${semArquivo} sem PDF correspondente na pasta`);
     if(semParser) partes.push(`${semParser} PDF achado mas não consegui abrir por CT-e (ex: PEL TRANSPORTES — sem valor por CT-e no documento, fica pendente manual)`);
     if(semPasta) partes.push(`${semPasta} sem a pasta do mês`);
