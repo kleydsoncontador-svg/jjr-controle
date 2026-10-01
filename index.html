@@ -19946,6 +19946,48 @@ async function _lancctbConcederAcessoPastaFopag(){
   } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
 }
 
+// ─── CT-es Rufato (pedido do usuário 01/10/2026) — SÓ serve pra essa empresa
+// (eid 4), handle próprio porque a pasta fica DENTRO da pasta da própria
+// empresa (X:\03 - CONTABIL\CLIENTES\Rufato Distribuidora - 04\...), ao
+// contrário de ConfiBackup/Tributos que são raízes únicas pra todas.
+// Concede acesso direto na pasta "Rufato Distribuidora - 04" — dali desce
+// {ano}/Docs. Suporte para Pagamentos/Faturas com Relação de CTe_{ano}-{mes}.
+async function _lancctbSalvarHandleRufatoCte(handle){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readwrite');
+    tx.objectStore('handles').put(handle,'raizRufatoCte');
+    tx.oncomplete=()=>resolve();
+    tx.onerror=()=>reject(tx.error);
+  });
+}
+async function _lancctbCarregarHandleRufatoCte(){
+  const db=await _lancctbAbrirDbHandles();
+  return new Promise((resolve,reject)=>{
+    const tx=db.transaction('handles','readonly');
+    const req=tx.objectStore('handles').get('raizRufatoCte');
+    req.onsuccess=()=>resolve(req.result||null);
+    req.onerror=()=>reject(req.error);
+  });
+}
+async function _lancctbTemAcessoPastaRufatoCte(){
+  if(!window.showDirectoryPicker) return false;
+  try{
+    const handle=await _lancctbCarregarHandleRufatoCte();
+    if(!handle) return false;
+    return (await handle.queryPermission({mode:'read'}))==='granted';
+  } catch { return false; }
+}
+async function _lancctbConcederAcessoPastaRufatoCte(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    await _lancctbSalvarHandleRufatoCte(handle);
+    toast('Acesso à pasta de CT-es da Rufato concedido!','ok');
+    _lancctbAtualizarEstadoBotoesAcesso();
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+
 // Barra de "Conceder acesso" na listagem de empresas de Lançamentos
 // Contábeis — pedido do usuário (10/09/2026): concede 1x, vale pra TODAS as
 // empresas (inclusive as que entrarem depois), sem reabrir o seletor. Os
@@ -19962,6 +20004,7 @@ function _lancctbRenderBotoesAcessoPastas(){
     ${btn('lancctbAcessoFopagBtn','_lancctbConcederAcessoPastaFopag','Relatórios FOPAG para Contábil')}
     ${btn('lancctbAcessoTransfRedeBtn','_lancctbConcederAcessoPastaTransfRede','Arquivos de Transferência de Rede')}
     ${btn('lancctbAcessoExtratosMisterBtn','_lancctbConcederAcessoPastaExtratosMister','Extratos Mister Contador')}
+    ${btn('lancctbAcessoRufatoCteBtn','_lancctbConcederAcessoPastaRufatoCte','CT-es Rufato')}
   </div>`;
 }
 async function _lancctbAtualizarEstadoBotoesAcesso(){
@@ -19978,6 +20021,7 @@ async function _lancctbAtualizarEstadoBotoesAcesso(){
   try{ marca('lancctbAcessoFopagBtn','Relatórios FOPAG para Contábil', await _lancctbTemAcessoPastaFopag()); }catch{}
   try{ marca('lancctbAcessoTransfRedeBtn','Arquivos de Transferência de Rede', await _lancctbTemAcessoPastaTransfRede()); }catch{}
   try{ marca('lancctbAcessoExtratosMisterBtn','Extratos Mister Contador', await _lancctbTemAcessoPastaExtratosMister()); }catch{}
+  try{ marca('lancctbAcessoRufatoCteBtn','CT-es Rufato', await _lancctbTemAcessoPastaRufatoCte()); }catch{}
 }
 // ─── Pastas de rede associadas ao Extrato Bancário (pedido do usuário 26-27/09/2026) ──────────
 // "Extratos Mister Contador" é uma raiz FIXA, 1x pra todas as empresas (mesmo padrão de
@@ -27056,6 +27100,199 @@ async function _lancctbAplicarRegraPorComposicao({regras,linhasRateioPorRegra,co
   await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
   return true;
 }
+// ─── "Processar CT-es" (Rufato, pedido do usuário 01/10/2026) ───────────────
+// SÓ pra essa empresa: várias transportadoras mandam 1 fatura (1 pagamento no
+// extrato) cobrindo VÁRIOS CT-es — cada CT-e vira 1 linha de débito na conta
+// 10001, histórico com o número do CT-e. O PDF da fatura fica em
+// X:\...\Rufato Distribuidora - 04\{ano}\Docs. Suporte para Pagamentos\
+// Faturas com Relação de CTe_{ano}-{mes}. Mapeado ao vivo (01/10/2026) 6
+// layouts de transportadora diferentes — cada um com seu parser abaixo,
+// tentados em sequência; só aceita o resultado se a SOMA dos CT-es bater com
+// o valor da pendência (±0,02), senão tenta o próximo e por fim desiste
+// (fica pendente manual — é o caso real da PEL TRANSPORTES, cujo PDF é um
+// boleto único sem valor por CT-e, só a lista de números soltos — pedido do
+// usuário: "pula o PEL por enquanto, deixa pendente manual").
+// Sem limite de dígitos antes da vírgula: alguns sistemas (STM) não usam
+// separador de milhar ("4207,92" em vez de "4.207,92") — só a vírgula+2
+// casas no fim garante que é dinheiro, não um código/peso qualquer.
+const LANCCTB_RUFATO_CTE_MONEY='(\\d+(?:\\.\\d{3})*,\\d{2})';
+async function _lancctbRufatoCteLinhasTexto(pdfDoc){
+  const linhas=[];
+  for(let p=1;p<=pdfDoc.numPages;p++){
+    const page=await pdfDoc.getPage(p);
+    const itens=await _lancctbExtrairItensPagina(page);
+    const agrupadas=_lancctbAgruparLinhasPorY(itens,3);
+    agrupadas.forEach(l=>linhas.push(l.itens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim()));
+  }
+  return linhas;
+}
+function _lancctbRufatoCteUltimoValor(linha){
+  const vals=[...linha.matchAll(new RegExp(LANCCTB_RUFATO_CTE_MONEY,'g'))];
+  return vals.length?_lancctbParseValorBR2(vals[vals.length-1][1]):null;
+}
+// Famílias com prefixo (captura o CT-e) + "pega o ÚLTIMO valor monetário da
+// linha" — a coluna de interesse é sempre a última da tabela (Frete/Valor).
+const LANCCTB_RUFATO_CTE_FAMILIAS_ULTIMO=[
+  { nome:'veloz', prefixo:/^\d{2}\/\d{2}\/\d{4}\s+(\d{3,8})\b/i },               // VELOZ BRASIL: data, Documento(CT-e), ..., Frete
+  { nome:'bruno', prefixo:/^\d{1,2}\s+(\d{4,8})\s+\d{2}\/\d{2}\/\d{4}\b/i },     // BRUNO ALEXANDRE: Fl, N°Conhec.(CT-e), Emissão, ..., Valor
+  { nome:'log7', prefixo:/^(\d{4,8})\s+\d{1,2}\s+\d{2}\/\d{2}\/\d{2}\b/i },      // LOG7: Conhec(CT-e), Fl, Emissão (ano 2 dígitos), ..., Vlr.Conhec.
+  { nome:'ssw', prefixo:/^1\s+(\d{6,9})\s+\d{2}\/\d{2}\/\d{2}\s+\d{11,14}\b/i }, // NRE/RAPIDO MONTES CLAROS/SCHREIBER/SOLUCAO (sistema SSW)
+  { nome:'composicao', prefixo:/\b\d{3}\s+([A-Z]\d{4,7})\s+\d{2}\/\d{2}\/\d{4}\b/i }, // PRIMISCIA/UNIAO TRANSPORTES ("Composição da Fatura")
+];
+// Famílias que capturam CT-e e Valor direto, em posição fixa (tem outro
+// valor monetário entre os dois — "o último número da linha" não serve).
+const LANCCTB_RUFATO_CTE_FAMILIAS_DIRETAS=[
+  { nome:'rodonaves', re:new RegExp('^CT-e\\s+(\\S+)\\s+\\d{2,3}\\s+\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\S+\\s*\\(\\d+\\)\\s+'+LANCCTB_RUFATO_CTE_MONEY,'i') },
+  { nome:'stm', re:new RegExp('^(CT-SPE-\\d+)\\s+\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d+\\s+'+LANCCTB_RUFATO_CTE_MONEY,'i') },
+  { nome:'pauliners', re:new RegExp('^\\S+-A\\s+(\\d+-\\d+)\\s+\\d{2,3}\\s+\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d+\\(\\d+\\)\\s+'+LANCCTB_RUFATO_CTE_MONEY,'i') },
+  { nome:'alves_andrade', re:new RegExp('TIPO\\s*CTe\\s+(\\d+)\\s+DATA\\s*EMISS[ÃA]O\\s*:?\\s*\\d{2}\\/\\d{2}\\/\\d{4}\\s+Valor\\s*Total\\s+'+LANCCTB_RUFATO_CTE_MONEY,'i') },
+];
+// IURY GUARU: 2 colunas lado a lado na mesma linha ("Nº CT-e | Emissão |
+// Valor do Frete" repetido 2x) — precisa de match global, não âncora no início.
+const LANCCTB_RUFATO_CTE_RE_IURY=new RegExp('(\\d{6,9})\\s+\\d{2}\\/\\d{2}\\/\\d{4}\\s+R\\$\\s*'+LANCCTB_RUFATO_CTE_MONEY,'gi');
+function _lancctbRufatoCteTentarFamilia(linhas,nomeFamilia){
+  if(nomeFamilia==='iury'){
+    const out=[];
+    linhas.forEach(l=>{ for(const m of l.matchAll(LANCCTB_RUFATO_CTE_RE_IURY)) out.push({cte:m[1],valor:_lancctbParseValorBR2(m[2])}); });
+    return out;
+  }
+  const diretas=LANCCTB_RUFATO_CTE_FAMILIAS_DIRETAS.find(f=>f.nome===nomeFamilia);
+  const ultimos=LANCCTB_RUFATO_CTE_FAMILIAS_ULTIMO.find(f=>f.nome===nomeFamilia);
+  const out=[];
+  linhas.forEach(l=>{
+    if(diretas){ const m=l.match(diretas.re); if(m) out.push({cte:m[1],valor:_lancctbParseValorBR2(m[2])}); return; }
+    if(ultimos){ const m=l.match(ultimos.prefixo); if(m){ const v=_lancctbRufatoCteUltimoValor(l); if(v!==null) out.push({cte:m[1],valor:v}); } }
+  });
+  return out;
+}
+// Tenta cada família; só aceita a que achou 1+ CT-e cuja SOMA bate o valor
+// esperado (±0,02 — arredondamento de centavo em soma de várias linhas).
+async function _lancctbRufatoCteExtrairDoPdf(pdfDoc,valorEsperado){
+  const linhas=await _lancctbRufatoCteLinhasTexto(pdfDoc);
+  const nomes=[...LANCCTB_RUFATO_CTE_FAMILIAS_DIRETAS.map(f=>f.nome),...LANCCTB_RUFATO_CTE_FAMILIAS_ULTIMO.map(f=>f.nome),'iury'];
+  for(const nome of nomes){
+    const achados=_lancctbRufatoCteTentarFamilia(linhas,nome);
+    if(!achados.length) continue;
+    const soma=Math.round(achados.reduce((s,a)=>s+a.valor,0)*100)/100;
+    if(Math.abs(soma-valorEsperado)<=0.02) return achados;
+  }
+  return null;
+}
+// "Pagamento ref. FATURA <num> - <TRANSPORTADORA>" — padrão real do histórico
+// bancário já gravado pra pagamento com Fatura casada (ver matching por NF).
+function _lancctbRufatoCteParsearHistorico(hist){
+  const m=String(hist||'').match(/FATURA\s+([^\-]+?)\s*-\s*(.+)$/i);
+  if(!m) return null;
+  return { fatura:m[1].trim(), fornecedor:m[2].trim() };
+}
+function _lancctbRufatoCteNormaliza(s){
+  return String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toUpperCase().replace(/[^A-Z0-9]+/g,' ').trim();
+}
+function _lancctbRufatoCteAcharArquivo(candidatos,info,valorEsperado){
+  const norm=_lancctbRufatoCteNormaliza;
+  const faturaNorm=norm(info.fatura).replace(/\s+/g,'');
+  const fornecedorPalavra=norm(info.fornecedor).split(' ')[0];
+  const comFornecedor=candidatos.filter(f=>norm(f.nome).includes(fornecedorPalavra));
+  const pool=comFornecedor.length?comFornecedor:candidatos;
+  // 1) nome contém o número da fatura (ex: "VELOZ BRASIL - 136.pdf")
+  let achado=pool.find(f=>norm(f.nome).replace(/\s+/g,'').includes(faturaNorm));
+  if(achado) return achado;
+  // 2) "FATURA <num>.pdf" exato (formato Alves e Andrade/Elite Cargas)
+  achado=candidatos.find(f=>norm(f.nome).replace(/\s+/g,'')===('FATURA'+faturaNorm));
+  if(achado) return achado;
+  // 3) nome contém o valor do pagamento (ex: "NOME - 6.500,00.pdf")
+  const valorTxt=valorEsperado.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  achado=pool.find(f=>f.nome.includes(valorTxt));
+  return achado||null;
+}
+async function _lancctbRufatoCteBuscarArquivosDoMes(anoMes){
+  const handleRaiz=await _lancctbCarregarHandleRufatoCte();
+  if(!handleRaiz) return [];
+  const perm=await handleRaiz.queryPermission({mode:'read'});
+  if(perm!=='granted') return [];
+  const ano=anoMes.split('-')[0];
+  try{
+    const dirAno=await handleRaiz.getDirectoryHandle(ano);
+    const dirSuporte=await dirAno.getDirectoryHandle('Docs. Suporte para Pagamentos');
+    const dirMes=await dirSuporte.getDirectoryHandle('Faturas com Relação de CTe_'+anoMes);
+    const out=[];
+    for await (const [nome,fh] of dirMes.entries()){
+      if(fh.kind==='file'&&nome.toLowerCase().endsWith('.pdf')) out.push({nome,fileHandle:fh});
+    }
+    return out;
+  }catch{ return []; }
+}
+async function _lancctbProcessarCtesRufato(){
+  if(String(_lancctbEidAtual)!=='4'){ toast('Esse botão só existe pra Rufato.','err'); return; }
+  if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  const btn=document.getElementById('lancctbProcessarCtesBtn');
+  if(btn&&btn.disabled) return;
+  const _chaveLock=`${_lancctbEidAtual}|${_lancctbExtratoContaSel}`;
+  if(_lancctbMatchingEmExecucao.has(_chaveLock)){ toast('Já tem um processamento rodando pra esta conta — aguarde terminar antes de clicar em outro "Processar..." (evita duplicar lançamento).','err'); return; }
+  _lancctbMatchingEmExecucao.add(_chaveLock);
+  if(btn) btn.disabled=true;
+  try{
+    const temAcesso=await _lancctbTemAcessoPastaRufatoCte();
+    if(!temAcesso){ toast('Conceda acesso à pasta "CT-es Rufato" primeiro — o botão fica na tela de listagem de empresas (Lançamentos Contábeis).','err'); return; }
+    const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
+    const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
+    const { data: pendenciasBrutas } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
+      .select('id,data_pagamento,valor_saida,historico_bancario')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)));
+    const pendencias=(pendenciasBrutas||[]).filter(l=>/FATURA\s+/i.test(l.historico_bancario||''));
+    const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
+      .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
+    if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+    const { data: contasFixas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['10001']);
+    const conta10001=(contasFixas||[]).find(c=>c.numero_conta==='10001');
+    if(!conta10001){ toast('Cadastre a conta contábil padrão 10001 (débitos de compra com NF) no Plano de Contas antes de rodar.','err'); return; }
+
+    const cachePorMes={}, arquivosUsados=new Set();
+    let resolvidos=0, semArquivo=0, semParser=0, semPasta=0;
+    for(let i=0;i<pendencias.length;i++){
+      const l=pendencias[i];
+      if(statusEl) statusEl.textContent=`Processando CT-es ${i+1}/${pendencias.length}…`;
+      const info=_lancctbRufatoCteParsearHistorico(l.historico_bancario);
+      if(!info) continue;
+      const anoMes=l.data_pagamento.slice(0,7);
+      if(!(anoMes in cachePorMes)) cachePorMes[anoMes]=await _lancctbRufatoCteBuscarArquivosDoMes(anoMes);
+      const candidatos=cachePorMes[anoMes];
+      if(!candidatos.length){ semPasta++; continue; }
+      const arquivo=_lancctbRufatoCteAcharArquivo(candidatos,info,l.valor_saida);
+      if(!arquivo){ semArquivo++; continue; }
+      const chaveArquivo=anoMes+'|'+arquivo.nome;
+      if(arquivosUsados.has(chaveArquivo)) continue;
+      let linhasCte=null;
+      try{
+        const arq=await arquivo.fileHandle.getFile();
+        const pdfDoc=await pdfjsLib.getDocument({data:await arq.arrayBuffer()}).promise;
+        linhasCte=await _lancctbRufatoCteExtrairDoPdf(pdfDoc,l.valor_saida);
+      }catch(e){ console.error('Falha ao ler PDF de CT-e '+arquivo.nome+':',e); }
+      if(!linhasCte||!linhasCte.length){ semParser++; continue; }
+      arquivosUsados.add(chaveArquivo);
+      const soma=Math.round(linhasCte.reduce((s,c)=>s+c.valor,0)*100)/100;
+      const ajuste=Math.round((l.valor_saida-soma)*100)/100;
+      const linhasRpc=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:l.historico_bancario, lancamento_extrato_id:l.id, origem_match:'manual' }];
+      linhasCte.forEach((c,k)=>{
+        linhasRpc.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta10001.classificacao, conta_contabil_id:conta10001.id, tipo:'D', valor:Math.round((c.valor+(k===0?ajuste:0))*100)/100, historico:`Pagamento ref. CT-e ${c.cte} - ${info.fornecedor}`, lancamento_extrato_id:l.id, origem_match:'manual' });
+      });
+      const { error: eRpc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasRpc });
+      if(eRpc){ console.error('Erro ao gerar lançamento de CT-es:',eRpc); semParser++; continue; }
+      await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+      resolvidos++;
+    }
+    const partes=[`${resolvidos} resolvido(s)`];
+    if(semArquivo) partes.push(`${semArquivo} sem PDF correspondente na pasta`);
+    if(semParser) partes.push(`${semParser} PDF achado mas não consegui abrir por CT-e (ex: PEL TRANSPORTES — sem valor por CT-e no documento, fica pendente manual)`);
+    if(semPasta) partes.push(`${semPasta} sem a pasta do mês`);
+    toast('Processar CT-es: '+partes.join(' · '),resolvidos?'ok':'err');
+    if(statusEl) statusEl.textContent='';
+    renderLancctbRegistroContabil();
+  } finally {
+    if(btn) btn.disabled=false;
+    _lancctbMatchingEmExecucao.delete(_chaveLock);
+  }
+}
 async function _lancctbProcessarTributos(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   // Achado real 15/09/2026 (Accurare, TFE 27/07 duplicada 2x): o botão só
@@ -28497,6 +28734,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       ${LANCCTB_EIDS_RECEB_SO_REGRAS.includes(String(_lancctbEidAtual))?`<button class="btn bo bsm" id="lancctbProcessarRecebSoRegrasBtn" onclick="_lancctbProcessarFonteRegistro('recebimentos_so_regras')" title="Só pra esta empresa (pedido do usuário 15/09/2026): roda o matching pra pendências de RECEBIMENTO usando SÓ as Regras por histórico — nunca tenta amarrar com Comprovante nem Nota Fiscal.">🎯 Processar Recebimentos (só Regras)</button>`:''}
       <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbProcessarFopag()" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
+      ${String(_lancctbEidAtual)==='4'?`<button class="btn bo bsm" id="lancctbProcessarCtesBtn" onclick="_lancctbProcessarCtesRufato()" title="SÓ Rufato: busca na pasta 'Faturas com Relação de CTe' do mês o PDF da transportadora e abre 1 linha de débito (conta 10001) por CT-e, com o número do CT-e no histórico. O acesso à pasta é concedido na tela de listagem de empresas ('CT-es Rufato').">🚚 Processar CT-es</button>`:''}
       <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
       <button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
