@@ -19451,6 +19451,18 @@ function _lancctbHistoricoTemNomeEmpresa(historico){
 // COMERCIO, GOLDEN COMPONENTES por mera coincidência de valor+data): pagamento
 // de tributo só pode ser ligado a comprovante/Fluxo que TAMBÉM pareça tributo.
 const LANCCTB_RE_NOME_TRIBUTO=/DARF|GPS|GNRE|INSS|FGTS|IRRF|IRPJ|CSLL|PIS|COFINS|ISS|ICMS|DAS|SIMPLES|TRIBUT|IMPOSTO|RECEITA|CONTRIB|GUIA|PREVID|TERCEIROS|SEBRAE|CIDE|PARCELAMENTO|TFE|TAXA|FAZENDA|MUNICIPAL|ESTADUAL|FEDERAL|PREFEITURA|SECRETARIA/;
+// 01/10/2026 (Transforme o Educar): gatilho de Regra "DAS" bateu sozinho em
+// "SINDICATO DAS EMPRESAS...", "CASA DAS FECHADURAS..." — "das" não é só a
+// sigla do tributo, é uma palavra comum do português (contração de "de"+
+// "as"), e aparece como palavra inteira (com espaço nos dois lados) nessas
+// frases, então nem fronteira de palavra (\b) resolveria. Gatilhos curtos
+// em geral (ex: "ISS","FGTS","JJR","TFE") não têm esse problema — só os que
+// colidem com palavra/contração comum do português precisam de confirmação
+// extra. Lista pequena e explícita (não "qualquer gatilho curto") pra não
+// exigir confirmação indevida de gatilhos como "JJR" (ver
+// feedback_pagamento_jjr_conta_510), que nunca vão passar no teste de
+// "parece tributo".
+const LANCCTB_GATILHOS_AMBIGUOS_PALAVRA_COMUM=new Set(['das','da','do','dos','de']);
 function _lancctbTextoParecidoTributo(txt){
   return LANCCTB_RE_NOME_TRIBUTO.test(_convMpRemoverAcentos(String(txt||'').toUpperCase()));
 }
@@ -26475,7 +26487,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         x.regra=regras.find(r=>r.dc===contraTipo&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))
           &&!(linhasRateioPorRegra[r.id]&&linhasRateioPorRegra[r.id].length)
           &&((r.tipo_regra==='cliente_fornecedor'&&x.cnpj&&String(r.cnpj_cpf_gatilho||'').replace(/\D/g,'')===x.cnpj)
-            ||(r.tipo_regra==='historico'&&r.historico_gatilho&&txt.includes(r.historico_gatilho.toLowerCase())&&(r.valor_gatilho==null||Math.abs(x.valor-r.valor_gatilho)<=LANCCTB_MATCH_TOLERANCIA_VALOR))))||null;
+            // 01/10/2026: mesma trava de gatilho curto/ambíguo (ex: "DAS")
+            // do Passo 3 principal — ver comentário lá.
+            ||(r.tipo_regra==='historico'&&r.historico_gatilho&&txt.includes(r.historico_gatilho.toLowerCase())&&(!LANCCTB_GATILHOS_AMBIGUOS_PALAVRA_COMUM.has(r.historico_gatilho.toLowerCase().replace(/[^a-z0-9]/g,''))||_lancctbHistoricoEhTributo(txt))&&(r.valor_gatilho==null||Math.abs(x.valor-r.valor_gatilho)<=LANCCTB_MATCH_TOLERANCIA_VALOR))))||null;
       }
       x.resolvido=!!(x.par||x.regra);
     });
@@ -27043,8 +27057,18 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
           // conforme o valor.
           if(r.valor_gatilho!=null&&Math.abs(valor-r.valor_gatilho)>LANCCTB_MATCH_TOLERANCIA_VALOR) return false;
           const gatilho=r.historico_gatilho.toLowerCase();
-          if((l.historico_bancario||'').toLowerCase().includes(gatilho)) return true;
-          if(fluxoMatch&&(fluxoMatch.descricao||'').toLowerCase().includes(gatilho)) return true;
+          // 01/10/2026 (Transforme o Educar): gatilho "DAS" bateu em "SINDICATO
+          // DAS EMPRESAS...", "CASA DAS FECHADURAS..." — "das" é uma palavra
+          // comum do português (contração de "de"+"as"), não só a sigla do
+          // tributo. Qualquer gatilho curto (<=4 letras/números) é ambíguo
+          // nesse sentido, então exige confirmação extra: o texto batido
+          // também precisa parecer pagamento de tributo de verdade
+          // (_lancctbHistoricoEhTributo, já usado em outros pontos do
+          // matching) — senão a Regra não bate sozinha.
+          const gatilhoAmbiguo=LANCCTB_GATILHOS_AMBIGUOS_PALAVRA_COMUM.has(gatilho.replace(/[^a-z0-9]/g,''));
+          const bateGatilho=txt=>(txt||'').toLowerCase().includes(gatilho)&&(!gatilhoAmbiguo||_lancctbHistoricoEhTributo(txt));
+          if(bateGatilho(l.historico_bancario)) return true;
+          if(fluxoMatch&&bateGatilho(fluxoMatch.descricao)) return true;
           return false;
         }
         if(r.tipo_regra==='cliente_fornecedor') return cnpjAncora&&r.cnpj_cpf_gatilho===cnpjAncora;
