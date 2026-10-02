@@ -10770,6 +10770,37 @@ async function bootstrap(){
   if(typeof supabase!=='undefined'&&typeof SUPABASE_URL!=='undefined'
      &&SUPABASE_URL&&SUPABASE_URL.indexOf('YOUR')<0){
     _supaClient=supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+    // Trava anti-duplicidade (02/10/2026): TODO "Processar ..." grava lançamento
+    // via criar_lancamento_partida_dobrada. Se já existe (não estornado) um lote
+    // IDÊNTICO (mesmas contas, D/C e valores) pro mesmo lancamento_extrato_id,
+    // não grava de novo. Compara o conteúdo e não só o ID do extrato porque há
+    // casos legítimos de vários lotes diferentes no mesmo extrato (recebimentos
+    // agrupados do dia, rateio).
+    (function(){
+      var origRpc=_supaClient.rpc.bind(_supaClient), emVoo=new Set();
+      var assin=function(ls){ return ls.map(function(l){return [l.conta_contabil_id,l.tipo,Number(l.valor).toFixed(2)].join(':');}).sort().join('|'); };
+      _supaClient.rpc=async function(fn,args,opts){
+        if(fn!=='criar_lancamento_partida_dobrada'||!args||!Array.isArray(args.linhas)) return origRpc(fn,args,opts);
+        var extIds=[...new Set(args.linhas.map(function(l){return l.lancamento_extrato_id;}).filter(Boolean).map(String))];
+        if(extIds.length!==1) return origRpc(fn,args,opts);
+        var extId=extIds[0], chave=extId+'#'+assin(args.linhas), dupErr={data:null,error:{message:'Duplicidade evitada: este lançamento já foi gerado para este item do extrato'}};
+        if(emVoo.has(chave)) return dupErr;
+        emVoo.add(chave);
+        try{
+          var r=await _supaClient.from('lancamentos_contabeis').select('lote_id,conta_contabil_id,tipo,valor').eq('lancamento_extrato_id',extId).eq('estornado',false);
+          if(!r.error&&r.data&&r.data.length){
+            var porLote={};
+            r.data.forEach(function(x){(porLote[x.lote_id]=porLote[x.lote_id]||[]).push(x);});
+            var minha=assin(args.linhas);
+            if(Object.values(porLote).some(function(ls){return assin(ls)===minha;})){
+              await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',extId);
+              return dupErr;
+            }
+          }
+          return await origRpc(fn,args,opts);
+        } finally { emVoo.delete(chave); }
+      };
+    })();
     // Badge "Cloud" no header
     var hdr=document.querySelector('header .hright');
     if(hdr){
