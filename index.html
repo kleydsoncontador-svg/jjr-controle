@@ -18564,6 +18564,8 @@ function renderConvEntradas(){
 // A lista de empresas do Livro de Entradas nunca foi implementada (renderMenuAdicionadasLista chamava uma função inexistente) — achado 02/10/2026.
 function renderConvEntradasLista(){
   _convEntradasAtualizarNomeDOM();
+  if(NFECL.eid){ renderNfeClassificacao(); return; }
+  { const bloco=document.querySelector('#page-conv-entradas .hide-in-print'); if(bloco) bloco.style.display=''; }
   const adicionadas=ensureMenuAdicionadasMigrado('convEntradas');
   const container=document.getElementById('convEntradasListaContainer');
   if(!container)return;
@@ -18586,51 +18588,451 @@ function renderConvEntradasLista(){
     html+=`<div style="border:1px solid var(--border);border-radius:8px;padding:16px;background:var(--white);display:flex;justify-content:space-between;align-items:center;gap:12px">
       <div><strong>${esc(emp.nome)}</strong> <span style="font-size:11px;color:var(--slate)">#${esc(String(emp.eid))}</span><div style="font-size:12px;color:var(--slate)">${cfg.contaDebito?'⚙️ Configurada — Conta: '+esc(String(cfg.contaDebito)):'Ainda não configurada'}</div></div>
       <div style="display:flex;gap:8px">
+        <button class="btn bp bsm" onclick="_nfeclAbrir('${eid}')">🧾 Classificar NFs</button>
         <button class="btn bp bsm" onclick="abrirConfigEntradasModal('${eid}')">⚙️ Config</button>
-        <button class="btn bp bsm" onclick="abrirUploadEntradasModal('${eid}')">📁 Upload</button>
+        <button class="btn bo bsm" onclick="abrirUploadEntradasModal('${eid}')">📁 Upload (Excel)</button>
         <button class="icon-btn" onclick="excluirEmpresaMenu('convEntradas','${eid}')" title="Remover da lista" style="background:none;border:none;cursor:pointer;color:var(--red)">🗑️</button>
       </div></div>`;
   });
   container.innerHTML=html+'</div>';
 }
+// ─── CLASSIFICAÇÃO ANALÍTICA DE NF-e DE ENTRADA E NFS-e DE SERVIÇOS TOMADOS (02/10/2026) ───
+// Pedido do usuário: classificar por PRODUTO (NF-e) / DESCRIÇÃO DO SERVIÇO (NFS-e), com gatilhos por
+// empresa, 1 lançamento equilibrado por nota (débitos = créditos, crédito sempre = vNF) e TXT só depois
+// da conferência. Sem IA: leitura determinística do XML (DOMParser, independe de namespace). Os XMLs vêm
+// das MESMAS pastas/handles do Lançamentos Contábeis (SIEG + Portal NFS-e) e nunca são guardados no
+// Supabase — só as regras (nfeClassRegras_<eid>) e as notas já geradas (nfeClassProc_<eid>) ficam salvas.
+const NFECL={ eid:null, mes:'', notas:[], regras:[], plano:[], status:'', proc:{}, buscando:false };
+
+function _nfeclNorm(s){ return _convMpRemoverAcentos(String(s||'').toUpperCase()).replace(/\s+/g,' ').trim(); }
+function _nfeclCent(v){ const n=Number(String(v==null?'0':v).trim().replace(',','.')); return Number.isFinite(n)?Math.round(n*100):0; }
+function _nfeclMoeda(c){ return _fmt(c/100); }
+function _nfeclDom(xml){ try{ const d=new DOMParser().parseFromString(xml,'application/xml'); return d.getElementsByTagName('parsererror').length?null:d; }catch(e){ return null; } }
+function _nfeclFirst(node,name){ if(!node) return null; const r=node.getElementsByTagNameNS('*',name); return r.length?r[0]:null; }
+function _nfeclTxt(node,name){ const e=_nfeclFirst(node,name); return e?e.textContent.trim():''; }
+function _nfeclChild(node,name){ if(!node) return null; return Array.from(node.children).find(c=>c.localName===name)||null; }
+function _nfeclDocDe(node){ return node?(_nfeclTxt(node,'CNPJ')||_nfeclTxt(node,'CPF')).replace(/\D/g,''):''; }
+
+function _nfeclParseNFe(xml){
+  const d=_nfeclDom(xml); if(!d) return null;
+  const inf=_nfeclFirst(d,'infNFe'); if(!inf) return null;
+  const ide=_nfeclChild(inf,'ide'), emit=_nfeclChild(inf,'emit'), dest=_nfeclChild(inf,'dest'), total=_nfeclChild(inf,'total');
+  const t=total?_nfeclChild(total,'ICMSTot'):null;
+  if(!ide||!emit||!t) return null;
+  const itens=Array.from(inf.children).filter(c=>c.localName==='det').map(det=>{
+    const p=_nfeclChild(det,'prod'); if(!p) return null;
+    const g=n=>{ const e=_nfeclChild(p,n); return e?e.textContent.trim():''; };
+    return { nItem:det.getAttribute('nItem')||'', cProd:g('cProd'), xProd:g('xProd'), uCom:g('uCom'), qCom:parseFloat(g('qCom'))||0, vUnCom:g('vUnCom'),
+      vProd:_nfeclCent(g('vProd')), vFrete:_nfeclCent(g('vFrete')), vDesc:_nfeclCent(g('vDesc')), vOutro:_nfeclCent(g('vOutro')), indTot:g('indTot')===''?'1':g('indTot') };
+  }).filter(Boolean);
+  const tv=n=>_nfeclCent(_nfeclTxt(t,n));
+  const chave=(inf.getAttribute('Id')||'').replace(/^NFe/i,'')||_nfeclTxt(d,'chNFe');
+  const prot=_nfeclFirst(d,'infProt');
+  return { tipo:'nfe', id:chave||('nfe|'+_nfeclDocDe(emit)+'|'+_nfeclTxt(ide,'nNF')), chave, numero:_nfeclTxt(ide,'nNF'), serie:_nfeclTxt(ide,'serie'),
+    emissao:(_nfeclTxt(ide,'dhEmi')||_nfeclTxt(ide,'dEmi')).slice(0,10), fornecedor:_nfeclTxt(emit,'xNome'), fornecedorDoc:_nfeclDocDe(emit), tomadorDoc:_nfeclDocDe(dest),
+    cStat:prot?_nfeclTxt(prot,'cStat'):'', itens,
+    tot:{ vNF:tv('vNF'), vProd:tv('vProd'), vFrete:tv('vFrete'), vSeg:tv('vSeg'), vDesc:tv('vDesc'), vOutro:tv('vOutro'), vIPI:tv('vIPI'), vST:tv('vST'), vFCPST:tv('vFCPST'),
+      vII:tv('vII'), vICMSDeson:tv('vICMSDeson'), vIPIDevol:tv('vIPIDevol') } };
+}
+function _nfeclParseNFSe(xml){
+  const d=_nfeclDom(xml); if(!d) return null;
+  const inf=_nfeclFirst(d,'infNFSe'); if(!inf) return null;
+  const emit=_nfeclChild(inf,'emit'), dps=_nfeclFirst(inf,'infDPS'), toma=dps?_nfeclChild(dps,'toma'):null;
+  const vals=_nfeclChild(inf,'valores'), dpsVals=dps?_nfeclChild(dps,'valores'):null;
+  const numero=_nfeclTxt(inf,'nNFSe'); if(!numero||!emit) return null;
+  const vServ=_nfeclCent(_nfeclTxt(dpsVals,'vServ'));
+  const temLiq=!!(vals&&_nfeclFirst(vals,'vLiq'));
+  const tpRet=_nfeclTxt(dps,'tpRetISSQN');
+  const vIss=vals?_nfeclCent(_nfeclTxt(vals,'vISSQN')):0;
+  const idNfse=inf.getAttribute('Id')||'';
+  return { tipo:'nfse', id:idNfse||('nfse|'+_nfeclDocDe(emit)+'|'+numero), chave:idNfse, numero, serie:'', emissao:(_nfeclTxt(inf,'dhEmi')||_nfeclTxt(dps,'dhEmi')||_nfeclTxt(dps,'dCompet')).slice(0,10),
+    fornecedor:_nfeclTxt(emit,'xNome'), fornecedorDoc:_nfeclDocDe(emit), tomadorDoc:_nfeclDocDe(toma), cStat:_nfeclTxt(inf,'cStat'),
+    descricao:_nfeclTxt(dps,'xDescServ'), vServ, vLiq:temLiq?_nfeclCent(_nfeclTxt(vals,'vLiq')):null,
+    ret:{ iss:tpRet==='2'?vIss:0, irrf:_nfeclCent(_nfeclTxt(dps,'vRetIRRF')), pisCofinsCsll:_nfeclCent(_nfeclTxt(dps,'vRetCSLL')), cp:_nfeclCent(_nfeclTxt(dps,'vRetCP')) } };
+}
+// Parte da descrição que identifica o serviço: tira linhas de dados bancários / referência (pedido do usuário).
+function _nfeclDescServico(txt){
+  const ls=String(txt||'').split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+  const util=ls.filter(l=>!/^(BANCO|BCO|AGENCIA|AG\b|CC\b|C\/C|CONTA|PIX|CHAVE|REF\b|REFERENTE)/i.test(l)&&!/\b(AG|CC)\.?\s*\d/i.test(l));
+  return (util.length?util:ls).join(' / ');
+}
+
+function _nfeclCfg(){ return getConvEntradasConfig(NFECL.eid)||{}; }
+// ── Composição ──────────────────────────────────────────────────────────
+function _nfeclMontarNFe(n){
+  const lin=[], div=[]; const grupos=new Map(); const foraTotal=[];
+  n.itens.forEach(it=>{
+    if(it.indTot==='0'){ foraTotal.push(it); return; }
+    const k=[it.cProd,_nfeclNorm(it.xProd),_nfeclNorm(it.uCom)].join('|');
+    let g=grupos.get(k); if(!g){ g={desc:it.xProd,cProd:it.cProd,unid:it.uCom,qtd:0,bruto:0,desc_:0,n:0}; grupos.set(k,g); }
+    g.qtd+=it.qCom; g.bruto+=it.vProd; g.desc_+=it.vDesc; g.n++;
+  });
+  grupos.forEach(g=>lin.push({ tipo:'produto', desc:g.desc, hist:g.desc, qtd:g.qtd, unid:g.unid, cProd:g.cProd, valor:g.bruto-g.desc_,
+    obs:(g.desc_?`desconto do item: R$ ${_nfeclMoeda(g.desc_)}`:'')+(g.n>1?`${g.desc_?' · ':''}${g.n} itens iguais agrupados`:'') }));
+  const T=n.tot, baseProd=lin.reduce((s,l)=>s+l.valor,0);
+  const descItens=Array.from(grupos.values()).reduce((s,g)=>s+g.desc_,0);
+  // Componentes que podem compor o vNF além dos produtos. Só entram os que BATEM com a diferença para o total oficial
+  // (tributo destacado que já está no preço não vira débito extra).
+  const cands=[['FRETE SOBRE COMPRA',T.vFrete],['SEGURO SOBRE COMPRA',T.vSeg],['OUTRAS DESPESAS ACESSORIAS',T.vOutro],['IPI',T.vIPI+T.vIPIDevol],['ICMS ST',T.vST+T.vFCPST],['IMPOSTO DE IMPORTACAO',T.vII]].filter(c=>c[1]>0);
+  const alvo=T.vNF-baseProd; const matches=[];
+  for(let m=0;m<(1<<cands.length);m++){ let s=0; for(let i=0;i<cands.length;i++) if(m&(1<<i)) s+=cands[i][1]; if(s===alvo) matches.push(m); }
+  const score=m=>{ let sc=0; cands.forEach((c,i)=>{ if(m&(1<<i)) sc+=(i<3?10:-1); }); return sc; };
+  matches.sort((a,b)=>score(b)-score(a));
+  if(matches.length){ cands.forEach((c,i)=>{ if(matches[0]&(1<<i)) lin.push({ tipo:'componente', desc:c[0], hist:c[0], qtd:null, unid:'', valor:c[1], obs:'total da NF-e' }); }); }
+  else {
+    div.push('DIVERGÊNCIA NA COMPOSIÇÃO DA NF-e');
+    div.push(`Valor total oficial da NF (vNF): R$ ${_nfeclMoeda(T.vNF)}`);
+    div.push(`Soma dos produtos (já líquida de desconto de item): R$ ${_nfeclMoeda(baseProd)}`);
+    div.push(`Frete: R$ ${_nfeclMoeda(T.vFrete)} · Seguro: R$ ${_nfeclMoeda(T.vSeg)} · Outras despesas: R$ ${_nfeclMoeda(T.vOutro)}`);
+    div.push(`Descontos: total R$ ${_nfeclMoeda(T.vDesc)} (nos itens R$ ${_nfeclMoeda(descItens)}) · Desoneração ICMS: R$ ${_nfeclMoeda(T.vICMSDeson)}`);
+    div.push(`IPI: R$ ${_nfeclMoeda(T.vIPI+T.vIPIDevol)} · ICMS-ST (+FCP ST): R$ ${_nfeclMoeda(T.vST+T.vFCPST)} · Imposto de importação: R$ ${_nfeclMoeda(T.vII)}`);
+    div.push(`Diferença encontrada: R$ ${_nfeclMoeda(alvo)} (vNF − soma dos produtos) sem combinação de componentes que a explique`);
+  }
+  if(!lin.length) div.push('NF-e sem itens que componham o total');
+  lin.forEach(l=>{ if(l.valor<=0&&l.tipo==='produto') div.push(`Produto "${l.desc}" com valor líquido R$ ${_nfeclMoeda(l.valor)} (verifique descontos)`); });
+  n.linhas=lin; n.divergencia=div; n.foraTotal=foraTotal;
+  n.creditos=[{ chave:'fornecedor', valor:T.vNF, desc:'TOTAL DA NOTA FISCAL', conta:_nfeclCfg().contaCredito||'', contaCfg:'contaCredito', rotulo:'Conta de crédito (fornecedores)' }];
+}
+function _nfeclMontarNFSe(n){
+  const div=[], hist=_nfeclDescServico(n.descricao);
+  n.linhas=[{ tipo:'servico', desc:n.descricao.replace(/\s*\r?\n\s*/g,' / '), hist, qtd:null, unid:'', valor:n.vServ, obs:'' }];
+  const R=n.ret, somaRet=R.iss+R.irrf+R.pisCofinsCsll+R.cp;
+  const liq=n.vLiq!=null?n.vLiq:n.vServ-somaRet;
+  if(liq+somaRet!==n.vServ){
+    div.push('DIVERGÊNCIA NA COMPOSIÇÃO DA NFS-e');
+    div.push(`Valor bruto do serviço: R$ ${_nfeclMoeda(n.vServ)} · Valor líquido informado: R$ ${_nfeclMoeda(liq)}`);
+    div.push(`Retenções identificadas: ISS R$ ${_nfeclMoeda(R.iss)} · IRRF R$ ${_nfeclMoeda(R.irrf)} · PIS/COFINS/CSLL R$ ${_nfeclMoeda(R.pisCofinsCsll)} · CP R$ ${_nfeclMoeda(R.cp)}`);
+    div.push(`Diferença encontrada: R$ ${_nfeclMoeda(n.vServ-liq-somaRet)}`);
+  }
+  if(n.vServ<=0) div.push('NFS-e sem valor de serviço');
+  const cfg=_nfeclCfg();
+  n.creditos=[{ chave:'fornecedor', valor:liq, desc:'TOTAL DA NOTA FISCAL', conta:cfg.contaCredito||'', contaCfg:'contaCredito', rotulo:'Conta de crédito (fornecedores)' }];
+  [['iss','ISS RETIDO','contaIssRetido','Conta ISS retido'],['irrf','IRRF RETIDO','contaIrrfRetido','Conta IRRF retido'],['pisCofinsCsll','PIS/COFINS/CSLL RETIDOS','contaPisCofinsCsllRetido','Conta PIS/COFINS/CSLL retidos'],['cp','CONTRIBUICAO PREVIDENCIARIA RETIDA','contaCpRetido','Conta contribuição previdenciária retida']]
+    .forEach(([k,desc,cfgKey,rotulo])=>{ if(R[k]>0) n.creditos.push({ chave:k, valor:R[k], desc, conta:cfg[cfgKey]||'', contaCfg:cfgKey, rotulo }); });
+  n.divergencia=div; n.foraTotal=[];
+}
+function _nfeclRegraBate(r,l){
+  const t=_nfeclNorm(r.texto); if(!t) return false;
+  const cand=[_nfeclNorm(l.desc),_nfeclNorm(l.hist)];
+  return r.modo==='igual'?cand.some(c=>c===t):cand.some(c=>c.includes(t));
+}
+function _nfeclAplicarRegras(n){
+  n.linhas.forEach(l=>{
+    if(l.manual) return;
+    const ms=NFECL.regras.filter(r=>_nfeclRegraBate(r,l));
+    const contas=[...new Set(ms.map(r=>String(r.conta)))];
+    l.conflito=contas.length>1?contas:null;
+    l.conta=contas.length===1?contas[0]:'';
+    l.origem=contas.length===1?'regra':'';
+  });
+}
+function _nfeclContaValida(c){
+  if(!c) return false;
+  if(!NFECL.plano.length) return true;
+  return NFECL.plano.some(p=>String(p.numero_conta)===String(c));
+}
+function _nfeclTotais(n){
+  const d=n.linhas.reduce((s,l)=>s+l.valor,0), c=n.creditos.reduce((s,x)=>s+x.valor,0);
+  return { d, c, dif:d-c };
+}
+function _nfeclStatus(n){
+  if(NFECL.proc[n.id]) return 'processada';
+  if(n.foraCompetencia) return 'fora';
+  if(n.invalida) return 'invalida';
+  const t=_nfeclTotais(n);
+  if(n.divergencia.length||Math.abs(t.dif)>1) return 'diverg';
+  if(n.linhas.some(l=>!l.conta||l.conflito||!_nfeclContaValida(l.conta))) return 'pend';
+  if(n.creditos.some(c=>!c.conta||!_nfeclContaValida(c.conta))) return 'pend';
+  return 'ok';
+}
+function _nfeclMontarNota(n,mes){
+  n.foraCompetencia=!!(n.emissao&&mes&&n.emissao.slice(0,7)!==mes);
+  n.invalida=!!n.canceladaEvento||(n.tipo==='nfe'?(!!n.cStat&&!['100','150'].includes(n.cStat)):(!!n.cStat&&!['100','107'].includes(n.cStat)));
+  n.invalidaMotivo=n.canceladaEvento?'cancelada por evento (cancelamento/substituição)':(n.invalida?`situação do documento: cStat ${n.cStat} (cancelada/denegada/inválida)`:'');
+  if(n.tipo==='nfe') _nfeclMontarNFe(n); else _nfeclMontarNFSe(n);
+  _nfeclAplicarRegras(n);
+  return n;
+}
+function _nfeclHistorico(n,desc){ return `NF ${n.numero} - ${n.fornecedor} (${desc})`; }
+
+// ── Leitura das pastas (mesmos handles do Lançamentos Contábeis) ───────────
+async function _nfeclPermissao(handle){
+  if(!handle) return false;
+  try{
+    if((await handle.queryPermission({mode:'read'}))==='granted') return true;
+    return (await handle.requestPermission({mode:'read'}))==='granted';
+  }catch(e){ return false; }
+}
+async function _nfeclListarXmls(){
+  const eid=NFECL.eid, [ano,mm]=NFECL.mes.split('-'), mesNome=LANCCTB_MESES_PASTA[Number(mm)-1];
+  const cnpjs=_lancctbCnpjsDaEmpresa(eid);
+  const arquivos=[]; const avisos=[];
+  const handleSieg=await _lancctbCarregarHandlePasta();
+  if(handleSieg&&await _nfeclPermissao(handleSieg)){
+    const dirXml=await _lancctbResolverPastaXml(handleSieg);
+    for(const cnpj of cnpjs){
+      for(const [tipoPasta,papel] of [['NF-es','Entrada'],['NFS-es','Servico Tomado']]){
+        try{
+          const dir=await dirXml.getDirectoryHandle(tipoPasta).then(d=>d.getDirectoryHandle(cnpj)).then(d=>d.getDirectoryHandle(papel)).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+          for await (const [nome,fh] of dir.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')) arquivos.push(await fh.getFile()); }
+        }catch(e){ /* sem pasta pra esse CNPJ/mês */ }
+      }
+    }
+  } else avisos.push('Sem acesso à pasta do SIEG (NF-e de entrada) — conceda acesso abaixo.');
+  const handleNfse=await _lancctbCarregarHandleNfsePortal(); const pastas=_lancctbPastasNfsePortalGet(eid);
+  if(handleNfse&&pastas.length&&await _nfeclPermissao(handleNfse)){
+    for(const nomePasta of pastas){
+      try{
+        const dir=await handleNfse.getDirectoryHandle(nomePasta).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mm)).then(d=>d.getDirectoryHandle('Recebidas'));
+        for await (const [nome,fh] of dir.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')) arquivos.push(await fh.getFile()); }
+      }catch(e){ /* sem pasta */ }
+      // Eventos (cancelamento/substituição) — pra nunca incluir nota cancelada.
+      try{
+        const dirEv=await handleNfse.getDirectoryHandle(nomePasta).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mm)).then(d=>d.getDirectoryHandle('Eventos'));
+        for await (const [nome,fh] of dirEv.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')) arquivos.push(await fh.getFile()); }
+      }catch(e){ /* sem eventos */ }
+    }
+  } else if(!handleNfse) avisos.push('Sem acesso à pasta do Portal NFS-e (serviços tomados) — conceda acesso abaixo.');
+  else if(!pastas.length) avisos.push('Esta empresa não tem pasta do Portal NFS-e associada (Lançamentos Contábeis → Importar XMLs → pastas NFS-e).');
+  return { arquivos, avisos };
+}
+async function _nfeclProcessarArquivos(arquivos){
+  const cnpjs=new Set(_lancctbCnpjsDaEmpresa(NFECL.eid));
+  const porId=new Map(); let descartadas=0, ilegiveis=0; const cancelados=new Set();
+  for(const f of arquivos){
+    let xml; try{ xml=await f.text(); }catch(e){ ilegiveis++; continue; }
+    if(/<infEvento/.test(xml)&&!/<infNFSe[ >]/.test(xml)&&!/<infNFe[ >]/.test(xml)){
+      const ch=(xml.match(/<chNFSe>(\d+)<\/chNFSe>/)||xml.match(/<chNFe>(\d+)<\/chNFe>/)||[])[1];
+      if(ch&&(/<e101101>|<e105102>/.test(xml)||/<tpEvento>110111<\/tpEvento>/.test(xml))) cancelados.add(ch);
+      continue;
+    }
+    const ehNfse=/<NFSe[ >]|www\.sped\.fazenda\.gov\.br\/nfse/.test(xml)&&/<infNFSe/.test(xml);
+    const n=ehNfse?_nfeclParseNFSe(xml):(/<infNFe/.test(xml)?_nfeclParseNFe(xml):null);
+    if(!n){ ilegiveis++; continue; }
+    if(!cnpjs.has(n.tomadorDoc)){ descartadas++; continue; }
+    if(!porId.has(n.id)) porId.set(n.id,n);
+  }
+  porId.forEach(n=>{ n.canceladaEvento=cancelados.has(String(n.chave||'').replace(/^NFS/i,'').replace(/^NFe/i,'')); });
+  NFECL.notas=Array.from(porId.values()).map(n=>_nfeclMontarNota(n,NFECL.mes)).sort((a,b)=>(a.emissao||'').localeCompare(b.emissao||'')||Number(a.numero)-Number(b.numero));
+  return { descartadas, ilegiveis };
+}
+async function _nfeclBuscar(){
+  if(NFECL.buscando) return; NFECL.buscando=true;
+  const el=document.getElementById('nfeclStatus'); if(el) el.textContent='Procurando XMLs nas pastas…';
+  try{
+    NFECL.regras=_nfeclRegrasGet(NFECL.eid); NFECL.proc=S.g('nfeClassProc_'+NFECL.eid)||{};
+    await _nfeclCarregarPlano();
+    const { arquivos, avisos }=await _nfeclListarXmls();
+    const r=await _nfeclProcessarArquivos(arquivos);
+    NFECL.status=`${arquivos.length} arquivo(s) lido(s), ${NFECL.notas.length} nota(s) desta empresa`+(r.descartadas?` · ${r.descartadas} de outro CNPJ ignorada(s)`:'')+(r.ilegiveis?` · ${r.ilegiveis} não reconhecida(s)`:'')+(avisos.length?' · '+avisos.join(' '):'');
+  }catch(e){ NFECL.status='Erro ao buscar: '+e.message; }
+  NFECL.buscando=false; renderNfeClassificacao();
+}
+async function _nfeclSelecionarManual(input){
+  const arquivos=Array.from(input.files||[]); if(!arquivos.length) return;
+  NFECL.regras=_nfeclRegrasGet(NFECL.eid); NFECL.proc=S.g('nfeClassProc_'+NFECL.eid)||{};
+  await _nfeclCarregarPlano();
+  const r=await _nfeclProcessarArquivos(arquivos);
+  NFECL.status=`${arquivos.length} arquivo(s) selecionado(s) manualmente, ${NFECL.notas.length} nota(s) desta empresa`+(r.descartadas?` · ${r.descartadas} de outro CNPJ ignorada(s)`:'')+(r.ilegiveis?` · ${r.ilegiveis} não reconhecida(s)`:'');
+  renderNfeClassificacao();
+}
+async function _nfeclCarregarPlano(){
+  try{
+    const { data }=await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('numero_conta,descricao,tipo').eq('empresa_eid',NFECL.eid).eq('ativo',true).order('numero_conta'));
+    NFECL.plano=(data||[]).filter(p=>p.tipo==='A');
+  }catch(e){ NFECL.plano=[]; }
+}
+async function _nfeclConcederAcesso(qual){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const handle=await window.showDirectoryPicker();
+    if(qual==='sieg') await _lancctbSalvarHandlePasta(handle); else await _lancctbSalvarHandleNfsePortal(handle);
+    toast('Acesso concedido.','ok');
+  }catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+
+// ── Regras por descrição ────────────────────────────────────────────────
+function _nfeclRegrasGet(eid){ return S.g('nfeClassRegras_'+eid)||[]; }
+function _nfeclRegrasSet(eid,l){ S.s('nfeClassRegras_'+eid,l); }
+function _nfeclModal(id,titulo,corpo){
+  let m=document.getElementById(id);
+  if(!m){ m=document.createElement('div'); m.className='mb'; m.id=id; m.style.display='none'; document.body.appendChild(m); }
+  m.innerHTML=`<div class="modal" style="max-width:520px"><div class="mt"><h3>${esc(titulo)}</h3><div style="display:flex;gap:6px"><button onclick="closeModal('${id}')">&#x2715;</button></div></div><div class="mc">${corpo}</div></div>`;
+  openModal(id);
+}
+function _nfeclAbrirRegra(ni,li){
+  const n=NFECL.notas[ni], l=n&&n.linhas[li]; if(!l) return;
+  if(!l.conta||!_nfeclContaValida(l.conta)){ toast('Informe uma conta de débito válida antes de salvar a regra.','err'); return; }
+  window._nfeclRegraAlvo={ni,li};
+  _nfeclModal('mNfeClRegra','Salvar regra por descrição',`
+    <div class="fg"><div class="fl">Quando a descrição</div>
+      <select class="si" id="nfeclRegraModo" style="width:100%"><option value="contem">contém</option><option value="igual">for exatamente igual a</option></select></div>
+    <div class="fg"><div class="fl">Texto do gatilho (edite pra ficar só com a parte que identifica o produto/serviço)</div>
+      <input class="fi" id="nfeclRegraTexto" value="${esc(l.hist)}"></div>
+    <div class="fg"><div class="fl">Conta de débito</div><input class="fi" id="nfeclRegraConta" value="${esc(l.conta)}" list="nfeclPlano"></div>
+    <div style="font-size:11.5px;color:var(--slate);margin:6px 0">A regra vale só pra esta empresa e guarda só o texto e a conta — nunca valores. Nas próximas notas com essa descrição a conta é preenchida sozinha.</div>
+    <div class="ma"><button class="btn bo" onclick="closeModal('mNfeClRegra')">Cancelar</button><button class="btn bp" onclick="_nfeclSalvarRegra()">Salvar regra</button></div>`);
+}
+function _nfeclSalvarRegra(){
+  const modo=document.getElementById('nfeclRegraModo').value, texto=document.getElementById('nfeclRegraTexto').value.trim(), conta=document.getElementById('nfeclRegraConta').value.trim();
+  if(!texto){ toast('Informe o texto do gatilho.','err'); return; }
+  if(!_nfeclContaValida(conta)){ toast('Conta inexistente no Plano de Contas desta empresa.','err'); return; }
+  const regras=_nfeclRegrasGet(NFECL.eid); const nt=_nfeclNorm(texto);
+  const ex=regras.find(r=>r.modo===modo&&_nfeclNorm(r.texto)===nt);
+  if(ex) ex.conta=conta; else regras.push({ id:'r'+Date.now()+Math.random().toString(36).slice(2,5), modo, texto, conta });
+  _nfeclRegrasSet(NFECL.eid,regras); NFECL.regras=regras;
+  NFECL.notas.forEach(n=>{ n.linhas.forEach(l=>{ if(_nfeclRegraBate({modo,texto,conta},l)) l.manual=false; }); _nfeclAplicarRegras(n); });
+  closeModal('mNfeClRegra'); toast('Regra salva e reaplicada às notas do mês.','ok'); renderNfeClassificacao();
+}
+function _nfeclSetConta(ni,li,v){
+  const l=NFECL.notas[ni].linhas[li]; v=String(v||'').trim();
+  l.manual=true; l.conta=v; l.origem=v?'manual':''; l.conflito=null;
+  if(v&&!_nfeclContaValida(v)) toast('Conta inexistente no Plano de Contas desta empresa.','err');
+  renderNfeClassificacao(ni);
+}
+function _nfeclSetContaCredito(ni,ci,v){ NFECL.notas[ni].creditos[ci].conta=String(v||'').trim(); renderNfeClassificacao(ni); }
+function _nfeclExcluirRegra(id){
+  if(!confirm('Excluir esta regra?')) return;
+  const l=_nfeclRegrasGet(NFECL.eid).filter(r=>r.id!==id); _nfeclRegrasSet(NFECL.eid,l); NFECL.regras=l;
+  NFECL.notas.forEach(n=>{ n.linhas.forEach(x=>{ if(x.origem==='regra') x.manual=false; }); _nfeclAplicarRegras(n); });
+  _nfeclAbrirListaRegras(); renderNfeClassificacao();
+}
+function _nfeclAbrirListaRegras(){
+  const rs=_nfeclRegrasGet(NFECL.eid);
+  _nfeclModal('mNfeClRegras','Regras de classificação desta empresa', rs.length?`<div style="max-height:50vh;overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr><th style="text-align:left;padding:4px">Condição</th><th style="text-align:left;padding:4px">Texto</th><th style="padding:4px">Conta</th><th></th></tr></thead><tbody>${rs.map(r=>`<tr style="border-top:1px solid var(--border)"><td style="padding:4px">${r.modo==='igual'?'igual a':'contém'}</td><td style="padding:4px">${esc(r.texto)}</td><td style="padding:4px;text-align:center;font-family:var(--mono)">${esc(r.conta)}</td><td style="padding:4px"><button class="btn bo bsm" onclick="_nfeclExcluirRegra('${r.id}')">🗑️</button></td></tr>`).join('')}</tbody></table></div>`:'<div style="color:var(--slate)">Nenhuma regra ainda.</div>');
+}
+
+// ── TXT ─────────────────────────────────────────────────────────────────
+function _nfeclDataBr(iso){ return iso?iso.split('-').reverse().join('/'):''; }
+function _nfeclLinhasTxt(notas){
+  const linhas=[];
+  notas.forEach(n=>{
+    const t=_nfeclTotais(n); if(Math.abs(t.dif)>1) return;
+    const data=_nfeclDataBr(n.emissao);
+    if(n.linhas.length===1&&n.creditos.length===1){
+      linhas.push({ data, debito:n.linhas[0].conta, credito:n.creditos[0].conta, valor:n.linhas[0].valor/100, historico:_nfeclHistorico(n,n.linhas[0].hist) });
+    } else {
+      linhas.push({ data, rateio:[
+        ...n.linhas.map(l=>({ debito:l.conta, credito:'', valor:l.valor/100, historico:_nfeclHistorico(n,l.hist) })),
+        ...n.creditos.map(c=>({ debito:'', credito:c.conta, valor:c.valor/100, historico:_nfeclHistorico(n,c.desc) })),
+      ] });
+    }
+  });
+  return linhas;
+}
+async function _nfeclGerarTxt(){
+  const prontas=NFECL.notas.filter(n=>_nfeclStatus(n)==='ok');
+  const bloqueio=NFECL.notas.filter(n=>['pend','diverg'].includes(_nfeclStatus(n)));
+  if(bloqueio.length){ toast(`Ainda há ${bloqueio.length} nota(s) por classificar ou com divergência — resolva antes de gerar o TXT.`,'err'); return; }
+  if(!prontas.length){ toast('Nenhuma nota pronta pra gerar (as já geradas não entram de novo).','err'); return; }
+  const emp=S.emps().find(e=>String(e.eid)===String(NFECL.eid)); const cnpj=(emp&&emp.cnpj||'').replace(/\D/g,'');
+  if(!cnpj){ toast('Empresa sem CNPJ cadastrado.','err'); return; }
+  const linhas=_nfeclLinhasTxt(prontas);
+  const slug=_convMpRemoverAcentos(emp.nome||NFECL.eid).toUpperCase().replace(/[^A-Z0-9]/g,'');
+  const nome=`classificacao_nf_${slug}_${NFECL.mes}.txt`;
+  const salvouRede=await baixarTxtMisterContador(cnpj,linhas,nome);
+  const proc=Object.assign({},S.g('nfeClassProc_'+NFECL.eid)||{});
+  prontas.forEach(n=>{ proc[n.id]={ mes:NFECL.mes, numero:n.numero, em:new Date().toISOString().slice(0,10) }; });
+  S.s('nfeClassProc_'+NFECL.eid,proc); NFECL.proc=proc;
+  toast(`TXT gerado com ${linhas.length} nota(s).${salvouRede?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador.'}`,'ok');
+  renderNfeClassificacao();
+}
+function _nfeclReabrirNota(ni){
+  const n=NFECL.notas[ni]; if(!n||!NFECL.proc[n.id]) return;
+  if(!confirm('Liberar esta nota para gerar o TXT de novo? (use só se o TXT anterior não foi importado)')) return;
+  const proc=Object.assign({},NFECL.proc); delete proc[n.id]; S.s('nfeClassProc_'+NFECL.eid,proc); NFECL.proc=proc; renderNfeClassificacao(ni);
+}
+
+// ── Config da empresa ───────────────────────────────────────────────────
 function abrirConfigEntradasModal(eid){
   const cfg=getConvEntradasConfig(eid);
-  const html=`<div style="padding:20px;max-width:500px">
-    <h4>Configuração — Livro de Entradas</h4>
-    <label style="font-weight:600;display:block;margin-bottom:6px">Conta Débito (ICMS):</label>
-    <input id="inputContaDebito" type="text" value="${cfg.contaDebito||''}" placeholder="Ex: 120" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;margin-bottom:16px">
-    <div style="display:flex;gap:8px">
-      <button class="btn bp bsm" onclick="salvarConfigEntradas(${eid})">✓ Salvar</button>
-      <button class="btn bo bsm" onclick="closeModal('mEntradasConfig')">Cancelar</button>
-    </div>
-  </div>`;
-  document.getElementById('mEntradasConfig').innerHTML=html;
-  openModal('mEntradasConfig');
+  const campo=(id,rot,val,ph)=>`<div class="fg"><div class="fl">${rot}</div><input class="fi" id="${id}" value="${esc(val||'')}" placeholder="${ph||''}"></div>`;
+  _nfeclModal('mEntradasConfig','Configuração — Classificação de NFs',
+    campo('cfgContaCredito','Conta de crédito das notas (fornecedores)',cfg.contaCredito,'Ex: 11000')+
+    `<div style="font-size:12px;font-weight:700;margin:10px 0 4px">Retenções nas NFS-e (crédito) — só necessárias se houver nota com retenção</div>`+
+    campo('cfgContaIss','Conta ISS retido',cfg.contaIssRetido)+campo('cfgContaIrrf','Conta IRRF retido',cfg.contaIrrfRetido)+
+    campo('cfgContaPcc','Conta PIS/COFINS/CSLL retidos',cfg.contaPisCofinsCsllRetido)+campo('cfgContaCp','Conta contribuição previdenciária retida',cfg.contaCpRetido)+
+    campo('inputContaDebito','Conta Débito (ICMS) — uso do upload em Excel antigo',cfg.contaDebito,'Ex: 120')+
+    `<div class="ma"><button class="btn bo" onclick="closeModal('mEntradasConfig')">Cancelar</button><button class="btn bp" onclick="salvarConfigEntradas('${eid}')">✓ Salvar</button></div>`);
 }
 function salvarConfigEntradas(eid){
-  const contaDebito=document.getElementById('inputContaDebito')?.value||'';
-  const cfg=getConvEntradasConfig(eid);
-  cfg.contaDebito=contaDebito;
-  setConvEntradasConfig(eid,cfg);
-  toast('Configuração salva','ok');
-  closeModal('mEntradasConfig');
-  renderConvEntradas();
+  const cfg=getConvEntradasConfig(eid); const v=id=>(document.getElementById(id)?.value||'').trim();
+  cfg.contaCredito=v('cfgContaCredito'); cfg.contaIssRetido=v('cfgContaIss'); cfg.contaIrrfRetido=v('cfgContaIrrf');
+  cfg.contaPisCofinsCsllRetido=v('cfgContaPcc'); cfg.contaCpRetido=v('cfgContaCp'); cfg.contaDebito=v('inputContaDebito');
+  setConvEntradasConfig(eid,cfg); toast('Configuração salva','ok'); closeModal('mEntradasConfig');
+  if(NFECL.eid&&String(NFECL.eid)===String(eid)){ NFECL.notas.forEach(n=>{ _nfeclMontarNota(n,NFECL.mes); }); renderNfeClassificacao(); } else renderConvEntradasLista();
 }
 async function abrirUploadEntradasModal(eid){
-  const html=`<div style="padding:20px;max-width:700px">
-    <h4>Upload — Livro de Entradas</h4>
-    <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:16px;font-size:0.9rem">
-      <strong>Formato esperado:</strong> Excel com colunas: Nº | Data | Valor | AC | Fornecedor
-    </div>
+  _nfeclModal('mEntradasUpload','Upload — Livro de Entradas (Excel)',`
+    <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:16px;font-size:0.9rem;color:#333"><strong>Formato esperado:</strong> Excel com colunas: Nº | Data | Valor | AC | Fornecedor</div>
     <input id="inputFileEntradas" type="file" accept=".xls,.xlsx,.ods" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:4px;margin-bottom:16px">
-    <div style="display:flex;gap:8px">
-      <button class="btn bp bsm" onclick="processarUploadEntradas(${eid})">▶ Processar</button>
-      <button class="btn bo bsm" onclick="closeModal('mEntradasUpload')">Cancelar</button>
-    </div>
-  </div>`;
-  document.getElementById('mEntradasUpload').innerHTML=html;
-  openModal('mEntradasUpload');
+    <div class="ma"><button class="btn bo" onclick="closeModal('mEntradasUpload')">Cancelar</button><button class="btn bp" onclick="processarUploadEntradas('${eid}')">▶ Processar</button></div>`);
 }
+
+// ── Tela de trabalho ────────────────────────────────────────────────────
+function _nfeclAbrir(eid){
+  NFECL.eid=String(eid); NFECL.notas=[]; NFECL.status='Escolha a competência e clique em "Buscar notas".'; NFECL.mes=NFECL.mes||(S.fechAtual()||'').slice(0,7);
+  NFECL.regras=_nfeclRegrasGet(NFECL.eid); NFECL.proc=S.g('nfeClassProc_'+NFECL.eid)||{};
+  _nfeclCarregarPlano().then(()=>renderNfeClassificacao());
+  renderNfeClassificacao();
+}
+function _nfeclFechar(){ NFECL.eid=null; NFECL.notas=[]; renderConvEntradasLista(); }
+function _nfeclSetMes(v){ NFECL.mes=v; NFECL.notas=[]; NFECL.status='Competência alterada — clique em "Buscar notas".'; renderNfeClassificacao(); }
+const _NFECL_PILL={ ok:['#166534','#dcfce7','✓ Pronta'], pend:['#92400e','#fef3c7','⚠ Classificar'], diverg:['#991b1b','#fee2e2','⛔ Divergência'], processada:['#1e3a8a','#dbeafe','✔ TXT já gerado'], fora:['#475569','#e2e8f0','Fora da competência'], invalida:['#991b1b','#fee2e2','Cancelada/inválida'] };
+function renderNfeClassificacao(abrirIdx){
+  const container=document.getElementById('convEntradasListaContainer'); if(!container) return;
+  const addBloco=document.querySelector('#page-conv-entradas .hide-in-print'); if(addBloco) addBloco.style.display=NFECL.eid?'none':'';
+  if(!NFECL.eid) return;
+  const emp=S.emps().find(e=>String(e.eid)===String(NFECL.eid));
+  const abertas=new Set(Array.from(container.querySelectorAll('details[data-ni][open]')).map(d=>Number(d.dataset.ni))); if(abrirIdx!=null) abertas.add(abrirIdx);
+  const cont={ ok:0, pend:0, diverg:0, processada:0, fora:0, invalida:0 }; NFECL.notas.forEach(n=>cont[_nfeclStatus(n)]++);
+  const podeTxt=cont.ok>0&&!cont.pend&&!cont.diverg;
+  let h=`<button class="btn bo bsm" onclick="_nfeclFechar()" style="margin-bottom:10px">← Voltar à lista de empresas</button>
+  <datalist id="nfeclPlano">${NFECL.plano.map(p=>`<option value="${esc(p.numero_conta)}">${esc(p.numero_conta)} — ${esc(p.descricao)}</option>`).join('')}</datalist>
+  <div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px">
+    <strong style="font-size:15px">${esc(emp?emp.nome:NFECL.eid)}</strong><span style="font-size:11px;color:var(--slate)">#${esc(NFECL.eid)}</span>
+    <span style="flex:1"></span>
+    <label style="font-size:12px">Competência <input type="month" class="fi" style="width:auto;display:inline-block" value="${esc(NFECL.mes)}" onchange="_nfeclSetMes(this.value)"></label>
+    <button class="btn bp bsm" onclick="_nfeclBuscar()" ${NFECL.buscando?'disabled':''}>🔎 Buscar notas</button>
+    <label class="btn bo bsm" style="cursor:pointer">📂 Escolher XMLs<input type="file" multiple accept=".xml" style="display:none" onchange="_nfeclSelecionarManual(this)"></label>
+    <button class="btn bo bsm" onclick="abrirConfigEntradasModal('${esc(NFECL.eid)}')">⚙️ Config</button>
+    <button class="btn bo bsm" onclick="_nfeclAbrirListaRegras()">📋 Regras (${NFECL.regras.length})</button>
+    <button class="btn bp bsm" ${podeTxt?'':'disabled'} onclick="_nfeclGerarTxt()" title="${podeTxt?'Gera o TXT das notas prontas':'Libera quando todas as notas estiverem prontas (sem pendência nem divergência)'}">📄 Gerar TXT (${cont.ok})</button>
+  </div>
+  <div style="font-size:12px;color:var(--slate);margin-bottom:6px">${esc(NFECL.status)} <a style="cursor:pointer;text-decoration:underline" onclick="_nfeclConcederAcesso('sieg').then(()=>renderNfeClassificacao())">🔑 pasta SIEG</a> · <a style="cursor:pointer;text-decoration:underline" onclick="_nfeclConcederAcesso('nfse').then(()=>renderNfeClassificacao())">🔑 pasta Portal NFS-e</a></div>
+  <div style="font-size:12px;margin-bottom:10px">Prontas: <b>${cont.ok}</b> · A classificar: <b>${cont.pend}</b> · Divergência: <b>${cont.diverg}</b> · TXT já gerado: <b>${cont.processada}</b>${cont.fora?` · Fora da competência: <b>${cont.fora}</b>`:''}${cont.invalida?` · Canceladas/inválidas: <b>${cont.invalida}</b>`:''}</div>`;
+  if(!NFECL.notas.length) h+=`<div style="text-align:center;color:var(--slate);padding:30px">Nenhuma nota carregada.</div>`;
+  NFECL.notas.forEach((n,ni)=>{
+    const st=_nfeclStatus(n), p=_NFECL_PILL[st], t=_nfeclTotais(n);
+    const aberta=abertas.has(ni)||(abertas.size===0&&['pend','diverg'].includes(st)&&NFECL.notas.length<=12);
+    h+=`<details data-ni="${ni}" ${aberta?'open':''} style="border:1px solid var(--border);border-radius:8px;margin-bottom:8px;background:var(--white)">
+      <summary style="cursor:pointer;padding:10px 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span style="font-size:10px;font-weight:700;background:var(--bg);padding:2px 6px;border-radius:4px">${n.tipo==='nfe'?'NF-e':'NFS-e'}</span>
+        <b>NF ${esc(n.numero)}</b><span>${esc(n.fornecedor)}</span><span style="color:var(--slate);font-size:12px">${esc(_nfeclDataBr(n.emissao))}</span><span style="flex:1"></span>
+        <b style="font-family:var(--mono)">R$ ${_nfeclMoeda(n.tipo==='nfe'?n.tot.vNF:n.vServ)}</b><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;background:${p[1]};color:${p[0]}">${p[2]}</span></summary>
+      <div style="padding:4px 12px 12px">`;
+    if(st==='invalida') h+=`<div style="color:#991b1b;font-size:12px;margin-bottom:6px">Nota não incluída: ${esc(n.invalidaMotivo)}.</div>`;
+    if(st==='fora') h+=`<div style="color:var(--slate);font-size:12px;margin-bottom:6px">Emitida em ${esc(_nfeclDataBr(n.emissao))}, fora da competência ${esc(NFECL.mes)} — não entra neste TXT.</div>`;
+    if(n.divergencia.length) h+=`<div style="background:#fee2e2;color:#991b1b;border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:8px;line-height:1.5"><b>${esc(n.divergencia[0])}</b><br>${n.divergencia.slice(1).map(esc).join('<br>')}</div>`;
+    h+=`<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="background:var(--bg)"><th style="text-align:left;padding:5px">D/C</th><th style="text-align:left;padding:5px">Produto / serviço</th><th style="text-align:right;padding:5px">Qtd</th><th style="text-align:right;padding:5px">Valor</th><th style="padding:5px;text-align:left">Conta</th><th style="padding:5px"></th></tr></thead><tbody>`;
+    n.linhas.forEach((l,li)=>{
+      const inv=l.conta&&!_nfeclContaValida(l.conta);
+      h+=`<tr style="border-top:1px solid var(--border)"><td style="padding:5px;font-weight:700">D</td>
+        <td style="padding:5px;white-space:pre-wrap;word-break:break-word">${esc(l.desc)}${l.obs?`<div style="font-size:10.5px;color:var(--slate)">${esc(l.obs)}</div>`:''}</td>
+        <td style="padding:5px;text-align:right">${l.qtd!=null?esc(String(l.qtd))+' '+esc(l.unid):''}</td><td style="padding:5px;text-align:right;font-family:var(--mono)">${_nfeclMoeda(l.valor)}</td>
+        <td style="padding:5px"><input class="fi" style="width:110px;font-family:var(--mono);${inv||l.conflito||!l.conta?'border-color:#dc2626':''}" list="nfeclPlano" value="${esc(l.conta||'')}" onchange="_nfeclSetConta(${ni},${li},this.value)" ${st==='processada'?'disabled':''}>${l.conflito?`<div style="color:#991b1b;font-size:10.5px">Regras em conflito: ${esc(l.conflito.join(' / '))} — escolha a conta</div>`:''}${l.origem==='regra'?'<div style="font-size:10.5px;color:#166534">pela regra</div>':''}</td>
+        <td style="padding:5px;white-space:nowrap">${l.manual&&l.conta&&!inv?`<button class="btn bo bsm" onclick="_nfeclAbrirRegra(${ni},${li})">💾 Salvar regra</button>`:''}</td></tr>`;
+    });
+    n.creditos.forEach((c,ci)=>{
+      h+=`<tr style="border-top:1px solid var(--border);background:var(--bg)"><td style="padding:5px;font-weight:700">C</td><td style="padding:5px">${esc(c.desc)}</td><td></td><td style="padding:5px;text-align:right;font-family:var(--mono)">${_nfeclMoeda(c.valor)}</td>
+        <td style="padding:5px"><input class="fi" style="width:110px;font-family:var(--mono);${!c.conta||!_nfeclContaValida(c.conta)?'border-color:#dc2626':''}" list="nfeclPlano" value="${esc(c.conta||'')}" onchange="_nfeclSetContaCredito(${ni},${ci},this.value)" placeholder="${esc(c.rotulo)}" title="${esc(c.rotulo)}" ${st==='processada'?'disabled':''}></td><td style="padding:5px;font-size:10.5px;color:var(--slate)">${!c.conta?esc(c.rotulo)+' (Config)':''}</td></tr>`;
+    });
+    h+=`</tbody><tfoot><tr style="border-top:2px solid var(--border);font-weight:700"><td colspan="3" style="padding:5px;text-align:right">Débitos ${_nfeclMoeda(t.d)} · Créditos ${_nfeclMoeda(t.c)}</td><td style="padding:5px;text-align:right;color:${Math.abs(t.dif)<=1?'#166534':'#991b1b'}">Dif. ${_nfeclMoeda(t.dif)}</td><td colspan="2" style="padding:5px">${st==='processada'?`<button class="btn bo bsm" onclick="_nfeclReabrirNota(${ni})">↺ Liberar de novo</button>`:''}</td></tr></tfoot></table>`;
+    if(n.foraTotal&&n.foraTotal.length) h+=`<div style="font-size:11px;color:var(--slate);margin-top:4px">Itens fora do total da NF (indTot=0), ignorados: ${n.foraTotal.map(i=>esc(i.xProd)).join('; ')}</div>`;
+    h+=`</div></details>`;
+  });
+  container.innerHTML=h;
+}
+
 async function processarUploadEntradas(eid){
   const file=document.getElementById('inputFileEntradas')?.files[0];
   if(!file){toast('Selecione um arquivo','err');return;}
@@ -18644,7 +19046,7 @@ async function processarUploadEntradas(eid){
 
   const rows=dados.slice(1).filter(r=>r[0]);
   const cfg=getConvEntradasConfig(eid);
-  const emp=S.emps().find(e=>e.eid===eid);
+  const emp=S.emps().find(e=>String(e.eid)===String(eid));
 
   const linhas=[];
   rows.forEach(r=>{
