@@ -18749,6 +18749,7 @@ function _nfeclMontarNFSe(n){
 }
 function _nfeclRegraBate(r,l,n){
   const t=_nfeclNorm(r.texto); if(!t) return false;
+  if(r.docTipo&&n&&r.docTipo!==n.tipo) return false; // regra de NFS-e não vale pra NF-e e vice-versa (pedido 03/10/2026)
   if(r.tipo==='fornecedor'){ if(!n||l.tipo==='componente') return false; const f=_nfeclNorm(n.fornecedor); return r.modo==='igual'?f===t:f.includes(t); }
   const cand=[_nfeclNorm(l.desc),_nfeclNorm(l.hist)];
   return r.modo==='igual'?cand.some(c=>c===t):cand.some(c=>c.includes(t));
@@ -18792,6 +18793,16 @@ function _nfeclMontarNota(n,mes){
   if(n.tipo==='nfe') _nfeclMontarNFe(n); else _nfeclMontarNFSe(n);
   _nfeclAplicarRegras(n);
   return n;
+}
+// Regras criadas antes de existir o tipo de documento: se casam SÓ com notas de um tipo, passam a valer só pra ele (as que casam com os 2 tipos, ou com nenhuma, ficam como estão até haver evidência).
+function _nfeclTipificarRegrasAntigas(){
+  const antigas=(NFECL.regras||[]).filter(r=>!r.docTipo); if(!antigas.length||!NFECL.notas.length) return;
+  let mudou=false;
+  antigas.forEach(r=>{
+    const tipos=new Set(); NFECL.notas.forEach(n=>n.linhas.forEach(l=>{ if(_nfeclRegraBate(r,l,n)) tipos.add(n.tipo); }));
+    if(tipos.size===1){ r.docTipo=[...tipos][0]; mudou=true; }
+  });
+  if(mudou){ _nfeclRegrasSet(NFECL.eid,NFECL.regras); NFECL.notas.forEach(n=>_nfeclAplicarRegras(n)); }
 }
 function _nfeclHistorico(n,desc){ return `NF ${n.numero} - ${n.fornecedor} (${desc})`; }
 
@@ -18861,6 +18872,7 @@ async function _nfeclProcessarArquivos(arquivos){
   porId.forEach(n=>{ n.canceladaEvento=cancelados.has(String(n.chave||'').replace(/^NFS/i,'').replace(/^NFe/i,'')); });
   NFECL.notas=Array.from(porId.values()).map(n=>_nfeclMontarNota(n,NFECL.mes)).sort((a,b)=>(a.emissao||'').localeCompare(b.emissao||'')||Number(a.numero)-Number(b.numero));
   NFECL.stats=st;
+  _nfeclTipificarRegrasAntigas();
   return { descartadas, ilegiveis };
 }
 async function _nfeclBuscar(){
@@ -18938,7 +18950,7 @@ function _nfeclRegraFornecedor(ni,li){
   const texto=String(window.prompt('Gatilho pelo nome do fornecedor — as notas deste fornecedor (produtos/serviços, não frete/impostos) vão para a conta '+conta+'.\nEdite para ficar só com a parte do nome que identifica o fornecedor:',n.fornecedor)||'').trim();
   if(!texto) return;
   if(!_nfeclNorm(n.fornecedor).includes(_nfeclNorm(texto))){ toast('O gatilho precisa ser um trecho do nome do fornecedor.','err'); return; }
-  _nfeclGravarRegra('contem',texto,conta,'fornecedor');
+  _nfeclGravarRegra('contem',texto,conta,'fornecedor',n.tipo);
 }
 function _nfeclSalvarRegraInline(ni,li){
   const l=NFECL.notas[ni].linhas[li]; const texto=String(l.gatilho||'').trim(); const modo=l.gatilhoModo==='igual'?'igual':'contem'; const conta=String(l.conta||'').trim();
@@ -18947,14 +18959,14 @@ function _nfeclSalvarRegraInline(ni,li){
   const nt=_nfeclNorm(texto); const d=_nfeclNorm(l.desc), h=_nfeclNorm(l.hist);
   const ok=modo==='igual'?(d===nt||h===nt):(d.includes(nt)||h.includes(nt));
   if(!ok){ toast('O gatilho precisa ser um trecho da descrição deste produto/serviço.','err'); return; }
-  _nfeclGravarRegra(modo,texto,conta);
+  _nfeclGravarRegra(modo,texto,conta,'descricao',NFECL.notas[ni].tipo);
 }
-function _nfeclGravarRegra(modo,texto,conta,tipo){
+function _nfeclGravarRegra(modo,texto,conta,tipo,docTipo){
   const regras=_nfeclRegrasGet(NFECL.eid); const nt=_nfeclNorm(texto);
-  const ex=regras.find(r=>r.modo===modo&&_nfeclNorm(r.texto)===nt&&(r.tipo||'descricao')===(typeof tipo==='undefined'?'descricao':tipo));
-  if(ex) ex.conta=conta; else regras.push({ id:'r'+Date.now()+Math.random().toString(36).slice(2,5), modo, texto, conta, tipo:(typeof tipo==='undefined'?'descricao':tipo) });
+  const ex=regras.find(r=>r.modo===modo&&_nfeclNorm(r.texto)===nt&&(r.tipo||'descricao')===(typeof tipo==='undefined'?'descricao':tipo)&&(r.docTipo||'')===(typeof docTipo==='undefined'?'':docTipo));
+  if(ex) ex.conta=conta; else regras.push({ id:'r'+Date.now()+Math.random().toString(36).slice(2,5), modo, texto, conta, tipo:(typeof tipo==='undefined'?'descricao':tipo), docTipo:(typeof docTipo==='undefined'?'':docTipo) });
   _nfeclRegrasSet(NFECL.eid,regras); NFECL.regras=regras;
-  NFECL.notas.forEach(n=>{ n.linhas.forEach(l=>{ if(_nfeclRegraBate({modo,texto,conta,tipo:(typeof tipo==='undefined'?'descricao':tipo)},l,n)) l.manual=false; }); _nfeclAplicarRegras(n); });
+  NFECL.notas.forEach(n=>{ n.linhas.forEach(l=>{ if(_nfeclRegraBate({modo,texto,conta,tipo:(typeof tipo==='undefined'?'descricao':tipo),docTipo:(typeof docTipo==='undefined'?'':docTipo)},l,n)) l.manual=false; }); _nfeclAplicarRegras(n); });
   closeModal('mNfeClRegra'); toast('Regra salva e reaplicada às notas do mês.','ok');
   NFECL.fecharIdx=new Set(NFECL.notas.map((n,i)=>(_nfeclStatus(n)==='ok'&&n.linhas.every(l=>l.origem==='regra'))?i:-1).filter(i=>i>=0));
   renderNfeClassificacao();
@@ -18964,10 +18976,10 @@ function _nfeclSalvarRegra(){
   if(!texto){ toast('Informe o texto do gatilho.','err'); return; }
   if(!_nfeclContaValida(conta)){ toast('Conta inexistente no Plano de Contas desta empresa.','err'); return; }
   const regras=_nfeclRegrasGet(NFECL.eid); const nt=_nfeclNorm(texto);
-  const ex=regras.find(r=>r.modo===modo&&_nfeclNorm(r.texto)===nt&&(r.tipo||'descricao')===(typeof tipo==='undefined'?'descricao':tipo));
-  if(ex) ex.conta=conta; else regras.push({ id:'r'+Date.now()+Math.random().toString(36).slice(2,5), modo, texto, conta, tipo:(typeof tipo==='undefined'?'descricao':tipo) });
+  const ex=regras.find(r=>r.modo===modo&&_nfeclNorm(r.texto)===nt&&(r.tipo||'descricao')===(typeof tipo==='undefined'?'descricao':tipo)&&(r.docTipo||'')===(typeof docTipo==='undefined'?'':docTipo));
+  if(ex) ex.conta=conta; else regras.push({ id:'r'+Date.now()+Math.random().toString(36).slice(2,5), modo, texto, conta, tipo:(typeof tipo==='undefined'?'descricao':tipo), docTipo:(typeof docTipo==='undefined'?'':docTipo) });
   _nfeclRegrasSet(NFECL.eid,regras); NFECL.regras=regras;
-  NFECL.notas.forEach(n=>{ n.linhas.forEach(l=>{ if(_nfeclRegraBate({modo,texto,conta,tipo:(typeof tipo==='undefined'?'descricao':tipo)},l,n)) l.manual=false; }); _nfeclAplicarRegras(n); });
+  NFECL.notas.forEach(n=>{ n.linhas.forEach(l=>{ if(_nfeclRegraBate({modo,texto,conta,tipo:(typeof tipo==='undefined'?'descricao':tipo),docTipo:(typeof docTipo==='undefined'?'':docTipo)},l,n)) l.manual=false; }); _nfeclAplicarRegras(n); });
   closeModal('mNfeClRegra'); toast('Regra salva e reaplicada às notas do mês.','ok'); renderNfeClassificacao();
 }
 function _nfeclSetConta(ni,li,v){
@@ -19029,7 +19041,7 @@ function _nfeclExcluirRegra(id){
 }
 function _nfeclAbrirListaRegras(){
   const rs=_nfeclRegrasGet(NFECL.eid);
-  _nfeclModal('mNfeClRegras','Regras de classificação desta empresa', rs.length?`<div style="max-height:50vh;overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr><th style="text-align:left;padding:4px">Condição</th><th style="text-align:left;padding:4px">Texto</th><th style="padding:4px">Conta</th><th></th></tr></thead><tbody>${rs.map(r=>`<tr style="border-top:1px solid var(--border)"><td style="padding:4px">${r.tipo==='fornecedor'?'fornecedor ':'descrição '}${r.modo==='igual'?'igual a':'contém'}</td><td style="padding:4px">${esc(r.texto)}</td><td style="padding:4px;text-align:center;font-family:var(--mono)">${esc(r.conta)}</td><td style="padding:4px"><button class="btn bo bsm" onclick="_nfeclExcluirRegra('${r.id}')">🗑️</button></td></tr>`).join('')}</tbody></table></div>`:'<div style="color:var(--slate)">Nenhuma regra ainda.</div>');
+  _nfeclModal('mNfeClRegras','Regras de classificação desta empresa', rs.length?`<div style="max-height:50vh;overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr><th style="text-align:left;padding:4px">Documento</th><th style="text-align:left;padding:4px">Condição</th><th style="text-align:left;padding:4px">Texto</th><th style="padding:4px">Conta</th><th></th></tr></thead><tbody>${rs.map(r=>`<tr style="border-top:1px solid var(--border)"><td style="padding:4px;white-space:nowrap;font-weight:700">${r.docTipo==='nfse'?'NFS-e':(r.docTipo==='nfe'?'NF-e':'<span style="font-weight:400;color:var(--slate)">ambos</span>')}</td><td style="padding:4px">${r.tipo==='fornecedor'?'fornecedor ':'descrição '}${r.modo==='igual'?'igual a':'contém'}</td><td style="padding:4px">${esc(r.texto)}</td><td style="padding:4px;text-align:center;font-family:var(--mono)">${esc(r.conta)}</td><td style="padding:4px"><button class="btn bo bsm" onclick="_nfeclExcluirRegra('${r.id}')">🗑️</button></td></tr>`).join('')}</tbody></table></div>`:'<div style="color:var(--slate)">Nenhuma regra ainda.</div>');
 }
 
 // ── TXT ─────────────────────────────────────────────────────────────────
