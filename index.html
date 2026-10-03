@@ -18799,21 +18799,28 @@ async function _nfeclListarXmls(){
 async function _nfeclProcessarArquivos(arquivos){
   const cnpjs=new Set(_lancctbCnpjsDaEmpresa(NFECL.eid));
   const porId=new Map(); let descartadas=0, ilegiveis=0; const cancelados=new Set();
+  const E=()=>({ arquivos:0, outroCnpj:0, duplicadas:0, naoLidas:0 });
+  const st={ nfe:E(), nfse:E(), desconhecido:E(), eventos:0, falhas:[] };
+  const tipoPorTexto=x=>/<infNFSe|<NFSe[ >]|www\.sped\.fazenda\.gov\.br\/nfse/i.test(x)?'nfse':(/<infNFe|<NFe[ >]|portalfiscal\.inf\.br\/nfe/i.test(x)?'nfe':'desconhecido');
   for(const f of arquivos){
-    let xml; try{ xml=await f.text(); }catch(e){ ilegiveis++; continue; }
+    let xml; try{ xml=await f.text(); }catch(e){ ilegiveis++; st.desconhecido.arquivos++; st.desconhecido.naoLidas++; st.falhas.push({ nome:f.name, tipo:'desconhecido', motivo:'não foi possível abrir o arquivo' }); continue; }
     if(/<infEvento/.test(xml)&&!/<infNFSe[ >]/.test(xml)&&!/<infNFe[ >]/.test(xml)){
       const ch=(xml.match(/<chNFSe>(\d+)<\/chNFSe>/)||xml.match(/<chNFe>(\d+)<\/chNFe>/)||[])[1];
       if(ch&&(/<e101101>|<e105102>/.test(xml)||/<tpEvento>110111<\/tpEvento>/.test(xml))) cancelados.add(ch);
+      st.eventos++;
       continue;
     }
     const ehNfse=/<NFSe[ >]|www\.sped\.fazenda\.gov\.br\/nfse/.test(xml)&&/<infNFSe/.test(xml);
     const n=ehNfse?_nfeclParseNFSe(xml):(/<infNFe/.test(xml)?_nfeclParseNFe(xml):null);
-    if(!n){ ilegiveis++; continue; }
-    if(!cnpjs.has(n.tomadorDoc)){ descartadas++; continue; }
-    if(!porId.has(n.id)) porId.set(n.id,n);
+    const tp=n?n.tipo:tipoPorTexto(xml); st[tp].arquivos++;
+    if(!n){ ilegiveis++; st[tp].naoLidas++; st.falhas.push({ nome:f.name, tipo:tp, motivo:tp==='desconhecido'?'não é NF-e nem NFS-e':'XML incompleto ou fora do leiaute esperado' }); continue; }
+    if(!cnpjs.has(n.tomadorDoc)){ descartadas++; st[tp].outroCnpj++; continue; }
+    if(porId.has(n.id)){ st[tp].duplicadas++; continue; }
+    porId.set(n.id,n);
   }
   porId.forEach(n=>{ n.canceladaEvento=cancelados.has(String(n.chave||'').replace(/^NFS/i,'').replace(/^NFe/i,'')); });
   NFECL.notas=Array.from(porId.values()).map(n=>_nfeclMontarNota(n,NFECL.mes)).sort((a,b)=>(a.emissao||'').localeCompare(b.emissao||'')||Number(a.numero)-Number(b.numero));
+  NFECL.stats=st;
   return { descartadas, ilegiveis };
 }
 async function _nfeclBuscar(){
@@ -18987,13 +18994,13 @@ async function abrirUploadEntradasModal(eid){
 
 // ── Tela de trabalho ────────────────────────────────────────────────────
 function _nfeclAbrir(eid){
-  NFECL.eid=String(eid); NFECL.notas=[]; NFECL.status='Escolha a competência e clique em "Buscar notas".'; NFECL.mes=NFECL.mes||(S.fechAtual()||'').slice(0,7);
+  NFECL.eid=String(eid); NFECL.notas=[]; NFECL.stats=null; NFECL.status='Escolha a competência e clique em "Buscar notas".'; NFECL.mes=NFECL.mes||(S.fechAtual()||'').slice(0,7);
   NFECL.regras=_nfeclRegrasGet(NFECL.eid); NFECL.proc=S.g('nfeClassProc_'+NFECL.eid)||{};
   _nfeclCarregarPlano().then(()=>renderNfeClassificacao());
   renderNfeClassificacao();
 }
 function _nfeclFechar(){ NFECL.eid=null; NFECL.notas=[]; renderConvEntradasLista(); }
-function _nfeclSetMes(v){ NFECL.mes=v; NFECL.notas=[]; NFECL.status='Competência alterada — clique em "Buscar notas".'; renderNfeClassificacao(); }
+function _nfeclSetMes(v){ NFECL.mes=v; NFECL.notas=[]; NFECL.stats=null; NFECL.status='Competência alterada — clique em "Buscar notas".'; renderNfeClassificacao(); }
 const _NFECL_PILL={ ok:['#166534','#dcfce7','✓ Pronta'], pend:['#92400e','#fef3c7','⚠ Classificar'], diverg:['#991b1b','#fee2e2','⛔ Divergência'], processada:['#1e3a8a','#dbeafe','✔ TXT já gerado'], fora:['#475569','#e2e8f0','Fora da competência'], invalida:['#991b1b','#fee2e2','Cancelada/inválida'] };
 function renderNfeClassificacao(abrirIdx){
   const container=document.getElementById('convEntradasListaContainer'); if(!container) return;
@@ -19018,6 +19025,15 @@ function renderNfeClassificacao(abrirIdx){
   </div>
   <div style="font-size:12px;color:var(--slate);margin-bottom:6px">${esc(NFECL.status)} <a style="cursor:pointer;text-decoration:underline" onclick="_nfeclConcederAcesso('sieg').then(()=>renderNfeClassificacao())">🔑 pasta SIEG</a> · <a style="cursor:pointer;text-decoration:underline" onclick="_nfeclConcederAcesso('nfse').then(()=>renderNfeClassificacao())">🔑 pasta Portal NFS-e</a></div>
   <div style="font-size:12px;margin-bottom:10px">Prontas: <b>${cont.ok}</b> · A classificar: <b>${cont.pend}</b> · Divergência: <b>${cont.diverg}</b> · TXT já gerado: <b>${cont.processada}</b>${cont.fora?` · Fora da competência: <b>${cont.fora}</b>`:''}${cont.invalida?` · Canceladas/inválidas: <b>${cont.invalida}</b>`:''}</div>`;
+  if(NFECL.stats){
+    const L=tp=>{ const x=NFECL.stats[tp], ns=NFECL.notas.filter(n=>n.tipo===tp);
+      const noMes=ns.filter(n=>!n.foraCompetencia&&!n.invalida).length, fora=ns.filter(n=>n.foraCompetencia).length, canc=ns.filter(n=>!n.foraCompetencia&&n.invalida).length;
+      return `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px;font-weight:700">${tp==='nfe'?'NF-e de entrada':'NFS-e tomadas'}</td><td style="padding:4px 8px;text-align:right">${x.arquivos}</td><td style="padding:4px 8px;text-align:right;font-weight:700;color:#166534">${noMes}</td><td style="padding:4px 8px;text-align:right">${fora}</td><td style="padding:4px 8px;text-align:right">${canc}</td><td style="padding:4px 8px;text-align:right">${x.outroCnpj}</td><td style="padding:4px 8px;text-align:right">${x.duplicadas}</td><td style="padding:4px 8px;text-align:right;font-weight:700;color:${x.naoLidas?'#991b1b':'inherit'}">${x.naoLidas}</td></tr>`; };
+    const falhas=NFECL.stats.falhas||[];
+    h+=`<div style="overflow:auto;margin-bottom:10px"><table style="border-collapse:collapse;font-size:12px;background:var(--white);border:1px solid var(--border);border-radius:6px"><thead><tr style="background:var(--bg)"><th style="text-align:left;padding:4px 8px">Tipo</th><th style="padding:4px 8px">Arquivos lidos</th><th style="padding:4px 8px">Notas no mês</th><th style="padding:4px 8px">Fora do mês</th><th style="padding:4px 8px">Canceladas/inválidas</th><th style="padding:4px 8px">De outro CNPJ</th><th style="padding:4px 8px">Repetidas</th><th style="padding:4px 8px">Não conseguiu ler</th></tr></thead><tbody>${L('nfe')}${L('nfse')}</tbody></table>`+
+      `<div style="font-size:11px;color:var(--slate);margin-top:4px">${NFECL.stats.eventos?NFECL.stats.eventos+' evento(s) de cancelamento lido(s) · ':''}${NFECL.stats.desconhecido.arquivos?NFECL.stats.desconhecido.arquivos+' arquivo(s) que não são NF-e/NFS-e · ':''}Notas no mês = desta empresa, emitidas na competência e não canceladas.</div>`+
+      (falhas.length?`<details style="margin-top:6px;font-size:12px"><summary style="cursor:pointer;color:#991b1b;font-weight:700">${falhas.length} arquivo(s) que não conseguiu ler — ver quais</summary><ul style="margin:6px 0 0 18px">${falhas.map(f=>`<li><span style="font-family:var(--mono)">${esc(f.nome)}</span> — ${esc(f.tipo==='nfe'?'NF-e':f.tipo==='nfse'?'NFS-e':'?')}: ${esc(f.motivo)}</li>`).join('')}</ul></details>`:'')+`</div>`;
+  }
   if(!NFECL.notas.length) h+=`<div style="text-align:center;color:var(--slate);padding:30px">Nenhuma nota carregada.</div>`;
   NFECL.notas.forEach((n,ni)=>{
     const st=_nfeclStatus(n), p=_NFECL_PILL[st], t=_nfeclTotais(n);
