@@ -20176,7 +20176,7 @@ function _lancctbCnpjsDoTexto(txt){
   (t.replace(/\D+/g,' ').match(/\b\d{14}\b/g)||[]).forEach(c=>achados.add(c));
   return [...achados];
 }
-function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorExtrato){
+function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorExtrato,permitirParcial){
   const numero=String(f.numero||f.documento_numero||'').trim().replace(/^0+/,'');
   if(!numero||!/^\d+$/.test(numero)) return null;
   const campoNome=ehSaida?'nome_emitente':'nome_destinatario', campoCnpj=ehSaida?'cnpj_emitente':'cnpj_destinatario';
@@ -20200,7 +20200,18 @@ function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorEx
     if(porParc.length>1) return null;
   }
   const porValor=compat.filter(okValor);
-  return porValor.length===1?porValor[0]:null;
+  if(porValor.length===1) return porValor[0];
+  // Pagamento PARCIAL (03/10/2026, ACCI): o Fluxo indica a NF (número + CNPJ) mas o valor pago é MENOR que a parcela (ex: NF de 8.297,75
+  // paga em 2x de 4.148,87). Só vale quando: é 1 NF só, com o CNPJ do Fluxo igual ao da nota, 1 parcela pendente e o valor pago < parcela.
+  // Devolve uma cópia marcada _parcial — quem chama divide a parcela (pago + saldo) antes de gerar o lançamento.
+  if(permitirParcial&&cnpjF&&valorExtrato>0){
+    const nfIds=new Set(compat.map(p=>p.nf_id));
+    if(nfIds.size===1&&compat.length===1){
+      const p=compat[0], nf=p.notas_fiscais;
+      if(nf[campoCnpj]===cnpjF&&p.valor_parcela-valorExtrato>0.02) return Object.assign({},p,{_parcial:true,_origem:p});
+    }
+  }
+  return null;
 }
 // Texto do tooltip da coluna Fluxo de Caixa: NF e parcela que o Fluxo indica.
 function _lancctbFluxoIndicaTxt(f){
@@ -27161,13 +27172,31 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // Etapa 1
     const c1=base.filter(f=>perto(f)&&nomeOk(f)).sort((a,b)=>(b.lancamento_extrato_id===l.id)-(a.lancamento_extrato_id===l.id)||_lancctbDiffDias(a.data,l.data_pagamento)-_lancctbDiffDias(b.data,l.data_pagamento));
     for(const f of c1){
-      const par=_lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valor);
+      let par=_lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valor,true);
       if(!par) continue;
+      let desfazerParcial=null;
+      if(par._parcial){
+        // Divide a parcela: a atual passa a valer o que foi PAGO e nasce uma parcela com o SALDO (pendente, +30 dias — mesma regra do 'Dividir Parcelas via Fluxo').
+        const orig=par._origem, saldo=Math.round((orig.valor_parcela-valor)*100)/100;
+        const { data: cheia } = await _supaClient.from('notas_fiscais_parcelas').select('*').eq('id',orig.id).single();
+        const { data: ultimas } = await _supaClient.from('notas_fiscais_parcelas').select('numero_parcela').eq('nf_id',orig.nf_id).order('numero_parcela',{ascending:false}).limit(1);
+        if(!cheia){ continue; }
+        const dSaldo=new Date(l.data_pagamento+'T00:00:00'); dSaldo.setDate(dSaldo.getDate()+30);
+        const { error: eUp } = await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:valor }).eq('id',orig.id);
+        if(eUp){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${eUp.message}`); continue; }
+        const novaLinha=Object.assign({},cheia); delete novaLinha.id; delete novaLinha.created_at; delete novaLinha.updated_at;
+        Object.assign(novaLinha,{ numero_parcela:((ultimas&&ultimas[0]&&ultimas[0].numero_parcela)||orig.numero_parcela||1)+1, data_vencimento:dSaldo.toISOString().slice(0,10), valor_parcela:saldo, status_conciliacao:'pendente', lancamento_extrato_id:null });
+        const { data: nova, error: eIns } = await _supaClient.from('notas_fiscais_parcelas').insert(novaLinha).select('id').single();
+        if(eIns||!nova){ await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:orig.valor_parcela }).eq('id',orig.id); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): não consegui abrir o saldo da NF (${eIns?eIns.message:'sem retorno'})`); continue; }
+        desfazerParcial=async()=>{ await _supaClient.from('notas_fiscais_parcelas').delete().eq('id',nova.id); await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:orig.valor_parcela }).eq('id',orig.id); };
+        orig.valor_parcela=valor; par=Object.assign({},orig,{ valor_parcela:valor, notas_fiscais:par.notas_fiscais });
+        parcelas.push(Object.assign({},orig,{ id:nova.id, numero_parcela:novaLinha.numero_parcela, valor_parcela:saldo, data_vencimento:novaLinha.data_vencimento }));
+      }
       const nf=par.notas_fiscais;
       const cnpjT=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeT=ehSaida?nf.nome_emitente:nf.nome_destinatario;
       const compUsa=comprovanteMatch&&(ehPonteL||!comprovanteMatch.cnpj_cpf||comprovanteMatch.cnpj_cpf===cnpjT)?comprovanteMatch:null;
       const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjT,nomeT,nf.numero?[nf.numero]:[],compUsa,par.numero_parcela,par.id,par.valor_parcela);
-      if(error){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
+      if(error){ if(desfazerParcial) await desfazerParcial(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
       parcelasUsadas.add(par.id); fluxoPonteUsados.add(f.id);
       await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',par.id);
       await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',f.id);
