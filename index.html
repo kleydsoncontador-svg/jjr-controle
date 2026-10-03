@@ -35013,7 +35013,7 @@ async function _lancctbParsearExtratoSicoobSisbr(pdf){
   const itens1=await _lancctbExtrairItensPagina(pagina1);
   const textoPagina1=itens1.map(i=>i.str).join(' ');
   if(!/SISTEMA DE COOPERATIVAS DE CR[ÉE]DITO DO BRASIL/i.test(textoPagina1)) return null;
-  if(!/EXTRATO DE CONTA CORRENTE/i.test(textoPagina1)) return null;
+  if(!/EXTRATO (?:DE )?CONTA CORRENTE/i.test(textoPagina1)) return null; // 2 variações: 'EXTRATO DE CONTA CORRENTE' (doc na própria linha, com R$) e 'EXTRATO CONTA CORRENTE' (DOC.: na linha seguinte, sem R$)
   if(!/HIST[ÓO]RICO DE MOVIMENTA[ÇC][ÃA]O/i.test(textoPagina1)) return null;
 
   const mPeriodo=textoPagina1.match(/Per[ií]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/i);
@@ -35026,15 +35026,18 @@ async function _lancctbParsearExtratoSicoobSisbr(pdf){
   };
 
   const REGEX_LANCAMENTO=/^(\d{2})\/(\d{2})\s+(\S+)\s+(.+?)\s+R\$\s*([\d.,]+)\s*([DC])\*?$/;
-  const REGEX_SALDO_ANTERIOR=/^(\d{2})\/(\d{2})\s+SALDO\s+ANTERIOR\s+R\$\s*([\d.,]+)\s*([DC])/i;
-  const REGEX_SALDO_BLOQ_ANTERIOR=/^\d{2}\/\d{2}\s+SALDO\s+BLOQUEADO\s+ANTERIOR\b/i;
+  const REGEX_SALDO_ANTERIOR=/^(\d{2})\/(\d{2})\s+SALDO\s+ANTERIOR\s+(?:R\$\s*)?([\d.,]+)\s*([DC])/i;
+  const REGEX_SALDO_BLOQ_ANTERIOR=/^\d{2}\/\d{2}\s+SALDO\s+BLOQ(?:UEADO)?\.?\s*ANTERIOR\b/i;
+  const REGEX_LANCAMENTO_SEM_RS=/^(\d{2})\/(\d{2})\s+(.+?)\s+(\d{1,3}(?:\.\d{3})*,\d{2})\s*([DC])\*?$/;
+  const REGEX_DOC_LINHA=/^DOC\.:\s*(.+)$/i;
+  const REGEX_RUIDO_V2=/^(SICOOB$|\d{2}\/\d{2}\/\d{4}$|\d{2}:\d{2}:\d{2}$|COOP\.:|CONTA:|PER[ÍI]ODO:|EXTRATO CONTA CORRENTE|DATA\s+HIST[ÓO]RICO\s+VALOR$|DATA$|HIST[ÓO]RICO$|VALOR$)/i;
   const REGEX_SALDO_DO_DIA=/^\d{2}\/\d{2}\s+SALDO\s+DO\s+DIA\b/i;
   const REGEX_SALDO_EM_CONTA=/^Saldo em conta:\s*-?\s*([\d.,]+)\s*([DC])/i;
   const REGEX_RUIDO=/^(EXTRATO DE CONTA CORRENTE|SISTEMA DE COOPERATIVAS|PLATAFORMA DE SERVI[ÇC]OS|Cooperativa:|Conta:|Per[ií]odo:|HIST[ÓO]RICO DE MOVIMENTA[ÇC][ÃA]O|Data\s+Documento\s+Hist[óo]rico\s+Valor|RESUMO$|Cheque especial contratado|Juros vencidos|Tarifas vencidas|Saldo dispon[íi]vel|Saldo bloqueado|ENCARGOS|Previs[ãa]o|OUTRAS INFORMA[ÇC][ÕO]ES|Vencimento de cheque|Taxa cheque|Custo Efetivo|INFORMA[ÇC][ÕO]ES$|SAC:|https?:\/\/|\d+\/\d+ Sicoob|Sicoob \| Internet Banking|\d{2}\/\d{2}\/\d{4},\s*\d{2}:\d{2})/i;
   const REGEX_PAGINACAO=/^\d+\/\d+$/;
 
   const registros=[];
-  let saldoAnteriorDoc=null, saldoFinalDoc=null, emResumo=false;
+  let saldoAnteriorDoc=null, saldoFinalDoc=null, emResumo=false, esperaSaldoFinal=false, ultimoSaldoDia=null;
 
   for(let p=1;p<=pdf.numPages;p++){
     const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
@@ -35042,14 +35045,24 @@ async function _lancctbParsearExtratoSicoobSisbr(pdf){
 
     for(const linhaTxt of linhas){
       if(/^RESUMO$/i.test(linhaTxt)){ emResumo=true; continue; }
+      // Variação 'EXTRATO CONTA CORRENTE': '(+) SALDO EM CONTA:' e o valor ('87.017,34C') vêm em linhas separadas ou juntas.
+      if(emResumo){
+        const mSc=linhaTxt.match(/^\(\+\)\s*SALDO EM CONTA:?\s*(?:R\$\s*)?([\d.,]+)?\s*([DC])?$/i);
+        if(mSc){ if(mSc[1]&&mSc[2]){ const v=_lancctbParseValorBR(mSc[1]); saldoFinalDoc=mSc[2].toUpperCase()==='D'?-v:v; } else esperaSaldoFinal=true; continue; }
+        if(esperaSaldoFinal){ const mV=linhaTxt.match(/^(?:R\$\s*)?([\d.,]+)\s*([DC])$/i); if(mV){ const v=_lancctbParseValorBR(mV[1]); saldoFinalDoc=mV[2].toUpperCase()==='D'?-v:v; } esperaSaldoFinal=false; continue; }
+      }
       const mSaldoConta=linhaTxt.match(REGEX_SALDO_EM_CONTA);
       if(mSaldoConta){ const v=_lancctbParseValorBR(mSaldoConta[1]); saldoFinalDoc=mSaldoConta[2].toUpperCase()==='D'?-v:v; continue; }
       if(emResumo) continue; // resto do RESUMO/ENCARGOS/OUTRAS INFORMAÇÕES — nunca vira lançamento
-      if(REGEX_PAGINACAO.test(linhaTxt)||REGEX_RUIDO.test(linhaTxt)) continue;
+      if(REGEX_PAGINACAO.test(linhaTxt)||REGEX_RUIDO.test(linhaTxt)||REGEX_RUIDO_V2.test(linhaTxt)) continue;
 
       const mSaldoAnt=linhaTxt.match(REGEX_SALDO_ANTERIOR);
       if(mSaldoAnt){ const v=_lancctbParseValorBR(mSaldoAnt[3]); saldoAnteriorDoc=mSaldoAnt[4].toUpperCase()==='D'?-v:v; continue; }
-      if(REGEX_SALDO_BLOQ_ANTERIOR.test(linhaTxt)||REGEX_SALDO_DO_DIA.test(linhaTxt)) continue;
+      if(REGEX_SALDO_BLOQ_ANTERIOR.test(linhaTxt)) continue;
+      if(REGEX_SALDO_DO_DIA.test(linhaTxt)){ const mSd=linhaTxt.match(/([\d.,]+)\s*([DC])\*?$/i); if(mSd){ const v=_lancctbParseValorBR(mSd[1]); ultimoSaldoDia=mSd[2].toUpperCase()==='D'?-v:v; } continue; }
+      // Variação 'EXTRATO CONTA CORRENTE': 'DOC.: <doc>' pertence ao lançamento imediatamente anterior (mesmo atravessando quebra de página) — nunca é lançamento novo.
+      const mDoc=linhaTxt.match(REGEX_DOC_LINHA);
+      if(mDoc&&registros.length){ registros[registros.length-1].documento=mDoc[1].trim(); continue; }
 
       const mLanc=linhaTxt.match(REGEX_LANCAMENTO);
       if(mLanc){
@@ -35067,12 +35080,21 @@ async function _lancctbParsearExtratoSicoobSisbr(pdf){
         continue;
       }
 
+      const mLanc2=linhaTxt.match(REGEX_LANCAMENTO_SEM_RS);
+      if(mLanc2){
+        const [,dd,mm,historico,valorTxt,dc]=mLanc2;
+        const valor=_lancctbParseValorBR(valorTxt), ehDebito=dc.toUpperCase()==='D';
+        registros.push({ data:`${anoParaMes(Number(mm))}-${mm}-${dd}`, historico:historico.trim(), documento:null, valor_saida:ehDebito?valor:0, valor_entrada:ehDebito?0:valor });
+        continue;
+      }
+
       // Linha sem data/valor logo após um lançamento = continuação do
       // histórico (regra 3 acima) — concatena com " | ", nunca cria linha nova.
       if(registros.length) registros[registros.length-1].historico=`${registros[registros.length-1].historico} | ${linhaTxt}`.trim();
     }
   }
   if(!registros.length) return null;
+  if(saldoFinalDoc==null&&ultimoSaldoDia!=null) saldoFinalDoc=ultimoSaldoDia;
   return {lancamentos:registros,saldoAnteriorDoc,saldoFinalDoc,layout:'Sicoob/SISBR (Extrato de Conta Corrente)'};
 }
 // ── Bradesco "EXTRATO MENSAL" (layout legado, mainframe/CICS) — pedido do
