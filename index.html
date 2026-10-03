@@ -18806,34 +18806,42 @@ async function _nfeclPermissao(handle){
     return (await handle.requestPermission({mode:'read'}))==='granted';
   }catch(e){ return false; }
 }
+// Varre a pasta do mês da competência E a do mês anterior e a do seguinte: a SIEG/Portal guardam a nota na pasta do mês em que ela foi CAPTURADA,
+// que pode não ser o mês de emissão (ex: NF emitida em 01/08 dentro da pasta de julho). Só a competência certa (pela data de emissão) usa a nota —
+// ver o filtro em _nfeclProcessarArquivos (arquivos de pasta vizinha com emissão em outro mês são ignorados em silêncio).
 async function _nfeclListarXmls(){
-  const eid=NFECL.eid, [ano,mm]=NFECL.mes.split('-'), mesNome=LANCCTB_MESES_PASTA[Number(mm)-1];
+  const eid=NFECL.eid;
   const cnpjs=_lancctbCnpjsDaEmpresa(eid);
   const arquivos=[]; const avisos=[];
+  const meses=[0,-1,1].map(off=>({ off, ym:_cronAddMes(NFECL.mes,off) }));
+  const juntar=async(dir,vizinha)=>{ for await (const [nome,fh] of dir.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')){ const f=await fh.getFile(); if(vizinha) f._nfeclVizinha=true; arquivos.push(f); } } };
   const handleSieg=await _lancctbCarregarHandlePasta();
   if(handleSieg&&await _nfeclPermissao(handleSieg)){
     const dirXml=await _lancctbResolverPastaXml(handleSieg);
-    for(const cnpj of cnpjs){
-      for(const [tipoPasta,papel] of [['NF-es','Entrada'],['NFS-es','Servico Tomado']]){
-        try{
-          const dir=await dirXml.getDirectoryHandle(tipoPasta).then(d=>d.getDirectoryHandle(cnpj)).then(d=>d.getDirectoryHandle(papel)).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
-          for await (const [nome,fh] of dir.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')) arquivos.push(await fh.getFile()); }
-        }catch(e){ /* sem pasta pra esse CNPJ/mês */ }
+    for(const {off,ym} of meses){
+      const [ano,mm]=ym.split('-'), mesNome=LANCCTB_MESES_PASTA[Number(mm)-1];
+      for(const cnpj of cnpjs){
+        for(const [tipoPasta,papel] of [['NF-es','Entrada'],['NFS-es','Servico Tomado']]){
+          try{
+            const dir=await dirXml.getDirectoryHandle(tipoPasta).then(d=>d.getDirectoryHandle(cnpj)).then(d=>d.getDirectoryHandle(papel)).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNome));
+            await juntar(dir,off!==0);
+          }catch(e){ /* sem pasta pra esse CNPJ/mês */ }
+        }
       }
     }
   } else avisos.push('Sem acesso à pasta do SIEG (NF-e de entrada) — conceda acesso abaixo.');
   const handleNfse=await _lancctbCarregarHandleNfsePortal(); const pastas=_lancctbPastasNfsePortalGet(eid);
   if(handleNfse&&pastas.length&&await _nfeclPermissao(handleNfse)){
     for(const nomePasta of pastas){
-      try{
-        const dir=await handleNfse.getDirectoryHandle(nomePasta).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mm)).then(d=>d.getDirectoryHandle('Recebidas'));
-        for await (const [nome,fh] of dir.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')) arquivos.push(await fh.getFile()); }
-      }catch(e){ /* sem pasta */ }
-      // Eventos (cancelamento/substituição) — pra nunca incluir nota cancelada.
-      try{
-        const dirEv=await handleNfse.getDirectoryHandle(nomePasta).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mm)).then(d=>d.getDirectoryHandle('Eventos'));
-        for await (const [nome,fh] of dirEv.entries()){ if(fh.kind==='file'&&nome.toLowerCase().endsWith('.xml')) arquivos.push(await fh.getFile()); }
-      }catch(e){ /* sem eventos */ }
+      for(const {off,ym} of meses){
+        const [ano,mm]=ym.split('-');
+        for(const sub of ['Recebidas','Eventos']){ // Eventos = cancelamento/substituição, pra nunca incluir nota cancelada
+          try{
+            const dir=await handleNfse.getDirectoryHandle(nomePasta).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mm)).then(d=>d.getDirectoryHandle(sub));
+            await juntar(dir,off!==0);
+          }catch(e){ /* sem pasta */ }
+        }
+      }
     }
   } else if(!handleNfse) avisos.push('Sem acesso à pasta do Portal NFS-e (serviços tomados) — conceda acesso abaixo.');
   else if(!pastas.length) avisos.push('Esta empresa não tem pasta do Portal NFS-e associada (Lançamentos Contábeis → Importar XMLs → pastas NFS-e).');
@@ -18855,6 +18863,7 @@ async function _nfeclProcessarArquivos(arquivos){
     }
     const ehNfse=/<NFSe[ >]|www\.sped\.fazenda\.gov\.br\/nfse/.test(xml)&&/<infNFSe/.test(xml);
     const n=ehNfse?_nfeclParseNFSe(xml):(/<infNFe/.test(xml)?_nfeclParseNFe(xml):null);
+    if(f._nfeclVizinha&&(!n||String(n.emissao||'').slice(0,7)!==NFECL.mes)) continue; // pasta do mês vizinho: só interessa nota emitida nesta competência
     const tp=n?n.tipo:tipoPorTexto(xml); st[tp].arquivos++;
     if(!n){ ilegiveis++; st[tp].naoLidas++; st.falhas.push({ nome:f.name, tipo:tp, motivo:tp==='desconhecido'?'não é NF-e nem NFS-e':'XML incompleto ou fora do leiaute esperado' }); continue; }
     if(!cnpjs.has(n.tomadorDoc)){ descartadas++; st[tp].outroCnpj++; continue; }
@@ -19181,7 +19190,7 @@ function renderNfeClassificacao(abrirIdx){
         <b style="font-family:var(--mono)">R$ ${_nfeclMoeda(n.tipo==='nfe'?n.tot.vNF:n.vServ)}</b><span style="font-size:11px;font-weight:700;padding:2px 8px;border-radius:10px;background:${p[1]};color:${p[0]}">${p[2]}</span></summary>
       <div style="padding:4px 12px 12px">`;
     if(st==='invalida') h+=`<div style="color:#991b1b;font-size:12px;margin-bottom:6px">Nota não incluída: ${esc(n.invalidaMotivo)}.</div>`;
-    if(st==='fora') h+=`<div style="color:var(--slate);font-size:12px;margin-bottom:6px">Emitida em ${esc(_nfeclDataBr(n.emissao))}, fora da competência ${esc(NFECL.mes)} — não entra neste TXT.</div>`;
+    if(st==='fora') h+=`<div style="color:var(--slate);font-size:12px;margin-bottom:6px">Emitida em ${esc(_nfeclDataBr(n.emissao))}: pertence à competência <b>${esc(n.emissao.slice(5,7)+'/'+n.emissao.slice(0,4))}</b>, não entra neste TXT — troque o Fechamento Atual para ${esc(n.emissao.slice(5,7)+'/'+n.emissao.slice(0,4))} que ela aparece lá (mesmo estando na pasta de ${esc(NFECL.mes.slice(5)+'/'+NFECL.mes.slice(0,4))}) e é gerada no TXT daquele mês.</div>`;
     if(n.divergencia.length) h+=`<div style="background:#fee2e2;color:#991b1b;border-radius:6px;padding:8px 10px;font-size:12px;margin-bottom:8px;line-height:1.5"><b>${esc(n.divergencia[0])}</b><br>${n.divergencia.slice(1).map(esc).join('<br>')}</div>`;
     h+=`<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="background:var(--bg)"><th style="text-align:left;padding:5px">D/C</th><th style="text-align:left;padding:5px">Produto / serviço</th><th style="text-align:right;padding:5px">Qtd</th><th style="text-align:right;padding:5px">Valor</th><th style="padding:5px;text-align:left">Conta</th><th style="padding:5px;text-align:left">Gatilho (trecho da descrição) → regra</th></tr></thead><tbody>`;
     n.linhas.forEach((l,li)=>{
