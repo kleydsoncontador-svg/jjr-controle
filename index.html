@@ -22121,6 +22121,29 @@ function _lancctbOcrDataParaItens(data){
   }
   return fundidas.map(w=>({ str:w.text.trim(), x:w.bbox.x0, y:-w.bbox.y0 }));
 }
+// Guia de pagamento/boleto de prefeitura (ex: ISS retido de Ibirité, "Recibo do Sacado" + "Ficha de Compensação"): o texto
+// corrido do OCR embaralha os campos (a base de cálculo aparece entre o rótulo e o valor), então lê POR POSIÇÃO — o valor fica
+// logo abaixo do rótulo, na mesma coluna. Valor da guia = VALOR DO DOCUMENTO + correção + juros + multa − descontos
+// (ou o próprio VALOR COBRADO, quando o OCR o enxerga). Usa a cópia de cima (a 2ª é a mesma guia repetida).
+function _lancctbOcrValorGuiaMunicipal(itens){
+  const MON=/^\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const abaixo=(rot)=>{
+    const c=itens.filter(i=>MON.test(i.str)&&i.x>=rot.x-20&&rot.y-i.y>=5&&rot.y-i.y<=95).sort((a,b)=>(rot.y-a.y)-(rot.y-b.y)||b.x-a.x)[0];
+    return c?_lancctbParseValorBR2(c.str):null;
+  };
+  const rotulos=(re,precedidoPorValor)=>itens.filter(i=>re.test(i.str)&&(!precedidoPorValor||itens.some(v=>/^VALOR$/i.test(v.str)&&Math.abs(v.y-i.y)<15&&v.x<i.x&&i.x-v.x<160))).sort((a,b)=>b.y-a.y);
+  const ancoraDoc=rotulos(/^DOCUMENTO$/i,true).map(d=>({ d, v:itens.find(v=>/^VALOR$/i.test(v.str)&&Math.abs(v.y-d.y)<15&&v.x<d.x&&d.x-v.x<160) })).find(o=>o.v&&abaixo({x:o.v.x,y:o.d.y})!=null);
+  if(!ancoraDoc) return null;
+  const topo=ancoraDoc.d.y, colX=ancoraDoc.v.x;
+  const doc=abaixo({x:colX,y:topo});
+  if(!(doc>0)) return null;
+  const caixa=(re)=>{ const l=itens.filter(i=>re.test(i.str)&&i.x>=colX-20&&i.y<topo&&topo-i.y<700).sort((a,b)=>b.y-a.y)[0]; return l?(abaixo({x:colX,y:l.y})||0):0; };
+  const correcao=caixa(/^CORRE[ÇC][ÃA]O$/i), juros=caixa(/^JUROS$/i), multa=caixa(/^MULTA$/i), desc=caixa(/^DESCONTOS$/i);
+  const cobradoLbl=itens.filter(i=>/^COBRADO$/i.test(i.str)&&i.y<topo&&topo-i.y<1000).sort((a,b)=>b.y-a.y)[0];
+  const cobrado=cobradoLbl?abaixo({x:colX,y:cobradoLbl.y}):null;
+  const total=Math.round((doc+correcao+juros+multa-desc)*100)/100;
+  return (cobrado&&cobrado>0)?cobrado:total;
+}
 async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
   const worker=await _ganhoOcrWorker();
   const page1=await pdf.getPage(1);
@@ -22165,6 +22188,12 @@ async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
   const mGuia=textoOcr.match(/total\s*da\s*guia:?\s*(?:R\$\s*)?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
   if(mGuia&&/fgts/i.test(textoOcr)) return { valor:_lancctbParseValorBR2(mGuia[1]), composicao:null, competencia:null, viaOcr:true };
   if(mTotal) return { valor:_lancctbParseValorBR2(mTotal[1]), composicao:null, competencia:null, viaOcr:true };
+  // Guia de pagamento/boleto municipal escaneado (ex: ISS retido da Prefeitura de Ibirité): "(=) VALOR COBRADO" (já com
+  // juros/multa) ou, na falta dele, "(=) VALOR DO DOCUMENTO" — pedido do usuário 03/10/2026 ("precisa ler, mesmo sendo imagem").
+  const posGuia=_lancctbOcrValorGuiaMunicipal(porPagina[0].itens);
+  if(posGuia!=null) return { valor:posGuia, composicao:null, competencia:null, viaOcr:true };
+  const mCobrado=textoOcr.match(/valor\s*cobrado[^\d]{0,25}([\d]{1,3}(?:\.\d{3})*,\d{2})/i)||textoOcr.match(/\(=\)\s*valor\s*do\s*documento[^\d]{0,25}([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
+  if(mCobrado) return { valor:_lancctbParseValorBR2(mCobrado[1]), composicao:null, competencia:null, viaOcr:true };
   return null;
 }
 // Ponto único de extração de valor de um PDF de tributo — tenta o DARF
