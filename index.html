@@ -27109,7 +27109,9 @@ async function _lancctbProcessarFluxo(){
     if(statusEl) statusEl.textContent='Aplicando Regras com gatilho de Fluxo…';
     let viaRegra=0;
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
-    toast(`Fluxo: ${associados} linha(s) associada(s); ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${associados||nfs||viaRegra?' — depois rode Processar FOPAG / Tributos.':'.'}`, (associados||nfs||viaRegra)?'ok':'err');
+    const diag=(resNf&&resNf.diagAglutinado)||[];
+    if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
+    toast(`Fluxo: ${associados} linha(s) associada(s); ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${associados||nfs||viaRegra?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}`, (associados||nfs||viaRegra)?'ok':'err');
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
@@ -27376,6 +27378,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
 
   const comprovantesUsadosPag=new Set(), comprovantesUsadosReceb=new Set(), parcelasUsadas=new Set();
   let resolvNF=0,resolvSubsetSum=0,resolvRegra=0,resolvSocio=0,resolvVt=0,aindaPendente=0;
+  const diagAglutinado=[]; // por que um pagamento que parece soma de várias linhas do Fluxo não abriu
   const erros=[];
 
   // Verifica as linhas recém-gravadas contra contasAlertaMap e manda pro
@@ -27603,7 +27606,8 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // do extrato com todos os componentes resolvidos; ambiguidade = fica pendente.
   async function tentarAglutinado(l,ehSaida,valor,usarComprovantes){
     const ehPonteL=/SECURITIZ|\bFIDC\b|FUNDO DE INVEST/.test(_convMpRemoverAcentos(String(l.historico_bancario||'').toUpperCase()));
-    if(_lancctbHistoricoTemNomeEmpresa(l.historico_bancario)&&!ehPonteL) return false;
+    const rotuloL=`${l.data_pagamento.split('-').reverse().join('/').slice(0,5)} R$ ${_fmt(valor)}`;
+    if(_lancctbHistoricoTemNomeEmpresa(l.historico_bancario)&&!ehPonteL){ diagAglutinado.push(`${rotuloL}: histórico do banco traz nome de empresa — não abre pelo Fluxo`); return false; }
     const vFluxo=f=>ehSaida?f.valor_saida:f.valor_entrada;
     const contraTipo=ehSaida?'D':'C', bancoTipo=ehSaida?'C':'D';
     const comprovantesUsadosL=comprovantesUsadosPag;
@@ -27619,7 +27623,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       comps.push({f,c:c||null});
     });
     cp.filter(c=>!cpUsadosMerge.has(c.id)).forEach(c=>comps.push({f:null,c}));
-    if(comps.length<2||comps.length>25) return false;
+    if(comps.length<2||comps.length>25){ if(comps.length>25||fl.length) diagAglutinado.push(`${rotuloL}: ${comps.length} linha(s) de Fluxo candidata(s) (precisa de 2 a 25, data ±${LANCCTB_MATCH_TOLERANCIA_DIAS} dias)`); return false; }
     // Resolve cada componente
     comps.forEach(x=>{
       x.valor=x.c?x.c.valor_pago:vFluxo(x.f);
@@ -27646,13 +27650,48 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       x.resolvido=!!(x.par||x.regra);
     });
     const { sols, estourou } = _lancctbSubconjuntosSoma(comps.map(x=>Math.round(x.valor*100)),Math.round(valor*100),Math.round((ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)*100),20,300000);
-    if(estourou||!sols.length) return false;
+    if(estourou||!sols.length){ diagAglutinado.push(`${rotuloL}: nenhuma combinação das ${comps.length} linha(s) do Fluxo fecha o valor (${comps.map(x=>_fmt(x.valor)).join(' / ')})`); return false; }
     const completas=sols.filter(sol=>sol.every(i=>comps[i].resolvido));
-    if(completas.length!==1) return false; // 0 = falta NF/Regra de alguém; >1 = ambíguo
-    const escolhidos=completas[0].map(i=>comps[i]);
+    // Pedido do usuário 04/10/2026 (ACCI: saída 1.885,00 = BY CAR 1.846,00 + 39,00 do Fluxo): quando só PARTE dos componentes tem NF/Regra,
+    // lança sozinho o que está resolvido e a(s) linha(s) sem NF viram pendência(s) separada(s) (com o Fluxo já ligado) pro usuário criar a Regra.
+    // Só vale se existir UMA única combinação que fecha o valor, com ao menos 1 componente resolvido e todos os não resolvidos vindos do Fluxo.
+    let parcial=false;
+    if(completas.length===0&&sols.length===1&&sols[0].some(i=>comps[i].resolvido)&&sols[0].every(i=>comps[i].resolvido||comps[i].f)) parcial=true;
+    else if(completas.length!==1){ // falta NF/Regra de alguém (sem Fluxo pra separar) ou combinação ambígua
+      diagAglutinado.push(sols.length>1||completas.length>1?`${rotuloL}: mais de uma combinação possível — ambíguo`:`${rotuloL}: combinação achada, mas nenhuma linha tem NF/Regra (${sols[0].map(i=>(comps[i].nome||comps[i].f?.descricao||'?')+' '+_fmt(comps[i].valor)+(comps[i].f?.numero||comps[i].f?.documento_numero?' NF '+(comps[i].f.numero||comps[i].f.documento_numero):'')).join(' + ')})`);
+      return false;
+    }
+    let escolhidos=(parcial?sols[0]:completas[0]).map(i=>comps[i]);
     // Uma mesma parcela de NF não pode entrar 2x
     const idsPar=escolhidos.map(x=>x.par?.id).filter(Boolean);
     if(new Set(idsPar).size!==idsPar.length) return false;
+    let desfazerParcial=null, novasLinhasFluxo=[]; const idsFluxoNovos=[];
+    if(parcial){
+      const R=escolhidos.filter(x=>x.resolvido), U=escolhidos.filter(x=>!x.resolvido);
+      const somaU=U.reduce((a,x)=>a+Math.round(x.valor*100),0)/100;
+      const valorR=Math.round((valor-somaU)*100)/100;
+      if(!R.length||!(valorR>0)) return false;
+      const criadas=[];
+      const desfazerCriadas=async()=>{ for(const c of criadas) await _supaClient.from('lancamentos_extrato').delete().eq('id',c.id); };
+      for(const x of U){
+        const { data: nova, error: eIns } = await _supaClient.from('lancamentos_extrato').insert({
+          empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento,
+          valor_saida:ehSaida?Math.round(x.valor*100)/100:0, valor_entrada:ehSaida?0:Math.round(x.valor*100)/100,
+          historico_bancario:l.historico_bancario, origem_importacao:'manual',
+          informacao:`Separada pelo Fluxo de Caixa do pagamento de R$ ${_fmt(valor)} em ${l.data_pagamento}: ${x.nome||x.f?.descricao||''}`.trim(),
+          hash_dedup:`fluxo_split_${l.id}_${x.f.id}_${Date.now()}`
+        }).select('id').single();
+        if(eIns||!nova){ await desfazerCriadas(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): não consegui separar a linha sem NF (${eIns?eIns.message:'sem retorno'})`); return false; }
+        criadas.push({ id:nova.id, fluxoId:x.f.id });
+      }
+      const campoValor=ehSaida?'valor_saida':'valor_entrada';
+      const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ [campoValor]:valorR }).eq('id',l.id);
+      if(eUpd){ await desfazerCriadas(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${eUpd.message}`); return false; }
+      const valorOriginal=valor;
+      desfazerParcial=async()=>{ await desfazerCriadas(); await _supaClient.from('lancamentos_extrato').update({ [campoValor]:valorOriginal }).eq('id',l.id); };
+      novasLinhasFluxo=criadas;
+      escolhidos=R; valor=valorR; l[campoValor]=valorR;
+    }
     const hists=[]; const linhas=[]; let somaAnt=0;
     escolhidos.forEach((x,i)=>{
       const ultimo=i===escolhidos.length-1;
@@ -27675,8 +27714,10 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const histBanco=new Set(hists).size<=1?hists[0]:(ehSaida?'Pagamentos Diversos':'Recebimentos Diversos');
     linhas.unshift({ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:histBanco, cliente_fornecedor_nome:null, cnpj_cpf:null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
     const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
-    if(error){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
+    if(error){ if(desfazerParcial) await desfazerParcial(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
     await checarAlertaAutomatico(linhas,l,valor,histBanco,null);
+    // Linhas sem NF separadas: o Fluxo de cada uma já fica ligado à sua nova pendência (é só clicar nela e criar a Regra)
+    for(const nl of novasLinhasFluxo){ idsFluxoNovos.push(nl.fluxoId); await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:nl.id}).eq('id',nl.fluxoId); fluxoPonteUsados.add(nl.fluxoId); }
     const idsP=escolhidos.map(x=>x.par?.id).filter(Boolean), idsF=escolhidos.map(x=>x.f?.id).filter(Boolean), idsC=escolhidos.map(x=>x.c?.id).filter(Boolean);
     idsP.forEach(id=>parcelasUsadas.add(id)); idsF.forEach(id=>fluxoPonteUsados.add(id)); idsC.forEach(id=>comprovantesUsadosL.add(id));
     if(idsP.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',idsP);
@@ -28275,7 +28316,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     if(!resolvido) aindaPendente++;
   }
 
-  return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, resolvSocio, resolvVt, aindaPendente, erros };
+  return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, resolvSocio, resolvVt, aindaPendente, erros, diagAglutinado };
 }
 async function _lancctbReprocessarPendencias(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
