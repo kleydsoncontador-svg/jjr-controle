@@ -14131,7 +14131,7 @@ function editarConvItauConfig(eid){
 }
 function renderConvItauProcessForm(eid,cfg){
   const resultado=_convItauResultados[eid];
-  const pendentes=resultado?_convItauPendentes[eid]:_convItauPendRestaurar(eid);
+  const pendentes=resultado?_convItauPendentes[eid]:_cartaoPendRestaurar('itau',eid);
   const regras=getConvItauRegras(eid);
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px">
@@ -14287,50 +14287,58 @@ function _convNfBuscar(eid,texto){
   const qn=_convNfNorm(q), dig=q.replace(/\D/g,'');
   return lista.filter(n=>(valor!==null&&Math.abs(n.valor-valor)<0.015)||(dig&&dig.length>=2&&n.numero.replace(/\D/g,'').replace(/^0+/,'')===dig.replace(/^0+/,''))||(qn.length>=2&&_convNfNorm(n.nome).includes(qn))).slice(0,15);
 }
-function _convItauNfCampoHtml(eid,i,t){
-  const sel=t&&t._nfSel;
+// ── Módulo GENÉRICO das faturas de cartão: amarração à NF + pendências persistidas ──────────────────────────
+// Cada conversor de fatura de cartão (Itaú, Nubank e os que vierem) se registra aqui com seus acessores. Pra criar a
+// fatura de um banco novo: registrar em _CARTAO_BANCOS e usar _cartaoNfCampoHtml / _cartaoPendPersistir / _cartaoPendRestaurar /
+// _cartaoDescartar / _convNfAuto / _convNfHistorico do mesmo jeito que o Itaú (ver renderConvItauPendentesForm e _convItauGerarResultado).
+const _CARTAO_BANCOS={
+  itau:{ nome:'Itaú', pend:()=>_convItauPendentes, sessao:()=>_convItauRegrasSessao, transPend:(...a)=>_convItauTransacaoPendente(...a), valor:t=>_convItauValorTotal(t), render:()=>renderConvItauLista(), idp:'convItau' },
+  nubank:{ nome:'Nubank', pend:()=>_convNubankPendentes, sessao:()=>_convNubankRegrasSessao, transPend:(...a)=>_convNubankTransacaoPendente(...a), valor:t=>t.valor, render:()=>renderConvNubankLista(), idp:'convNubank' }
+};
+function _cartaoNfCampoHtml(banco,eid,i,t){
+  const B=_CARTAO_BANCOS[banco], sel=t&&t._nfSel;
   return `<div style="position:relative;min-width:260px;flex:1"><label style="font-size:10px;color:var(--slate);display:block">Nota Fiscal (valor, nº ou fornecedor)</label>
-    <input class="fi" id="convItauNf_${eid}_${i}" autocomplete="off" style="font-size:12px;${sel?'border-color:#16a34a':''}" placeholder="Sem NF — digite pra buscar" value="${esc(_convNfLabel(sel))}" oninput="_convItauNfDigitou('${eid}',${i},this.value)" onblur="setTimeout(()=>{const b=document.getElementById('convItauNfLista_${eid}_${i}');if(b)b.style.display='none'},180)">
-    <div id="convItauNfLista_${eid}_${i}" style="display:none;position:absolute;left:0;top:100%;z-index:9999;min-width:380px;max-height:260px;overflow:auto;background:var(--white);color:var(--ink);border:1px solid var(--border);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.35);font-size:11.5px"></div></div>`;
+    <input class="fi" id="${B.idp}Nf_${eid}_${i}" autocomplete="off" style="font-size:12px;${sel?'border-color:#16a34a':''}" placeholder="Sem NF — digite pra buscar" value="${esc(_convNfLabel(sel))}" oninput="_cartaoNfDigitou('${banco}','${eid}',${i},this.value)" onblur="setTimeout(()=>{const b=document.getElementById('${B.idp}NfLista_${eid}_${i}');if(b)b.style.display='none'},180)">
+    <div id="${B.idp}NfLista_${eid}_${i}" style="display:none;position:absolute;left:0;top:100%;z-index:9999;min-width:380px;max-height:260px;overflow:auto;background:var(--white);color:var(--ink);border:1px solid var(--border);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.35);font-size:11.5px"></div></div>`;
 }
-function _convItauNfDigitou(eid,i,texto){
-  const pendentes=_convItauPendentes[eid]; if(!pendentes) return; const item=pendentes.descricoes[i]; if(!item) return;
-  const t=_convItauTransacaoPendente(eid,pendentes,item.desc,item.sinal); const box=document.getElementById('convItauNfLista_'+eid+'_'+i); if(!box) return;
-  if(!String(texto||'').trim()){ if(t){ t._nfSel=null; _convItauPendPersistir(eid); } box.style.display='none'; const inp=document.getElementById('convItauNf_'+eid+'_'+i); if(inp) inp.style.borderColor=''; return; }
-  const usadas=_convNfUsadasPor(pendentes.transacoes,t); const res=_convNfBuscar(eid,texto);
-  const falhou=(_convNfCache[eid]&&_convNfCache[eid].erro);
-  box.innerHTML=res.length?res.map(n=>`<div onmousedown="event.preventDefault();_convItauNfEscolher('${eid}',${i},${n.id})" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" style="padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--border)"><b>NF ${esc(n.numero)}</b> · ${esc(n.nome)} · R$ ${_fmt(n.valor)} · ${esc(_convMpFmtDataBr(n.data))}${usadas.has(n.id)?' <span style="color:#b45309">(já amarrada a outra compra)</span>':''}</div>`).join(''):`<div style="padding:8px;color:var(--slate)">${falhou?'Notas não carregadas — confira a conexão e processe de novo.':'Nenhuma NF encontrada com esse valor, número ou nome.'}</div>`;
+function _cartaoNfDigitou(banco,eid,i,texto){
+  const B=_CARTAO_BANCOS[banco], pendentes=B.pend()[eid]; if(!pendentes) return; const item=pendentes.descricoes[i]; if(!item) return;
+  const t=B.transPend(eid,pendentes,item.desc,item.sinal), box=document.getElementById(B.idp+'NfLista_'+eid+'_'+i); if(!box) return;
+  if(!String(texto||'').trim()){ if(t){ t._nfSel=null; _cartaoPendPersistir(banco,eid); } box.style.display='none'; const inp=document.getElementById(B.idp+'Nf_'+eid+'_'+i); if(inp) inp.style.borderColor=''; return; }
+  const usadas=_convNfUsadasPor(pendentes.transacoes,t), res=_convNfBuscar(eid,texto), falhou=(_convNfCache[eid]&&_convNfCache[eid].erro);
+  box.innerHTML=res.length?res.map(n=>`<div onmousedown="event.preventDefault();_cartaoNfEscolher('${banco}','${eid}',${i},${n.id})" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" style="padding:5px 8px;cursor:pointer;border-bottom:1px solid var(--border)"><b>NF ${esc(n.numero)}</b> · ${esc(n.nome)} · R$ ${_fmt(n.valor)} · ${esc(_convMpFmtDataBr(n.data))}${usadas.has(n.id)?' <span style="color:#b45309">(já amarrada a outra compra)</span>':''}</div>`).join(''):`<div style="padding:8px;color:var(--slate)">${falhou?'Notas não carregadas — confira a conexão e processe de novo.':'Nenhuma NF encontrada com esse valor, número ou nome.'}</div>`;
   box.style.display='block';
 }
-function _convItauNfEscolher(eid,i,nfId){
-  const pendentes=_convItauPendentes[eid]; if(!pendentes) return; const item=pendentes.descricoes[i]; if(!item) return;
-  const t=_convItauTransacaoPendente(eid,pendentes,item.desc,item.sinal); const n=((_convNfCache[eid]&&_convNfCache[eid].lista)||[]).find(x=>x.id===nfId); if(!t||!n) return;
-  t._nfSel=n; _convItauPendPersistir(eid); const inp=document.getElementById('convItauNf_'+eid+'_'+i); if(inp){ inp.value=_convNfLabel(n); inp.style.borderColor='#16a34a'; }
-  const box=document.getElementById('convItauNfLista_'+eid+'_'+i); if(box) box.style.display='none';
-  const h=document.getElementById('convItauHist_'+eid+'_'+i); if(h) h.placeholder='Automático: '+_convNfHistorico(n);
+function _cartaoNfEscolher(banco,eid,i,nfId){
+  const B=_CARTAO_BANCOS[banco], pendentes=B.pend()[eid]; if(!pendentes) return; const item=pendentes.descricoes[i]; if(!item) return;
+  const t=B.transPend(eid,pendentes,item.desc,item.sinal), n=((_convNfCache[eid]&&_convNfCache[eid].lista)||[]).find(x=>x.id===nfId); if(!t||!n) return;
+  t._nfSel=n; _cartaoPendPersistir(banco,eid);
+  const inp=document.getElementById(B.idp+'Nf_'+eid+'_'+i); if(inp){ inp.value=_convNfLabel(n); inp.style.borderColor='#16a34a'; }
+  const box=document.getElementById(B.idp+'NfLista_'+eid+'_'+i); if(box) box.style.display='none';
+  const h=document.getElementById(B.idp+'Hist_'+eid+'_'+i); if(h) h.placeholder='Automático: '+_convNfHistorico(n);
 }
 // Pendências de classificação ficam salvas por empresa (só dados da fatura — nunca o PDF) pra, ao sair da tela e voltar,
 // continuar do ponto onde parou. Saem quando a fatura é processada ou quando o usuário descarta.
-function _convItauPendPersistir(eid){
+function _cartaoPendPersistir(banco,eid){
   try{
-    const p=_convItauPendentes[eid];
-    if(!p){ S.s('convItauPend_'+eid,{}); return; }
-    S.s('convItauPend_'+eid,{ mesFechamento:p.mesFechamento, transacoes:p.transacoes, descricoes:p.descricoes, regrasSessao:_convItauRegrasSessao[eid]||[], salvoEm:new Date().toISOString() });
+    const B=_CARTAO_BANCOS[banco], p=B.pend()[eid], chave='cartaoPend_'+banco+'_'+eid;
+    if(!p){ S.s(chave,{}); return; }
+    S.s(chave,{ mesFechamento:p.mesFechamento, transacoes:p.transacoes, descricoes:p.descricoes, regrasSessao:B.sessao()[eid]||[], salvoEm:new Date().toISOString() });
   }catch(e){ console.warn('Pendências do cartão não persistidas:',e); }
 }
-function _convItauPendRestaurar(eid){
-  if(_convItauPendentes[eid]) return _convItauPendentes[eid];
-  const d=S.g('convItauPend_'+eid);
+function _cartaoPendRestaurar(banco,eid){
+  const B=_CARTAO_BANCOS[banco]; if(B.pend()[eid]) return B.pend()[eid];
+  const d=S.g('cartaoPend_'+banco+'_'+eid);
   if(!d||!Array.isArray(d.transacoes)||!d.transacoes.length||!Array.isArray(d.descricoes)||!d.descricoes.length) return null;
-  _convItauPendentes[eid]={ mesFechamento:d.mesFechamento, transacoes:d.transacoes, descricoes:d.descricoes };
-  _convItauRegrasSessao[eid]=d.regrasSessao||[];
-  _convNfCarregar(eid).then(()=>{ if(_convItauPendentes[eid]) renderConvItauLista(); }); // notas pra busca/amarração
-  return _convItauPendentes[eid];
+  B.pend()[eid]={ mesFechamento:d.mesFechamento, transacoes:d.transacoes, descricoes:d.descricoes };
+  B.sessao()[eid]=d.regrasSessao||[];
+  _convNfCarregar(eid).then(()=>{ if(B.pend()[eid]) B.render(); }); // notas pra busca/amarração
+  return B.pend()[eid];
 }
-function _convItauDescartarPendencias(eid){
+function _cartaoDescartar(banco,eid){
   if(!confirm('Descartar as pendências desta fatura? Você poderá processar o PDF de novo.')) return;
-  delete _convItauPendentes[eid]; delete _convItauRegrasSessao[eid]; _convItauPendPersistir(eid);
-  renderConvItauLista(); toast('Pendências descartadas','ok');
+  const B=_CARTAO_BANCOS[banco]; delete B.pend()[eid]; delete B.sessao()[eid]; _cartaoPendPersistir(banco,eid);
+  B.render(); toast('Pendências descartadas','ok');
 }
 function _convItauTransacaoPendente(eid,pendentes,desc,sinal){
   const regras=[...getConvItauRegras(eid),...(_convItauRegrasSessao[eid]||[])];
@@ -14433,7 +14441,7 @@ async function processarConvItau(eid){
     if(naoClassificados.size){
       _convItauPendentes[eid]={mesFechamento,transacoes:relevantes,descricoes:[...naoClassificados.values()]};
       _convItauRegrasSessao[eid]=[];
-      _convItauPendPersistir(eid);
+      _cartaoPendPersistir('itau',eid);
       renderConvItauLista();
       _convItauSetStatus(eid,naoClassificados.size+' fornecedor(es) novo(s) encontrados — classifique abaixo para gerar o lançamento.','');
       toast(naoClassificados.size+' fornecedor(es) precisam de classificação.','');
@@ -14453,7 +14461,7 @@ async function processarConvItau(eid){
 function renderConvItauPendentesForm(eid,pendentes){
   const descricoes=pendentes.descricoes;
   let html=`<div style="margin-top:12px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;padding:12px" onclick="event.stopPropagation()">
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><span style="font-size:12px;font-weight:700;color:#92400E">⚠ Fornecedores novos — informe a conta de cada um</span><button class="btn bo bsm" style="font-size:11px" onclick="_convItauDescartarPendencias('${eid}')">🗑️ Descartar pendências</button></div>
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><span style="font-size:12px;font-weight:700;color:#92400E">⚠ Fornecedores novos — informe a conta de cada um</span><button class="btn bo bsm" style="font-size:11px" onclick="_cartaoDescartar('itau','${eid}')">🗑️ Descartar pendências</button></div>
     <div style="font-size:11px;color:#92400E;margin-bottom:10px">As compras são amarradas automaticamente à NF dos Lançamentos Contábeis pelo valor total (campo "Nota Fiscal"); se não achar, digite o valor, o nº ou parte do fornecedor. A regra vale por "contém no texto": se preferir, deixe só um trecho do nome (ex: "JOSE SILVA P" já cobre "JOSE SILVA PIRES" e "JOSE SILVA PI" em meses diferentes). Valores negativos na fatura (ex: estorno) entram como crédito dessa conta, não débito — e uma regra salva para débito não vale automaticamente para crédito (e vice-versa). Salve cada linha individualmente; conforme você salva, ela sai da lista.</div>`;
   descricoes.forEach((item,i)=>{
     const desc=item.desc, sinalItem=item.sinal;
@@ -14473,7 +14481,7 @@ function renderConvItauPendentesForm(eid,pendentes){
       <div><label style="font-size:10px;color:var(--slate);display:block">Data do lançamento</label><div style="font-size:12px;padding:6px 0;white-space:nowrap;font-weight:600">${transacao?esc(transacao.dataStr):'—'}</div></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Conta do Fornecedor</label><input class="fi" id="convItauContaDeb_${eid}_${i}" placeholder="Conta" style="font-size:12px;width:140px"></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Valor na fatura</label><div style="font-size:12px;padding:6px 0;white-space:nowrap">${valorInfo}</div></div>
-      ${_convItauNfCampoHtml(eid,i,transacao)}
+      ${_cartaoNfCampoHtml('itau',eid,i,transacao)}
       <div><label style="font-size:10px;color:var(--slate);display:block">Outro valor (opcional)</label><input class="fi" id="convItauValorOverride_${eid}_${i}" placeholder="Ex: 150,00" style="font-size:12px;width:110px"></div>
       <div style="flex:1;min-width:160px"><label style="font-size:10px;color:var(--slate);display:block">Histórico personalizado (opcional)</label><input class="fi" id="convItauHist_${eid}_${i}" placeholder="Deixe em branco para usar a descrição da fatura" style="font-size:12px"></div>
       <div style="display:flex;flex-direction:column;align-items:flex-start;gap:4px">
@@ -14540,7 +14548,7 @@ function salvarClassificacaoLinhaConvItau(eid,i){
     _convItauGerarResultado(eid,pendentes.transacoes,pendentes.mesFechamento,[...regras,...regrasSessao]);
     delete _convItauRegrasSessao[eid];
   } else {
-    _convItauPendPersistir(eid);
+    _cartaoPendPersistir('itau',eid);
     renderConvItauLista();
     toast('Fornecedor classificado!','ok');
   }
@@ -14632,7 +14640,7 @@ function _convItauGerarResultado(eid,transacoes,mesFechamento,regras){
   });
   _convItauResultados[eid]={linhas,mesFechamento,
     validacoes:{totalLinhas:linhas.length,semClassificacao:linhas.filter(l=>l.semClassificacao).length,comNF:linhas.filter(l=>l.nf).length}};
-  delete _convItauPendentes[eid]; delete _convItauRegrasSessao[eid]; _convItauPendPersistir(eid);
+  delete _convItauPendentes[eid]; delete _convItauRegrasSessao[eid]; _cartaoPendPersistir('itau',eid);
   renderConvItauLista();
   toast('Fatura processada com sucesso!','ok');
 }
@@ -14791,7 +14799,7 @@ function editarConvNubankConfig(eid){
 }
 function renderConvNubankProcessForm(eid,cfg){
   const resultado=_convNubankResultados[eid];
-  const pendentes=_convNubankPendentes[eid];
+  const pendentes=resultado?_convNubankPendentes[eid]:_cartaoPendRestaurar('nubank',eid);
   const regras=getConvNubankRegras(eid);
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:8px">
@@ -14912,6 +14920,7 @@ async function processarConvNubank(eid){
       return;
     }
 
+    await _convNfCarregar(eid); // NFs dos Lançamentos Contábeis, pra amarrar as compras pelo valor total
     const regras=getConvNubankRegras(eid);
     const naoClassificados=new Map();
     transacoes.forEach(t=>{
@@ -14926,6 +14935,7 @@ async function processarConvNubank(eid){
     if(naoClassificados.size){
       _convNubankPendentes[eid]={mesFechamento,transacoes,descricoes:[...naoClassificados.values()]};
       _convNubankRegrasSessao[eid]=[];
+      _cartaoPendPersistir('nubank',eid);
       renderConvNubankLista();
       _convNubankSetStatus(eid,naoClassificados.size+' fornecedor(es) novo(s) encontrados — classifique abaixo para gerar o lançamento.','');
       toast(naoClassificados.size+' fornecedor(es) precisam de classificação.','');
@@ -14945,8 +14955,8 @@ async function processarConvNubank(eid){
 function renderConvNubankPendentesForm(eid,pendentes){
   const descricoes=pendentes.descricoes;
   let html=`<div style="margin-top:12px;background:#FEF3C7;border:1px solid #FDE68A;border-radius:6px;padding:12px" onclick="event.stopPropagation()">
-    <div style="font-size:12px;font-weight:700;color:#92400E;margin-bottom:8px">⚠ Fornecedores novos — informe a conta de cada um</div>
-    <div style="font-size:11px;color:#92400E;margin-bottom:10px">A regra vale por "contém no texto": se preferir, deixe só um trecho do nome. Valores negativos na fatura (ex: estorno) entram como crédito dessa conta, não débito — e uma regra salva para débito não vale automaticamente para crédito (e vice-versa). Salve cada linha individualmente; conforme você salva, ela sai da lista.</div>`;
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px"><span style="font-size:12px;font-weight:700;color:#92400E">⚠ Fornecedores novos — informe a conta de cada um</span><button class="btn bo bsm" style="font-size:11px" onclick="_cartaoDescartar('nubank','${eid}')">🗑️ Descartar pendências</button></div>
+    <div style="font-size:11px;color:#92400E;margin-bottom:10px">As compras são amarradas automaticamente à NF dos Lançamentos Contábeis pelo valor total (campo "Nota Fiscal"); se não achar, digite o valor, o nº ou parte do fornecedor. A regra vale por "contém no texto": se preferir, deixe só um trecho do nome. Valores negativos na fatura (ex: estorno) entram como crédito dessa conta, não débito — e uma regra salva para débito não vale automaticamente para crédito (e vice-versa). Salve cada linha individualmente; conforme você salva, ela sai da lista.</div>`;
   descricoes.forEach((item,i)=>{
     const desc=item.desc, sinalItem=item.sinal;
     const transacao=_convNubankTransacaoPendente(eid,pendentes,desc,sinalItem);
@@ -14955,11 +14965,13 @@ function renderConvNubankPendentesForm(eid,pendentes){
     const badgeCor=ehCredito?'#dc2626':'#16a34a';
     const badgeTxt=ehCredito?'→ Crédito':'→ Débito';
     const valorInfo=`R$ ${_fmt(Math.abs(valorTotal))} <span style="color:${badgeCor};font-weight:600">${badgeTxt}</span>`+(transacao&&transacao.usdInfo?`<br><span style="color:var(--slate);font-weight:400">${esc(transacao.usdInfo)}</span>`:'');
+    if(transacao&&transacao._nfSel===undefined){ transacao._nfSel=_convNfAuto(eid,transacao,valorTotal,_convNfUsadasPor(pendentes.transacoes,transacao)); }
     html+=`<div style="display:flex;gap:8px;align-items:flex-end;margin-bottom:10px;flex-wrap:wrap;padding-bottom:10px;border-bottom:1px solid #FDE68A">
       <div style="flex:1;min-width:160px"><label style="font-size:10px;color:var(--slate);display:block">Fornecedor (regra)</label><input class="fi" id="convNubankChave_${eid}_${i}" value="${esc(desc)}" style="font-size:12px"></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Data do lançamento</label><div style="font-size:12px;padding:6px 0;white-space:nowrap;font-weight:600">${transacao?esc(transacao.dataStr):'—'}</div></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Conta do Fornecedor</label><input class="fi" id="convNubankContaDeb_${eid}_${i}" placeholder="Conta" style="font-size:12px;width:140px"></div>
       <div><label style="font-size:10px;color:var(--slate);display:block">Valor na fatura</label><div style="font-size:12px;padding:6px 0;white-space:nowrap">${valorInfo}</div></div>
+      ${_cartaoNfCampoHtml('nubank',eid,i,transacao)}
       <div><label style="font-size:10px;color:var(--slate);display:block">Outro valor (opcional)</label><input class="fi" id="convNubankValorOverride_${eid}_${i}" placeholder="Ex: 150,00" style="font-size:12px;width:110px"></div>
       <div style="flex:1;min-width:160px"><label style="font-size:10px;color:var(--slate);display:block">Histórico personalizado (opcional)</label><input class="fi" id="convNubankHist_${eid}_${i}" placeholder="Deixe em branco para usar a descrição da fatura" style="font-size:12px"></div>
       <div style="display:flex;flex-direction:column;align-items:flex-start;gap:4px">
@@ -15022,6 +15034,7 @@ function salvarClassificacaoLinhaConvNubank(eid,i){
     _convNubankGerarResultado(eid,pendentes.transacoes,pendentes.mesFechamento,[...regras,...regrasSessao]);
     delete _convNubankRegrasSessao[eid];
   } else {
+    _cartaoPendPersistir('nubank',eid);
     renderConvNubankLista();
     toast('Fornecedor classificado!','ok');
   }
@@ -15094,8 +15107,10 @@ function excluirRegraConvNubank(eid,i){
 }
 function _convNubankGerarResultado(eid,transacoes,mesFechamento,regras){
   const cfg=getConvNubankConfig(eid);
+  const usadasNf=_convNfUsadasPor(transacoes,null);
   const linhas=transacoes.map(t=>{
     const valorFinal=t._valorOverride!==undefined?t._valorOverride:t.valor;
+    if(t._nfSel===undefined){ t._nfSel=_convNfAuto(eid,t,valorFinal,usadasNf); if(t._nfSel) usadasNf.add(t._nfSel.id); }
     const r=_convItauClassificar(t.descricao,regras,valorFinal);
     const contaFornecedor=r?r.contaDebito:'';
     const dataUso=_convItauDataUtilizada(t.dataStr,mesFechamento);
@@ -15103,13 +15118,14 @@ function _convNubankGerarResultado(eid,transacoes,mesFechamento,regras){
     const negativo=valorFinal<0;
     const debito=negativo?cfg.contaCredito:contaFornecedor;
     const credito=negativo?contaFornecedor:cfg.contaCredito;
-    const historicoBase=r&&r.historicoPersonalizado?r.historicoPersonalizado:t.descricao;
+    const nfT=t._nfSel||null;
+    const historicoBase=r&&r.historicoPersonalizado?r.historicoPersonalizado:(nfT?_convNfHistorico(nfT):t.descricao);
     const historico=historicoBase+(t.usdInfo?(' ('+t.usdInfo+')'):'');
-    return {dataEditada:dataBr,descricao:t.descricao,valor:valorFinal,debito,credito,historico,semClassificacao:!contaFornecedor};
+    return {dataEditada:dataBr,descricao:t.descricao,valor:valorFinal,debito,credito,historico,semClassificacao:!contaFornecedor,nf:nfT?('NF '+nfT.numero):''};
   });
   _convNubankResultados[eid]={linhas,mesFechamento,
-    validacoes:{totalLinhas:linhas.length,semClassificacao:linhas.filter(l=>l.semClassificacao).length}};
-  delete _convNubankPendentes[eid];
+    validacoes:{totalLinhas:linhas.length,semClassificacao:linhas.filter(l=>l.semClassificacao).length,comNF:linhas.filter(l=>l.nf).length}};
+  delete _convNubankPendentes[eid]; delete _convNubankRegrasSessao[eid]; _cartaoPendPersistir('nubank',eid);
   renderConvNubankLista();
   toast('Fatura processada com sucesso!','ok');
 }
@@ -15122,6 +15138,7 @@ function renderConvNubankResultado(eid,resultado){
     <div style="margin-top:10px;font-size:11px;color:var(--slate)">
       <div>✓ ${validacoes.totalLinhas} linhas geradas</div>
       ${validacoes.semClassificacao>0?`<div style="color:#dc2626">⚠ ${validacoes.semClassificacao} linha(s) sem conta débito</div>`:'<div style="color:#16a34a">✓ Todas as linhas classificadas</div>'}
+      <div>${validacoes.comNF||0} linha(s) amarrada(s) a NF (histórico "Pagamento a ... - NF n")</div>
     </div>
     <div style="margin-top:10px;max-height:220px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
       <table style="width:100%;font-size:11px;border-collapse:collapse">
