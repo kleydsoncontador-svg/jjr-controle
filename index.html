@@ -14267,7 +14267,7 @@ async function _convNfCarregar(eid){
   }catch(e){ console.warn('NFs não carregadas pra amarração:',e); _convNfCache[eid]={ lista:[], erro:true }; }
   return _convNfCache[eid].lista;
 }
-function _convNfLabel(n){ return n?('NF '+n.numero+' - '+n.nome+' (R$ '+_fmt(n.valor)+')'):''; }
+function _convNfLabel(n){ return n?('NF '+n.numero+' - '+n.nome+' (R$ '+_fmt(n.valor)+')'+(n.data?' · emitida em '+_convMpFmtDataBr(n.data):'')):''; }
 function _convNfHistorico(n){ return 'Pagamento a '+String(n.nome||'').trim()+' - NF '+n.numero; }
 // Acha a NF da compra: valor total igual (±1 centavo); se mais de uma, desempata pelo nome do fornecedor; senão deixa pra escolha manual.
 function _convNfAuto(eid,t,valorFinal,usadas){
@@ -14292,9 +14292,22 @@ function _convNfBuscar(eid,texto){
 // fatura de um banco novo: registrar em _CARTAO_BANCOS e usar _cartaoNfCampoHtml / _cartaoPendPersistir / _cartaoPendRestaurar /
 // _cartaoDescartar / _convNfAuto / _convNfHistorico do mesmo jeito que o Itaú (ver renderConvItauPendentesForm e _convItauGerarResultado).
 const _CARTAO_BANCOS={
-  itau:{ nome:'Itaú', pend:()=>_convItauPendentes, sessao:()=>_convItauRegrasSessao, transPend:(...a)=>_convItauTransacaoPendente(...a), valor:t=>_convItauValorTotal(t), render:()=>renderConvItauLista(), idp:'convItau' },
-  nubank:{ nome:'Nubank', pend:()=>_convNubankPendentes, sessao:()=>_convNubankRegrasSessao, transPend:(...a)=>_convNubankTransacaoPendente(...a), valor:t=>t.valor, render:()=>renderConvNubankLista(), idp:'convNubank' }
+  itau:{ nome:'Itaú', pend:()=>_convItauPendentes, sessao:()=>_convItauRegrasSessao, transPend:(...a)=>_convItauTransacaoPendente(...a), valor:t=>_convItauValorTotal(t), render:()=>renderConvItauLista(), idp:'convItau',
+    gerar:(eid,p)=>{ _convItauGerarResultado(eid,p.transacoes,p.mesFechamento,[...getConvItauRegras(eid),...(_convItauRegrasSessao[eid]||[])]); delete _convItauRegrasSessao[eid]; } },
+  nubank:{ nome:'Nubank', pend:()=>_convNubankPendentes, sessao:()=>_convNubankRegrasSessao, transPend:(...a)=>_convNubankTransacaoPendente(...a), valor:t=>t.valor, render:()=>renderConvNubankLista(), idp:'convNubank',
+    gerar:(eid,p)=>{ _convNubankGerarResultado(eid,p.transacoes,p.mesFechamento,[...getConvNubankRegras(eid),...(_convNubankRegrasSessao[eid]||[])]); delete _convNubankRegrasSessao[eid]; } }
 };
+// Pedido do usuário 03/10/2026: aceitou a NF → a compra SOME das pendências (não precisa de conta/regra) e o débito vai pra 10001
+// (conta padrão de compra com NF — a despesa já foi reconhecida na NF). Se não sobrou nenhuma pendência, gera o resultado.
+function _cartaoResolverComNf(banco,eid){
+  const B=_CARTAO_BANCOS[banco], p=B.pend()[eid]; if(!p) return;
+  p.descricoes=p.descricoes.filter(it=>{
+    const cands=p.transacoes.filter(t=>t.descricao===it.desc&&(!it.sinal||(B.valor(t)<0?'credito':'debito')===it.sinal));
+    return cands.length&&cands.some(t=>!t._nfSel); // ainda tem compra desse fornecedor sem NF → continua pendente
+  });
+  if(!p.descricoes.length){ B.gerar(eid,p); return; }
+  _cartaoPendPersistir(banco,eid); B.render();
+}
 function _cartaoNfCampoHtml(banco,eid,i,t){
   const B=_CARTAO_BANCOS[banco], sel=t&&t._nfSel, sug=(!sel&&t&&t._nfSel===undefined)?t._nfSug:null, mostrar=sel||sug;
   const rotulo=sel?'Nota Fiscal — aceita ✓':(sug?'Nota Fiscal — sugestão':'Nota Fiscal (valor, nº ou fornecedor)');
@@ -14316,12 +14329,13 @@ async function _cartaoMarcarNfsAssociadas(eid,resultado){
 function _cartaoNfAceitar(banco,eid,i){
   const B=_CARTAO_BANCOS[banco], pendentes=B.pend()[eid]; if(!pendentes) return; const item=pendentes.descricoes[i]; if(!item) return;
   const t=B.transPend(eid,pendentes,item.desc,item.sinal); if(!t||!t._nfSug) return;
-  t._nfSel=t._nfSug; _cartaoPendPersistir(banco,eid); B.render();
+  t._nfSel=t._nfSug; _cartaoResolverComNf(banco,eid);
 }
 function _cartaoNfAceitarTodas(banco,eid){
   const B=_CARTAO_BANCOS[banco], pendentes=B.pend()[eid]; if(!pendentes) return; let n=0;
   pendentes.descricoes.forEach(item=>{ const t=B.transPend(eid,pendentes,item.desc,item.sinal); if(t&&t._nfSel===undefined&&t._nfSug){ t._nfSel=t._nfSug; n++; } });
-  _cartaoPendPersistir(banco,eid); B.render(); toast(n?n+' NF(s) aceita(s)':'Nenhuma sugestão de NF pendente','ok');
+  toast(n?n+' NF(s) aceita(s) — compras amarradas saem das pendências (débito em 10001)':'Nenhuma sugestão de NF pendente','ok');
+  _cartaoResolverComNf(banco,eid);
 }
 function _cartaoNfDigitou(banco,eid,i,texto){
   const B=_CARTAO_BANCOS[banco], pendentes=B.pend()[eid]; if(!pendentes) return; const item=pendentes.descricoes[i]; if(!item) return;
@@ -14334,10 +14348,7 @@ function _cartaoNfDigitou(banco,eid,i,texto){
 function _cartaoNfEscolher(banco,eid,i,nfId){
   const B=_CARTAO_BANCOS[banco], pendentes=B.pend()[eid]; if(!pendentes) return; const item=pendentes.descricoes[i]; if(!item) return;
   const t=B.transPend(eid,pendentes,item.desc,item.sinal), n=((_convNfCache[eid]&&_convNfCache[eid].lista)||[]).find(x=>x.id===nfId); if(!t||!n) return;
-  t._nfSel=n; _cartaoPendPersistir(banco,eid);
-  const inp=document.getElementById(B.idp+'Nf_'+eid+'_'+i); if(inp){ inp.value=_convNfLabel(n); inp.style.borderColor='#16a34a'; }
-  const box=document.getElementById(B.idp+'NfLista_'+eid+'_'+i); if(box) box.style.display='none';
-  const h=document.getElementById(B.idp+'Hist_'+eid+'_'+i); if(h) h.placeholder='Automático: '+_convNfHistorico(n);
+  t._nfSel=n; _cartaoResolverComNf(banco,eid);
 }
 // Pendências de classificação ficam salvas por empresa (só dados da fatura — nunca o PDF) pra, ao sair da tela e voltar,
 // continuar do ponto onde parou. Saem quando a fatura é processada ou quando o usuário descarta.
@@ -14365,7 +14376,7 @@ function _cartaoDescartar(banco,eid){
 function _convItauTransacaoPendente(eid,pendentes,desc,sinal){
   const regras=[...getConvItauRegras(eid),...(_convItauRegrasSessao[eid]||[])];
   const candidatos=pendentes.transacoes.filter(t=>t.descricao===desc&&(!sinal||(_convItauValorTotal(t)<0?'credito':'debito')===sinal));
-  return candidatos.find(t=>!_convItauClassificar(t.descricao,regras,_convItauValorTotal(t)))||candidatos[0];
+  return candidatos.find(t=>!t._nfSel&&!_convItauClassificar(t.descricao,regras,_convItauValorTotal(t)))||candidatos.find(t=>!t._nfSel)||candidatos[0];
 }
 function _convItauDataUtilizada(dataStr,mesFechamento){
   const [ano,mes]=mesFechamento.split('-').map(Number);
@@ -14526,7 +14537,11 @@ function salvarClassificacaoLinhaConvItau(eid,i,comGatilho){
   const historicoPersonalizado=(document.getElementById('convItauHist_'+eid+'_'+i)?.value||'').trim();
   const overrideRaw=(document.getElementById('convItauValorOverride_'+eid+'_'+i)?.value||'').trim();
   const usarComoRegra=(comGatilho===undefined)?true:!!comGatilho; // botões "Salvar com gatilho" / "Salvar sem gatilho"
-  if(!chave||!contaDebito){toast('Preencha fornecedor e conta.','err');return;}
+  if(!chave||!contaDebito){
+    const tNf=_convItauTransacaoPendente(eid,pendentes,desc,sinalItem);
+    if(tNf&&(tNf._nfSel||tNf._nfSug)){ tNf._nfSel=tNf._nfSel||tNf._nfSug; _cartaoResolverComNf('itau',eid); return; } // NF amarrada: não precisa de conta
+    toast('Preencha fornecedor e conta.','err');return;
+  }
 
   const transacao=_convItauTransacaoPendente(eid,pendentes,desc,sinalItem);
   if(transacao&&transacao._nfSel===undefined&&transacao._nfSug) transacao._nfSel=transacao._nfSug; // salvar a linha aceita a NF sugerida
@@ -14650,7 +14665,7 @@ function _convItauGerarResultado(eid,transacoes,mesFechamento,regras){
     const valorFinal=t._valorOverride!==undefined?t._valorOverride:valorBase;
     if(t._nfSel===undefined){ t._nfSel=t._nfSug||_convNfAuto(eid,t,valorFinal,usadasNf); if(t._nfSel) usadasNf.add(t._nfSel.id); }
     const r=_convItauClassificar(t.descricao,regras,valorFinal);
-    const contaFornecedor=r?r.contaDebito:'';
+    const contaFornecedor=(t._nfSel&&valorFinal>0)?'10001':(r?r.contaDebito:'');
     const dataUso=_convItauDataUtilizada(t.dataStr,mesFechamento);
     const dataBr=_convMpFmtDataBr(dataUso);
     const negativo=valorFinal<0;
@@ -14915,7 +14930,7 @@ function _convNubankParsearTransacoes(linhasTexto){
 function _convNubankTransacaoPendente(eid,pendentes,desc,sinal){
   const regras=[...getConvNubankRegras(eid),...(_convNubankRegrasSessao[eid]||[])];
   const candidatos=pendentes.transacoes.filter(t=>t.descricao===desc&&(!sinal||(t.valor<0?'credito':'debito')===sinal));
-  return candidatos.find(t=>!_convItauClassificar(t.descricao,regras,t.valor))||candidatos[0];
+  return candidatos.find(t=>!t._nfSel&&!_convItauClassificar(t.descricao,regras,t.valor))||candidatos.find(t=>!t._nfSel)||candidatos[0];
 }
 async function processarConvNubank(eid){
   const btn=document.getElementById('convNubankBtnProcessar_'+eid);
@@ -15018,7 +15033,11 @@ function salvarClassificacaoLinhaConvNubank(eid,i,comGatilho){
   const historicoPersonalizado=(document.getElementById('convNubankHist_'+eid+'_'+i)?.value||'').trim();
   const overrideRaw=(document.getElementById('convNubankValorOverride_'+eid+'_'+i)?.value||'').trim();
   const usarComoRegra=(comGatilho===undefined)?true:!!comGatilho; // botões "Salvar com gatilho" / "Salvar sem gatilho"
-  if(!chave||!contaDebito){toast('Preencha fornecedor e conta.','err');return;}
+  if(!chave||!contaDebito){
+    const tNf=_convNubankTransacaoPendente(eid,pendentes,desc,sinalItem);
+    if(tNf&&(tNf._nfSel||tNf._nfSug)){ tNf._nfSel=tNf._nfSel||tNf._nfSug; _cartaoResolverComNf('nubank',eid); return; } // NF amarrada: não precisa de conta
+    toast('Preencha fornecedor e conta.','err');return;
+  }
 
   const transacao=_convNubankTransacaoPendente(eid,pendentes,desc,sinalItem);
   if(transacao&&transacao._nfSel===undefined&&transacao._nfSug) transacao._nfSel=transacao._nfSug; // salvar a linha aceita a NF sugerida
@@ -15137,7 +15156,7 @@ function _convNubankGerarResultado(eid,transacoes,mesFechamento,regras){
     const valorFinal=t._valorOverride!==undefined?t._valorOverride:t.valor;
     if(t._nfSel===undefined){ t._nfSel=t._nfSug||_convNfAuto(eid,t,valorFinal,usadasNf); if(t._nfSel) usadasNf.add(t._nfSel.id); }
     const r=_convItauClassificar(t.descricao,regras,valorFinal);
-    const contaFornecedor=r?r.contaDebito:'';
+    const contaFornecedor=(t._nfSel&&valorFinal>0)?'10001':(r?r.contaDebito:'');
     const dataUso=_convItauDataUtilizada(t.dataStr,mesFechamento);
     const dataBr=_convMpFmtDataBr(dataUso);
     const negativo=valorFinal<0;
