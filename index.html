@@ -20495,10 +20495,16 @@ function _lancctbBancoSemNfRecebimento(eid,ag){
   const cod=String(ag.banco_codigo||'').replace(/\D/g,'').replace(/^0+/,'');
   return /SAFRA|SICOOB/i.test(`${ag.banco_nome||''} ${ag.descricao||''}`)||cod==='422'||cod==='756';
 }
+// Achados reais 03/10/2026 (ACCI, FGTS Digital): "DB.CONV.TR FD-RFB" (débito de convênio da Receita/FGTS Digital) e
+// "PIX EMIT.OUTRA IF | Pagamento Pix | 00.360.305 0001-04" (PIX pra Caixa Econômica Federal = guia do FGTS) não tinham
+// "cara de tributo" e o Processar Tributos nem olhava essas linhas.
+const LANCCTB_CNPJS_ARRECADADORES=['00360305000104' /* Caixa Econômica Federal — FGTS */, '00394460000141' /* Receita Federal */];
 function _lancctbHistoricoEhTributo(historico){
   if(!historico) return false;
   const t=_convMpRemoverAcentos(String(historico).toUpperCase());
-  return LANCCTB_HISTORICOS_TRIBUTO.some(termo=>t.includes(termo));
+  if(LANCCTB_HISTORICOS_TRIBUTO.some(termo=>t.includes(termo))) return true;
+  if(/\bDB\.?\s?CONV\.?\s?TR\b|\bFD[\s.\-]?RFB\b|\bCONV\.?\s?TR\.?\s?FD\b/.test(t)) return true;
+  return _lancctbCnpjsDoTexto(historico).some(c=>LANCCTB_CNPJS_ARRECADADORES.includes(c));
 }
 function _lancctbNaturezaEhFinanceira(natOp,modelo){
   // NFC-e (modelo 65) é SEMPRE venda de verdade ao consumidor final — não
@@ -28598,7 +28604,14 @@ async function _lancctbProcessarTributos(){
   // matching por NF, ver _lancctbHistoricoEhTributo) — nunca tenta em cima
   // de um histórico genérico tipo "Pagamento de conta FULANO"/"Pix enviado
   // FULANO", mesmo que o valor bata por coincidência.
-  const pendencias=(pendenciasBrutas||[]).filter(l=>(l.origem_importacao!=='tributo_composicao'||_ehComposicaoAntigaSemCodigo(l))&&_lancctbHistoricoEhTributo(l.historico_bancario));
+  const _passaComposicao=l=>(l.origem_importacao!=='tributo_composicao'||_ehComposicaoAntigaSemCodigo(l));
+  const pendenciasComCara=(pendenciasBrutas||[]).filter(l=>_passaComposicao(l)&&_lancctbHistoricoEhTributo(l.historico_bancario));
+  // Pedido do usuário 03/10/2026 ("continua falhando na amarração de alguns impostos, inaceitável"): o histórico do banco pode ser
+  // qualquer coisa (PIX, débito de convênio...). Saída SEM cara de tributo também é tentada, mas SÓ por valor EXATO (±0,01) contra uma
+  // guia do mês — nunca tolerância, nunca soma de guias — pra não repetir o erro da Taylu (16/09/2026). Entram depois das com cara de
+  // tributo, e cada guia só resolve 1 pagamento.
+  const pendenciasSoExato=(pendenciasBrutas||[]).filter(l=>_passaComposicao(l)&&l.origem_importacao!=='tributo_composicao'&&!_lancctbHistoricoEhTributo(l.historico_bancario)).map(l=>{ l._soExato=true; return l; });
+  const pendencias=[...pendenciasComCara,...pendenciasSoExato];
   const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
     .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
     .eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico'));
@@ -28618,6 +28631,7 @@ async function _lancctbProcessarTributos(){
   // rodada, dividindo os dois igual — cada arquivo só pode resolver 1
   // pendência por execução deste botão.
   const arquivosUsados=new Set();
+  const cacheLeituraPdf={}; // chaveArquivo -> valor extraído (null = não leu) — cada PDF é lido/OCRizado uma vez por rodada
   let resolvidos=0, comSugestao=0, semAchado=0, tributosDivididos=0, semPdfNaPasta=0;
   // Pedido do usuário 22/09/2026: "e nessa tela que já precisa abrir logo
   // depois de processar" — sem Regra ainda pra resolver sozinho, guarda a(s)
@@ -28636,17 +28650,21 @@ async function _lancctbProcessarTributos(){
     // a pasta do mês estava VAZIA pra essa empresa (nome do arquivo sem o
     // "(eid)", pasta errada, ou acesso não concedido) ou se tinha PDF(s) mas
     // nenhum bateu o valor — diagnósticos bem diferentes. Conta separado.
-    if(!candidatos.length) semPdfNaPasta++;
+    if(!candidatos.length&&!l._soExato) semPdfNaPasta++;
     let achou=null, folga=null, quase=null;
     for(const f of candidatos){
       const chaveArquivo=anoMes+'|'+f.nome;
       if(arquivosUsados.has(chaveArquivo)) continue;
       let extraido;
-      try{
-        const arquivo=await f.fileHandle.getFile();
-        const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
-        extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
-      }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); continue; }
+      if(chaveArquivo in cacheLeituraPdf) extraido=cacheLeituraPdf[chaveArquivo];
+      else {
+        try{
+          const arquivo=await f.fileHandle.getFile();
+          const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
+          extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
+        }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); extraido=null; }
+        cacheLeituraPdf[chaveArquivo]=extraido;
+      }
       if(!extraido) continue;
       // Bate exato (±2,00) OU o pagamento é MAIOR que o tributo por até 30%
       // — nesse 2º caso o lançamento é dividido: valor exato do tributo +
@@ -28663,7 +28681,7 @@ async function _lancctbProcessarTributos(){
       // era 504,15 e foi casado com a original por estar dentro da tolerância de ±2,00. Batida EXATA (±0,01) sempre vence;
       // dentro da tolerância só vale se NENHUMA guia do mês bater exato.
       if(Math.abs(dif)<=0.01){ achou={f,extraido,diferenca:0}; arquivosUsados.add(chaveArquivo); break; }
-      if(Math.abs(dif)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&!quase) quase={f,extraido,chaveArquivo};
+      if(Math.abs(dif)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&!quase&&!l._soExato) quase={f,extraido,chaveArquivo};
       // Batida EXATA em qualquer PDF do mês sempre vence a folga de 30% (18/09/2026:
       // PIS/COFINS 7.623,80 podia ser "roubado" por outra guia mais barata que
       // aparecia antes na lista e cabia na folga) — guarda a 1ª folga e só usa
@@ -28674,7 +28692,7 @@ async function _lancctbProcessarTributos(){
     }
     if(!achou&&quase){ achou={f:quase.f,extraido:quase.extraido,diferenca:0}; arquivosUsados.add(quase.chaveArquivo); }
     // Pagamento único de VÁRIAS guias (ver _lancctbAcharCombinacaoGuias) — vem ANTES da folga de 30%, senão a soma vira "DIFERENÇA".
-    if(!achou){
+    if(!achou&&!l._soExato){
       if(!leiturasPorMes[anoMes]) leiturasPorMes[anoMes]=await _lancctbLerGuiasDoMes(eid,anoMes,_lancctbTributosPermitirIA);
       const comb=_lancctbAcharCombinacaoGuias(valor,l.data_pagamento,leiturasPorMes[anoMes],arquivosUsados);
       if(comb){
@@ -28712,7 +28730,7 @@ async function _lancctbProcessarTributos(){
       }
     }
     if(!achou&&folga){ achou={f:folga.f,extraido:folga.extraido,diferenca:folga.diferenca}; arquivosUsados.add(folga.chaveArquivo); }
-    if(!achou){ semAchado++; continue; }
+    if(!achou){ if(!l._soExato) semAchado++; continue; }
     const info=_lancctbParsearNomeArquivoTributo(achou.f.nome);
     // Divide o extrato quando o pagamento passou do valor do tributo.
     if(achou.diferenca>0.01){
