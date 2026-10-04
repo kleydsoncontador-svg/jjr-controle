@@ -27098,9 +27098,11 @@ async function _lancctbProcessarFluxoRegras(silencioso){
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente'));
     if(!pendencias||!pendencias.length){ _toast('Nenhuma pendência nesta conta.','ok'); return; }
+    // Fluxo "não associado" (candidato por valor/data) + Fluxo JÁ associado a um extrato pendente (o usuário já confirmou a ligação com o
+    // botão Associar, mas o lançamento ainda não foi gerado — achado 03/10/2026, ACCI "ACORDO": ficava pendente e este botão não pegava).
     const { data: fluxoPend } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem')
-      .eq('empresa_eid',eid).eq('status_associado','nao_associado'));
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem,status_associado,lancamento_extrato_id')
+      .eq('empresa_eid',eid).or('status_associado.eq.nao_associado,lancamento_extrato_id.not.is.null'));
     const { data: todasRegras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
       .select('id,historico_fixo,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao),fluxo_historico_gatilho,fluxo_cliente_gatilho,fluxo_numero_gatilho,fluxo_descconta_gatilho')
       .eq('empresa_eid',eid).eq('ativo',true));
@@ -27117,7 +27119,9 @@ async function _lancctbProcessarFluxoRegras(silencioso){
     for(const l of pendencias){
       const ehSaida=l.valor_saida>0;
       const valor=l.valor_saida||l.valor_entrada;
-      const candidatos=(fluxoPend||[]).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
+      const jaLigado=(fluxoPend||[]).find(f=>f.lancamento_extrato_id!=null&&String(f.lancamento_extrato_id)===String(l.id)); // ligação já confirmada pelo usuário
+      const candidatos=jaLigado?[jaLigado]:(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado')
+        .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
         .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; });
       if(!candidatos.length) continue;
       candidatos.sort((a,b)=>_lancctbTextoScoreSimilaridade(l.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(l.historico_bancario,a.descricao));
