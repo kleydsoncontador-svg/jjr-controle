@@ -2846,6 +2846,14 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
   </div>
 </div>
 
+<!-- Modal: ABRIR no extrato — seleção de N linhas do Fluxo → escolher 1 extrato pendente → dividir -->
+<div class="mb" id="mLancctbFluxoAbrirExtrato" style="display:none">
+  <div class="modal" style="max-width:640px">
+    <div class="mt"><h3>Abrir no extrato</h3><button onclick="closeModal('mLancctbFluxoAbrirExtrato')">&#x2715;</button></div>
+    <div class="mc" id="lancctbFluxoAbrirExtratoBody"></div>
+  </div>
+</div>
+
 <!-- Modal: associar 1 linha do Fluxo de Caixa a 1 lançamento pendente do
      extrato (Fase 10) — conteúdo montado via JS em abrirLancctbFluxoAssociarModal(). -->
 <div class="mb" id="mLancctbFluxoAssociar" style="display:none">
@@ -33201,6 +33209,7 @@ async function renderLancctbFluxoCaixa(){
     </select>
     <button class="btn bp bsm" onclick="associarLancctbFluxoEmLote()">✓ Associar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'}</button>
     <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="desassociarLancctbFluxoEmLote()">↩ Desassociar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'}</button>
+    <button class="btn bp bsm" onclick="abrirLancctbFluxoNoExtrato()" title="Escolher 1 extrato pendente e dividir nas linhas do Fluxo selecionadas">🔗 Abrir no extrato</button>
     <button class="btn bo bsm" onclick="_lancctbFluxoSelecionarTodosMode=false;_lancctbFluxoSelecionados.clear();renderLancctbFluxoCaixa()">✕ Limpar seleção</button>
   </div>
   `:''}
@@ -33341,6 +33350,100 @@ async function associarLancctbFluxoEmLote(){
   _lancctbFluxoSelecionados.clear();
   renderLancctbFluxoCaixa();
 }
+async function abrirLancctbFluxoNoExtrato(){
+  const ids=[..._lancctbFluxoSelecionados];
+  if(ids.length<1){ toast('Selecione pelo menos 1 linha do Fluxo.','err'); return; }
+  const {data:fluxoLinhas,error:eF}=await _supaClient.from('fluxo_caixa_lancamentos').select('*').in('id',ids);
+  if(eF||!fluxoLinhas){ toast('Erro ao carregar linhas do Fluxo: '+(eF?.message||'sem retorno'),'err'); return; }
+  const somaS=fluxoLinhas.reduce((a,f)=>a+Number(f.valor_saida||0),0);
+  const somaE=fluxoLinhas.reduce((a,f)=>a+Number(f.valor_entrada||0),0);
+  const ehSaidaFluxo=somaS>=somaE;
+  const somaFluxo=Math.round((ehSaidaFluxo?somaS:somaE)*100)/100;
+  const contaFiltro=document.getElementById('lancctbFluxoAssociacaoContaId')?.value||'';
+  let q=_supaClient.from('lancamentos_extrato').select('*')
+    .eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente')
+    .order('data_pagamento',{ascending:false}).limit(100);
+  if(contaFiltro) q=q.eq('conta_bancaria_id',contaFiltro);
+  const {data:extratos,error:eE}=await q;
+  if(eE){ toast('Erro ao buscar extratos: '+eE.message,'err'); return; }
+  let html='<div style="margin-bottom:10px;font-size:13px"><strong>Soma das linhas selecionadas:</strong> R$ '+_fmt(somaFluxo)+' ('+ids.length+' linha'+(ids.length>1?'s':'')+' do Fluxo)<br><span style="color:var(--slate);font-size:12px">Escolha o extrato pendente que corresponde a esse pagamento.</span></div>';
+  html+='<div style="overflow-x:auto;overflow-y:auto;max-height:380px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="background:var(--ink2);color:#fff"><th style="padding:7px 10px">Data</th><th style="padding:7px 10px">Histórico bancário</th><th style="padding:7px 10px;text-align:right">Valor</th><th style="padding:7px 10px;text-align:right">Diferença</th><th style="padding:7px 10px"></th></tr></thead><tbody>';
+  (extratos||[]).forEach(ex=>{
+    const vEx=Number(ex.valor_saida||0)>0?Number(ex.valor_saida):Number(ex.valor_entrada||0);
+    const dir=Number(ex.valor_saida||0)>0?'saída':'entrada';
+    const dif=Math.round((vEx-somaFluxo)*100)/100;
+    const difCor=Math.abs(dif)<0.01?'var(--ok)':Math.abs(dif)>50?'#dc2626':'#d97706';
+    const difTxt=Math.abs(dif)<0.01?'<span style="color:var(--ok)">exato</span>':'<span style="color:'+difCor+'">'+(dif>0?'+':'')+' R$ '+_fmt(Math.abs(dif))+'</span>';
+    const dt=(ex.data_pagamento||'').split('-').reverse().join('/');
+    const hist=esc(ex.historico_bancario||'');
+    html+='<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 10px">'+dt+'</td><td style="padding:6px 10px;max-width:260px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="'+hist+'">'+hist+' <span style="color:var(--slate);font-size:11px">('+dir+')</span></td><td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums">R$ '+_fmt(vEx)+'</td><td style="padding:6px 10px;text-align:right">'+difTxt+'</td><td style="padding:6px 10px;text-align:center"><button class="btn bp bsm" onclick="confirmarLancctbAberturaNaExtrato('+ex.id+','+(Number(ex.valor_saida||0)>0?'true':'false')+')">Usar este</button></td></tr>';
+  });
+  if(!(extratos||[]).length) html+='<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--slate)">Nenhum extrato pendente encontrado'+(contaFiltro?' para essa conta':'')+'.</td></tr>';
+  html+='</tbody></table></div>';
+  document.getElementById('lancctbFluxoAbrirExtratoBody').innerHTML=html;
+  openModal('mLancctbFluxoAbrirExtrato');
+}
+
+async function confirmarLancctbAberturaNaExtrato(extratoId,ehSaidaExtrato){
+  const ids=[..._lancctbFluxoSelecionados];
+  const {data:fluxoLinhas}=await _supaClient.from('fluxo_caixa_lancamentos').select('*').in('id',ids);
+  const {data:extrato}=await _supaClient.from('lancamentos_extrato').select('*').eq('id',extratoId).single();
+  if(!fluxoLinhas?.length||!extrato){ toast('Dados inválidos.','err'); return; }
+  const campoV=ehSaidaExtrato?'valor_saida':'valor_entrada';
+  const campoZ=ehSaidaExtrato?'valor_entrada':'valor_saida';
+  const valorExtrato=Number(extrato[campoV]||0);
+  const somaFluxo=Math.round(fluxoLinhas.reduce((a,f)=>a+Number((ehSaidaExtrato?f.valor_saida:f.valor_entrada)||0),0)*100)/100;
+  const diferenca=Math.round((valorExtrato-somaFluxo)*100)/100;
+  const linhasDesc=fluxoLinhas.map(f=>'• R$ '+_fmt(ehSaidaExtrato?f.valor_saida:f.valor_entrada)+' — '+(f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).join('\n');
+  const difMsg=Math.abs(diferenca)>0.01?'\n• R$ '+_fmt(Math.abs(diferenca))+' — Diferença (linha extra criada)':'';
+  const dt=(extrato.data_pagamento||'').split('-').reverse().join('/');
+  if(!confirm('Dividir '+dt+' R$ '+_fmt(valorExtrato)+' em '+(fluxoLinhas.length+(Math.abs(diferenca)>0.01?1:0))+' linha(s):\n'+linhasDesc+difMsg+'\n\nConfirmar?')) return;
+  closeModal('mLancctbFluxoAbrirExtrato');
+  await _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaidaExtrato,campoV,campoZ,somaFluxo,diferenca);
+}
+
+async function _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaida,campoV,campoZ,somaFluxo,diferenca){
+  const eid=_lancctbEidAtual;
+  const criadas=[];
+  const desfazer=async()=>{ for(const c of criadas) await _supaClient.from('lancamentos_extrato').delete().eq('id',c.id); };
+  for(const f of fluxoLinhas.slice(1)){
+    const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100;
+    const {data:nova,error:eI}=await _supaClient.from('lancamentos_extrato').insert({
+      empresa_eid:eid, conta_bancaria_id:extrato.conta_bancaria_id,
+      data_pagamento:extrato.data_pagamento, [campoV]:vf, [campoZ]:0,
+      historico_bancario:extrato.historico_bancario,
+      informacao:'Aberto do Fluxo: '+((f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).trim(),
+      origem_importacao:'manual',
+      hash_dedup:'fluxo_abert_'+extrato.id+'_'+f.id+'_'+Date.now()
+    }).select('id').single();
+    if(eI||!nova){ await desfazer(); toast('Erro ao criar linha: '+(eI?.message||'sem retorno'),'err'); return; }
+    criadas.push({id:nova.id,fluxoId:f.id});
+  }
+  if(Math.abs(diferenca)>0.01){
+    const {data:novaDif,error:eDi}=await _supaClient.from('lancamentos_extrato').insert({
+      empresa_eid:eid, conta_bancaria_id:extrato.conta_bancaria_id,
+      data_pagamento:extrato.data_pagamento, [campoV]:Math.round(Math.abs(diferenca)*100)/100, [campoZ]:0,
+      historico_bancario:extrato.historico_bancario,
+      informacao:'Diferença — abertura manual pelo Fluxo de Caixa (original R$ '+_fmt(Number(extrato[campoV]))+')',
+      origem_importacao:'manual',
+      hash_dedup:'fluxo_dif_'+extrato.id+'_'+Date.now()
+    }).select('id').single();
+    if(eDi||!novaDif){ await desfazer(); toast('Erro ao criar linha de diferença: '+(eDi?.message||'sem retorno'),'err'); return; }
+    criadas.push({id:novaDif.id,fluxoId:null});
+  }
+  const vf0=Math.round(Number((ehSaida?fluxoLinhas[0].valor_saida:fluxoLinhas[0].valor_entrada)||0)*100)/100;
+  const {error:eUpd}=await _supaClient.from('lancamentos_extrato').update({[campoV]:vf0}).eq('id',extrato.id);
+  if(eUpd){ await desfazer(); toast('Erro ao atualizar extrato: '+eUpd.message,'err'); return; }
+  await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).eq('id',fluxoLinhas[0].id);
+  for(const c of criadas.filter(x=>x.fluxoId))
+    await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:c.id}).eq('id',c.fluxoId);
+  _lancctbFluxoSelecionados.clear();
+  _lancctbFluxoSelecionarTodosMode=false;
+  renderLancctbFluxoCaixa();
+  const nTotal=fluxoLinhas.length+(Math.abs(diferenca)>0.01?1:0);
+  toast('Extrato dividido em '+nTotal+' linha(s) — vá ao Registro Contábil para classificar cada uma.','ok');
+}
+
 // Pedido do usuário 09/09/2026: "crie um botão para desassociar" — desfaz
 // a associação de conta bancária desta(s) linha(s) do Fluxo de Caixa,
 // voltando pra "não associado". Só mexe no lado do Fluxo (conta_bancaria_id/
