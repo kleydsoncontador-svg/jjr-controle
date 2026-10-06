@@ -38060,6 +38060,72 @@ async function _lancctbParsearExtratoHotmartLaunchpad(pdf){
   return { layout:'Hotmart / Launch Pad (carteira)', model:'HOTMART_LAUNCHPAD_ACCOUNT', lancamentos, saldoFinalDoc,
     observacao:` Titular ${titular||''} CNPJ ${cnpj} · período ${periodoIni.split('-').reverse().join('/')} a ${periodoFim.split('-').reverse().join('/')} · Σ entradas R$ ${_fmt(somaE)} / Σ saídas R$ ${_fmt(somaS)}.` };
 }
+// ─── XP XPerformance — seção "MOVIMENTAÇÕES DO MÊS" do Relatório de Investimentos (conta corrente).
+// A tabela é exibida do mais recente para o mais antigo; o parser reverte para ordem cronológica.
+async function _lancctbParsearExtratoXpXperformanceCC(pdf){
+  const norm=s=>s.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,'');
+  const pageTexts=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    try{
+      const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+      pageTexts.push({p,txt:itens.map(i=>i.str).join(' ')});
+    }catch(e){ pageTexts.push({p,txt:''}); }
+  }
+  const textoGlobal=pageTexts.map(x=>x.txt).join(' ');
+  const tn=norm(textoGlobal);
+  if(!tn.includes('XPERFORMANCE')) return null;
+  if(!tn.includes('RELATORIODEINVESTIMENTOS')) return null;
+  if(!tn.includes('MOVIMENTACOESDOMES')) return null;
+  let movPageNum=null;
+  for(const {p,txt} of pageTexts){
+    if(norm(txt).includes('MOVIMENTACOESDOMES')&&norm(txt).includes('MOV')&&norm(txt).includes('LIQ')){
+      movPageNum=p; break;
+    }
+  }
+  if(!movPageNum) return null;
+  const parseValorBr=s=>{
+    if(!s) return null;
+    const t=s.replace(/\s/g,'');
+    const neg=t.startsWith('-');
+    const limpo=t.replace(/[^0-9.,]/g,'').replace(/\./g,'').replace(',','.');
+    const n=parseFloat(limpo);
+    return isNaN(n)?null:(neg?-n:n);
+  };
+  const lancamentos=[];
+  for(let p=movPageNum;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const linhas=_lancctbAgruparLinhasPorY(itens,3).sort((a,b)=>b.y-a.y);
+    for(const L of linhas){
+      const zMov=[], zLiq=[], zHist=[], zValor=[], zSaldo=[];
+      for(const it of L.itens.sort((a,b)=>a.x-b.x)){
+        if(it.x<115) zMov.push(it.str);
+        else if(it.x<185) zLiq.push(it.str);
+        else if(it.x<600) zHist.push(it.str);
+        else if(it.x<668) zValor.push(it.str);
+        else zSaldo.push(it.str);
+      }
+      const movStr=zMov.join('');
+      if(!/^\d{2}\/\d{2}\/\d{4}$/.test(movStr)) continue;
+      const liqStr=zLiq.join('');
+      const dataMov=_lancctbDataIsoFlex(movStr);
+      const dataLiq=_lancctbDataIsoFlex(liqStr||movStr);
+      const dataIso=dataLiq||dataMov;
+      if(!dataIso) continue;
+      const historico=zHist.join(' ').replace(/\s*\/\s*/g,'/').replace(/\s+/g,' ').trim();
+      const v=parseValorBr(zValor.join(''));
+      const saldo=parseValorBr(zSaldo.join(''));
+      if(v===null) continue;
+      lancamentos.push({data:dataIso,historico:historico||'(sem histórico)',
+        valor_entrada:v>0?Math.round(v*100)/100:0,valor_saida:v<0?Math.round(-v*100)/100:0,saldo_apos:saldo});
+    }
+  }
+  if(!lancamentos.length) return null;
+  // Tabela XP é newest-first: lancamentos[0] = transação mais recente = saldo de fechamento
+  const saldoFinal=lancamentos[0].saldo_apos;
+  lancamentos.reverse(); // devolver em ordem cronológica (mais antigo primeiro)
+  lancamentos.forEach(l=>{ delete l.saldo_apos; });
+  return {lancamentos,saldoAnteriorDoc:null,saldoFinalDoc:saldoFinal,layout:'XP XPerformance — Movimentações do Mês'};
+}
 // ─── Banco Inter — CSV puro (não confundir com o PDF "Banco Inter" acima, que é outro modelo de
 // relatório). Sem XLSX/SheetJS: layout tem linhas de cabeçalho fora de tabela (Conta/Período/Saldo)
 // antes da linha real de colunas "Data Lançamento;Descrição;Valor;Saldo" — parseia o texto puro.
@@ -38313,7 +38379,7 @@ async function processarLancctbUploadExtrato(forcarIA){
         status.textContent='Tentando reconhecer o layout do PDF (sem IA)…';
         return (await _lancctbParsearExtratoC6MultiMes(pdf))||(await _lancctbParsearExtratoBancoInter(pdf))||(await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
           ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))||(await _lancctbParsearExtratoSicoobSisbr(pdf))
-          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoCoraPdf(pdf))||(await _lancctbParsearExtratoHotmartLaunchpad(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
+          ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoCoraPdf(pdf))||(await _lancctbParsearExtratoHotmartLaunchpad(pdf))||(await _lancctbParsearExtratoXpXperformanceCC(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
           ||(await _lancctbParsearExtratoItauBBAOcr(pdf));
       })();
       if(reconhecido&&reconhecido.meses){
