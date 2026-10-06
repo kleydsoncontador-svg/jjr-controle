@@ -34103,7 +34103,8 @@ async function abrirLancctbFluxoImportModal(){
     </div>
     <div class="fg">
       <div class="fl">Arquivo (Excel ou PDF)</div>
-      <input class="fi" id="lancctbFluxoImportArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf">
+      <input class="fi" id="lancctbFluxoImportArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf" multiple>
+      <div style="font-size:11px;color:var(--slate);margin-top:3px">Para o "Relatório de Contas a Pagar (Fornecedores Pagos)" você pode selecionar vários PDFs de uma vez.</div>
     </div>
     <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;margin-top:6px">
       <input type="checkbox" id="lancctbFluxoImportSoMesAtual" checked>
@@ -34127,9 +34128,16 @@ async function abrirLancctbFluxoImportModal(){
 }
 let _lancctbFluxoWbTemp=null; // workbook em espera enquanto o usuário escolhe a(s) aba(s)
 async function _lancctbFluxoLerArquivo(){
-  const file=document.getElementById('lancctbFluxoImportArquivo')?.files[0];
+  const files=document.getElementById('lancctbFluxoImportArquivo')?.files;
   const status=document.getElementById('lancctbFluxoImportStatus');
-  if(!file){ toast('Selecione um arquivo','err'); return; }
+  if(!files||!files.length){ toast('Selecione um arquivo','err'); return; }
+  if(files.length>1){
+    const todosPdf=[...files].every(f=>/\.pdf$/i.test(f.name));
+    if(!todosPdf){ toast('Seleção múltipla só suportada para PDFs','err'); return; }
+    await _cpfpLerMultiplosPdfs([...files],status);
+    return;
+  }
+  const file=files[0];
   _lancctbFluxoImportTipo=document.getElementById('lancctbFluxoImportTipo').value;
   _lancctbFluxoImportNomeArquivo=file.name;
   const ehPdf=/\.pdf$/i.test(file.name);
@@ -34222,6 +34230,241 @@ function _lancctbFluxoProcessarAbas(wb,nomesAbas){
     return;
   }
   status.textContent=`${matrizTotal.length-1} linha(s) encontrada(s)${qtdAbas}. `+(salvo&&faltaram.length?`Não achei no arquivo as colunas do mapeamento salvo (${faltaram.map(esc).join(', ')}) — confira abaixo. `:'Confira o mapeamento de colunas abaixo antes de importar.');
+}
+// ─── Relatório de Contas a Pagar — Fornecedores Pagos (CONTAS_PAGAR_FORNECEDORES_PAGOS) ─────
+// Leitor SEM IA. Colunas: Emiss. | Duplic. | Fornecedor | Banco | Tipo Pagto | Vencto. |
+// Vcto Original | Valor | Juros | Abatim. | Valor Líq. | Tp | CPré.
+// Distingue-se do Bling "normal" pelas colunas Emiss./Duplic./Vencto./"Valor Líq." que o Bling não tem.
+// DATA do Fluxo = Vencto. (NUNCA Emiss. nem Vcto Original — regra explícita).
+// Upload aceita 1 ou vários PDFs de uma vez; importação INCREMENTAL (dedup por forn+duplic+data+valor).
+let _cpfpResultados=[];
+function _cpfpDetectar(itensPag1){
+  const texto=itensPag1.map(i=>i.str||'').join(' ');
+  if(!/Relat[oó]rio de Contas a Pagar/i.test(texto)) return false;
+  return itensPag1.some(i=>/^Emiss\.$/i.test((i.str||'').trim()))
+      && itensPag1.some(i=>/^Duplic\.$/i.test((i.str||'').trim()))
+      && itensPag1.some(i=>/^Vencto\.$/i.test((i.str||'').trim()))
+      && itensPag1.some(i=>/^Valor\s+L[ií]q\./i.test((i.str||'').trim()));
+}
+function _cpfpDetectarColunas(itens){
+  const achar=(...pats)=>{ for(const p of pats){ const re=new RegExp('^'+p+'$','i'); const it=itens.find(i=>re.test((i.str||'').trim())); if(it!=null) return Math.round(it.x); } return null; };
+  const xTipoIt=itens.find(i=>/^Tipo$/i.test((i.str||'').trim()));
+  return {
+    emiss   : achar('Emiss\\.') ?? 12,
+    duplic  : achar('Duplic\\.') ?? 54,
+    forn    : achar('Fornecedor') ?? 100,
+    banco   : achar('Banco') ?? 206,
+    tipo    : xTipoIt?Math.round(xTipoIt.x):236,
+    vencto  : achar('Vencto\\.') ?? 301,
+    vcto_ori: achar('Vcto\\s+Original','Original') ?? 344,
+    valor   : achar('Valor') ?? 415,
+    juros   : achar('Juros') ?? 441,
+    abat    : achar('Abatim\\.','Abatimento') ?? 470,
+    valliq  : achar('Valor\\s+L[ií]q\\.') ?? 510,
+    tp      : achar('Tp') ?? 551,
+    cpre    : achar('CP[rR][eé]','CPr[eé]') ?? 569,
+  };
+}
+function _cpfpMapearCol(x,cols){
+  const defs=Object.entries(cols).map(([k,v])=>({k,v})).sort((a,b)=>a.v-b.v);
+  for(let i=0;i<defs.length;i++){
+    const min=i===0?-1e9:(defs[i-1].v+defs[i].v)/2;
+    const max=i===defs.length-1?1e9:(defs[i].v+defs[i+1].v)/2;
+    if(x>=min&&x<max) return defs[i].k;
+  }
+  return null;
+}
+const CPFP_RUIDO=[
+  /^Relat[oó]rio de Contas a Pagar$/i,/^Data De Vencimento de\s*:/i,
+  /^Empresas\s*:/i,/^Fornecedor\(es\)\s*:/i,/^P[aá]gina\s+\d+\s+de\s+\d+/i,
+  /^\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}:\d{2}$/,/^Emiss\.?\s+Duplic\.?\s+Fornecedor/i,
+  /^Totais?\s*$/i,/^Totais?\s+Gerais?\s*$/i,/^Total\s+a\s+Pagar/i,/^Total\s+Pago/i,
+  /^Vencto\s*:\s*\d{2}\/\d{2}\/\d{4}$/i,
+];
+function _cpfpEhRuido(txt){ return CPFP_RUIDO.some(r=>r.test(txt.trim())); }
+function _cpfpParseValBR(s){ if(!s) return 0; const t=String(s).replace(/[^\d,]/g,'').trim(); return parseFloat(t.replace(/\./g,'').replace(',','.'))||0; }
+function _cpfpSplitDuplic(raw){
+  const t=String(raw||'').trim();
+  if(!t) return {numero:null,parcela:null,duplic_raw:null};
+  const m=t.match(/^(\d+)\.(\d+)$/);
+  if(m) return {numero:m[1],parcela:m[2],duplic_raw:t};
+  return {numero:t,parcela:null,duplic_raw:t};
+}
+function _cpfpExtrairMeta(itensPag1){
+  const full=itensPag1.map(i=>i.str||'').join(' ').replace(/\s+/g,' ');
+  const mEmp=full.match(/Empresas\s*:\s*(.+?)(?:\s{2,}|\d{2}\/\d{2}\/\d{4}\s+\d{2}:|P[aá]gina|$)/i);
+  const empresa=mEmp?mEmp[1].trim():null;
+  const mPer=full.match(/Data De Vencimento de\s*:\s*'?(\d{2}\/\d{2}\/\d{4})'?\s+at[eé]\s+'?(\d{2}\/\d{2}\/\d{4})/i);
+  let competencia=null;
+  if(mPer){ const m2=mPer[1].match(/(\d{2})\/(\d{2})\/(\d{4})/); if(m2) competencia=`${m2[2]}/${m2[3]}`; }
+  return {empresa,competencia};
+}
+async function _cpfpParsearArquivo(pdf,nomeArquivo,status){
+  const itensPag1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  if(!_cpfpDetectar(itensPag1)) return null;
+  const {empresa,competencia}=_cpfpExtrairMeta(itensPag1);
+  const registros=[];
+  let totalGeral=null;
+  for(let p=1;p<=pdf.numPages;p++){
+    if(status) status.textContent=`${nomeArquivo}: p.${p}/${pdf.numPages}…`;
+    const itens=p===1?itensPag1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const cols=_cpfpDetectarColunas(itens);
+    const linhas=_lancctbAgruparLinhasPorY(itens,4);
+    for(const linha of linhas){
+      const txt=linha.itens.map(i=>i.str||'').join(' ').trim();
+      if(!txt||_cpfpEhRuido(txt)) continue;
+      const mTG=txt.match(/Totais?\s+Gerais?\s+([\d.,]+)/i);
+      if(mTG){ totalGeral=_cpfpParseValBR(mTG[1]); continue; }
+      const pc={emiss:[],duplic:[],forn:[],banco:[],tipo:[],vencto:[],vcto_ori:[],valor:[],juros:[],abat:[],valliq:[],tp:[],cpre:[]};
+      linha.itens.forEach(it=>{ const c=_cpfpMapearCol(Math.round(it.x),cols); if(c&&pc[c]) pc[c].push(it); });
+      const j=k=>pc[k].sort((a,b)=>a.x-b.x).map(i=>i.str||'').join(' ').trim();
+      const txtEmiss=j('emiss'), txtVencto=j('vencto'), txtDuplic=j('duplic');
+      if(!/^\d{2}\/\d{2}\/\d{4}$/.test(txtEmiss)||!/^\d{2}\/\d{2}\/\d{4}$/.test(txtVencto)||!txtDuplic) continue;
+      let txtValLiq=j('valliq'), txtTp=j('tp');
+      if(!txtTp){ const mv=txtValLiq.match(/^([\d.,]+)\s+([A-Z])$/); if(mv){txtValLiq=mv[1];txtTp=mv[2];} }
+      const {numero,parcela,duplic_raw}=_cpfpSplitDuplic(txtDuplic);
+      const valorLiq=_cpfpParseValBR(txtValLiq);
+      const [ddV,mmV,aaaaV]=txtVencto.split('/');
+      const [ddE,mmE,aaaaE]=txtEmiss.split('/');
+      const txtVctoOri=j('vcto_ori');
+      let original_due_date=null;
+      if(/^\d{2}\/\d{2}\/\d{4}$/.test(txtVctoOri)){ const[ddO,mmO,aaaaO]=txtVctoOri.split('/'); original_due_date=`${aaaaO}-${mmO}-${ddO}`; }
+      registros.push({
+        data:`${aaaaV}-${mmV}-${ddV}`,
+        descricao:`Pagamento fornecedor - DUP ${duplic_raw}`,
+        cliente_fornecedor_nome:j('forn')||null,
+        documento_numero:numero||null,
+        parcela:parcela||null,
+        valor_saida:valorLiq,
+        valor_entrada:0,
+        port_nom:j('banco')||null,
+        arquivo_origem:nomeArquivo,
+        _duplic_raw:duplic_raw,
+        _emissao:`${aaaaE}-${mmE}-${ddE}`,
+        _original_due_date:original_due_date,
+        _valor_original:_cpfpParseValBR(j('valor')),
+        _juros:_cpfpParseValBR(j('juros')),
+        _abatimento:_cpfpParseValBR(j('abat')),
+        _tipo_pagto:j('tipo')||null,
+        _tp_raw:txtTp||null,
+        _cpre_raw:j('cpre')||null,
+        _incluir:true,
+      });
+    }
+  }
+  const soma=Math.round(registros.reduce((s,r)=>s+r.valor_saida,0)*100)/100;
+  return {registros,empresa,competencia,totalGeral,soma,nomeArquivo,
+    bate:totalGeral!=null&&Math.abs(soma-totalGeral)<0.02};
+}
+async function _cpfpLerMultiplosPdfs(files,status){
+  _cpfpResultados=[];
+  _convItauGarantirWorker();
+  const lsKey=`cpfp_hashes_${_lancctbEidAtual}`;
+  const hashesConhecidos=JSON.parse(localStorage.getItem(lsKey)||'{}');
+  const avisos=[];
+  for(const file of files){
+    const buf=await file.arrayBuffer();
+    const hashArr=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',buf)));
+    const hash=hashArr.map(b=>b.toString(16).padStart(2,'0')).join('');
+    if(hashesConhecidos[hash]) avisos.push(`"${file.name}" já foi processado antes (${hashesConhecidos[hash].data})`);
+    const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+    const res=await _cpfpParsearArquivo(pdf,file.name,status);
+    if(!res){ avisos.push(`"${file.name}" não reconhecido como Relatório de Contas a Pagar`); continue; }
+    res.hash=hash;
+    _cpfpResultados.push(res);
+  }
+  if(!_cpfpResultados.length){
+    if(status) status.textContent=avisos.join(' | ')||'Nenhum arquivo reconhecido.';
+    return;
+  }
+  const empresas=[...new Set(_cpfpResultados.map(r=>r.empresa).filter(Boolean))];
+  const competencias=[...new Set(_cpfpResultados.map(r=>r.competencia).filter(Boolean))];
+  const avisoEmp=empresas.length>1?`⚠ Empresas divergentes: ${empresas.join(', ')}`:null;
+  const avComp=competencias.length>1?`⚠ Competências divergentes: ${competencias.join(', ')}`:null;
+  document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_cpfpPreviewHtml(_cpfpResultados,avisos,avisoEmp,avComp);
+  document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+  const total=_cpfpResultados.reduce((s,r)=>s+r.registros.length,0);
+  if(status) status.textContent=`${_cpfpResultados.length} arquivo(s) · ${total} registro(s) · confira abaixo.`;
+}
+function _cpfpPreviewHtml(resultados,avisos=[],avisoEmp=null,avComp=null){
+  const totalReg=resultados.reduce((s,r)=>s+r.registros.filter(x=>x._incluir).length,0);
+  const totalVal=Math.round(resultados.reduce((s,r)=>s+r.registros.filter(x=>x._incluir).reduce((a,x)=>a+x.valor_saida,0),0)*100)/100;
+  let html=`<div style="font-size:12px;margin-bottom:10px">`;
+  if(avisoEmp) html+=`<div style="color:#dc2626;margin-bottom:4px">${esc(avisoEmp)}</div>`;
+  if(avComp) html+=`<div style="color:#b45309;margin-bottom:4px">${esc(avComp)}</div>`;
+  avisos.forEach(a=>{ html+=`<div style="color:#b45309;margin-bottom:2px">⚠ ${esc(a)}</div>`; });
+  resultados.forEach((r)=>{
+    const ok=r.bate?'<span style="color:var(--teal)">✓</span>':'<span style="color:#dc2626">⚠</span>';
+    const somaFile=Math.round(r.registros.filter(x=>x._incluir).reduce((s,x)=>s+x.valor_saida,0)*100)/100;
+    html+=`<div style="margin-top:4px;font-size:11.5px"><strong>${esc(r.nomeArquivo)}</strong> — ${r.registros.filter(x=>x._incluir).length} reg. · R$ ${_fmt(somaFile)}${r.totalGeral!=null?` (PDF: R$ ${_fmt(r.totalGeral)} ${ok})`:''}</div>`;
+  });
+  html+=`<div style="margin-top:4px;font-weight:bold">Total selecionado: ${totalReg} lançamento(s) · R$ ${_fmt(totalVal)}</div></div>`;
+  const todos=resultados.flatMap((r,ri)=>r.registros.map((reg,i)=>({...reg,_ri:ri,_i:i})));
+  html+=`<div style="overflow-x:auto;max-height:320px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+  <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+    <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+      <th style="padding:5px 8px"><input type="checkbox" checked onclick="_cpfpToggleTodos(this.checked)"></th>
+      <th style="padding:5px 8px;text-align:left">Data</th>
+      <th style="padding:5px 8px;text-align:left">Fornecedor</th>
+      <th style="padding:5px 8px;text-align:left">Duplic.</th>
+      <th style="padding:5px 8px;text-align:center">Parc.</th>
+      <th style="padding:5px 8px;text-align:left">Banco</th>
+      <th style="padding:5px 8px;text-align:right">Valor Líq.</th>
+      <th style="padding:5px 8px;text-align:left">Arquivo</th>
+    </tr></thead><tbody>`;
+  todos.forEach(r=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${r._incluir?1:.4}">
+      <td style="padding:4px 8px"><input type="checkbox" ${r._incluir?'checked':''} onclick="_cpfpResultados[${r._ri}].registros[${r._i}]._incluir=this.checked;document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_cpfpPreviewHtml(_cpfpResultados)"></td>
+      <td style="padding:4px 8px">${r.data?new Date(r.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
+      <td style="padding:4px 8px;max-width:180px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(r.cliente_fornecedor_nome||'')}">${esc(r.cliente_fornecedor_nome||'—')}</td>
+      <td style="padding:4px 8px;font-family:var(--mono)">${esc(r._duplic_raw||r.documento_numero||'—')}</td>
+      <td style="padding:4px 8px;text-align:center">${r.parcela||'—'}</td>
+      <td style="padding:4px 8px">${esc(r.port_nom||'—')}</td>
+      <td style="padding:4px 14px;text-align:right">R$ ${_fmt(r.valor_saida)}</td>
+      <td style="padding:4px 8px;color:var(--slate);font-size:10.5px;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.arquivo_origem||'')}</td>
+    </tr>`;
+  });
+  const qtdSel=todos.filter(r=>r._incluir).length;
+  html+=`</tbody></table></div>
+  <div class="ma" style="margin-top:14px">
+    <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+    <button class="btn bp" onclick="_cpfpConfirmar()">✓ Importar ${qtdSel} lançamento(s)</button>
+  </div>`;
+  return html;
+}
+function _cpfpToggleTodos(marcar){
+  _cpfpResultados.forEach(r=>r.registros.forEach(reg=>{reg._incluir=marcar;}));
+  document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_cpfpPreviewHtml(_cpfpResultados);
+}
+async function _cpfpConfirmar(){
+  const contaSel=document.getElementById('lancctbFluxoImportConta')?.value||null;
+  const selecionados=_cpfpResultados.flatMap(r=>r.registros.filter(reg=>reg._incluir));
+  if(!selecionados.length){ toast('Nenhum lançamento selecionado','err'); return; }
+  const status=document.getElementById('lancctbFluxoImportStatus');
+  if(status) status.textContent='Verificando duplicatas…';
+  const {data:existentes}=await _supaClient.from('fluxo_caixa_lancamentos')
+    .select('data,documento_numero,parcela,cliente_fornecedor_nome,valor_saida')
+    .eq('empresa_eid',_lancctbEidAtual);
+  const normF=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+  const chave=r=>`${r.data}|${normF(r.cliente_fornecedor_nome)}|${r._duplic_raw||r.documento_numero||''}|${Math.round((r.valor_saida||0)*100)}`;
+  const jaExiste=new Set((existentes||[]).map(e=>chave({...e,_duplic_raw:e.documento_numero})));
+  const novos=selecionados.filter(r=>!jaExiste.has(chave(r))).map(r=>{
+    const {_duplic_raw,_emissao,_original_due_date,_valor_original,_juros,_abatimento,_tipo_pagto,_tp_raw,_cpre_raw,_incluir,_ri,_i,...rest}=r;
+    return {...rest,empresa_eid:_lancctbEidAtual,conta_bancaria_id:contaSel||null};
+  });
+  const pulados=selecionados.length-novos.length;
+  if(!novos.length){ toast(`Todos os ${selecionados.length} lançamentos já existem.`,'err'); return; }
+  if(status) status.textContent=`Gravando ${novos.length} registro(s)…`;
+  const {error}=await _supaClient.from('fluxo_caixa_lancamentos').insert(novos);
+  if(error){ toast('Erro ao gravar: '+error.message,'err'); return; }
+  const lsKey=`cpfp_hashes_${_lancctbEidAtual}`;
+  const hashes=JSON.parse(localStorage.getItem(lsKey)||'{}');
+  _cpfpResultados.forEach(r=>{ if(r.hash) hashes[r.hash]={nome:r.nomeArquivo,data:new Date().toISOString().slice(0,10)}; });
+  localStorage.setItem(lsKey,JSON.stringify(hashes));
+  toast(novos.length+' lançamento(s) importado(s)'+(pulados?' · '+pulados+' já existiam':''),'ok');
+  closeModal('mLancctbUpload');
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
 }
 // ─── Bling — "Relatório de Contas a Pagar" (pedido do usuário 28/09/2026) ──────────────────
 // Leitor SEM IA, dedicado a este layout exato do Bling — reaproveita a MESMA tabela de Fluxo
@@ -34426,6 +34669,22 @@ async function _lancctbFluxoLerPdf(file,status){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    // CPFP: Relatório de Contas a Pagar — Fornecedores Pagos (sem IA, colunas Emiss./Duplic./Vencto./Valor Líq.)
+    const resultadoCpfp=await _cpfpParsearArquivo(pdf,file.name,status);
+    if(resultadoCpfp){
+      _cpfpResultados=[{...resultadoCpfp}];
+      const hashBuf=await file.arrayBuffer();
+      const hashArr=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',hashBuf)));
+      const hash=hashArr.map(b=>b.toString(16).padStart(2,'0')).join('');
+      _cpfpResultados[0].hash=hash;
+      const lsKey=`cpfp_hashes_${_lancctbEidAtual}`;
+      const hc=JSON.parse(localStorage.getItem(lsKey)||'{}');
+      const avisos=hc[hash]?[`"${file.name}" já foi processado antes (${hc[hash].data})`]:[];
+      document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_cpfpPreviewHtml(_cpfpResultados,avisos);
+      document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+      if(status) status.textContent=`CONTAS_PAGAR_FORNECEDORES_PAGOS · ${resultadoCpfp.registros.length} registros${resultadoCpfp.empresa?' · '+resultadoCpfp.empresa:''}`;
+      return;
+    }
     const resultadoBling=await _lancctbParsearFluxoBlingContasPagar(pdf,status);
     if(resultadoBling){
       _lancctbBlingResultado=resultadoBling;
