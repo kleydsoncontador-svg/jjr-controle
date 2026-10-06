@@ -2429,6 +2429,28 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: Importar Excel Mercado Pago (multi-arquivo, sem IA) -->
+<div class="mb" id="mLancctbAplicImportExcel" style="display:none">
+  <div class="modal" style="max-width:660px">
+    <div class="mt">
+      <h3 id="mAplicExcelTitulo">Importar Excel — Mercado Pago</h3>
+      <button onclick="closeModal('mLancctbAplicImportExcel')">&#x2715;</button>
+    </div>
+    <div class="mc">
+      <div class="fg">
+        <div class="fl">Arquivos .xls (pode selecionar vários)</div>
+        <input class="fi" id="mAplicExcelArquivo" type="file" accept=".xls,.xlsx" multiple onchange="_mpExcelLer(this.files)">
+      </div>
+      <div id="mAplicExcelStatus" style="font-size:12px;color:var(--slate);min-height:18px;margin-top:4px"></div>
+      <div id="mAplicExcelPreview" style="margin-top:10px"></div>
+    </div>
+    <div class="ma">
+      <button class="btn bo" onclick="closeModal('mLancctbAplicImportExcel')">Cancelar</button>
+      <button class="btn bp" id="mAplicExcelBtnConfirmar" style="display:none" onclick="_mpExcelConfirmar()">✓ Importar</button>
+    </div>
+  </div>
+</div>
+
 <div class="mb" id="mLancctbAplicUpload" style="display:none">
   <div class="modal" style="max-width:640px">
     <div class="mt">
@@ -25340,6 +25362,7 @@ async function renderLancctbAplicacoes(){
             <button class="btn bp bsm" onclick="abrirLancctbAplicacaoMovimentoModal(${a.id})">+ Lançar Movimento</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicacaoRendimentoModal(${a.id})" title="Lançamento manual de Rendimento — só soma no saldo da Aplicação, nunca gera lançamento no Extrato Bancário">+ Lançar Rendimento</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicUploadModal(${a.id})" title="Sobe um PDF com várias Aplicações e Resgates (ex: extrato de aplicações do banco) e lança tudo de uma vez — sem IA por padrão, com opção de tentar com IA Gemini">⬆ Importar PDF</button>
+            <button class="btn bo bsm" onclick="abrirMpExcelModal(${a.id})" title="Importa um ou mais arquivos .xls do Mercado Pago Cofrinho (RENDIMENTOS, Transferências, Resgates) — sem IA">📊 Importar Excel MP</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicGerarExtratoModal(${a.id})" title="Gera o lançamento no Extrato Bancário dos movimentos que ainda não têm um — nada é gerado automaticamente ao salvar/importar">🏦 Gerar Lançamentos no Extrato</button>
             <button class="btn bo bsm" onclick="abrirLancctbAplicacaoModal(${a.id})">✎ Editar</button>
             <button class="btn bsm" style="background:#ca8a04;color:#fff;border-color:#ca8a04" onclick="_irParaGanhoDetalheByNome('${_lancctbEidAtual}',this.closest('[data-apl-nome]').dataset.aplNome)" title="Abre o extrato desta aplicação no módulo Ganhos e Rendimentos">↗ Ganhos/Rendimentos</button>
@@ -25603,6 +25626,141 @@ async function excluirLancctbAplicacaoMovimento(movId){
   toast('Movimento excluído','ok');
   renderLancctbAplicacoes();
 }
+
+// ─── Importar Excel Mercado Pago Cofrinho ───────────────────────────────────
+// Lê .xls exportado pelo Mercado Pago (colunas A=Data B=Categoria C=Histórico
+// D=Tipo E=Valor F=Id J=Conta). Regras:
+//   Tipo=C + Categoria=RENDIMENTO → tipo='rendimento'
+//   Tipo=C + outro (Transferência) → tipo='aplicacao'
+//   Tipo=D                         → tipo='resgate'
+// Aceita múltiplos arquivos por vez; dedup por data+tipo+valor_bruto.
+let _mpExcelAplicacaoId=null, _mpExcelPendente=[];
+let _mpSheetJsCarregado=false, _mpSheetJsPromise=null;
+function _mpGarantirSheetJs(){
+  if(_mpSheetJsCarregado) return Promise.resolve();
+  if(_mpSheetJsPromise) return _mpSheetJsPromise;
+  _mpSheetJsPromise=new Promise((res,rej)=>{
+    const s=document.createElement('script');
+    s.src='https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js';
+    s.onload=()=>{ _mpSheetJsCarregado=true; res(); };
+    s.onerror=()=>rej(new Error('Falha ao carregar SheetJS'));
+    document.head.appendChild(s);
+  });
+  return _mpSheetJsPromise;
+}
+function abrirMpExcelModal(aplicacaoId){
+  _mpExcelAplicacaoId=aplicacaoId;
+  _mpExcelPendente=[];
+  const a=_lancctbUltimasAplicacoes.find(x=>x.id===aplicacaoId);
+  document.getElementById('mAplicExcelTitulo').textContent='Importar Excel MP — '+(a?a.nome:'');
+  document.getElementById('mAplicExcelArquivo').value='';
+  document.getElementById('mAplicExcelStatus').textContent='';
+  document.getElementById('mAplicExcelPreview').innerHTML='';
+  document.getElementById('mAplicExcelBtnConfirmar').style.display='none';
+  openModal('mLancctbAplicImportExcel');
+}
+async function _mpExcelLer(files){
+  const statusEl=document.getElementById('mAplicExcelStatus');
+  const previewEl=document.getElementById('mAplicExcelPreview');
+  const btnConf=document.getElementById('mAplicExcelBtnConfirmar');
+  _mpExcelPendente=[];
+  previewEl.innerHTML='';
+  btnConf.style.display='none';
+  if(!files||!files.length) return;
+  statusEl.textContent='Carregando biblioteca…';
+  try{ await _mpGarantirSheetJs(); }catch(e){ toast('Erro ao carregar SheetJS: '+e.message,'err'); statusEl.textContent=''; return; }
+  statusEl.textContent='Lendo arquivos…';
+  const todos=[];
+  for(const file of files){
+    try{
+      const buf=await file.arrayBuffer();
+      const wb=XLSX.read(buf,{type:'array',cellDates:true});
+      const ws=wb.Sheets[wb.SheetNames[0]];
+      const rows=XLSX.utils.sheet_to_json(ws,{header:1,defval:''});
+      // Detecta linha de cabeçalho (procura linha onde col A ≈ "Data")
+      let dataIdx=-1;
+      for(let i=0;i<Math.min(rows.length,5);i++){
+        if(String(rows[i][0]||'').trim().toLowerCase()==='data'){ dataIdx=i; break; }
+      }
+      if(dataIdx<0){ toast(file.name+': não achei cabeçalho "Data" — verifique o arquivo','err'); continue; }
+      for(let i=dataIdx+1;i<rows.length;i++){
+        const r=rows[i];
+        const rawData=r[0], cat=String(r[1]||'').trim(), hist=String(r[2]||'').trim(),
+              tipoRaw=String(r[3]||'').trim().toUpperCase(), valorRaw=r[4], idMp=String(r[5]||'').trim(),
+              conta=String(r[9]||'').trim();
+        if(!rawData&&!valorRaw) continue; // linha em branco
+        // Parsear data
+        let dataStr='';
+        if(rawData instanceof Date){ const d=rawData; dataStr=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+        else{ const s=String(rawData||'').trim(); const m=s.match(/^(\d{2})\/(\d{2})\/(\d{4})$/); if(m) dataStr=m[3]+'-'+m[2]+'-'+m[1]; }
+        if(!dataStr) continue;
+        const valor=typeof valorRaw==='number'?Math.abs(valorRaw):Math.abs(parseFloat(String(valorRaw).replace(',','.'))||0);
+        if(!valor) continue;
+        // Mapear tipo
+        let tipo;
+        if(tipoRaw==='D') tipo='resgate';
+        else if(tipoRaw==='C'&&cat.toUpperCase()==='RENDIMENTO') tipo='rendimento';
+        else if(tipoRaw==='C') tipo='aplicacao';
+        else continue;
+        // Histórico composto: "Rendimento ref. MAQUININHA COFRINHO INVESTIMENTO"
+        const contaDisplay=conta||cat;
+        todos.push({data:dataStr,tipo,valor_bruto:valor,id_mp:idMp,conta:contaDisplay,arquivo:file.name});
+      }
+    }catch(e){ toast('Erro ao ler '+file.name+': '+e.message,'err'); console.error(e); }
+  }
+  if(!todos.length){ statusEl.textContent='Nenhum lançamento encontrado nos arquivos.'; return; }
+  _mpExcelPendente=todos;
+  // Preview agrupado por tipo
+  const cnt={rendimento:0,aplicacao:0,resgate:0};
+  const soma={rendimento:0,aplicacao:0,resgate:0};
+  todos.forEach(r=>{ cnt[r.tipo]++; soma[r.tipo]+=r.valor_bruto; });
+  const fmtTipo={rendimento:'Rendimentos',aplicacao:'Aplicações',resgate:'Resgates'};
+  let html='<table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:var(--bg2)">';
+  html+='<th style="padding:4px 6px;text-align:left">Tipo</th><th style="padding:4px 6px;text-align:right">Qtd</th><th style="padding:4px 6px;text-align:right">Total</th></tr></thead><tbody>';
+  ['rendimento','aplicacao','resgate'].forEach(t=>{
+    if(!cnt[t]) return;
+    html+=`<tr><td style="padding:3px 6px">${fmtTipo[t]}</td><td style="padding:3px 6px;text-align:right">${cnt[t]}</td><td style="padding:3px 6px;text-align:right">R$ ${_fmt(soma[t])}</td></tr>`;
+  });
+  html+=`<tr style="font-weight:700;border-top:1px solid var(--brd)"><td style="padding:3px 6px">Total</td><td style="padding:3px 6px;text-align:right">${todos.length}</td><td></td></tr>`;
+  html+='</tbody></table>';
+  // Amostra dos primeiros 5
+  html+='<div style="font-size:11px;color:var(--slate);margin-top:8px;font-weight:600">Amostra (primeiros 5):</div>';
+  html+='<table style="width:100%;border-collapse:collapse;font-size:11px"><tbody>';
+  todos.slice(0,5).forEach(r=>{
+    html+=`<tr><td style="padding:2px 4px">${r.data}</td><td style="padding:2px 4px">${fmtTipo[r.tipo]}</td><td style="padding:2px 4px;max-width:200px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(r.conta)}</td><td style="padding:2px 4px;text-align:right">R$ ${_fmt(r.valor_bruto)}</td></tr>`;
+  });
+  html+='</tbody></table>';
+  previewEl.innerHTML=html;
+  statusEl.textContent=`${todos.length} lançamento(s) lido(s) de ${files.length} arquivo(s).`;
+  btnConf.style.display='';
+}
+async function _mpExcelConfirmar(){
+  const statusEl=document.getElementById('mAplicExcelStatus');
+  const btnConf=document.getElementById('mAplicExcelBtnConfirmar');
+  if(!_mpExcelPendente.length||!_mpExcelAplicacaoId){ toast('Nenhum dado para importar','err'); return; }
+  btnConf.disabled=true;
+  statusEl.textContent='Verificando duplicatas…';
+  // Buscar movimentos já existentes pra dedup
+  const { data: existentes } = await _supaClient.from('aplicacoes_financeiras_movimentos')
+    .select('tipo,data,valor_bruto').eq('aplicacao_id',_mpExcelAplicacaoId);
+  const jaExiste=new Set((existentes||[]).map(m=>`${m.data}|${m.tipo}|${Math.round((m.valor_bruto||0)*100)}`));
+  const novos=_mpExcelPendente.filter(r=>`${r.data}|${r.tipo}|${Math.round(r.valor_bruto*100)}`).filter(r=>!jaExiste.has(`${r.data}|${r.tipo}|${Math.round(r.valor_bruto*100)}`));
+  const pulados=_mpExcelPendente.length-novos.length;
+  if(!novos.length){ toast('Todos os '+_mpExcelPendente.length+' lançamentos já existem — nada importado.','info'); btnConf.disabled=false; return; }
+  statusEl.textContent=`Salvando ${novos.length} lançamento(s)…`;
+  const regs=novos.map(r=>({
+    aplicacao_id:_mpExcelAplicacaoId, empresa_eid:_lancctbEidAtual,
+    tipo:r.tipo, data:r.data, valor_bruto:r.valor_bruto,
+    valor_liquido:r.tipo==='rendimento'?r.valor_bruto:null,
+  }));
+  const { error } = await _supaClient.from('aplicacoes_financeiras_movimentos').insert(regs);
+  btnConf.disabled=false;
+  if(error){ toast('Erro ao salvar: '+error.message,'err'); statusEl.textContent=''; return; }
+  toast(novos.length+' lançamento(s) importado(s)'+(pulados?' · '+pulados+' já existiam':''),'ok');
+  closeModal('mLancctbAplicImportExcel');
+  renderLancctbAplicacoes();
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 // Gera um TXT com cada linha de IRRF/IOF retido nos Resgates + cada
 // Rendimento lançado manualmente, de todas as Aplicações Financeiras da
