@@ -3748,6 +3748,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
         <tr style="background:var(--ink2)">
           <th style="background:var(--ink2);color:#fff;text-align:left;min-width:220px">Nome</th>
           <th style="background:var(--ink2);color:#fff;text-align:left;min-width:280px">E-mail</th>
+          <th id="respThAcesso" style="background:var(--ink2);color:#fff;text-align:center;min-width:110px;display:none">Acesso</th>
           <th style="background:var(--ink2);color:#fff;text-align:center;min-width:140px">Data Inclusão</th>
           <th style="background:var(--ink2);color:#fff;text-align:center;min-width:140px">Data Saída</th>
           <th style="background:var(--ink2);color:#fff;text-align:center;width:120px">Ações</th>
@@ -3755,7 +3756,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
         <tr id="responsaveisColFiltros"></tr>
       </thead>
       <tbody id="tabelaResponsaveis">
-        <tr><td colspan="5" style="padding:20px;text-align:center;color:var(--slate)">Nenhum responsável cadastrado</td></tr>
+        <tr><td colspan="6" style="padding:20px;text-align:center;color:var(--slate)">Nenhum responsável cadastrado</td></tr>
       </tbody>
     </table>
     </div>
@@ -4411,6 +4412,19 @@ async function tentarLogin(){
   if(btn){btn.disabled=false;btn.textContent='Entrar';}
   if(resp.error){errEl.textContent='E-mail ou senha incorretos.';errEl.style.display='block';return;}
   var u=resp.data.user;
+  // Verifica bloqueio antes de deixar entrar
+  try{
+    const {data:respData}=await _supaClient.from('dados_app').select('value').eq('key','responsaveis').single();
+    const lista=respData&&respData.value||[];
+    const colab=lista.find(r=>(r.email||'').toLowerCase()===(u.email||'').toLowerCase());
+    if(colab&&colab.bloqueado&&!((u.user_metadata&&u.user_metadata.perfil)==='admin')&&u.email!=='kleydson.contador@gmail.com'){
+      await _supaClient.auth.signOut();
+      if(btn){btn.disabled=false;btn.textContent='Entrar';}
+      errEl.textContent='Seu acesso foi bloqueado. Entre em contato com o administrador.';
+      errEl.style.display='block';
+      return;
+    }
+  }catch(e){ console.warn('Verificação de bloqueio falhou:',e); }
   var nome=(u.user_metadata&&u.user_metadata.nome)||USER_NAMES[u.email]||u.email;
   currentUser={id:u.id,login:u.email,nome:nome,perfil:(u.user_metadata&&u.user_metadata.perfil)||'editor'};
   S.saveSession(currentUser);
@@ -4419,6 +4433,7 @@ async function tentarLogin(){
   await _loadFromSupabase();
   await inicializarGruposEconomicosPadrao();
   seedData();fillSelects();renderPeriodControl();renderDash();goPage('home');setTimeout(initLucros,500);
+  _iniciarVerificacaoBloqueio();
 }
 
 async function fazerLogout(){
@@ -4428,6 +4443,31 @@ async function fazerLogout(){
   document.getElementById('loginUser').value='';
   document.getElementById('loginPass').value='';
   document.getElementById('loginScreen').style.display='flex';
+}
+// Verifica a cada 5 minutos se a sessão ativa ainda tem acesso liberado.
+// Quando o administrador bloqueia alguém, o dado vai para a nuvem;
+// na próxima verificação a sessão da pessoa é encerrada automaticamente.
+let _bloqueioInterval=null;
+function _iniciarVerificacaoBloqueio(){
+  if(_bloqueioInterval) clearInterval(_bloqueioInterval);
+  _bloqueioInterval=setInterval(async()=>{
+    if(!currentUser||!_supaClient||isAdmin(currentUser)) return;
+    try{
+      const {data}=await _supaClient.from('dados_app').select('value').eq('key','responsaveis').single();
+      const lista=(data&&data.value)||[];
+      const colab=lista.find(r=>(r.email||'').toLowerCase()===(currentUser.login||'').toLowerCase());
+      if(colab&&colab.bloqueado){
+        clearInterval(_bloqueioInterval);
+        await _supaClient.auth.signOut();
+        currentUser=null; S.saveSession(null);
+        const ls=document.getElementById('loginScreen');
+        const err=document.getElementById('loginErr');
+        if(err){err.textContent='Seu acesso foi bloqueado pelo administrador.';err.style.display='block';}
+        if(ls) ls.style.display='flex';
+        toast('Sessão encerrada — acesso bloqueado pelo administrador.','err');
+      }
+    }catch(e){ console.warn('Verificação periódica de bloqueio:',e); }
+  }, 5*60*1000);
 }
 
 function aplicarDarkMode(ativo){
@@ -54768,9 +54808,14 @@ function renderResponsaveis(){
   _respRenderPastaDownloadBox();
   const tbody=document.getElementById('tabelaResponsaveis');
   if(!tbody)return;
+  const ehAdmin=isAdmin(currentUser);
+  // Mostra/oculta a coluna Acesso conforme permissão
+  const thAcesso=document.getElementById('respThAcesso');
+  if(thAcesso) thAcesso.style.display=ehAdmin?'':'none';
   _respRenderColFiltros();
+  const cols=ehAdmin?6:5;
   if(_responsaveis.length===0){
-    tbody.innerHTML='<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--slate)">Nenhum responsável cadastrado</td></tr>';
+    tbody.innerHTML=`<tr><td colspan="${cols}" style="padding:20px;text-align:center;color:var(--slate)">Nenhum responsável cadastrado</td></tr>`;
     return;
   }
   const f=_respColF;
@@ -54778,30 +54823,51 @@ function renderResponsaveis(){
   if(f.nome){ const t=f.nome.trim().toLowerCase(); linhas=linhas.filter(l=>(l.r.nome||'').toLowerCase().includes(t)); }
   if(f.email){ const t=f.email.trim().toLowerCase(); linhas=linhas.filter(l=>(l.r.email||'').toLowerCase().includes(t)); }
   if(!linhas.length){
-    tbody.innerHTML='<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--slate)">Nenhum responsável encontrado com esse filtro.</td></tr>';
+    tbody.innerHTML=`<tr><td colspan="${cols}" style="padding:20px;text-align:center;color:var(--slate)">Nenhum responsável encontrado com esse filtro.</td></tr>`;
     return;
   }
-  tbody.innerHTML=linhas.map(({r,idx})=>`
-    <tr>
+  tbody.innerHTML=linhas.map(({r,idx})=>{
+    const bloqueado=!!r.bloqueado;
+    const ehProprioAdmin=isAdmin(currentUser)&&(currentUser.login||'')===(r.email||'');
+    const celulaAcesso=ehAdmin?`<td style="text-align:center">
+      ${ehProprioAdmin
+        ? `<span style="font-size:12px;color:var(--slate)">—</span>`
+        : bloqueado
+          ? `<span style="color:#dc2626;font-size:12px;font-weight:600">🔴 Bloqueado</span><br><button class="btn bo bsm" style="margin-top:4px;color:var(--teal)" onclick="toggleAcessoResponsavel(${idx})">Liberar</button>`
+          : `<span style="color:var(--teal);font-size:12px;font-weight:600">🟢 Ativo</span><br><button class="btn bo bsm" style="margin-top:4px;color:#dc2626" onclick="toggleAcessoResponsavel(${idx})">Bloquear</button>`
+      }
+    </td>`:'';
+    return `<tr style="${bloqueado?'opacity:.6':''}">
       <td><b style="color:#1E3558">${esc(r.nome||'')}</b></td>
       <td>${esc(r.email||'')}</td>
+      ${celulaAcesso}
       <td style="text-align:center">${esc(r.dataInclusao||'—')}</td>
       <td style="text-align:center;color:${r.dataSaida?'#dc2626':'var(--slate)'}">${esc(r.dataSaida||'—')}</td>
       <td style="text-align:center;white-space:nowrap">
         <button class="btn bo bsm" onclick="abrirModalResponsavel(${idx})">✎ Editar</button>
         <button class="btn bo bsm" style="color:#dc2626" onclick="deletarResponsavel(${idx})">🗑️ Deletar</button>
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
+}
+function toggleAcessoResponsavel(idx){
+  if(!isAdmin(currentUser)){ toast('Sem permissão.','err'); return; }
+  const r=_responsaveis[idx];
+  if(!r) return;
+  const novo=!r.bloqueado;
+  if(novo && !confirm(`Bloquear o acesso de ${r.nome} (${r.email}) ao site?\n\nA sessão ativa dela será encerrada em até 5 minutos.`)) return;
+  _responsaveis[idx].bloqueado=novo;
+  if(novo) _responsaveis[idx].bloqueadoEm=new Date().toISOString().split('T')[0];
+  else delete _responsaveis[idx].bloqueadoEm;
+  salvarResponsaveis();
+  toast(novo?`${r.nome} bloqueado — acesso encerrado em até 5 minutos.`:`${r.nome} liberado — pode entrar normalmente.`, novo?'warn':'ok');
 }
 function _respRenderColFiltros(){
   const tr=document.getElementById('responsaveisColFiltros'); if(!tr) return;
-  if(tr.dataset.montado) return;
-  tr.dataset.montado='1';
   const f=_respColF;
   const th=(inner)=>`<th style="padding:4px 6px;background:var(--ink3);border-bottom:1px solid var(--border);font-weight:400">${inner}</th>`;
   const txt=(k,ph)=>`<input class="fi" value="${esc(f[k]||'')}" oninput="_respFiltrarCol('${k}',this.value)" placeholder="${ph}" style="padding:3px 6px;font-size:11px;width:100%">`;
-  tr.innerHTML=th(txt('nome','Filtrar nome…'))+th(txt('email','Filtrar e-mail…'))+th('')+th('')+th('');
+  tr.innerHTML=th(txt('nome','Filtrar nome…'))+th(txt('email','Filtrar e-mail…'))+(isAdmin(currentUser)?th(''):'')+th('')+th('')+th('');
 }
 function adicionarResponsavel(){
   _respEditIdx=-1;
@@ -54834,7 +54900,8 @@ function salvarResponsavelModal(){
   if(_respEditIdx===-1){
     _responsaveis.push({nome,email,dataInclusao,dataSaida});
   } else {
-    _responsaveis[_respEditIdx]={nome,email,dataInclusao,dataSaida};
+    // preserva campos extras como bloqueado/bloqueadoEm ao editar
+    _responsaveis[_respEditIdx]=Object.assign({},_responsaveis[_respEditIdx],{nome,email,dataInclusao,dataSaida});
   }
   salvarResponsaveis();
   closeModal('mResponsavel');
