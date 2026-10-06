@@ -25627,6 +25627,124 @@ async function excluirLancctbAplicacaoMovimento(movId){
   renderLancctbAplicacoes();
 }
 
+// ─── Parser PDF Mercado Pago Cofrinho ───────────────────────────────────────
+// Fingerprint: título "... do mês MM/YYYY" + cabeçalho com "Entrada" e "Saída"
+// Tipo determinado por coluna (Entrada/Saída) e Categoria:
+//   Categoria=RENDIMENTO          → 'rendimento'
+//   Transferência em Entrada      → 'aplicacao'
+//   Saída (qualquer histórico)    → 'resgate'
+async function _mpPdfParsear(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
+  // Lê p.1 para fingerprint
+  const pg1=await pdf.getPage(1);
+  const ct1=await pg1.getTextContent();
+  const itens1=ct1.items.map(i=>({str:i.str||'',x:Math.round(i.transform[4]),y:Math.round(i.transform[5])}));
+  // Fingerprint: cabeçalho com "Entrada" e "Saída" E título com "do mês \d{2}/\d{4}"
+  const textoTitulo=itens1.map(i=>i.str).join(' ');
+  const mMes=textoTitulo.match(/do\s+m[eê]s\s+(\d{2}\/\d{4})/i);
+  const temEntrada=itens1.some(i=>/^Entrada$/i.test(i.str.trim()));
+  const temSaida=itens1.some(i=>/^Sa[ií]da$/i.test(i.str.trim()));
+  if(!mMes||!temEntrada||!temSaida) return null;
+  const competencia=mMes[1]; // "08/2026"
+  // Extrai nome do cofrinho do título (antes de "do mês")
+  const mTitulo=textoTitulo.match(/([A-ZÁÉÍÓÚÂÊÔÃÕÇÀÜÑ ]+)\s+do\s+m[eê]s/i);
+  const cofrinhoNome=(mTitulo?mTitulo[1]:'').trim();
+  // Detecta X de Entrada e Saída a partir do cabeçalho
+  const itEntrada=itens1.find(i=>/^Entrada$/i.test(i.str.trim()));
+  const itSaida=itens1.find(i=>/^Sa[ií]da$/i.test(i.str.trim()));
+  const xEntrada=itEntrada?itEntrada.x:476;
+  const xSaida=itSaida?itSaida.x:539;
+  const xMeio=(xEntrada+xSaida)/2; // separador Entrada vs Saída
+  // X da coluna Categoria
+  const itCat=itens1.find(i=>/^Categoria$/i.test(i.str.trim()));
+  const xCat=itCat?itCat.x:348;
+  const xHistorico=81; // sempre ≈81
+
+  const SKIP_TEXTO=[/^Data$/i,/^Hist[oó]rico$/i,/^Cliente$/i,/^Categoria$/i,/^Entrada$/i,/^Sa[ií]da$/i,/^Totais?$/i,/^Saldo\s+(inicial|final)$/i];
+  function ehSkip(str){ return SKIP_TEXTO.some(r=>r.test(str.trim())); }
+
+  const registros=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const pg=await pdf.getPage(p);
+    const ct=await pg.getTextContent();
+    const itens=ct.items.map(i=>({str:i.str||'',x:Math.round(i.transform[4]),y:Math.round(i.transform[5])}));
+    const linhas=_lancctbAgruparLinhasPorY(itens,15);
+    for(const linha of linhas){
+      const todos=linha.itens;
+      // Data: primeiro item com x≈34 no formato dd/mm/yyyy
+      const itData=todos.find(i=>i.x<50&&/^\d{2}\/\d{2}\/\d{4}$/.test(i.str.trim()));
+      if(!itData) continue;
+      const [dd,mm,aaaa]=itData.str.trim().split('/');
+      const dataStr=`${aaaa}-${mm}-${dd}`;
+      // Categoria: item com x≈xCat (ignora items vazios que o pdfjs às vezes insere)
+      const itCatLinha=todos.find(i=>i.str.trim()&&Math.abs(i.x-xCat)<30&&!ehSkip(i.str));
+      const catStr=String((itCatLinha?.str||'')).trim().toUpperCase();
+      // Histórico: itens com x≈81
+      const histStr=todos.filter(i=>i.x<xCat-30&&i.x>50&&i.str.trim()&&!ehSkip(i.str)&&!/^\d{2}\/\d{2}\/\d{4}$/.test(i.str.trim())).map(i=>i.str).join(' ').trim();
+      // Rendimento: pela Categoria ou, se catStr vazio, por "RENDIMENTO" em qualquer item da linha
+      const ehRendimento=catStr.includes('RENDIMENTO')||(!catStr&&/RENDIMENTO/.test(todos.map(i=>i.str).join(' ').toUpperCase()));
+      // Valor Entrada: itens com x >= xMeio
+      // Entrada: x entre xEntrada-10 e xSaida-10 (valores right-aligned sob o header)
+      // Saída:   x >= xSaida-10
+      const xSaidaMin=xSaida-10;
+      const parseBR=s=>parseFloat(String(s).replace(/\./g,'').replace(',','.'))||0;
+      const valEntradaRaw=todos.filter(i=>i.x>=(xEntrada-10)&&i.x<xSaidaMin&&!ehSkip(i.str)).map(i=>i.str.trim()).filter(Boolean).join('');
+      const valSaidaRaw=todos.filter(i=>i.x>=xSaidaMin&&!ehSkip(i.str)).map(i=>i.str.trim()).filter(Boolean).join('');
+      const valEntrada=parseBR(valEntradaRaw);
+      const valSaida=parseBR(valSaidaRaw);
+      if(!valEntrada&&!valSaida) continue;
+      // Determinar tipo
+      let tipo, valor;
+      if(ehRendimento){
+        tipo='rendimento'; valor=valEntrada||valSaida;
+      } else if(valSaida>0){
+        tipo='resgate'; valor=valSaida;
+      } else {
+        tipo='aplicacao'; valor=valEntrada;
+      }
+      if(!valor) continue;
+      registros.push({tipo,data:dataStr,valor_bruto:valor,historico:histStr,categoria:catStr});
+    }
+  }
+  // Totais da linha "Totais" (validação opcional)
+  const textoPg1=itens1.map(i=>i.str).join(' ');
+  const mTotais=textoPg1.match(/Totais\s+([\d.,]+)\s+([\d.,]+)/i);
+  const totalEntrada=mTotais?parseFloat(mTotais[1].replace(/\./g,'').replace(',','.')):null;
+  const totalSaida=mTotais?parseFloat(mTotais[2].replace(/\./g,'').replace(',','.')):null;
+  return {registros,cofrinho:cofrinhoNome,competencia,totalEntrada,totalSaida};
+}
+// Aplica resultado do _mpPdfParsear direto no Supabase (sem tela de mapeamento —
+// o formato MP não tem ambiguidade de colunas).
+async function _mpPdfAplicar(aplicacaoId,mpPdf,statusEl){
+  if(!mpPdf.registros.length){ toast('Nenhum lançamento encontrado no PDF Mercado Pago.','err'); return; }
+  if(statusEl) statusEl.textContent='Verificando duplicatas…';
+  const { data: existentes } = await _supaClient.from('aplicacoes_financeiras_movimentos')
+    .select('tipo,data,valor_bruto').eq('aplicacao_id',aplicacaoId);
+  const jaExiste=new Set((existentes||[]).map(m=>`${m.data}|${m.tipo}|${Math.round((m.valor_bruto||0)*100)}`));
+  const novos=mpPdf.registros.filter(r=>!jaExiste.has(`${r.data}|${r.tipo}|${Math.round(r.valor_bruto*100)}`));
+  const pulados=mpPdf.registros.length-novos.length;
+  if(!novos.length){ toast('Todos os '+mpPdf.registros.length+' lançamentos já existem — nada importado.','info'); if(statusEl) statusEl.textContent=''; _lancctbAplicUploadFechar(); return; }
+  if(statusEl) statusEl.textContent=`Salvando ${novos.length} lançamento(s)…`;
+  const regs=novos.map(r=>({
+    aplicacao_id:aplicacaoId, empresa_eid:_lancctbEidAtual,
+    tipo:r.tipo, data:r.data, valor_bruto:r.valor_bruto,
+    valor_liquido:r.tipo==='rendimento'?r.valor_bruto:null,
+  }));
+  const { error } = await _supaClient.from('aplicacoes_financeiras_movimentos').insert(regs);
+  if(statusEl) statusEl.textContent='';
+  if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
+  const cnt={rendimento:0,aplicacao:0,resgate:0};
+  novos.forEach(r=>cnt[r.tipo]++);
+  const partes=[];
+  if(cnt.rendimento) partes.push(cnt.rendimento+' rendimento(s)');
+  if(cnt.aplicacao) partes.push(cnt.aplicacao+' aplicação(ões)');
+  if(cnt.resgate) partes.push(cnt.resgate+' resgate(s)');
+  if(pulados) partes.push(pulados+' já existiam');
+  toast('MP '+mpPdf.cofrinho+' ('+mpPdf.competencia+'): '+partes.join(', ')+'.','ok');
+  _lancctbAplicUploadFechar();
+  renderLancctbAplicacoes();
+}
 // ─── Importar Excel Mercado Pago Cofrinho ───────────────────────────────────
 // Lê .xls exportado pelo Mercado Pago (colunas A=Data B=Categoria C=Histórico
 // D=Tipo E=Valor F=Id J=Conta). Regras:
@@ -25928,12 +26046,21 @@ async function _lancctbAplicUploadExtrair(usarIA){
       // Achado real 22/09/2026 (CLD): existe mais de um layout Bradesco de
       // Aplicações/Resgates ("Extrato Padrão" e "Extrato de CDBs/LETRAS") —
       // tenta cada leitor determinístico em sequência antes de cair pra IA.
+      // Mercado Pago Cofrinho (formato próprio: Entrada/Saída, rendimento, transferência)
+      const mpPdf=await _mpPdfParsear(file).catch(e=>{ console.error('_mpPdfParsear:',e); return null; });
+      if(mpPdf){
+        statusEl.textContent='';
+        if(btn){ btn.disabled=false; }
+        if(btnIa){ btnIa.disabled=false; }
+        await _mpPdfAplicar(aplicacaoId,mpPdf,statusEl);
+        return;
+      }
       extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisNativoDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file));
       if(!extraido){
         statusEl.textContent='';
         if(btn) btn.disabled=false;
         if(btnIa) btnIa.disabled=false;
-        toast('Não reconheci esse layout automaticamente (padrões Bradesco/Itaú Aut Mais) — tente "Usar IA Gemini".','err');
+        toast('Não reconheci esse layout automaticamente (padrões Bradesco/Itaú Aut Mais/Mercado Pago) — tente "Usar IA Gemini".','err');
         return;
       }
     }
