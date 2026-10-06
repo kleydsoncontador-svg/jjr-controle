@@ -40817,6 +40817,54 @@ function _ganhoParseDataParaMk(v){
   m=s.match(/^(\d{4})-(\d{2})$/); if(m) return m[2]+'/'+m[1]; // aaaa-mm
   return null;
 }
+// ── BB Rende Fácil — PDF IMAGEM (OCR local via Tesseract.js) ──────────────
+// Acionado quando o PDF não tem texto selecionável (IMAGE_ONLY_PDF).
+// Tesseract carrega do CDN na 1ª chamada; idiomas por+eng são baixados pelo
+// browser e ficam em cache — NENHUMA imagem é enviada para API externa,
+// o OCR roda inteiramente no browser.
+let _bbRFTesseractCarregado=false, _bbRFTesseractPromessa=null;
+function _bbRFGarantirTesseract(){
+  if(_bbRFTesseractCarregado) return Promise.resolve();
+  if(_bbRFTesseractPromessa) return _bbRFTesseractPromessa;
+  _bbRFTesseractPromessa=new Promise((res,rej)=>{
+    const s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js';
+    s.onload=()=>{ _bbRFTesseractCarregado=true; res(); };
+    s.onerror=()=>rej(new Error('Falha ao carregar Tesseract.js'));
+    document.head.appendChild(s);
+  });
+  return _bbRFTesseractPromessa;
+}
+async function _bbRendeFacilOcrTexto(pdf,onStatus){
+  await _bbRFGarantirTesseract();
+  if(onStatus) onStatus('BB Rende Fácil (imagem): carregando OCR…');
+  const worker=await Tesseract.createWorker('por+eng');
+  let texto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    if(onStatus) onStatus(`BB Rende Fácil (imagem): OCR p.${p}/${pdf.numPages}…`);
+    const page=await pdf.getPage(p);
+    const viewport=page.getViewport({scale:3});
+    const canvas=document.createElement('canvas');
+    canvas.width=viewport.width; canvas.height=viewport.height;
+    const ctx=canvas.getContext('2d');
+    await page.render({canvasContext:ctx,viewport}).promise;
+    // Pré-processamento: escala de cinza + aumento de contraste
+    const img=ctx.getImageData(0,0,canvas.width,canvas.height);
+    const d=img.data;
+    for(let i=0;i<d.length;i+=4){
+      const g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2];
+      const c=Math.min(255,Math.max(0,(g-128)*1.6+128));
+      d[i]=d[i+1]=d[i+2]=c;
+    }
+    ctx.putImageData(img,0,0);
+    const {data:{text}}=await worker.recognize(canvas);
+    texto+=' '+text;
+  }
+  await worker.terminate();
+  // Normalizar problemas comuns de OCR em números BR:
+  // espaço como milhar "273 603,87" → "273.603,87"
+  return texto.replace(/(\d)\s+(\d{3}[,])/g,'$1.$2').replace(/\s+/g,' ').trim();
+}
 // Modelo "BB Rende Fácil" — pedido do usuário 09/09/2026: "são essas
 // informações que vou levar pra cada coluna" (Resumo do mês: Aplicações/
 // Resgates líquidos/IR/IOF/Rendimentos no mês) — não precisa mapear coluna
@@ -40825,10 +40873,10 @@ function _ganhoParseDataParaMk(v){
 // validado contra o PDF real no Conversor de Aplicações (ver
 // _convAplicFinExtrairBBRendeFacil) — aqui só reaproveita o "Resumo do
 // mês" e escreve direto em ganho.dados, sem passar pelo mapeamento manual.
-async function _ganhoExtrairBBRendeFacil(file){
+async function _ganhoExtrairBBRendeFacil(file,onStatus){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
-  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const pdf=await pdfjsLib.getDocument({data:new Uint8Array(buf)}).promise;
   let textoCompleto='';
   for(let p=1;p<=pdf.numPages;p++){
     const page=await pdf.getPage(p);
@@ -40836,6 +40884,13 @@ async function _ganhoExtrairBBRendeFacil(file){
     textoCompleto+=' '+content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim();
   }
   textoCompleto=textoCompleto.trim();
+  // IMAGE_ONLY_PDF: sem texto selecionável → OCR local (Tesseract.js, sem IA)
+  if(textoCompleto.length<50){
+    try{ textoCompleto=await _bbRendeFacilOcrTexto(pdf,onStatus); }
+    catch(e){ console.error('BB Rende Fácil OCR:',e); return null; }
+    if(!textoCompleto||textoCompleto.length<50) return null;
+  }
+  if(onStatus) onStatus('BB Rende Fácil: analisando texto…');
   // Mesmo relaxamento do detector acima (15/09/2026): "BB" pode não existir
   // no texto, só "Rende Fácil".
   if(!/Rende\s*F[ÁA]cil/i.test(textoCompleto)||!/Resumo\s+do\s+m[êe]s/i.test(textoCompleto)) return null;
@@ -40957,8 +41012,8 @@ async function _ganhoExtrairItauCcAplicAutMaisEmbutida(file){
 // Empacota o resultado de _ganhoExtrairBBRendeFacil no contrato padrão
 // (source_keys) pra passar pela MESMA tela de mapeamento dos outros bancos —
 // pedido do usuário 11/09/2026, antes escrevia direto sem perguntar nada.
-async function _aplicfinParseBbRendeFacil(file){
-  const bb=await _ganhoExtrairBBRendeFacil(file);
+async function _aplicfinParseBbRendeFacil(file,onStatus){
+  const bb=await _ganhoExtrairBBRendeFacil(file,onStatus);
   if(!bb) return null;
   const [mm,aaaa]=bb.mk.split('/');
   const M='bb_rende_facil';
@@ -42901,7 +42956,7 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
   // perguntado como eu queria amarrar" — antes o BB escrevia direto nas
   // colunas, sem perguntar nem guardar no Supabase; agora pergunta 1x igual
   // aos outros bancos e reaplica sozinho nos meses seguintes.
-  const bb=await _aplicfinParseBbRendeFacil(file);
+  const bb=await _aplicfinParseBbRendeFacil(file,msg=>{ if(statusEl) statusEl.textContent=msg; });
   if(bb) return await _ganhoAplicarParserSemIA(eid,pid,bb,file,statusEl);
 
   // Extrato de Conta Corrente Itaú com a seção "Movimentação - Aplicações/Resgates
