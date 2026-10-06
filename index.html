@@ -42105,6 +42105,18 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       rendMes:'bb_rende_facil.summary.month_yield',
       saldoBrutoExtrato:'bb_rende_facil.summary.final_gross_balance',
     },
+    xp_xperformance:{
+      bruto:'xp_xperformance.summary.ganho_financeiro',
+      iof:'xp_xperformance.summary.iof',
+      irrf:'xp_xperformance.summary.ir',
+      rendMes:'xp_xperformance.summary.ganho_financeiro',
+      rendLiq:'xp_xperformance.summary.ganho_financeiro_liquido',
+      saldoBrutoExtrato:'xp_xperformance.summary.patrimonio_final',
+      // aplic e resgate intencionalmente sem sugestão: Movimentações ≠ Aplicações/Resgates
+    },
+    xp_posicao_consolidada:{
+      saldoBrutoExtrato:'xp_posicao_consolidada.summary.patrimonio_total',
+    },
   };
   // Modelos "Extrato de Fundos de Investimento" Itaú têm um M diferente por
   // CNPJ+origem (itau_fundo_<hash>/itau_fundo_img_<hash>) — não dá pra usar
@@ -42407,6 +42419,151 @@ async function _ganhoItauFundoConfirmarEscolha(){
   // 'MAPEAR' já deixou a tela de mapeamento renderizada por _ganhoAplicarParserSemIA.
 }
 
+// ── XP Investimentos: XPerformance (relatório mensal de rentabilidade) ──
+// Extrai da tabela "EVOLUÇÃO PATRIMONIAL POR PERÍODO" da página 4 os valores
+// do mês de referência (Patrimônio inicial, Movimentações, IR, IOF,
+// Patrimônio final, Ganho financeiro).
+// ATENÇÃO: "Movimentações" é o líquido de todas as movimentações do mês —
+// NÃO representa Aplicações nem Resgates individualmente; por isso os campos
+// aplic/resgate NÃO têm sugestão de source_key neste modelo.
+async function _aplicfinParseXpXperformance(pdf){
+  const M='xp_xperformance';
+  const pageTexts=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    try{
+      const page=await pdf.getPage(p);
+      const content=await page.getTextContent();
+      pageTexts.push(content.items.map(i=>String(i.str||'').trim()).filter(Boolean).join(' '));
+    }catch(e){ pageTexts.push(''); }
+  }
+  const textoTotal=pageTexts.join(' ');
+  const norm=s=>s.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ');
+  const tn=norm(textoTotal);
+  // Fingerprint: deve conter "XPERFORMANCE" e indicadores do layout
+  if(!tn.includes('XPERFORMANCE')) return null;
+  if(!tn.includes('RELATORIO DE INVESTIMENTOS')&&!tn.includes('RELATORIO')) return null;
+  if(!tn.includes('EVOLUCAO PATRIMONIAL')&&!tn.includes('PATRIMONIO INICIAL')) return null;
+
+  // Competência: extrair data de referência (ex: "30/09/2026" → "2026-09")
+  let competence=null;
+  const mData=textoTotal.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if(mData) competence=mData[3]+'-'+mData[2];
+
+  // Valores monetários: R$ 1.234,56 ou -R$ 1.234,56
+  const parseVal=s=>{
+    const m=String(s).replace(/R\$\s*/g,'').replace(/\./g,'').replace(',','.').trim();
+    const n=parseFloat(m);
+    return isNaN(n)?null:Math.round(n*100)/100;
+  };
+
+  // Tabela na página 4 (índice 3); fallback: varrer todo o texto
+  let patrimonioInicial=null,movimentacoes=null,ir=null,iof=null,patrimonioFinal=null,ganhoFinanceiro=null;
+  const pg4=pageTexts.length>3?pageTexts[3]:textoTotal;
+  // Linha: "set./26 R$ 660.098,86 -R$ 70.798,06 -R$ 2.448,71 -R$ 173,68 R$ 594.958,82 R$ 8.280,41 1,05%"
+  const mLinha=pg4.match(/(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\.?\/\d{2}\s+((?:-?R\$\s*[\d.,]+\s*){6})/i);
+  if(mLinha){
+    const vals=[...mLinha[1].matchAll(/-?R\$\s*[\d.,]+/gi)].map(m2=>parseVal(m2[0]));
+    if(vals.length>=6){
+      [patrimonioInicial,movimentacoes,ir,iof,patrimonioFinal,ganhoFinanceiro]=vals;
+    }
+  }
+
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  const irAbs=ir!=null?Math.abs(ir):null;
+  const iofAbs=iof!=null?Math.abs(iof):null;
+  const ganhoLiq=(ganhoFinanceiro!=null&&irAbs!=null&&iofAbs!=null)?r2(ganhoFinanceiro-irAbs-iofAbs):null;
+
+  const mk=(k,label,v,sec)=>({key:M+'.'+k,label,section:sec||'Evolução Patrimonial por Período',product:null,value:r2(v),calculationType:'DIRECT_TOTAL'});
+  const sources=[
+    mk('summary.patrimonio_inicial','Patrimônio inicial',patrimonioInicial),
+    mk('summary.movimentacoes','Movimentações líquidas do mês (≠ Aplic/Resgate)',movimentacoes),
+    mk('summary.ir','IR retido no mês',irAbs),
+    mk('summary.iof','IOF retido no mês',iofAbs),
+    mk('summary.patrimonio_final','Patrimônio final',patrimonioFinal),
+    mk('summary.ganho_financeiro','Ganho financeiro (bruto)',ganhoFinanceiro),
+  ];
+  if(ganhoLiq!=null) sources.push(mk('summary.ganho_financeiro_liquido','Ganho financeiro líquido (Ganho − IR − IOF)',ganhoLiq));
+
+  const validations=[];
+  if(patrimonioInicial!=null&&movimentacoes!=null&&ir!=null&&iof!=null&&ganhoFinanceiro!=null&&patrimonioFinal!=null){
+    // Equação: Patr.inicial + Movimentações + Ganho + IR(neg) + IOF(neg) = Patr.final
+    const calc=r2(patrimonioInicial+movimentacoes+ganhoFinanceiro+(ir)+(iof));
+    const ok=Math.abs(calc-patrimonioFinal)<0.15;
+    validations.push({ok,detail:'Patrimônio inicial + Movimentações + Ganho + IR + IOF = '+_fmt(calc)+' (esperado '+_fmt(patrimonioFinal)+')'+(ok?'':' — divergência de R$ '+Math.abs(calc-patrimonioFinal).toFixed(2))});
+  }
+
+  const warnings=[];
+  if(movimentacoes!=null) warnings.push('"Movimentações" ('+_fmt(Math.abs(movimentacoes))+') é o líquido consolidado do mês — não preencher Aplicação ou Resgate com esse valor. Para registrar Aplicações/Resgates, consulte a página "Movimentações" do extrato e separe cada item individualmente.');
+
+  return{bank:'XP',model:M,competence,account:null,
+    fingerprint:_aplicfinFingerprint('XP',M,['XPERFORMANCE','RELATORIO DE INVESTIMENTOS','EVOLUCAO PATRIMONIAL POR PERIODO']),
+    productMode:'single',products:[],sources,validations,warnings,pageCount:pdf.numPages};
+}
+
+// ── XP Investimentos: Posição Consolidada (snapshot de posição) ──
+// Extrai apenas o Patrimônio Total e a posição de cada ativo.
+// NÃO usar para preencher colunas mensais (Ganho, Aplicação, Resgate, IR) —
+// é um snapshot da data de consulta, não um relatório de competência mensal.
+async function _aplicfinParseXpPosicaoConsolidada(pdf){
+  const M='xp_posicao_consolidada';
+  const pageTexts=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    try{
+      const page=await pdf.getPage(p);
+      const content=await page.getTextContent();
+      pageTexts.push(content.items.map(i=>String(i.str||'').trim()).filter(Boolean).join(' '));
+    }catch(e){ pageTexts.push(''); }
+  }
+  const textoTotal=pageTexts.join(' ');
+  const norm=s=>s.toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ');
+  const tn=norm(textoTotal);
+  if(!tn.includes('POSICAO CONSOLIDADA')) return null;
+  if(!tn.includes('XP INVESTIMENTOS')) return null;
+  if(tn.includes('XPERFORMANCE')) return null; // evitar colisão com o outro modelo
+
+  // Data de referência (primeira data encontrada)
+  let competence=null;
+  const mData=textoTotal.match(/(\d{2})\/(\d{2})\/(\d{4})/);
+  if(mData) competence=mData[3]+'-'+mData[2];
+
+  const parseVal=s=>{
+    const m=String(s).replace(/R\$\s*/g,'').replace(/\./g,'').replace(',','.').trim();
+    const n=parseFloat(m);
+    return isNaN(n)?null:Math.round(n*100)/100;
+  };
+
+  // Patrimônio Total (página 2)
+  let patrimonioTotal=null;
+  for(const txt of pageTexts){
+    const mPT=txt.match(/(?:PATRIM[ÔO]NIO|PATRIM)[\s\S]{0,30}?R\$\s*([\d.,]+)/i);
+    if(mPT){ const v=parseVal(mPT[1]); if(v&&v>1000){ patrimonioTotal=v; break; } }
+  }
+
+  // Ativos individuais: "[Nome do Fundo] [data] [valor_cota] [qtd] R$ [em_cotiz] R$ [posicao] R$ [val_liq]"
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  const mk=(k,label,v,sec)=>({key:M+'.'+k,label,section:sec||'Posição Consolidada',product:null,value:r2(v),calculationType:'DIRECT_TOTAL'});
+  const sources=[mk('summary.patrimonio_total','Patrimônio Total',patrimonioTotal)];
+
+  // Varrer todas as páginas buscando linhas de ativo
+  for(const txt of pageTexts){
+    const mAtivos=[...txt.matchAll(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ0-9\s]{5,50}(?:FIF|FIC|FIM|RF|CP|RL|DI)[A-Za-zÀ-ÿ0-9\s]{0,30})\s+\d{2}\/\d{2}\/\d{4}\s+[\d.]+\s+([\d.,]+)\s+R\$\s*[\d.,]+\s+R\$\s*([\d.,]+)\s+R\$\s*([\d.,]+)/gi)];
+    for(const m of mAtivos){
+      const nome=m[1].replace(/\s+/g,' ').trim();
+      const posicao=parseVal(m[3]);
+      const valorLiq=parseVal(m[4]);
+      if(!posicao||posicao<=0) continue;
+      const slug=nome.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^a-z0-9]/g,'_').replace(/_+/g,'_').replace(/^_|_$/g,'').slice(0,30);
+      sources.push(mk('ativos.'+slug+'.posicao',nome+' → Posição (Bruto)',posicao,'Posição Detalhada dos Ativos'));
+      if(valorLiq!=null) sources.push(mk('ativos.'+slug+'.valor_liquido',nome+' → Valor Líquido',valorLiq,'Posição Detalhada dos Ativos'));
+    }
+  }
+
+  const warnings=['Posição Consolidada é um snapshot da data de consulta — NÃO use para preencher colunas mensais (Ganho, Aplicação, Resgate, IR). Use apenas para conferir o saldo atual (campo "Saldo Bruto do Extrato").'];
+  return{bank:'XP',model:M,competence,account:null,
+    fingerprint:_aplicfinFingerprint('XP',M,['POSICAO CONSOLIDADA','PATRIMONIO TOTAL','POSICAO DETALHADA DOS ATIVOS']),
+    productMode:'single',products:[],sources,validations:[],warnings,pageCount:pdf.numPages};
+}
+
 // Dispatcher dos leitores SEM IA de Ganhos/Rendimentos. Tenta cada parser
 // determinístico; o 1º que reconhecer o modelo grava e devolve 'PROCESSADO'
 // (ou 'MAPEAR' se abriu a tela de mapeamento coluna-do-site → informação-do-
@@ -42470,6 +42627,18 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
   if(itau){
     return await _ganhoAplicarParserSemIA(eid,pid,itau,file,statusEl);
   }
+
+  // XP Investimentos: XPerformance (relatório mensal) e Posição Consolidada (snapshot)
+  try{
+    _convItauGarantirWorker();
+    const buf=await file.arrayBuffer();
+    const pdfXp=await pdfjsLib.getDocument({data:buf}).promise;
+    const xpPerf=await _aplicfinParseXpXperformance(pdfXp);
+    if(xpPerf) return await _ganhoAplicarParserSemIA(eid,pid,xpPerf,file,statusEl);
+    const xpPos=await _aplicfinParseXpPosicaoConsolidada(pdfXp);
+    if(xpPos) return await _ganhoAplicarParserSemIA(eid,pid,xpPos,file,statusEl);
+  }catch(e){ console.error('Parser XP:',e); }
+
   return 'NAO_RECONHECIDO';
 }
 async function _ganhoUploadIAExtrair(forcarIA){
