@@ -939,6 +939,7 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
     <span class="idtag" id="empIdTag"></span>
     <span class="mn" id="empCnpj" style="font-family:var(--mono);color:var(--slate)"></span>
     <button class="btn bo bsm" onclick="enviarEmailPendencias(currentEid)">📧 Cobrar Documentos Pendentes</button>
+    <button class="btn bo bsm" onclick="goPage('cronograma');setTimeout(abrirCronAtribModal,80)">👤 Responsáveis</button>
     <span id="empCobrancaLog" style="font-size:11.5px;color:var(--slate)"></span>
   </div>
   <div id="empChips" style="display:flex;gap:6px;margin:6px 0 14px;flex-wrap:wrap"></div>
@@ -7010,7 +7011,24 @@ function isTrimestralItem(item){ return (item.nome||'').toLowerCase().includes('
 // Pedido do usuário 26/09/2026: "Pró-Labore Anual (apenas em Dezembro)" só se aplica em dezembro — nos outros meses
 // não é cobrado (mesmo tratamento do trimestral: mostra "—" e não conta como pendência). Vale pelo texto do nome.
 function isSoDezembroItem(item){ return /(apenas|somente|s[oó])\s+em\s+dezembro/i.test(item.nome||''); }
-function foraDoTrimestre(item,m){ return (isTrimestralItem(item) && !MESES_TRIMESTRE.includes(m.substring(5,7))) || (isSoDezembroItem(item) && m.substring(5,7)!=='12'); }
+// Pedido do usuário 05/10/2026: tarefa anual com mês específico no nome (ex: "IPTU Anual (em Fevereiro)")
+// só fica pendente naquele mês — nos demais mostra "—" sem contar como pendência.
+const _MESES_PT_NUM={'janeiro':'01','fevereiro':'02','marco':'03','março':'03','abril':'04','maio':'05','junho':'06','julho':'07','agosto':'08','setembro':'09','outubro':'10','novembro':'11','dezembro':'12'};
+function _mesAnualItem(item){
+  const n=(item.nome||'').toLowerCase();
+  if(!n.includes('anual')) return null;
+  const mt=n.match(/\bem\s+([a-zÀ-ÿ]+)/i);
+  if(!mt) return null;
+  return _MESES_PT_NUM[mt[1].toLowerCase()]||null;
+}
+function foraDoTrimestre(item,m){
+  const mm=m.substring(5,7);
+  if(isTrimestralItem(item) && !MESES_TRIMESTRE.includes(mm)) return true;
+  if(isSoDezembroItem(item) && mm!=='12') return true;
+  const ma=_mesAnualItem(item);
+  if(ma && mm!==ma) return true;
+  return false;
+}
 
 // "Preencher Ganhos/Rendimentos" não é marcado manualmente — ver comentário
 // em renderEmpresaChecklist. `eid` é opcional só por segurança com chamadas
@@ -7055,6 +7073,15 @@ function calcStatusMes(chk, mes, eid){
   return 'completo';
 }
 
+async function _atualizarBadgeAutomacao(eid){
+  try{
+    const{data}=await _supaClient.from('agencias_bancarias').select('id').eq('empresa_eid',eid).eq('ativo',true).ilike('banco_nome','%MISTER CONTADOR%').limit(1);
+    if(data&&data.length&&String(currentEid)===String(eid)){
+      const el=document.getElementById('empChips');
+      if(el)el.innerHTML+=`<span class="chip" style="background:#1d4ed8;color:#fff;font-weight:600">🤖 Automação</span>`;
+    }
+  }catch(e){}
+}
 // ─── FICHA DA EMPRESA ────────────────────────────────────────────────────────
 function renderEmpresaPage(eid){
   const emps = S.emps();
@@ -7072,6 +7099,7 @@ function renderEmpresaPage(eid){
   const fs=emp.fechamentoStatus||{tipo:'ativo'};
   if(fs.tipo&&fs.tipo!=='ativo') chips.push({ativo:'Ativo',bloqueio:'Bloqueio',saida:'Saída definitiva',extincao:'Extinção'}[fs.tipo]||(fs.tipo));
   document.getElementById('empChips').innerHTML = chips.map(c=>`<span class="chip">${c}</span>`).join('');
+  _atualizarBadgeAutomacao(eid);
   renderEmpresaChecklist(eid);
   const chk2=S.chk(String(eid));
   const obsEl=document.getElementById('empObs');
@@ -13429,6 +13457,7 @@ function renderMenuAdicionadasLista(menu){
     eids.forEach(eid=>{
       const emp=emps.find(e=>String(e.eid)===eid);
       if(!emp)return;
+      if(menu==='ganhos'){const cp=_ganhosComputarPeriodoFinalizado(eid);if(cp&&cp!==getMenuFinalizado('ganhos',eid))setMenuFinalizado('ganhos',eid,cp);}
       const valSalvo=getMenuFinalizado(menu,eid)||'';
       const valExibicao=valSalvo?valSalvo.split('-')[1]+'/'+valSalvo.split('-')[0]:'';
       const rowBg=valSalvo&&valSalvo>=S.fechAtual()?'background:var(--blue-bg)':'';
@@ -13461,6 +13490,7 @@ function renderMenuAdicionadasLista(menu){
     let periodoHtml='';
     let cardBg='var(--white)';
     if(menu==='ganhos'||menu==='parcelamentos'||menu==='emprestimos'||menu==='imoveis'){
+      if(menu==='ganhos'){const cp=_ganhosComputarPeriodoFinalizado(eid);if(cp&&cp!==getMenuFinalizado('ganhos',eid))setMenuFinalizado('ganhos',eid,cp);}
       const valSalvo=getMenuFinalizado(menu,eid)||'';
       const valExibicao=valSalvo?valSalvo.split('-')[1]+'/'+valSalvo.split('-')[0]:'';
       periodoHtml=`<input type="text" value="${esc(valExibicao)}" placeholder="MM/AAAA" maxlength="7" style="padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:3px;width:75px;text-align:center" oninput="formatarMesAno(this)" onblur="onMesAnoFinalizadoBlur(this,'${menu}','${eid}')" onclick="event.stopPropagation()">`;
@@ -39836,6 +39866,30 @@ function abrirGanhos(eid){
   }
 }
 function fecharGanhosModal(){document.getElementById('mGanhos').style.display='none';renderGanhos();}
+function _ganhosUltimaLinhaMes(g){
+  const dados=g.dados||{};
+  const preenchidos=Object.keys(dados).filter(mk=>{
+    const d=dados[mk];
+    return d&&Object.values(d).some(v=>parseFloat(v)>0);
+  });
+  if(!preenchidos.length)return '';
+  preenchidos.sort((a,b)=>{
+    const c=s=>s.split('/')[1]+'-'+s.split('/')[0];
+    return c(b).localeCompare(c(a));
+  });
+  return preenchidos[0];
+}
+function _ganhosComputarPeriodoFinalizado(eid){
+  const ganhos=getGanhos(eid);
+  const ativos=Object.values(ganhos).filter(g=>!g.arquivado);
+  if(!ativos.length)return '';
+  const meses=ativos.map(g=>_ganhosUltimaLinhaMes(g));
+  if(meses.some(m=>!m))return '';
+  const primeiro=meses[0];
+  if(!meses.every(m=>m===primeiro))return '';
+  const[mm,yyyy]=primeiro.split('/');
+  return yyyy+'-'+mm;
+}
 function renderGanhoResumoCards(){
   const eid=document.getElementById('ganhosEid').value;
   const mes=(document.getElementById('ganhoResumoMes')||{}).value;
@@ -39910,11 +39964,7 @@ function renderGanhoResumoCards(){
           </div>
           <div style="display:flex;flex-direction:column;gap:4px;flex-shrink:0">
             <div style="display:flex;gap:8px;align-items:center">
-              <select style="padding:4px 8px;border:1px solid #4a6a8a;border-radius:4px;font-size:10px;background:#1E3558;color:#9ab5d0;cursor:pointer" onchange="setGanhoStatus('${eid2}',${pid},'${periodKey}',this.value)" onclick="event.stopPropagation()">
-                <option value="andamento" ${((g.statusPorPeriodo||{})[periodKey]||'andamento')==='andamento'?'selected':''}>🟡 Em andamento</option>
-                <option value="finalizada" ${((g.statusPorPeriodo||{})[periodKey]||'andamento')==='finalizada'?'selected':''}>✅ Finalizada</option>
-                <option value="pendente" ${((g.statusPorPeriodo||{})[periodKey]||'andamento')==='pendente'?'selected':''}>⚠️ Docs. Pendentes</option>
-              </select>
+              ${(()=>{const ul=_ganhosUltimaLinhaMes(g);return ul?`<span style="font-size:11px;font-weight:700;color:#fff;background:#3DA0A0;border-radius:10px;padding:3px 10px;white-space:nowrap">${ul}</span>`:`<span style="font-size:11px;color:#9ab5d0">—</span>`;})()}
               <button class="btn bo bsm" onclick="abrirGanhoDetalhe('${eid2}',${pid})" style="font-size:.72rem;color:#b8ccdf;border-color:#4a6a8a">Abrir Detalhes</button>
               <button class="btn bd bsm" onclick="removeGanhoRendimento('${eid2}',${pid})" style="font-size:.72rem">✕</button>
             </div>
@@ -54585,7 +54635,7 @@ function _cronAtribRenderFull(manterForm){
   const nomesDisponiveis=[...new Set(S.listagem().filter(l=>l.tipo===tipo).map(l=>l.nome).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
   const resps=getResps();
   const atuais=_cronAtribuicoes().filter(a=>a.tipo===tipo).sort((a,b)=>String(a.nome||'').localeCompare(String(b.nome||''),'pt-BR',{sensitivity:'base'}));
-  h+=`<div style="overflow-x:auto;margin-bottom:14px;max-height:45vh;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r)"><table style="width:auto;min-width:690px;table-layout:auto;border-collapse:collapse;font-size:12.5px;background:var(--white)"><thead style="position:sticky;top:0"><tr>
+  h+=`<div style="overflow-x:auto;margin-bottom:14px;max-height:72vh;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r)"><table style="width:auto;min-width:690px;table-layout:auto;border-collapse:collapse;font-size:12.5px;background:var(--white)"><thead style="position:sticky;top:0"><tr>
     <th style="${_cronTh()};white-space:nowrap">Tarefa</th><th style="${_cronTh()};white-space:nowrap;min-width:120px">Responsável</th><th style="${_cronTh()};white-space:nowrap;min-width:110px">Empresas</th><th style="${_cronTh()};min-width:90px"></th></tr></thead><tbody>`;
   if(!atuais.length) h+=`<tr><td colspan="4" style="${_cronTd()};color:var(--slate)">Nenhuma atribuição cadastrada ainda.</td></tr>`;
   atuais.forEach(a=>{
