@@ -336,6 +336,9 @@ table.chk td.act{width:34px;text-align:center;position:sticky;right:0;background
 .cell.sm{background:var(--blue-bg);border-color:var(--blue);color:var(--blue);font-size:9.5px;font-weight:700}
 .cell.me{background:#FEF9C3;border-color:#EAB308;color:#854D0E;font-size:13px;font-weight:700}
 .badge-automacao{display:inline-block;font-size:9px;font-weight:700;padding:1px 5px;border-radius:4px;background:#1d4ed8;color:#fff;vertical-align:middle;letter-spacing:.3px;margin-left:4px}
+.cell.fim{background:#fee2e2;border-color:#fca5a5;color:#ef4444;font-size:9.5px;font-weight:700;cursor:pointer}
+.fim-btn{background:#ef4444;color:#fff;border:none;border-radius:3px;cursor:pointer;font-size:9px;font-weight:700;padding:1px 5px;line-height:1.6;width:100%;margin-bottom:2px}
+.fim-btn:hover{background:#dc2626}
 .addrow{display:flex;align-items:center;gap:6px;padding:9px 12px;border-top:1px dashed var(--border);color:var(--teal);font-size:12px;cursor:pointer}
 .addrow:hover{background:var(--teal-bg)}
 .addform{display:flex;gap:8px;align-items:center;padding:10px 12px;border-top:1px solid var(--border);background:#FAFCFE;flex-wrap:wrap}
@@ -411,6 +414,7 @@ table.chk th.nm.cur{background:#D0EDE9}
 .cell.sm{background:var(--blue-bg);border-color:var(--blue);color:var(--blue);font-size:10px;font-weight:700}
 .cell.me{background:#FEF9C3;border-color:#EAB308;color:#854D0E;font-size:13px;font-weight:700}
 .badge-automacao{background:#fff;color:#1d4ed8}
+.cell.fim{background:#450a0a;border-color:#991b1b;color:#fca5a5}
 .status-row th{background:#F1F5F9}
 .addrow td{background:var(--bg);border-top:2px dashed var(--border)}
 .addform{display:flex;align-items:center;gap:8px;padding:6px 0;flex-wrap:wrap}
@@ -7301,6 +7305,9 @@ function renderEmpresaChecklist(eid){
   const docs    = chk.documentos||[];
   const tarefas = chk.tarefas||[];
   const emp     = S.emps().find(e=>String(e.eid)===String(eid));
+  const docsAtivos  = docs.map((d,i)=>({item:d,realIdx:i})).filter(d=>!d.item.fimAPartir);
+  const docsInativos= docs.map((d,i)=>({item:d,realIdx:i})).filter(d=>!!d.item.fimAPartir);
+  const tarefasIdx  = tarefas.map((d,i)=>({item:d,realIdx:i}));
 
   // Meses fora do período de vínculo da empresa (antes da entrada ou depois da saída)
   const mesForaPeriodo = (m) => {
@@ -7389,14 +7396,20 @@ function renderEmpresaChecklist(eid){
   };
 
   // Helper: data rows for a section
-  const dataRows = (items, tipo) => {
+  // itemsIdx = [{item, realIdx}]  isInativo = true → mostra FIM e células de reativação
+  const dataRows = (itemsIdx, tipo, isInativo=false, showAddRow=true) => {
     const listagem = S.listagem().filter(l=>l.tipo===(tipo==='documentos'?'documento':'tarefa'));
     const appFin = getAppFinanceiro()||{};
     let rows = '';
-    items.forEach((item, idx)=>{
+    itemsIdx.forEach(({item, realIdx})=>{
       let cells = `<td class="nm">${esc(item.nome)}</td>`;
       visMeses.forEach(m=>{
         const cur=m===fech;
+        // Célula FIM (inativos, a partir do mês de encerramento)
+        if(isInativo && item.fimAPartir && m>=item.fimAPartir){
+          cells+=`<td class="mes${cur?' cur':''}"><div class="cell fim" onclick="reativarDoc('${eid}',${realIdx},'${m}')" title="FIM — clique para marcar como recebido e reativar este documento a partir de ${m.split('-')[1]}/${m.split('-')[0]}">FIM</div></td>`;
+          return;
+        }
         if(mesForaPeriodo(m)){
           cells+=`<td class="mes${cur?' cur':''}"><div class="cell na" style="cursor:default;opacity:.45" title="Fora do período da empresa">—</div></td>`;
           return;
@@ -7434,29 +7447,36 @@ function renderEmpresaChecklist(eid){
         }
         const v=(item.meses||{})[m]||'';
         const cls=v==='ok'?'cell ok':v==='na'?'cell na':v==='sm'?'cell sm':v==='me'?'cell me':'cell';
-        cells+=`<td class="mes${cur?' cur':''}"><div class="${cls}" onclick="toggleCelula('${eid}','${tipo}',${idx},'${m}')" title="${v==='me'?'Modelo de documento enviado incorreto':''}">${v==='ok'?'✓':v==='na'?'N/A':v==='sm'?'S/M':v==='me'?'≠':''}</div></td>`;
+        cells+=`<td class="mes${cur?' cur':''}"><div class="${cls}" onclick="toggleCelula('${eid}','${tipo}',${realIdx},'${m}')" title="${v==='me'?'Modelo de documento enviado incorreto':''}">${v==='ok'?'✓':v==='na'?'N/A':v==='sm'?'S/M':v==='me'?'≠':''}</div></td>`;
       });
       if(tipo==='documentos'){
-        cells+=`<td class="inf"><input class="iline" value="${esc(item.info||'')}" onchange="updateItemField('${eid}','${tipo}',${idx},'info',this.value)" placeholder="—"></td>`;
+        cells+=`<td class="inf"><input class="iline" value="${esc(item.info||'')}" onchange="updateItemField('${eid}','${tipo}',${realIdx},'info',this.value)" placeholder="—"></td>`;
       } else {
         cells+=`<td class="inf"></td>`;
       }
-      cells+=`<td><button class="del-btn" onclick="delLinha('${eid}','${tipo}',${idx})" title="Remover">×</button></td>`;
+      // Coluna de ações: botão FIM + excluir (ativos) ou só excluir (inativos)
+      if(tipo==='documentos' && !isInativo){
+        cells+=`<td><div style="display:flex;flex-direction:column;gap:2px"><button class="fim-btn" onclick="marcarFim('${eid}',${realIdx})" title="Encerrar recebimento deste documento a partir do fechamento atual">FIM</button><button class="del-btn" onclick="delLinha('${eid}','${tipo}',${realIdx})" title="Remover">×</button></div></td>`;
+      } else {
+        cells+=`<td><button class="del-btn" onclick="delLinha('${eid}','${tipo}',${realIdx})" title="Remover">×</button></td>`;
+      }
       rows+=`<tr>${cells}</tr>`;
     });
-    // Add row
-    const dlId='dl_'+tipo;
-    const addCols = visMeses.length + 2 + 1; // mes cols + 1 inf + del
-    rows+=`<tr class="addrow">
-      <td class="nm" colspan="${addCols}">
-        <div class="addform">
-          <input id="addNome_${tipo}" class="fi" list="${dlId}" placeholder="Nome do ${tipo==='documentos'?'documento':'tarefa'} (ou escolha da listagem)…" autocomplete="off" style="flex:1;min-width:160px">
-          <datalist id="${dlId}">${listagem.map(l=>`<option value="${esc(l.nome)}">`).join('')}</datalist>
-          ${tipo==='documentos'?`<input id="addInfo_${tipo}" class="fi" placeholder="Info (agência/conta…)" style="max-width:180px">`:''}
-          <button class="btn bp" onclick="addLinha('${eid}','${tipo}')">+ Adicionar</button>
-        </div>
-      </td>
-    </tr>`;
+    // Add row (só na seção ativa)
+    if(showAddRow){
+      const dlId='dl_'+tipo;
+      const addCols = visMeses.length + 2 + 1;
+      rows+=`<tr class="addrow">
+        <td class="nm" colspan="${addCols}">
+          <div class="addform">
+            <input id="addNome_${tipo}" class="fi" list="${dlId}" placeholder="Nome do ${tipo==='documentos'?'documento':'tarefa'} (ou escolha da listagem)…" autocomplete="off" style="flex:1;min-width:160px">
+            <datalist id="${dlId}">${listagem.map(l=>`<option value="${esc(l.nome)}">`).join('')}</datalist>
+            ${tipo==='documentos'?`<input id="addInfo_${tipo}" class="fi" placeholder="Info (agência/conta…)" style="max-width:180px">`:''}
+            <button class="btn bp" onclick="addLinha('${eid}','${tipo}')">+ Adicionar</button>
+          </div>
+        </td>
+      </tr>`;
+    }
     return rows;
   };
 
@@ -7474,11 +7494,12 @@ function renderEmpresaChecklist(eid){
     </thead>
     <tbody>
       ${divider('Documentação recebida')}
-      <tr class="status-row">${statusRow(docs,'Status')}</tr>
-      ${dataRows(docs,'documentos')}
+      <tr class="status-row">${statusRow(docsAtivos.map(d=>d.item),'Status')}</tr>
+      ${dataRows(docsAtivos,'documentos')}
       ${divider('Tarefas adicionais')}
       <tr class="status-row">${statusRow(tarefas,'Status')}</tr>
-      ${dataRows(tarefas,'tarefas')}
+      ${dataRows(tarefasIdx,'tarefas')}
+      ${docsInativos.length?divider('Inativos — Documentação encerrada')+''+dataRows(docsInativos,'documentos',true,false):''}
     </tbody>
   </table>`;
 
@@ -7503,6 +7524,22 @@ function toggleCelula(eid,tipo,idx,mes){
   item.meses[mes]=cur===''?'ok':cur==='ok'?'na':cur==='na'?'sm':cur==='sm'?'me':'';
   S.saveChk(String(eid),chk);
   renderChecklistTable(eid,tipo);
+}
+function marcarFim(eid,idx){
+  const chk=S.chk(String(eid));
+  if(!chk.documentos[idx]) return;
+  chk.documentos[idx].fimAPartir=S.fechAtual();
+  S.saveChk(String(eid),chk);
+  renderEmpresaChecklist(eid);
+}
+function reativarDoc(eid,idx,mes){
+  const chk=S.chk(String(eid));
+  if(!chk.documentos[idx]) return;
+  delete chk.documentos[idx].fimAPartir;
+  if(!chk.documentos[idx].meses) chk.documentos[idx].meses={};
+  chk.documentos[idx].meses[mes]='ok';
+  S.saveChk(String(eid),chk);
+  renderEmpresaChecklist(eid);
 }
 function updateItemField(eid,tipo,idx,field,val){
   const chk=S.chk(String(eid));
