@@ -30862,27 +30862,26 @@ async function renderLancctbRegistroContabil(){
     const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,'');
     q=q.ilike('historico_bancario',`%${t}%`);
   }
-  const { data: extratoRows, error, count } = await q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to);
+  // extratoRows (página) e linhasSoma (totais do filtro) em paralelo — eram sequenciais.
+  const [{ data: extratoRows, error, count }, { data: linhasSoma }] = await Promise.all([
+    q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to),
+    _lancctbFetchTudo(()=>{
+      let qs=_supaClient.from('lancamentos_extrato').select('id,valor_saida,valor_entrada')
+        .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel);
+      if(_lancctbRegistroStatus) qs=qs.eq('status_conciliacao',_lancctbRegistroStatus);
+      else qs=qs.neq('status_conciliacao','ignorado');
+      if(_lancctbRegistroDataDe) qs=qs.gte('data_pagamento',_lancctbRegistroDataDe);
+      if(_lancctbRegistroDataAte) qs=qs.lte('data_pagamento',_lancctbRegistroDataAte);
+      if(_lancctbRegistroDataExata) qs=qs.eq('data_pagamento',_lancctbRegistroDataExata);
+      if(_lancctbRegistroDirecao==='entrada') qs=qs.gt('valor_entrada',0);
+      else if(_lancctbRegistroDirecao==='saida') qs=qs.gt('valor_saida',0);
+      if(_lancctbRegistroValor){ const v=+_lancctbRegistroValor, de=v-0.01, ate=v+0.01; qs=qs.or(`and(valor_saida.gte.${de},valor_saida.lte.${ate}),and(valor_entrada.gte.${de},valor_entrada.lte.${ate})`); }
+      if(idsInterseccao) qs=qs.in('id',idsInterseccao);
+      if(_lancctbRegistroBusca.trim()){ const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,''); qs=qs.ilike('historico_bancario',`%${t}%`); }
+      return qs;
+    }),
+  ]);
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar registro contábil: ${esc(error.message)}</div>`; return; }
-
-  // Pedido do usuário 27/09/2026 ("preciso aqui da soma do que filtrei"): soma de TODAS as linhas
-  // que batem no filtro atual (não só as 50 da página) — mesmos filtros da consulta principal
-  // acima, só que buscando valor_saida/valor_entrada de todo mundo via _lancctbFetchTudo.
-  const { data: linhasSoma } = await _lancctbFetchTudo(()=>{
-    let qs=_supaClient.from('lancamentos_extrato').select('id,valor_saida,valor_entrada')
-      .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel);
-    if(_lancctbRegistroStatus) qs=qs.eq('status_conciliacao',_lancctbRegistroStatus);
-    else qs=qs.neq('status_conciliacao','ignorado');
-    if(_lancctbRegistroDataDe) qs=qs.gte('data_pagamento',_lancctbRegistroDataDe);
-    if(_lancctbRegistroDataAte) qs=qs.lte('data_pagamento',_lancctbRegistroDataAte);
-    if(_lancctbRegistroDataExata) qs=qs.eq('data_pagamento',_lancctbRegistroDataExata);
-    if(_lancctbRegistroDirecao==='entrada') qs=qs.gt('valor_entrada',0);
-    else if(_lancctbRegistroDirecao==='saida') qs=qs.gt('valor_saida',0);
-    if(_lancctbRegistroValor){ const v=+_lancctbRegistroValor, de=v-0.01, ate=v+0.01; qs=qs.or(`and(valor_saida.gte.${de},valor_saida.lte.${ate}),and(valor_entrada.gte.${de},valor_entrada.lte.${ate})`); }
-    if(idsInterseccao) qs=qs.in('id',idsInterseccao);
-    if(_lancctbRegistroBusca.trim()){ const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,''); qs=qs.ilike('historico_bancario',`%${t}%`); }
-    return qs;
-  });
   const somaEntrada=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_entrada||0),0);
   const somaSaida=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_saida||0),0);
 
@@ -30894,13 +30893,29 @@ async function renderLancctbRegistroContabil(){
   // sozinha pelos botões). Correção do usuário no mesmo dia: "se eu criei regra em julho, não pode
   // contar" — Regra criada DENTRO do próprio mês/período filtrado não conta como automático, porque
   // criar a Regra também foi trabalho manual seu; só conta regra que já existia antes do período.
-  let percAutomatico=null;
+  // ctbLinhas (página) e ctbTodos (percAutomatico) em paralelo — eram sequenciais
+  // (ctbTodos esperava linhasSoma; ctbLinhas esperava ctbTodos).
   const idsTodosFiltro=(linhasSoma||[]).map(r=>r.id);
+  const idsExtrato=(extratoRows||[]).map(r=>r.id);
+  const [ctbLinhasRes, ctbTodosRes] = await Promise.all([
+    idsExtrato.length
+      ? _supaClient.from('lancamentos_contabeis')
+          .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,informacao_extra,nf_parcela_id,notas_fiscais_parcelas(data_vencimento),plano_contas(numero_conta,descricao)')
+          .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true})
+      : Promise.resolve({data:[]}),
+    idsTodosFiltro.length
+      ? _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
+          .select('lancamento_extrato_id,origem_match,regra_matching_id').eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsTodosFiltro))
+      : Promise.resolve({data:[]}),
+  ]);
+  let ctbPorExtrato={};
+  (ctbLinhasRes.data||[]).forEach(l=>{ (ctbPorExtrato[l.lancamento_extrato_id]=ctbPorExtrato[l.lancamento_extrato_id]||[]).push(l); });
+  let linhas=(extratoRows||[]).map(r=>({ extrato:r, ctb:ctbPorExtrato[r.id]||[] }));
+
+  let percAutomatico=null;
   if(idsTodosFiltro.length){
-    const { data: ctbTodos } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
-      .select('lancamento_extrato_id,origem_match,regra_matching_id').eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsTodosFiltro));
     const origemPorExtrato={};
-    (ctbTodos||[]).forEach(l=>{ if(!(l.lancamento_extrato_id in origemPorExtrato)) origemPorExtrato[l.lancamento_extrato_id]=l; });
+    (ctbTodosRes.data||[]).forEach(l=>{ if(!(l.lancamento_extrato_id in origemPorExtrato)) origemPorExtrato[l.lancamento_extrato_id]=l; });
     const regraIds=[...new Set(Object.values(origemPorExtrato).map(l=>l.regra_matching_id).filter(Boolean))];
     let criadaAntesDaRegra={};
     const cutoff=_lancctbRegistroDataDe||null;
@@ -30912,16 +30927,6 @@ async function renderLancctbRegistroContabil(){
     percAutomatico={pct:Math.round(automatico/idsTodosFiltro.length*100),automatico,total:idsTodosFiltro.length};
   }
 
-  const idsExtrato=(extratoRows||[]).map(r=>r.id);
-  let ctbPorExtrato={};
-  if(idsExtrato.length){
-    const { data: ctbLinhas } = await _supaClient.from('lancamentos_contabeis')
-      .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,informacao_extra,nf_parcela_id,notas_fiscais_parcelas(data_vencimento),plano_contas(numero_conta,descricao)')
-      .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true});
-    (ctbLinhas||[]).forEach(l=>{ (ctbPorExtrato[l.lancamento_extrato_id]=ctbPorExtrato[l.lancamento_extrato_id]||[]).push(l); });
-  }
-  let linhas=(extratoRows||[]).map(r=>({ extrato:r, ctb:ctbPorExtrato[r.id]||[] }));
-
   // Pedido do usuário 18/09/2026: "pra fins de conferência, mesmo os
   // lançamentos conciliados devem mostrar como está o pagamento no fluxo de
   // caixa, cliente/fornecedor e Número entre parênteses". Conciliado mostra
@@ -30929,9 +30934,14 @@ async function renderLancctbRegistroContabil(){
   // ligada, tenta a de mesmo valor+data (palpite em itálico) só pra conferir.
   const conciliadosItens=linhas.filter(l=>l.ctb.length);
   if(conciliadosItens.length){
-    const { data: fluxoAll }=await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,numero,parcela,status_associado,lancamento_extrato_id')
-      .eq('empresa_eid',eid));
+    // Antes: varredura total da tabela fluxo_caixa_lancamentos da empresa (maior gargalo).
+    // Agora: 2 queries direcionadas em paralelo — vinculadas à página + livres da mesma conta.
+    const _FLUXO_SEL='id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,numero,parcela,status_associado,lancamento_extrato_id';
+    const [{ data: _flxLig },{ data: _flxLiv }]=await Promise.all([
+      idsExtrato.length ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).in('lancamento_extrato_id',idsExtrato)) : Promise.resolve({data:[]}),
+      contaAtual ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`)) : Promise.resolve({data:[]}),
+    ]);
+    const fluxoAll=[...(_flxLig||[]),...(_flxLiv||[])];
     const fluxoPorExtrato={};
     (fluxoAll||[]).forEach(f=>{ if(f.lancamento_extrato_id&&!fluxoPorExtrato[f.lancamento_extrato_id]) fluxoPorExtrato[f.lancamento_extrato_id]=f; });
     const livres=(fluxoAll||[]).filter(f=>!f.lancamento_extrato_id);
