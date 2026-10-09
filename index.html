@@ -20446,6 +20446,46 @@ async function _lancctbFetchTudo(construirQuery){
   }
   return { data:todos, error:null };
 }
+// Versão paralela sem count: busca em ondas de LOTE_PARALELO páginas simultâneas.
+// Para quando a última página da onda retornar < 1000 registros (não há mais dados).
+// Para 27k registros: 4 ondas × 8 requests = 4 round-trips em vez de 28 sequenciais.
+const _LANCCTB_FETCH_PARALELO_LOTE=8;
+async function _lancctbFetchTudoParalelo(construirQuery){
+  let todos=[], offset=0;
+  while(true){
+    const onda=Array.from({length:_LANCCTB_FETCH_PARALELO_LOTE},(_,i)=>offset+i*1000);
+    const resultados=await Promise.all(onda.map(off=>construirQuery().range(off,off+999)));
+    for(const r of resultados){
+      if(r.error) return { data:todos.length?todos:null, error:r.error };
+      todos=todos.concat(r.data||[]);
+    }
+    // Se a última página retornou < 1000 linhas, não há mais dados
+    if((resultados[resultados.length-1].data||[]).length<1000) break;
+    offset+=_LANCCTB_FETCH_PARALELO_LOTE*1000;
+  }
+  return { data:todos, error:null };
+}
+// Leitura em lotes para .in() com listas grandes: PostgREST codifica .in() na
+// URL — listas com milhares de ids estouram o limite e falham com 400 sem aviso.
+// construirQuery = função que retorna a query BASE sem .in(); col = nome da coluna
+// para filtrar; ids = lista completa de valores.
+// Busca em lotes de 500 em ondas de LOTE_PARALELO simultâneos.
+const _LANCCTB_IN_LOTE=500;
+async function _lancctbFetchPorIds(construirQuery,col,ids){
+  if(!ids||!ids.length) return { data:[], error:null };
+  const lotes=[];
+  for(let i=0;i<ids.length;i+=_LANCCTB_IN_LOTE) lotes.push(ids.slice(i,i+_LANCCTB_IN_LOTE));
+  let todos=[];
+  for(let i=0;i<lotes.length;i+=_LANCCTB_FETCH_PARALELO_LOTE){
+    const onda=lotes.slice(i,i+_LANCCTB_FETCH_PARALELO_LOTE);
+    const resultados=await Promise.all(onda.map(lote=>_lancctbFetchTudo(()=>construirQuery().in(col,lote))));
+    for(const r of resultados){
+      if(r.error) return { data:todos.length?todos:null, error:r.error };
+      todos=todos.concat(r.data||[]);
+    }
+  }
+  return { data:todos, error:null };
+}
 // PostgREST codifica .in() como parte da URL — uma lista com milhares de
 // ids estoura o limite de tamanho da URL e o request inteiro falha com 400
 // "Bad Request" (achado ao testar exclusão em massa do Fluxo de Caixa com
@@ -20620,6 +20660,7 @@ function _lancctbListaColFiltrosHtml(responsaveis,tribs){
 }
 
 function abrirLancctbEmpresa(eid){
+  _lancctbRegistroCache=null; // invalidar cache ao trocar empresa
   _lancctbEidAtual=String(eid);
   // Se "Registro Contábil" estiver oculta pra essa empresa (config de abas
   // visíveis), abre na 1ª aba que sobrou visível em vez de tentar mostrar
@@ -30762,11 +30803,18 @@ function _lancctbRegistroMudarMes(v){
   renderLancctbRegistroContabil();
 }
 
+let _lancctbRegistroCache=null; // {eid, html} — conteúdo anterior para exibição imediata
 async function renderLancctbRegistroContabil(){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
-  _lancctbCarregando(el);
+  // Mostrar conteúdo anterior imediatamente para evitar flash de "Carregando..."
+  // nas trocas de aba — usuário vê o dado antigo enquanto o novo chega.
+  if(_lancctbRegistroCache&&_lancctbRegistroCache.eid===eid){
+    _lancctbSetConteudo(el,_lancctbRegistroCache.html);
+  } else {
+    _lancctbCarregando(el);
+  }
 
   const { data: agencias } = await _supaClient.from('agencias_bancarias')
     .select('id,banco_nome,agencia,conta_corrente,conta_contabil_id,plano_contas(numero_conta,classificacao,descricao)')
@@ -30863,7 +30911,7 @@ async function renderLancctbRegistroContabil(){
     const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,'');
     q=q.ilike('historico_bancario',`%${t}%`);
   }
-  // Construtor da query base de totais (reutilizado para count e fetch)
+  // Construtor da query base de totais (reutilizado para fetch paralelo)
   function _qSoma(){
     let qs=_supaClient.from('lancamentos_extrato').select('id,valor_saida,valor_entrada')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel);
@@ -30879,25 +30927,16 @@ async function renderLancctbRegistroContabil(){
     if(_lancctbRegistroBusca.trim()){ const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,''); qs=qs.ilike('historico_bancario',`%${t}%`); }
     return qs;
   }
-  // Contar total ANTES de decidir se faz full-scan.
-  // Empresas com muitos registros sem filtro de data (ex: Mercado Pago Fast Lube
-  // com 27k+ linhas) travariam ao fazer _lancctbFetchTudo iterando 28x.
-  const LANCCTB_SOMA_MAX=2000;
-  const [{ data: extratoRows, error, count }, { count: totalSoma }] = await Promise.all([
+  // Página atual e soma geral em paralelo.
+  // linhasSoma usa _lancctbFetchTudoParalelo: para 27k registros faz 28 requests
+  // em ondas de 8 simultâneos (~1-2s) em vez de 28 sequenciais (~6s).
+  const [{ data: extratoRows, error, count }, { data: linhasSoma }] = await Promise.all([
     q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to),
-    _qSoma().select('id',{count:'exact',head:true}),
+    _lancctbFetchTudoParalelo(()=>_qSoma()),
   ]);
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar registro contábil: ${esc(error.message)}</div>`; return; }
-
-  // Se o total for grande demais, pular full-scan: sem soma total nem %automático.
-  // O usuário deve filtrar por data para ver esses valores.
-  const muitosRegistros=totalSoma>LANCCTB_SOMA_MAX;
-  let linhasSoma=null, somaEntrada=null, somaSaida=null;
-  if(!muitosRegistros){
-    ({ data: linhasSoma } = await _lancctbFetchTudo(()=>_qSoma()));
-    somaEntrada=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_entrada||0),0);
-    somaSaida=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_saida||0),0);
-  }
+  const somaEntrada=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_entrada||0),0);
+  const somaSaida=(linhasSoma||[]).reduce((s,l)=>s+(l.valor_saida||0),0);
 
   // Pedido do usuário 28/09/2026: "percentual de cada mês que foi fechado apenas usando os botões
   // de processamento, sem que eu tivesse que criar de regra pra fechar o mês" — conta, de TODO o
@@ -30907,8 +30946,9 @@ async function renderLancctbRegistroContabil(){
   // sozinha pelos botões). Correção do usuário no mesmo dia: "se eu criei regra em julho, não pode
   // contar" — Regra criada DENTRO do próprio mês/período filtrado não conta como automático, porque
   // criar a Regra também foi trabalho manual seu; só conta regra que já existia antes do período.
-  // ctbLinhas (página) e ctbTodos (percAutomatico) em paralelo — eram sequenciais
-  // (ctbTodos esperava linhasSoma; ctbLinhas esperava ctbTodos).
+  // ctbLinhas (página) e ctbTodos (percAutomatico) em paralelo.
+  // ctbTodosRes usa _lancctbFetchPorIds: quando idsTodosFiltro tem 27k entradas,
+  // .in() direto estouraria a URL; aqui batelamos em lotes de 500 em paralelo.
   const idsTodosFiltro=(linhasSoma||[]).map(r=>r.id);
   const idsExtrato=(extratoRows||[]).map(r=>r.id);
   const [ctbLinhasRes, ctbTodosRes] = await Promise.all([
@@ -30918,8 +30958,11 @@ async function renderLancctbRegistroContabil(){
           .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true})
       : Promise.resolve({data:[]}),
     idsTodosFiltro.length
-      ? _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
-          .select('lancamento_extrato_id,origem_match,regra_matching_id').eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsTodosFiltro))
+      ? _lancctbFetchPorIds(
+          ()=>_supaClient.from('lancamentos_contabeis')
+            .select('lancamento_extrato_id,origem_match,regra_matching_id')
+            .eq('empresa_eid',eid).eq('estornado',false),
+          'lancamento_extrato_id',idsTodosFiltro)
       : Promise.resolve({data:[]}),
   ]);
   let ctbPorExtrato={};
@@ -31105,7 +31148,9 @@ async function renderLancctbRegistroContabil(){
   const { count: pendenciasTotaisConta } = await qPendencias;
 
   _lancctbUltimoRegistro=linhas;
-  _lancctbSetConteudo(el,_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico,totalSoma,muitosRegistros}));
+  const _htmlRegistro=_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico});
+  _lancctbRegistroCache={eid,html:_htmlRegistro};
+  _lancctbSetConteudo(el,_htmlRegistro);
   _lancctbAtivarScrollTopoRegistro();
   if(String(eid)==='4') _lancctbAtualizarEstadoBotoesAcesso();
 }
@@ -31390,7 +31435,7 @@ async function _lancctbExecutarDesclassificarLote(){
   renderLancctbRegistroContabil();
 }
 
-function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta,somaEntrada,somaSaida,percAutomatico,totalSoma,muitosRegistros}){
+function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta,somaEntrada,somaSaida,percAutomatico}){
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
@@ -31429,7 +31474,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <span style="font-size:11px;color:var(--slate)">— use os campos abaixo do cabeçalho da tabela pra filtrar por coluna</span>
     ${percAutomatico?`<span style="font-size:11.5px;color:var(--slate);margin-left:auto" title="De todos os ${percAutomatico.total} lançamento(s) do filtro atual, ${percAutomatico.automatico} já foram resolvidos sozinhos pelos botões de processamento (matching automático ou Regra já existente) — sem você precisar escolher a conta na mão em 'Classificar'.">⚙️ <b style="color:${percAutomatico.pct>=80?'var(--teal)':percAutomatico.pct>=50?'var(--amber)':'var(--red)'}">${percAutomatico.pct}%</b> fechado só com os botões de processamento (${percAutomatico.automatico}/${percAutomatico.total})</span>`:''}
   </div>
-  ${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida,muitosRegistros,totalSoma)}
+  ${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida)}
   <div id="lancctbRegistroScrollTopo" style="overflow-x:auto;overflow-y:hidden;height:16px"><div id="lancctbRegistroScrollTopoEspacador" style="height:1px"></div></div>
   <div id="lancctbRegistroScrollWrap" style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 360px)">`;
   // Largura das colunas de histórico se ajusta ao maior texto carregado na
@@ -31527,7 +31572,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,contaAtual); });
   }
   html+=`</tbody></table></div>
-    <div style="margin-top:14px">${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida,muitosRegistros,totalSoma)}</div>`;
+    <div style="margin-top:14px">${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida)}</div>`;
   return html;
 }
 // Versão GENÉRICA da barra de paginação abaixo (pedido do usuário
@@ -31552,16 +31597,15 @@ function _lancctbPagGenericaHtml(paginaAtual,count,from,to,totalPaginas,incName,
 // Última — reaproveitada em cima E embaixo da tabela (pedido do usuário
 // 08/09/2026: só no rodapé obrigava rolar a página inteira pra trocar de
 // página numa tabela com muitas linhas).
-function _lancctbRegistroSomaFiltradaTexto(somaEntrada,somaSaida,muitosRegistros,totalSoma){
-  if(muitosRegistros) return `<span style="color:var(--amber)" title="Filtrar por data para ver totais">⚠️ ${totalSoma?.toLocaleString('pt-BR')||'Muitos'} registros — filtre por data para ver soma total e % automático</span>`;
+function _lancctbRegistroSomaFiltradaTexto(somaEntrada,somaSaida){
   somaEntrada=somaEntrada||0; somaSaida=somaSaida||0;
   if(_lancctbRegistroDirecao==='entrada') return `Soma filtrada: R$ ${_fmt(somaEntrada)}`;
   if(_lancctbRegistroDirecao==='saida') return `Soma filtrada: R$ ${_fmt(somaSaida)}`;
   return `Soma filtrada: R$ ${_fmt(somaEntrada)} entrada / R$ ${_fmt(somaSaida)} saída`;
 }
-function _lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida,muitosRegistros,totalSoma){
+function _lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida){
   return `<div style="display:flex;justify-content:space-between;align-items:center;font-size:12.5px;color:var(--slate);gap:8px;flex-wrap:wrap">
-    <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados <strong style="color:var(--ink)">· ${_lancctbRegistroSomaFiltradaTexto(somaEntrada,somaSaida,muitosRegistros,totalSoma)}</strong></span>
+    <span>Mostrando ${count?Math.min(from+1,count):0}–${Math.min(to+1,count||0)} de ${count||0} resultados <strong style="color:var(--ink)">· ${_lancctbRegistroSomaFiltradaTexto(somaEntrada,somaSaida)}</strong></span>
     <button class="btn bo bsm lancctb-classificar-lote-btn" ${_lancctbRegistroSelecionados.size?'':'disabled'} onclick="abrirLancctbClassificarLoteModal()">🗂️ Classificar em lote${_lancctbRegistroSelecionados.size?` (${_lancctbRegistroSelecionados.size})`:''}</button>
     <button class="btn bo bsm lancctb-desclassificar-lote-btn" ${_lancctbRegistroSelecionadosDesclass.size?'':'disabled'} onclick="_lancctbExecutarDesclassificarLote()" title="Desfaz o lançamento contábil e devolve NF/Comprovante/Fluxo de Caixa pra pendente — em lote">🔓 Desclassificar em lote${_lancctbRegistroSelecionadosDesclass.size?` (${_lancctbRegistroSelecionadosDesclass.size})`:''}</button>
     <div style="display:flex;gap:6px">
