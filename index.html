@@ -25504,26 +25504,27 @@ async function renderLancctbAplicacoes(){
     _lancctbSetConteudo(el,html);
     return;
   }
+  // Configs de dedução no saldo por aplicação (escolha do usuário: bruto/liquido/principal)
+  // Padrão histórico: "Aut Mais" (Itaú) usa líquido; todas as demais usam bruto.
+  const cfgSaldoKey=`aplic_saldo_resgate_${eid}`;
+  const cfgSaldo=S.g(cfgSaldoKey)||{};
   html+='<div style="display:grid;gap:14px">';
   aplicacoes.forEach(a=>{
     const conta=a.agencias_bancarias?`${esc(a.agencias_bancarias.banco_nome||'')} Ag ${esc(a.agencias_bancarias.agencia||'')} Cc ${esc(a.agencias_bancarias.conta_corrente||'')}`:'—';
     const contaContabil=a.plano_contas?`${esc(a.plano_contas.numero_conta)} - ${esc(a.plano_contas.descricao)}`:'— sem vínculo —';
     const todosMovs=movimentosPorAplicacao[a.id]||[];
-    // Sinal no saldo da Aplicação: Aplicação/Rendimento entram (+), Resgate
-    // sai (−) — sempre pelo valor BRUTO (correção real 22/09/2026: usar o
-    // Líquido subtraía a menos, deixando de deduzir IRRF/IOF do saldo da
-    // posição — conferido pelo usuário com a calculadora: Saldo anterior −
-    // Bruto bate; Saldo anterior − Líquido não). O Bruto é a posição cheia
-    // que sai do CDB no resgate; IRRF/IOF só afetam o que chega líquido na
-    // conta corrente (coluna Líquido/Crédito, separada) — nunca o saldo
-    // interno da Aplicação. Distinto de qual valor vai pro Extrato Bancário
-    // (escolha à parte em "No Resgate, usar no Extrato Bancário").
-    // EXCEÇÃO (usuário, 23/09/2026): na aplicação "Aut Mais" (Itaú) o saldo
-    // da tela do banco bate abatendo o LÍQUIDO do resgate, não o bruto
-    // (conferido na Pulse Marketing). Só vale pra Aut Mais — as demais
-    // continuam pelo Bruto, conforme a regra acima.
-    const abateLiquidoNoSaldo=/aut\.?\s*mais/i.test(a.nome||'');
-    const valorParaSaldo=m=>(abateLiquidoNoSaldo&&m.tipo==='resgate')?(m.valor_liquido||0):(m.valor_bruto||0);
+    // Dedução do Resgate no Saldo: escolha salva por aplicação (bruto/liquido/principal).
+    // Padrão: "Aut Mais" → líquido (conferido 23/09/2026 na Pulse Marketing);
+    // demais → bruto (IRRF/IOF só afetam o líquido que chega na conta corrente,
+    // nunca a posição interna da aplicação — ver comentário original 22/09/2026).
+    const padraoDeducao=/aut\.?\s*mais/i.test(a.nome||'')?'liquido':'bruto';
+    const deducaoResgate=cfgSaldo[String(a.id)]||padraoDeducao;
+    const valorParaSaldo=m=>{
+      if(m.tipo!=='resgate') return m.valor_bruto||0;
+      if(deducaoResgate==='liquido') return m.valor_liquido||0;
+      if(deducaoResgate==='principal') return m.valor_principal||m.valor_bruto||0;
+      return m.valor_bruto||0; // 'bruto'
+    };
     const sinal=m=>m.tipo==='resgate'?-1:1;
     const saldoInicial=a.saldo_inicial||0;
     let saldoAntes=saldoInicial;
@@ -25545,6 +25546,16 @@ async function renderLancctbAplicacoes(){
           <div style="text-align:right">
             <div style="font-size:10.5px;color:var(--slate)">Saldo inicial</div>
             <input class="si" style="width:110px;text-align:right;font-size:12px" value="${_fmt(saldoInicial)}" onblur="salvarLancctbAplicSaldoInicial(${a.id},this)" onkeydown="if(event.key==='Enter')this.blur()">
+          </div>
+          <div style="text-align:left">
+            <div style="font-size:10.5px;color:var(--slate);margin-bottom:3px">Resgate deduz do saldo</div>
+            <div style="display:flex;gap:4px">
+              ${['bruto','liquido','principal'].map(op=>{
+                const ativo=deducaoResgate===op;
+                const label=op==='bruto'?'Bruto':op==='liquido'?'Líquido':'Principal';
+                return `<button class="btn bsm" style="${ativo?'background:#1E3558;color:#fff;border-color:#1E3558':'background:var(--white);color:var(--ink);border-color:var(--border)'}" onclick="salvarLancctbAplicDeducaoSaldo(${a.id},'${op}')" title="Coluna usada pra abater o Resgate no Saldo da aplicação">${label}</button>`;
+              }).join('')}
+            </div>
           </div>
           <div style="display:flex;gap:6px;flex-wrap:wrap">
             <button class="btn bp bsm" onclick="abrirLancctbAplicacaoMovimentoModal(${a.id})">+ Lançar Movimento</button>
@@ -25586,6 +25597,14 @@ async function salvarLancctbAplicSaldoInicial(aplicacaoId,input){
   const { error } = await _supaClient.from('aplicacoes_financeiras').update({saldo_inicial:valor}).eq('id',aplicacaoId);
   if(error){ toast('Erro ao salvar saldo inicial: '+error.message,'err'); return; }
   toast('Saldo inicial salvo','ok');
+  renderLancctbAplicacoes();
+}
+async function salvarLancctbAplicDeducaoSaldo(aplicacaoId,opcao){
+  const eid=_lancctbEidAtual;
+  const k=`aplic_saldo_resgate_${eid}`;
+  const cfg=S.g(k)||{};
+  cfg[String(aplicacaoId)]=opcao;
+  await S.s(k,cfg);
   renderLancctbAplicacoes();
 }
 async function abrirLancctbAplicacaoModal(id){
