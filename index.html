@@ -29965,6 +29965,27 @@ async function _lancctbProcessarTributos(){
     let valor=l.valor_saida;
     const anoMes=l.data_pagamento.slice(0,7);
     if(!cachePorMes[anoMes]) cachePorMes[anoMes]=await _lancctbBuscarPdfsTributosDoMes(eid,anoMes);
+    // Pagamento antecipado: imposto pago antes do vencimento — o PDF pode
+    // estar na pasta do MÊS SEGUINTE (quando o vencimento cai no próximo
+    // mês). Acontece especialmente nos últimos dias do mês: ex. pago 28/09,
+    // vencimento 05/10 → PDF em Tributos do Mês_2026-10. Busca a pasta do
+    // mês seguinte e inclui só guias cujo vencimento seja <= 15 dias após o
+    // pagamento (nunca puxa guias de 2 meses à frente).
+    const diaPag=parseInt(l.data_pagamento.slice(8,10),10);
+    if(diaPag>=10){
+      const [anoStr,mesStr]=anoMes.split('-');
+      let mesNum=parseInt(mesStr,10)+1, anoNum=parseInt(anoStr,10);
+      if(mesNum>12){mesNum=1;anoNum++;}
+      const anoMesSeg=`${anoNum}-${String(mesNum).padStart(2,'0')}`;
+      if(!cachePorMes[anoMesSeg]) cachePorMes[anoMesSeg]=await _lancctbBuscarPdfsTributosDoMes(eid,anoMesSeg);
+      const extras=(cachePorMes[anoMesSeg]||[]).filter(f=>{
+        const info=_lancctbParsearNomeArquivoTributo(f.nome);
+        if(!info.vencimento) return false;
+        const diff=_lancctbDiasEntre(info.vencimento,l.data_pagamento);
+        return diff>=0&&diff<=15;
+      }).map(f=>({...f,_mesPasta:anoMesSeg}));
+      if(extras.length) cachePorMes[anoMes]=[...(cachePorMes[anoMes]||[]),...extras];
+    }
     const candidatos=cachePorMes[anoMes];
     // Achado real 22/09/2026 (CLD): "1 sem PDF no mês" não deixava claro se
     // a pasta do mês estava VAZIA pra essa empresa (nome do arquivo sem o
@@ -29973,7 +29994,7 @@ async function _lancctbProcessarTributos(){
     if(!candidatos.length&&!l._soExato) semPdfNaPasta++;
     let achou=null, folga=null, quase=null;
     for(const f of candidatos){
-      const chaveArquivo=anoMes+'|'+f.nome;
+      const chaveArquivo=(f._mesPasta||anoMes)+'|'+f.nome;
       if(arquivosUsados.has(chaveArquivo)) continue;
       let extraido;
       if(chaveArquivo in cacheLeituraPdf) extraido=cacheLeituraPdf[chaveArquivo];
@@ -30013,7 +30034,15 @@ async function _lancctbProcessarTributos(){
     if(!achou&&quase){ achou={f:quase.f,extraido:quase.extraido,diferenca:0}; arquivosUsados.add(quase.chaveArquivo); }
     // Pagamento único de VÁRIAS guias (ver _lancctbAcharCombinacaoGuias) — vem ANTES da folga de 30%, senão a soma vira "DIFERENÇA".
     if(!achou&&!l._soExato){
-      if(!leiturasPorMes[anoMes]) leiturasPorMes[anoMes]=await _lancctbLerGuiasDoMes(eid,anoMes,_lancctbTributosPermitirIA);
+      // Usa os candidatos já enriquecidos (incluindo guias do mês seguinte
+      // para pagamentos antecipados) em vez de releer só a pasta do anoMes.
+      if(!leiturasPorMes[anoMes]){
+        const leitMes=await _lancctbLerGuiasDoMes(eid,anoMes,_lancctbTributosPermitirIA);
+        // Adiciona guias do mês seguinte que já foram injetadas em candidatos
+        const extras=candidatos.filter(f=>f._mesPasta);
+        const extrasLidos=await Promise.all(extras.map(async f=>{ let extraido=null; try{ const arq=await f.fileHandle.getFile(); const pdf=await pdfjsLib.getDocument({data:await arq.arrayBuffer()}).promise; extraido=await _lancctbExtrairValorPdfTributo(pdf,_lancctbTributosPermitirIA); }catch(e){} return { f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave:f._mesPasta+'|'+f.nome }; }));
+        leiturasPorMes[anoMes]=[...leitMes,...extrasLidos];
+      }
       const comb=_lancctbAcharCombinacaoGuias(valor,l.data_pagamento,leiturasPorMes[anoMes],arquivosUsados);
       if(comb){
         comb.guias.forEach(g=>arquivosUsados.add(g.chave));
