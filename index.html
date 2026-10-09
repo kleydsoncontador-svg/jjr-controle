@@ -42954,23 +42954,82 @@ async function _lancctbAplicParseItauCdbDiOcrDet(file){
   if(content1.items.map(i=>i.str).join('').trim().length>=50) return null;
 
   const worker=await _ganhoOcrWorker();
-  let melhorRotacao=0, melhorScore=-1, melhorTexto='';
+
+  // 1. Detectar rotação
+  let melhorRotacao=0, melhorScore=-1;
   for(const rot of [0,90,180,270]){
     const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,1.3);
     const {data}=await worker.recognize(canvas);
     const score=_cdbdiScoreAncoras(data.text);
-    console.log('[cdbdi-ocr] rot='+rot+' score='+score+' texto(300)='+data.text.slice(0,300));
-    if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; melhorTexto=data.text; }
+    console.log('[cdbdi-ocr] rot='+rot+' score='+score);
+    if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; }
   }
   console.log('[cdbdi-ocr] melhorScore='+melhorScore+' melhorRotacao='+melhorRotacao);
-  if(melhorScore<1) return null; // não parece extrato CDB-DI Itaú
+  if(melhorScore<1) return null;
 
+  // 2. Extrair "Resumo do período" linha Total por coordenadas (OCR célula a célula)
+  // Coordenadas validadas empiricamente no extrato MRS 09/2026.
+  // Y=0.370-0.380 = linha Total; X por coluna (fração da largura da página).
+  const RESUMO_COLS=[
+    {n:'saldoAnterior',     x0:0.155,x1:0.257},
+    {n:'aplicacoes',        x0:0.257,x1:0.355},
+    {n:'resgatesRecompras', x0:0.355,x1:0.453},
+    {n:'vencimentos',       x0:0.453,x1:0.550},
+    {n:'rendAcumulado',     x0:0.550,x1:0.647},
+    {n:'saldoBrutoFinal',   x0:0.647,x1:0.746},
+    {n:'impostosEstimados', x0:0.746,x1:0.845},
+    {n:'saldoFinalLiquido', x0:0.845,x1:0.945},
+  ];
+  const RESUMO_Y0=0.370, RESUMO_Y1=0.380;
+  const CELL_SCALE=6, CELL_PAD=15;
+
+  // Correções de caracteres comuns em OCR desta fonte
+  const _fixOcr=s=>s
+    .replace(/(\d) \./g,'$1.').replace(/(\d) ,/g,'$1,')
+    .replace(/(\d)\//g,'$17').replace(/\/(\d)/g,'7$1')
+    .replace(/,\s*[UO]{1,2}/g,',00').replace(/\b[UO],/g,'0,');
+  const _parseBR=s=>{const m=(s||'').match(/(\d[\d.]*,\d{2})/);return m?parseFloat(m[1].replace(/\./g,'').replace(',','.')):null;};
+
+  const pageForResumo=await _ganhoItauFundoRenderizarPagina(page1,melhorRotacao,2.5);
+  const pW=pageForResumo.width, pH=pageForResumo.height;
+  const rSy=Math.round(RESUMO_Y0*pH), rSh=Math.round((RESUMO_Y1-RESUMO_Y0)*pH);
+  const resumoVals={};
+
+  try{
+    for(const col of RESUMO_COLS){
+      const rSx=Math.round(col.x0*pW), rSw=Math.round((col.x1-col.x0)*pW);
+      const cell=document.createElement('canvas');
+      cell.width=rSw*CELL_SCALE+CELL_PAD*2; cell.height=rSh*CELL_SCALE+CELL_PAD*2;
+      const cctx=cell.getContext('2d');
+      cctx.fillStyle='#fff'; cctx.fillRect(0,0,cell.width,cell.height);
+      cctx.drawImage(pageForResumo,rSx,rSy,rSw,rSh,CELL_PAD,CELL_PAD,rSw*CELL_SCALE,rSh*CELL_SCALE);
+      // PSM 6 (bloco) primeiro, PSM 7 (linha única) como fallback
+      await worker.setParameters({tessedit_pageseg_mode:'6',tessedit_char_whitelist:''});
+      const {data:d6}=await worker.recognize(cell);
+      let val=_parseBR(_fixOcr(d6.text.split('\n')[0].trim()));
+      if(val===null){
+        await worker.setParameters({tessedit_pageseg_mode:'7',tessedit_char_whitelist:''});
+        const {data:d7}=await worker.recognize(cell);
+        val=_parseBR(_fixOcr(d7.text.replace(/\n/g,' ').trim()));
+      }
+      resumoVals[col.n]=val;
+      console.log('[cdbdi-ocr] resumo',col.n,'=',val);
+    }
+  } finally {
+    try{ await worker.setParameters({tessedit_pageseg_mode:'3',tessedit_char_whitelist:''}); }catch(e){}
+  }
+
+  // Validações do Resumo
+  const {saldoAnterior,rendAcumulado,saldoBrutoFinal,impostosEstimados,saldoFinalLiquido}=resumoVals;
+  const v1=saldoAnterior!=null&&rendAcumulado!=null&&saldoBrutoFinal!=null?Math.abs(saldoAnterior+rendAcumulado-saldoBrutoFinal)<5:null;
+  const v2=saldoBrutoFinal!=null&&impostosEstimados!=null&&saldoFinalLiquido!=null?Math.abs(saldoBrutoFinal-impostosEstimados-saldoFinalLiquido)<5:null;
+  console.log('[cdbdi-ocr] V1(saldo+rend=bruto):',v1,' V2(bruto-imp=liq):',v2);
+
+  // 3. Extrair movimentos linha a linha (igual ao código anterior)
   const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
   const REGEX_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
   const pv=s=>parseFloat(String(s||'').replace(/\./g,'').replace(',','.'))||0;
   const arrumarNum=s=>/^-?\d{3,}$/.test(s)?s.replace(/^(-?\d+)(\d{2})$/,'$1,$2'):s;
-
-  let textoOcrCompleto='';
   const linhas=[];
   try{
     await worker.setParameters({tessedit_pageseg_mode:'6'});
@@ -42978,31 +43037,23 @@ async function _lancctbAplicParseItauCdbDiOcrDet(file){
       const page=p===1?page1:await pdf.getPage(p);
       const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,3.5);
       const {data}=await worker.recognize(canvas);
-      textoOcrCompleto+=(' '+data.text);
       const linhasOcr=(data.lines&&data.lines.length)
         ? data.lines.map(ln=>(ln.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text})))
         : _lancctbAgruparLinhasPorY((data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0})),12).map(l=>l.itens);
       linhasOcr.forEach(itens=>{
         if(!itens.length) return;
         const textoLinha=itens.map(i=>i.str).join(' ');
-        if(/SALDO\s+ANTERIOR/i.test(textoLinha)) return;
-        // Linha "SALDO FINAL" não é movimento, mas seu valor = saldo bruto final do mês
-        if(/SALDO\s+FINAL/i.test(textoLinha)){
-          const nums=itens.map(i=>arrumarNum(i.str)).filter(s=>REGEX_NUM.test(s)).map(s=>pv(s));
-          if(nums.length>=1&&!saldoBrutoFinal) saldoBrutoFinal=nums[0];
-          return;
-        }
+        if(/SALDO\s+ANTERIOR/i.test(textoLinha)||/SALDO\s+FINAL/i.test(textoLinha)) return;
         const dataItem=itens.find(i=>REGEX_DATA.test(i.str));
         if(!dataItem) return;
         const ehResgate=/RESGATE|VENCIMENTO/i.test(textoLinha);
         const ehAplicacao=/APLIC/i.test(textoLinha)&&!/VALOR\s+APLIC/i.test(textoLinha);
         const nums=itens.map(i=>arrumarNum(i.str)).filter(s=>REGEX_NUM.test(s)).map(s=>pv(s));
         if(ehResgate&&nums.length>=5){
-          // Ordem colunas: Valor(*)/bruto | IOF | IR | Valor creditado/líquido | Valor principal
           const [bruto,iof,irrf,liquido,principal]=nums;
-          linhas.push({ Data:dataItem.str, Principal:principal||0, Bruto:bruto||0, IOF:iof||0, IRRF:irrf||0, Liquido:liquido||0, Historico:'Resgate' });
+          linhas.push({Data:dataItem.str,Principal:principal||0,Bruto:bruto||0,IOF:iof||0,IRRF:irrf||0,Liquido:liquido||0,Historico:'Resgate'});
         } else if(ehAplicacao&&nums.length>=1){
-          linhas.push({ Data:dataItem.str, Principal:nums[0]||0, Bruto:null, IOF:null, IRRF:null, Liquido:null, Historico:'Aplicação' });
+          linhas.push({Data:dataItem.str,Principal:nums[0]||0,Bruto:null,IOF:null,IRRF:null,Liquido:null,Historico:'Aplicação'});
         }
       });
     }
@@ -43010,19 +43061,18 @@ async function _lancctbAplicParseItauCdbDiOcrDet(file){
     try{ await worker.setParameters({tessedit_pageseg_mode:'3'}); }catch(e){}
   }
 
-  // Resumo do período via regex no texto OCR completo
-  let saldoBrutoFinal=0, rendAcumulado=0, aplicacoes=0, resgatesRecompras=0;
-  const mSaldo=/saldo\s+bruto\s+final\s*\*{0,3}\s*([\d.]+,\d{2})/i.exec(textoOcrCompleto);
-  if(mSaldo) saldoBrutoFinal=pv(mSaldo[1]);
-  const mRend=/rendim\.\s*acumulado\s+([\d.]+,\d{2})/i.exec(textoOcrCompleto);
-  if(mRend) rendAcumulado=pv(mRend[1]);
-  const mApl=/Aplica[çc][oõ]es\s+([\d.]+,\d{2})/i.exec(textoOcrCompleto);
-  if(mApl) aplicacoes=pv(mApl[1]);
-  const mResg=/Resgates.Recompras\s+([\d.]+,\d{2})/i.exec(textoOcrCompleto);
-  if(mResg) resgatesRecompras=pv(mResg[1]);
-
-  if(!linhas.length&&!saldoBrutoFinal) return null;
-  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, resumo:{ saldoBrutoFinal, rendAcumulado, aplicacoes, resgatesRecompras } };
+  // Válido se tem saldo bruto final OU movimentos
+  if(!saldoBrutoFinal&&!linhas.length) return null;
+  return {
+    colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas,
+    resumo:{
+      saldoAnterior:saldoAnterior||0, saldoBrutoFinal:saldoBrutoFinal||0,
+      rendAcumulado:rendAcumulado||0, aplicacoes:resumoVals.aplicacoes||0,
+      resgatesRecompras:resumoVals.resgatesRecompras||0,
+      impostosEstimados:impostosEstimados||0, saldoFinalLiquido:saldoFinalLiquido||0,
+      validacoes:{v1,v2},
+    }
+  };
 }
 
 // Adaptador pro "Extrair sem IA" dos Ganhos/Rendimentos: o PDF do Itaú Aut
