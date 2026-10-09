@@ -26262,12 +26262,12 @@ async function _lancctbAplicUploadExtrair(usarIA){
         await _mpPdfAplicar(aplicacaoId,mpPdf,statusEl);
         return;
       }
-      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisNativoDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file));
+      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisNativoDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file))||(await _lancctbAplicParseItauCdbDiDet(file));
       if(!extraido){
         statusEl.textContent='';
         if(btn) btn.disabled=false;
         if(btnIa) btnIa.disabled=false;
-        toast('Não reconheci esse layout automaticamente (padrões Bradesco/Itaú Aut Mais/Mercado Pago) — tente "Usar IA Gemini".','err');
+        toast('Não reconheci esse layout automaticamente (padrões Bradesco/Itaú Aut Mais/CDB-DI/Mercado Pago) — tente "Usar IA Gemini".','err');
         return;
       }
     }
@@ -42826,6 +42826,103 @@ async function _lancctbAplicParseItauAutMaisNativoDet(file){
   });
 
   return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, diario };
+}
+
+// ── MODELO: Itaú "Extrato de movimentação mensal - CDB-DI" ──────────────────
+// Novo layout a partir de 09/2026 (MRS Participação). Duas fontes de dados:
+//
+// 1) Tabela superior (movimentações): colunas fixas — Data | Histórico |
+//    Valor(*) | IOF | IR | Valor creditado | Valor principal | Remuneração |
+//    Rentab. no período | Data aplicação | Data vencimento | N. operação
+//    Só tem linhas quando há RESGATE; quando só há rendimento o quadro exibe
+//    apenas SALDO ANTERIOR e SALDO FINAL.
+//
+// 2) "Resumo do período": colunas — Saldo anterior | Aplicações |
+//    Resgates/Recompras | Rendim. acumulado | Impostos estimados |
+//    Saldo final(**) | Saldo bruto final(**)
+//    → Usar "Saldo bruto final(**)" (posição sem impostos estimados).
+//    → NÃO usar "Impostos estimados" como IRRF — é imposto sobre a posição,
+//       não retido no mês.
+//
+// Quando há resgate: os valores IOF/IR/Valor creditado/Valor principal vêm
+// da tabela superior (lógica idêntica ao layout de 08/2026).
+// Quando não há resgate: só há rendimento → nenhum movimento é lançado
+// (o saldo é atualizado pelo Saldo Bruto Final).
+//
+// Identificadores: "Extrato de movimentação mensal" + "CDB-DI" no texto.
+// Retorno: { colunas, linhas } — mesma estrutura dos outros parsers; os
+// Ganhos/Rendimentos usam esse mesmo objeto depois.
+async function _lancctbAplicParseItauCdbDiDet(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const page1=await pdf.getPage(1);
+  const c1=await page1.getTextContent();
+  const texto1=c1.items.map(i=>i.str).join(' ');
+  // Ancora: novo layout tem "Extrato de movimentação mensal" e "CDB-DI"
+  if(!/Extrato\s+de\s+movimenta/i.test(texto1)||!/CDB[\s-]DI/i.test(texto1)) return null;
+  if(/Extrato\s+Consolidado\s+de\s+Movimenta/i.test(texto1)) return null; // não é Aut Mais
+
+  const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const REGEX_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
+  const pv=s=>parseFloat(String(s||'').replace(/\./g,'').replace(',','.'))||0;
+
+  // Coleta todos os itens de texto de todas as páginas
+  const todosItens=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const cont=p===1?c1:await (await pdf.getPage(p)).getTextContent();
+    cont.items.forEach(i=>{ if(i.str&&i.str.trim()) todosItens.push({str:i.str.trim(),x:Math.round(i.transform[4]),y:Math.round(i.transform[5])}); });
+  }
+  const textoCompleto=todosItens.map(i=>i.str).join(' ');
+
+  // ── 1. Resumo do período ──────────────────────────────────────────────
+  // Procura "Saldo bruto final" no texto completo (pode aparecer com (**)
+  // ou sem asteriscos dependendo do PDF).
+  let saldoBrutoFinal=0, rendAcumulado=0, aplicacoes=0, resgatesRecompras=0;
+  const mResumoBruto=/Saldo\s+bruto\s+final\s*(?:\*+\s*)?([\d.]+,\d{2})/i.exec(textoCompleto);
+  if(mResumoBruto) saldoBrutoFinal=pv(mResumoBruto[1]);
+  const mRendAcum=/Rendim\.\s+acumulado\s+([\d.]+,\d{2})/i.exec(textoCompleto);
+  if(mRendAcum) rendAcumulado=pv(mRendAcum[1]);
+  const mAplics=/\bAplica[çc][oõ]es\s+([\d.]+,\d{2})/i.exec(textoCompleto);
+  if(mAplics) aplicacoes=pv(mAplics[1]);
+  const mResgatesRec=/Resgates\/Recompras\s+([\d.]+,\d{2})/i.exec(textoCompleto);
+  if(mResgatesRec) resgatesRecompras=pv(mResgatesRec[1]);
+
+  // ── 2. Tabela superior: movimentações (resgate/aplicação do mês) ──────
+  // Colunas (pela ordem horizontal): Data | Histórico | Valor(*) | IOF |
+  // IR | Valor creditado | Valor principal | Remuneração | ...
+  // Uma linha de RESGATE tem: data, texto "RESGATE", e os valores na ordem
+  // acima. Linhas "SALDO ANTERIOR"/"SALDO FINAL" são ignoradas.
+  const linhas=[];
+  const porY=_lancctbAgruparLinhasPorY(todosItens,2.5);
+  porY.forEach(linhaY=>{
+    const itensOrd=linhaY.itens.slice().sort((a,b)=>a.x-b.x);
+    const textoLinha=itensOrd.map(i=>i.str).join(' ');
+    if(/SALDO\s+ANTERIOR|SALDO\s+FINAL/i.test(textoLinha)) return;
+    const dataItem=itensOrd.find(i=>REGEX_DATA.test(i.str));
+    if(!dataItem) return;
+    const ehResgate=/RESGATE|VENCIMENTO/i.test(textoLinha);
+    const ehAplicacao=/APLIC/i.test(textoLinha)&&!/VALOR\s+APLIC/i.test(textoLinha);
+    const nums=itensOrd.filter(i=>REGEX_NUM.test(i.str)).map(i=>pv(i.str));
+    if(ehResgate&&nums.length>=5){
+      // Ordem: Valor(*) | IOF | IR | Valor creditado | Valor principal | [Remuneração...]
+      const [bruto,iof,irrf,liquido,principal]=nums;
+      const rendBruto=bruto>0&&principal>0?Math.round((bruto-principal)*100)/100:0;
+      linhas.push({ Data:dataItem.str, Principal:principal||0, Bruto:bruto||0, IOF:iof||0, IRRF:irrf||0, Liquido:liquido||0, Historico:'Resgate' });
+    } else if(ehAplicacao&&nums.length>=1){
+      linhas.push({ Data:dataItem.str, Principal:nums[0]||0, Bruto:null, IOF:null, IRRF:null, Liquido:null, Historico:'Aplicação' });
+    }
+  });
+
+  // Se não houver movimentos mas tem Saldo Bruto Final, retorna linhas vazias
+  // (o saldo será atualizado fora); se não achou nada útil, retorna null.
+  if(!linhas.length&&!saldoBrutoFinal) return null;
+
+  return {
+    colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'],
+    linhas,
+    // Metadados do Resumo — disponíveis para Ganhos/Rendimentos
+    resumo:{ saldoBrutoFinal, rendAcumulado, aplicacoes, resgatesRecompras },
+  };
 }
 
 // Adaptador pro "Extrair sem IA" dos Ganhos/Rendimentos: o PDF do Itaú Aut
