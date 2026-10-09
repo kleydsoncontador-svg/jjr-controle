@@ -31041,22 +31041,45 @@ async function renderLancctbRegistroContabil(){
   if(pendentes.length){
     // Saída sugere via Comprovantes (pagamento), entrada via Comprovantes de
     // Recebimento — tabelas separadas (ver Fase 9), nunca cruza uma com a outra.
+    // Filtro de data para comprovantes, NF parcelas e Fluxo: ±LANCCTB_MATCH_TOLERANCIA_DIAS
+    // em torno do range de datas dos pendentes na página atual. Evita buscar a
+    // tabela inteira em empresas com volume alto (Fast Lube tem 100k+ NF parcelas
+    // pendentes). Fetch paralelo (_lancctbFetchTudoParalelo) nos 3 mais pesados.
+    const _dpndDatas=pendentes.map(it=>it.extrato.data_pagamento).filter(Boolean).sort();
+    const _addDPnd=(d,n)=>{ const dt=new Date(d+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+    const _dMinPnd=_dpndDatas.length?_addDPnd(_dpndDatas[0],-LANCCTB_MATCH_TOLERANCIA_DIAS):null;
+    const _dMaxPnd=_dpndDatas.length?_addDPnd(_dpndDatas[_dpndDatas.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS):null;
     const [{ data: compsPag },{ data: compsReceb },{ data: parcelasPend },{ data: fluxoPend }]=await Promise.all([
-      _lancctbFetchTudo(()=>_supaClient.from('comprovantes_bancarios')
-        .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
-        .eq('empresa_eid',eid).eq('status_conciliacao','pendente')),
-      _lancctbFetchTudo(()=>_supaClient.from('comprovantes_recebimento')
-        .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
-        .eq('empresa_eid',eid).eq('status_conciliacao','pendente')),
+      _lancctbFetchTudoParalelo(()=>{
+        let q=_supaClient.from('comprovantes_bancarios')
+          .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
+          .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
+        if(_dMinPnd) q=q.gte('data_pagamento',_dMinPnd);
+        if(_dMaxPnd) q=q.lte('data_pagamento',_dMaxPnd);
+        return q;
+      }),
+      _lancctbFetchTudoParalelo(()=>{
+        let q=_supaClient.from('comprovantes_recebimento')
+          .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
+          .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
+        if(_dMinPnd) q=q.gte('data_pagamento',_dMinPnd);
+        if(_dMaxPnd) q=q.lte('data_pagamento',_dMaxPnd);
+        return q;
+      }),
       // Pedido do usuário 09/09/2026: "não trouxe data da parcela e nem
       // disse sim ou não pra se está dentro do mês" — antes essas 2 colunas
       // só vinham preenchidas depois de conciliado (ligadas via ctb). Pra
       // pendente, sugere a NF pendente mais próxima por valor+data (mesma
       // lógica de tolerância do resto do módulo) e já mostra Data
       // Parcela/Mês Bate como PALPITE (itálico), antes de confirmar.
-      _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
-        .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario)')
-        .eq('empresa_eid',eid).eq('status_conciliacao','pendente')),
+      _lancctbFetchTudoParalelo(()=>{
+        let q=_supaClient.from('notas_fiscais_parcelas')
+          .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario)')
+          .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
+        if(_dMinPnd) q=q.gte('data_vencimento',_dMinPnd);
+        if(_dMaxPnd) q=q.lte('data_vencimento',_dMaxPnd);
+        return q;
+      }),
       // Pedido do usuário 09/09/2026: "preciso ter a coluna Fluxo de Caixa,
       // pois posso criar regra por ela, tentando associar ao fluxo, pra
       // aqueles que ainda não estão conciliados" — mostra se já existe uma
