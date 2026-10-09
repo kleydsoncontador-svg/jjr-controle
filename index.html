@@ -26262,7 +26262,7 @@ async function _lancctbAplicUploadExtrair(usarIA){
         await _mpPdfAplicar(aplicacaoId,mpPdf,statusEl);
         return;
       }
-      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisNativoDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file))||(await _lancctbAplicParseItauCdbDiDet(file));
+      extraido=(await _lancctbAplicParseBradescoPadraoDet(file))||(await _lancctbAplicParseBradescoCdbMultiDet(file))||(await _lancctbAplicParseItauAutMaisNativoDet(file))||(await _lancctbAplicParseItauAutMaisOcrDet(file))||(await _lancctbAplicParseItauCdbDiDet(file))||(await _lancctbAplicParseItauCdbDiOcrDet(file));
       if(!extraido){
         statusEl.textContent='';
         if(btn) btn.disabled=false;
@@ -42923,6 +42923,82 @@ async function _lancctbAplicParseItauCdbDiDet(file){
     // Metadados do Resumo — disponíveis para Ganhos/Rendimentos
     resumo:{ saldoBrutoFinal, rendAcumulado, aplicacoes, resgatesRecompras },
   };
+}
+
+// ── Itaú CDB-DI novo layout — PDF imagem (OCR) ───────────────────────────────
+const CDBDI_ANCORAS=[/CDB.?DI/i,/extrato.*movimenta/i,/saldo.*bruto.*final/i,/rendim.*acumulado/i,/RESGATE|VENCIMENTO/];
+function _cdbdiScoreAncoras(t){ return CDBDI_ANCORAS.reduce((s,rx)=>s+(rx.test(t||'')?1:0),0); }
+
+async function _lancctbAplicParseItauCdbDiOcrDet(file){
+  const buf=await file.arrayBuffer();
+  const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+  const page1=await pdf.getPage(1);
+  const content1=await page1.getTextContent();
+  // Só entra nessa rota se não houver texto nativo suficiente
+  if(content1.items.map(i=>i.str).join('').trim().length>=50) return null;
+
+  const worker=await _ganhoOcrWorker();
+  let melhorRotacao=0, melhorScore=-1, melhorTexto='';
+  for(const rot of [0,90,180,270]){
+    const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,1.3);
+    const {data}=await worker.recognize(canvas);
+    const score=_cdbdiScoreAncoras(data.text);
+    if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; melhorTexto=data.text; }
+  }
+  if(melhorScore<2) return null; // não parece extrato CDB-DI Itaú
+
+  const REGEX_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+  const REGEX_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
+  const pv=s=>parseFloat(String(s||'').replace(/\./g,'').replace(',','.'))||0;
+  const arrumarNum=s=>/^-?\d{3,}$/.test(s)?s.replace(/^(-?\d+)(\d{2})$/,'$1,$2'):s;
+
+  let textoOcrCompleto='';
+  const linhas=[];
+  try{
+    await worker.setParameters({tessedit_pageseg_mode:'6'});
+    for(let p=1;p<=pdf.numPages;p++){
+      const page=p===1?page1:await pdf.getPage(p);
+      const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,3.5);
+      const {data}=await worker.recognize(canvas);
+      textoOcrCompleto+=(' '+data.text);
+      const linhasOcr=(data.lines&&data.lines.length)
+        ? data.lines.map(ln=>(ln.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text})))
+        : _lancctbAgruparLinhasPorY((data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>({str:w.text,x:(w.bbox.x0+w.bbox.x1)/2,y:-w.bbox.y0})),12).map(l=>l.itens);
+      linhasOcr.forEach(itens=>{
+        if(!itens.length) return;
+        const textoLinha=itens.map(i=>i.str).join(' ');
+        if(/SALDO\s+ANTERIOR|SALDO\s+FINAL/i.test(textoLinha)) return;
+        const dataItem=itens.find(i=>REGEX_DATA.test(i.str));
+        if(!dataItem) return;
+        const ehResgate=/RESGATE|VENCIMENTO/i.test(textoLinha);
+        const ehAplicacao=/APLIC/i.test(textoLinha)&&!/VALOR\s+APLIC/i.test(textoLinha);
+        const nums=itens.map(i=>arrumarNum(i.str)).filter(s=>REGEX_NUM.test(s)).map(s=>pv(s));
+        if(ehResgate&&nums.length>=5){
+          // Ordem colunas: Valor(*)/bruto | IOF | IR | Valor creditado/líquido | Valor principal
+          const [bruto,iof,irrf,liquido,principal]=nums;
+          linhas.push({ Data:dataItem.str, Principal:principal||0, Bruto:bruto||0, IOF:iof||0, IRRF:irrf||0, Liquido:liquido||0, Historico:'Resgate' });
+        } else if(ehAplicacao&&nums.length>=1){
+          linhas.push({ Data:dataItem.str, Principal:nums[0]||0, Bruto:null, IOF:null, IRRF:null, Liquido:null, Historico:'Aplicação' });
+        }
+      });
+    }
+  } finally {
+    try{ await worker.setParameters({tessedit_pageseg_mode:'3'}); }catch(e){}
+  }
+
+  // Resumo do período via regex no texto OCR completo
+  let saldoBrutoFinal=0, rendAcumulado=0, aplicacoes=0, resgatesRecompras=0;
+  const mSaldo=/saldo\s+bruto\s+final\s*\*{0,3}\s*([\d.]+,\d{2})/i.exec(textoOcrCompleto);
+  if(mSaldo) saldoBrutoFinal=pv(mSaldo[1]);
+  const mRend=/rendim\.\s*acumulado\s+([\d.]+,\d{2})/i.exec(textoOcrCompleto);
+  if(mRend) rendAcumulado=pv(mRend[1]);
+  const mApl=/Aplica[çc][oõ]es\s+([\d.]+,\d{2})/i.exec(textoOcrCompleto);
+  if(mApl) aplicacoes=pv(mApl[1]);
+  const mResg=/Resgates.Recompras\s+([\d.]+,\d{2})/i.exec(textoOcrCompleto);
+  if(mResg) resgatesRecompras=pv(mResg[1]);
+
+  if(!linhas.length&&!saldoBrutoFinal) return null;
+  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, resumo:{ saldoBrutoFinal, rendAcumulado, aplicacoes, resgatesRecompras } };
 }
 
 // Adaptador pro "Extrair sem IA" dos Ganhos/Rendimentos: o PDF do Itaú Aut
