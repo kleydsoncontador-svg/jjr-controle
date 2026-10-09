@@ -30938,9 +30938,16 @@ async function renderLancctbRegistroContabil(){
     // Antes: varredura total da tabela fluxo_caixa_lancamentos da empresa (maior gargalo).
     // Agora: 2 queries direcionadas em paralelo — vinculadas à página + livres da mesma conta.
     const _FLUXO_SEL='id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,numero,parcela,status_associado,lancamento_extrato_id';
+    // Para palpites livres: restringir ao range de datas da página ±3 dias para
+    // evitar buscar toda a tabela em empresas com muitos lançamentos (ex: Fast Lube
+    // tem 9k+ livres — sem filtro de data faz 10 requests de 1000 linhas cada).
+    const _datasExtrato=(extratoRows||[]).map(r=>r.data_pagamento).filter(Boolean).sort();
+    const _addDias=(d,n)=>{ const dt=new Date(d+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+    const _datMinLiv=_datasExtrato.length ? _addDias(_datasExtrato[0],-LANCCTB_MATCH_TOLERANCIA_DIAS) : null;
+    const _datMaxLiv=_datasExtrato.length ? _addDias(_datasExtrato[_datasExtrato.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS) : null;
     const [{ data: _flxLig },{ data: _flxLiv }]=await Promise.all([
       idsExtrato.length ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).in('lancamento_extrato_id',idsExtrato)) : Promise.resolve({data:[]}),
-      contaAtual ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`)) : Promise.resolve({data:[]}),
+      contaAtual && _datMinLiv ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`).gte('data',_datMinLiv).lte('data',_datMaxLiv)) : Promise.resolve({data:[]}),
     ]);
     const fluxoAll=[...(_flxLig||[]),...(_flxLiv||[])];
     const fluxoPorExtrato={};
@@ -42886,17 +42893,45 @@ async function _lancctbAplicParseItauCdbDiDet(file){
   const textoCompleto=todosItens.map(i=>i.str).join(' ');
 
   // ── 1. Resumo do período ──────────────────────────────────────────────
-  // Procura "Saldo bruto final" no texto completo (pode aparecer com (**)
-  // ou sem asteriscos dependendo do PDF).
-  let saldoBrutoFinal=0, rendAcumulado=0, aplicacoes=0, resgatesRecompras=0;
-  const mResumoBruto=/Saldo\s+bruto\s+final\s*(?:\*+\s*)?([\d.]+,\d{2})/i.exec(textoCompleto);
-  if(mResumoBruto) saldoBrutoFinal=pv(mResumoBruto[1]);
-  const mRendAcum=/Rendim\.\s+acumulado\s+([\d.]+,\d{2})/i.exec(textoCompleto);
-  if(mRendAcum) rendAcumulado=pv(mRendAcum[1]);
-  const mAplics=/\bAplica[çc][oõ]es\s+([\d.]+,\d{2})/i.exec(textoCompleto);
-  if(mAplics) aplicacoes=pv(mAplics[1]);
-  const mResgatesRec=/Resgates\/Recompras\s+([\d.]+,\d{2})/i.exec(textoCompleto);
-  if(mResgatesRec) resgatesRecompras=pv(mResgatesRec[1]);
+  // O layout do PDF pode ter os cabeçalhos das colunas intercalados com os
+  // valores no fluxo de texto (ex: "Saldo bruto final(**) 465.995,27 44.394.929,79"),
+  // então regex no texto concatenado captura o número errado.
+  // Estratégia correta: encontrar "Resumo do período" nos itens e coletar os
+  // primeiros 8 números BR em sequência — eles correspondem às 8 colunas da
+  // linha "Total" na ordem visual da tabela.
+  const REGEX_BR_NUM=/^\d[\d.]*,\d{2}$/;
+  const idxResumo=todosItens.findIndex(i=>/Resumo\s+do\s+per[ií]odo/i.test(i.str));
+  let saldoAnterior=0, aplicacoes=0, resgatesRecompras=0, vencimentos=0;
+  let rendAcumulado=0, saldoBrutoFinal=0, impostosEstimados=0, saldoFinalLiquido=0;
+  if(idxResumo>=0){
+    const nums8=[];
+    for(let i=idxResumo+1;i<todosItens.length&&nums8.length<8;i++){
+      if(REGEX_BR_NUM.test(todosItens[i].str)) nums8.push(pv(todosItens[i].str));
+    }
+    if(nums8.length>=8){
+      [saldoAnterior,aplicacoes,resgatesRecompras,vencimentos,rendAcumulado,saldoBrutoFinal,impostosEstimados,saldoFinalLiquido]=nums8;
+    } else if(nums8.length>=6){
+      // fallback parcial: pelo menos saldoBrutoFinal e rendAcumulado
+      [,aplicacoes,resgatesRecompras,,rendAcumulado,saldoBrutoFinal]=nums8;
+    }
+  }
+  // Fallback antigo para PDFs onde o layout concatena sem interleaving
+  if(!saldoBrutoFinal){
+    const mResumoBruto=/Saldo\s+bruto\s+final\s*(?:\*+\s*)?([\d.]+,\d{2})/i.exec(textoCompleto);
+    if(mResumoBruto) saldoBrutoFinal=pv(mResumoBruto[1]);
+  }
+  if(!rendAcumulado){
+    const mRendAcum=/Rendim\.\s+acumulado\s+([\d.]+,\d{2})/i.exec(textoCompleto);
+    if(mRendAcum) rendAcumulado=pv(mRendAcum[1]);
+  }
+  if(!aplicacoes){
+    const mAplics=/\bAplica[çc][oõ]es\s+([\d.]+,\d{2})/i.exec(textoCompleto);
+    if(mAplics) aplicacoes=pv(mAplics[1]);
+  }
+  if(!resgatesRecompras){
+    const mResgatesRec=/Resgates\/Recompras\s+([\d.]+,\d{2})/i.exec(textoCompleto);
+    if(mResgatesRec) resgatesRecompras=pv(mResgatesRec[1]);
+  }
 
   // ── 2. Tabela superior: movimentações (resgate/aplicação do mês) ──────
   // Colunas (pela ordem horizontal): Data | Histórico | Valor(*) | IOF |
@@ -42937,7 +42972,7 @@ async function _lancctbAplicParseItauCdbDiDet(file){
     colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'],
     linhas,
     // Metadados do Resumo — disponíveis para Ganhos/Rendimentos
-    resumo:{ saldoBrutoFinal, rendAcumulado, aplicacoes, resgatesRecompras },
+    resumo:{ saldoAnterior, aplicacoes, resgatesRecompras, vencimentos, rendAcumulado, saldoBrutoFinal, impostosEstimados, saldoFinalLiquido },
   };
 }
 
