@@ -36070,8 +36070,9 @@ async function abrirLancctbIgnorarModal(){
   const padroes=_lancctbIgnorarPadroesGet(eid);
   let html=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Lançamentos cujo Histórico Bancário <b>contiver</b> um destes textos entram automaticamente como "ignorado" — em qualquer conta desta empresa, todo mês, sem contar no saldo diário. Sem data de corte = ignora pra sempre.<br><span style="color:var(--slate);font-size:11px">Dica: basta digitar a parte central do histórico — não precisa ser o início nem o fim exato.</span></div>`;
   html+=`<div style="display:flex;gap:8px;margin-bottom:12px">
-    <input class="fi" id="lancctbIgnorarNovoTexto" placeholder="Texto contido no histórico — ex: RENTAB.INVEST FACILCRED+" style="flex:1">
+    <input class="fi" id="lancctbIgnorarNovoTexto" placeholder="Texto contido no histórico — ex: RENTAB.INVEST FACILCRED" style="flex:1">
     <button class="btn bp bsm" onclick="_lancctbIgnorarAdicionar()">+ Adicionar</button>
+    <button class="btn bo bsm" onclick="_lancctbIgnorarReaplicarAgora()" title="Aplica os padrões abaixo a todos os lançamentos da empresa, inclusive os já conciliados (pergunta antes)">↻ Reaplicar</button>
   </div>`;
   if(!padroes.length){
     html+='<div style="color:var(--slate);font-size:12.5px;text-align:center;padding:14px">Nenhum padrão cadastrado ainda.</div>';
@@ -36101,7 +36102,7 @@ async function _lancctbIgnorarAdicionar(){
   padroes.push({id:String(Date.now()),padrao:texto,ativoAte:null});
   _lancctbIgnorarPadroesSet(eid,padroes);
   toast('Padrão adicionado — aplicando aos lançamentos existentes…','ok');
-  await _lancctbReaplicarIgnorar(eid);
+  await _lancctbReaplicarIgnorar(eid,{conciliados:true});
   abrirLancctbIgnorarModal();
 }
 async function _lancctbIgnorarSalvarAte(id){
@@ -36113,7 +36114,14 @@ async function _lancctbIgnorarSalvarAte(id){
   p.ativoAte=v||null;
   _lancctbIgnorarPadroesSet(eid,padroes);
   toast('Corte salvo — reaplicando aos lançamentos…','ok');
-  await _lancctbReaplicarIgnorar(eid);
+  await _lancctbReaplicarIgnorar(eid,{conciliados:true});
+  abrirLancctbIgnorarModal();
+}
+async function _lancctbIgnorarReaplicarAgora(){
+  const eid=_lancctbEidAtual;
+  if(!_lancctbIgnorarPadroesGet(eid).length){ toast('Nenhum padrão cadastrado.','err'); return; }
+  const r=await _lancctbReaplicarIgnorar(eid,{conciliados:true});
+  toast(`Reaplicado — ${r.ignorados} pendente(s) e ${r.conciliadosIgnorados||0} já conciliado(s) ignorados.`,'ok');
   abrirLancctbIgnorarModal();
 }
 async function _lancctbIgnorarRemover(id){
@@ -36128,7 +36136,7 @@ async function _lancctbIgnorarRemover(id){
 // corrige os dois sentidos: marca ignorado quem deve, devolve pra pendente
 // quem não deve mais (padrão removido, ou passou do mês de corte). Nunca
 // mexe em quem já está 'conciliado' — isso é um resultado de verdade.
-async function _lancctbReaplicarIgnorar(eid){
+async function _lancctbReaplicarIgnorar(eid,opts){
   const padroes=_lancctbIgnorarPadroesGet(eid);
   const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,historico_bancario,status_conciliacao').eq('empresa_eid',eid).in('status_conciliacao',['pendente','ignorado']));
@@ -36146,8 +36154,43 @@ async function _lancctbReaplicarIgnorar(eid){
   });
   if(paraIgnorar.length) await _lancctbEmLotesDb(paraIgnorar,200,lote=>_supaClient.from('lancamentos_extrato').update({status_conciliacao:'ignorado'}).in('id',lote));
   if(paraReverter.length) await _lancctbEmLotesDb(paraReverter,200,lote=>_supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).in('id',lote));
-  if(paraIgnorar.length||paraReverter.length) renderLancctbExtrato();
-  return {ignorados:paraIgnorar.length,revertidos:paraReverter.length};
+  const conciliadosIgnorados=(opts&&opts.conciliados)?await _lancctbIgnorarConciliados(eid,padroes):0;
+  if(paraIgnorar.length||paraReverter.length||conciliadosIgnorados) renderLancctbExtrato();
+  return {ignorados:paraIgnorar.length,revertidos:paraReverter.length,conciliadosIgnorados};
+}
+// Lançamentos JÁ CONCILIADOS que batem com um padrão: só mexe depois de o usuário confirmar. Desfaz a conciliação do mesmo
+// jeito do "Desconciliar" do Registro Contábil (lançamentos contábeis ficam estornados, nunca apagados; NF/comprovante/Fluxo
+// voltam pra pendente) e marca o lançamento do extrato como ignorado.
+async function _lancctbIgnorarConciliados(eid,padroes){
+  if(!padroes.length) return 0;
+  const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+    .select('id,data_pagamento,historico_bancario,valor_saida,valor_entrada').eq('empresa_eid',eid).eq('status_conciliacao','conciliado'));
+  const alvo=(linhas||[]).filter(l=>{
+    const hist=(l.historico_bancario||'').trim().toLowerCase(), ym=(l.data_pagamento||'').slice(0,7);
+    return padroes.some(p=>hist.includes(p.padrao.trim().toLowerCase())&&_lancctbIgnorarPadraoBate(p,ym));
+  });
+  if(!alvo.length) return 0;
+  const soma=alvo.reduce((t,l)=>t+(Number(l.valor_entrada)||0)+(Number(l.valor_saida)||0),0);
+  if(!confirm(`${alvo.length} lançamento(s) JÁ CONCILIADOS batem com os padrões de "Ignorar Sempre" (soma R$ ${_fmt(soma)}).\n\nPara ignorá-los preciso desfazer a conciliação: os lançamentos contábeis ligados a eles ficam ESTORNADOS (continuam no histórico) e NF/comprovante/Fluxo amarrados voltam para pendente.\n\nDesfazer a conciliação e ignorar?`)) return 0;
+  let feitos=0;
+  for(let i=0;i<alvo.length;i+=100){
+    const lote=alvo.slice(i,i+100), ids=lote.map(l=>l.id);
+    const ehSaida=new Set(lote.filter(l=>Number(l.valor_saida)>0).map(l=>l.id));
+    const { data: ctb } = await _supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id,nf_parcela_id,comprovante_id').in('lancamento_extrato_id',ids).eq('estornado',false);
+    const idsNf=[...new Set((ctb||[]).map(c=>c.nf_parcela_id).filter(Boolean))];
+    const idsCompPag=[...new Set((ctb||[]).filter(c=>c.comprovante_id&&ehSaida.has(c.lancamento_extrato_id)).map(c=>c.comprovante_id))];
+    const idsCompReceb=[...new Set((ctb||[]).filter(c=>c.comprovante_id&&!ehSaida.has(c.lancamento_extrato_id)).map(c=>c.comprovante_id))];
+    if(idsNf.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsNf);
+    if(idsCompPag.length) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsCompPag);
+    if(idsCompReceb.length) await _supaClient.from('comprovantes_recebimento').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsCompReceb);
+    await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('lancamento_extrato_id',ids);
+    await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:null}).in('lancamento_extrato_id',ids);
+    const { error } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).in('lancamento_extrato_id',ids).eq('estornado',false);
+    if(error){ toast('Erro ao estornar lançamentos contábeis: '+error.message,'err'); break; }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'ignorado'}).in('id',ids);
+    feitos+=ids.length;
+  }
+  return feitos;
 }
 
 async function renderLancctbExtrato(){
