@@ -41892,6 +41892,18 @@ function _ganhoCnpjCandidatoValido(raw){
 // modelo é idêntica nas duas. Devolve {fundos:[{nome,cnpjRaw,cnpjNorm,
 // resumo:[{key,value,raw_description,raw_value,page}],competence}],
 // competence} ou null se o texto não bater com esse layout.
+//
+// ATENÇÃO — ordem não-linear do pdf.js: neste extrato consolidado, o pdf.js
+// extrai o conteúdo das células da tabela "Resumo do Período" ANTES de
+// extrair o rótulo "Resumo do Período - Total (R$)" e ANTES do rodapé
+// "Ag./Conta/Subconta ... CNPJ XX". Por isso a abordagem antiga
+// (ativar dentroResumo ao encontrar o rótulo e coletar as linhas seguintes)
+// perdia todos os valores. Nova abordagem: 2 passagens —
+//   Passo 1: mapear página → CNPJ do fundo pelo rodapé "Ag./Conta/Subconta
+//            ... CNPJ XX" (o CNPJ do gestor/admin não tem essa marca).
+//   Passo 2: para cada linha de qualquer página já mapeada, se o rótulo
+//            normalizado bater com GANHO_ITAU_FUNDO_DESCRICOES, coleta o
+//            valor — sem depender da ordem de extração.
 function _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto){
   if(!/Extrato de Fundos de Investimento/i.test(textoCompleto)) return null;
 
@@ -41904,35 +41916,45 @@ function _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto){
   // sair diferentes) — exige as 3 palavras próximas, não a pontuação exata.
   const RE_MARCA_CONTA=/AG[^A-Z0-9]{0,3}CONTA[^A-Z0-9]{0,3}SUBCONTA/i;
 
-  // Um fundo pode ocupar várias páginas — currentFund só troca quando surge
-  // uma NOVA linha com CNPJ válido junto da marca de agência/conta/subconta,
-  // nunca por mudança de página. Cuidado: "Gestor:"/"Administrado por:" no
-  // rodapé também trazem um CNPJ (da gestora/administradora, não do fundo)
-  // — não têm a marca de agência/conta/subconta, então não viram blocos.
-  const fundos=[];
-  let fundoAtual=null, dentroResumo=false, linhaAnterior='';
+  // PASSO 1: mapear página → CNPJ do fundo pelo rodapé com Ag./Conta/Subconta.
+  // A página consolidada (folha 001) tem só "Ag./Conta" (sem Subconta) →
+  // não bate com RE_MARCA_CONTA → ignorada corretamente.
+  const pagToCnpj={};
+  const cnpjToRaw={};
   for(const {texto:linha,pagina} of todasLinhas){
     const mCnpj=linha.match(/CNPJ\s*[:\s]?\s*([0-9OQIL|.\/-]{14,22})/i);
     if(mCnpj&&RE_MARCA_CONTA.test(linha)){
       const cnpjValido=_ganhoCnpjCandidatoValido(mCnpj[1]);
       if(cnpjValido){
-        fundoAtual={nome:linhaAnterior.trim(),cnpjRaw:mCnpj[1],cnpjNorm:cnpjValido,resumo:[],competence,pagina};
-        fundos.push(fundoAtual);
-        dentroResumo=false; linhaAnterior=linha; continue;
+        pagToCnpj[pagina]=cnpjValido;
+        if(!cnpjToRaw[cnpjValido]) cnpjToRaw[cnpjValido]=mCnpj[1];
       }
     }
-    if(/^Resumo do Per[íi]odo/i.test(linha)){ dentroResumo=!!fundoAtual; linhaAnterior=linha; continue; }
-    if(/^Movimenta[çc][ãa]o no Per[íi]odo/i.test(linha)){ dentroResumo=false; linhaAnterior=linha; continue; }
-    if(dentroResumo&&fundoAtual){
-      const mVal=linha.match(RE_NUM_FIM);
-      if(mVal){
-        const descRaw=linha.slice(0,mVal.index).trim();
-        const key=GANHO_ITAU_FUNDO_DESCRICOES[_ganhoNormalizarDescricaoFundo(descRaw)];
-        if(key) fundoAtual.resumo.push({key,value:_lancctbParseValorBR(mVal[1]),raw_description:descRaw,raw_value:mVal[1],page:pagina});
-      }
-    }
-    linhaAnterior=linha;
   }
+  if(!Object.keys(pagToCnpj).length) return {error:'NO_FUND_BLOCKS_FOUND'};
+
+  // PASSO 2: coletar valores e nome do fundo por CNPJ.
+  // Coleta qualquer linha cujo rótulo normalizado bata com GANHO_ITAU_FUNDO_DESCRICOES
+  // dentro das páginas já mapeadas — não depende da posição relativa ao rótulo
+  // "Resumo do Período" (que o pdf.js extrai DEPOIS dos valores).
+  const fundoMap={};
+  for(const {texto:linha,pagina} of todasLinhas){
+    const cnpjPag=pagToCnpj[pagina];
+    if(!cnpjPag) continue;
+    if(!fundoMap[cnpjPag]) fundoMap[cnpjPag]={cnpjNorm:cnpjPag,cnpjRaw:cnpjToRaw[cnpjPag]||'',resumo:[],competence,nome:'',pagina};
+    // Nome do fundo: primeira linha começando com "ITAU " nessa página.
+    if(!fundoMap[cnpjPag].nome){ const t=linha.trim(); if(/^ITAU\s+/i.test(t)&&t.length>8) fundoMap[cnpjPag].nome=t; }
+    // Valor do Resumo: último número BR da linha, rótulo normalizado no mapa.
+    const mVal=linha.match(RE_NUM_FIM);
+    if(mVal){
+      const descRaw=linha.slice(0,mVal.index).trim();
+      const key=GANHO_ITAU_FUNDO_DESCRICOES[_ganhoNormalizarDescricaoFundo(descRaw)];
+      if(key&&!fundoMap[cnpjPag].resumo.find(r=>r.key===key)){
+        fundoMap[cnpjPag].resumo.push({key,value:_lancctbParseValorBR(mVal[1]),raw_description:descRaw,raw_value:mVal[1],page:pagina});
+      }
+    }
+  }
+  const fundos=Object.values(fundoMap);
   if(!fundos.length) return {error:'NO_FUND_BLOCKS_FOUND'};
   return {fundos,competence};
 }
