@@ -42147,7 +42147,9 @@ const GANHO_ITAU_FUNDO_DESCRICOES={
   'RENDIMENTO BRUTO NO MES':'summary.gross_yield_month',
 };
 function _ganhoNormalizarDescricaoFundo(s){
-  return String(s||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\*/g,'').replace(/[0-9.,]+/g,'').replace(/\s+/g,' ').trim();
+  const t=String(s||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\*/g,'').replace(/[0-9.,]+/g,'').replace(/\s+/g,' ').trim();
+  // erros típicos de OCR: IR lido como 1R (o 1 some com os dígitos) e P/RESGATE sem a barra
+  return t.replace(/[^A-Z\s\/\-]/g,'').replace(/\s+/g,' ').trim().replace(/^R RETIDO/,'IR RETIDO').replace(/P\s*\/?\s*RESGATE/,'P/RESGATE');
 }
 // Validação de dígitos verificadores de CNPJ (algoritmo padrão) — usada
 // tanto pra rejeitar CNPJ "candidato" ilegível (OCR) quanto, na origem OCR,
@@ -42201,20 +42203,57 @@ function _ganhoCnpjCandidatoValido(raw){
 //   Passo 2: para cada linha de qualquer página já mapeada, se o rótulo
 //            normalizado bater com GANHO_ITAU_FUNDO_DESCRICOES, coleta o
 //            valor — sem depender da ordem de extração.
+// Número do OCR: "1.234,56" normal, ou só dígitos sem vírgula ("12569" = 125,69; "000" = 0,00).
+function _ganhoItauFundoTokNum(t){
+  t=String(t||'').trim();
+  if(/^-?[\d.]+,\d{2}$/.test(t)) return _lancctbParseValorBR(t);
+  if(/^\d{3,}$/.test(t)) return parseInt(t,10)/100;
+  return null;
+}
+// "Movimentação no Período" (VALOR LIQUIDO do resgate = o que de fato entrou na conta) e "Detalhamento de Resgate"
+// (3 números por linha: Rend. Base Calc. IR, Valor I.R., Valor do IOF). Soma todos os resgates do fundo no mês.
+function _ganhoItauFundoLerMovimento(linhas){
+  const r2=v=>Math.round(v*100)/100;
+  let liquido=0, achouLiquido=false, emDet=false; const det={rend:0,ir:0,iof:0,n:0,rendIncompleto:0};
+  (linhas||[]).forEach(l=>{
+    const t=String(l).trim();
+    if(/Detalhamento de Resgate/i.test(t)){ emDet=true; return; }
+    if(/Posi[çc][ãa]o por Aplica/i.test(t)){ emDet=false; return; }
+    const mL=t.match(/VALOR\s+L[IÍ1]QUIDO\s+(?:R?\$\s*)?(-?[\d.]+,\d{2})\s*$/i);
+    if(mL){ liquido+=_lancctbParseValorBR(mL[1]); achouLiquido=true; return; }
+    if(emDet){
+      const toks=t.split(/\s+/);
+      if(toks.length===3){
+        const v=toks.map(_ganhoItauFundoTokNum);
+        if(v[1]!=null&&v[2]!=null){ if(v[0]!=null) det.rend+=v[0]; else det.rendIncompleto++; det.ir+=v[1]; det.iof+=v[2]; det.n++; }
+      }
+    }
+  });
+  return {liquido:achouLiquido?r2(liquido):null, det:{rend:r2(det.rend),ir:r2(det.ir),iof:r2(det.iof),n:det.n,rendIncompleto:det.rendIncompleto}};
+}
 function _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto){
-  if(!/Extrato de Fundos de Investimento/i.test(textoCompleto)) return null;
+  // O título "Extrato de Fundos de Investimento" é texto claro sobre faixa laranja e o OCR nem sempre lê — aceita também as
+  // outras âncoras do documento (posição consolidada / quadro "Resumo do Período - Total").
+  if(!/Extrato de Fundos de Investimento|POSI[ÇC][ÃA]O CONSOLIDADA DE SEUS FUNDOS|Resumo do Per.odo\s*-?\s*Total/i.test(textoCompleto)) return null;
 
   // Competência pelo FIM do período ("Período: 03/08 a 31/08/2026" → 08/2026),
   // nunca pela emissão, pelo início do período nem pelo nome do arquivo.
-  const mPeriodo=textoCompleto.match(/Per[íi]odo:\s*\d{2}\/\d{2}\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/i);
-  const competence=mPeriodo?(mPeriodo[3]+'-'+mPeriodo[2]):null;
+  // No OCR o ano do cabeçalho já saiu errado (2026 lido como 2006): a competência é a mais repetida entre o fim do período,
+  // a data da posição consolidada e a data da cota ("valor da cota em dd.mm.aaaa").
+  const mPeriodo=textoCompleto.match(/Per.odo:?\s*\d{2}\/\d{2}\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/i);
+  const candComp=[];
+  if(mPeriodo) candComp.push(mPeriodo[3]+'-'+mPeriodo[2]);
+  for(const m of textoCompleto.matchAll(/POSI[ÇC][ÃA]O CONSOLIDADA[^\n]{0,80}?\bEM\s*(\d{2})\/(\d{2})\/(\d{4})/gi)) candComp.push(m[3]+'-'+m[2]);
+  for(const m of textoCompleto.matchAll(/valor da cota em\s*(\d{2})[./](\d{2})[./](\d{4})/gi)) candComp.push(m[3]+'-'+m[2]);
+  const contComp={}; candComp.filter(c=>/^20\d{2}-(0[1-9]|1[0-2])$/.test(c)).forEach(c=>{ contComp[c]=(contComp[c]||0)+1; });
+  const competence=Object.keys(contComp).sort((a,b)=>contComp[b]-contComp[a])[0]||null;
   // Aceita sinal antes ("-3.564,97") ou depois ("3.564,97-") do número — antes o "-" no final nem casava e
   // _lancctbParseValorBR descarta o sinal, então perda virava rendimento positivo.
   const RE_NUM_FIM=/(-?[\d.]+,\d{2}-?)\s*$/;
   const valorComSinal=s=>{ const v=_lancctbParseValorBR(s.replace(/-/g,'')); return /-/.test(s)?-v:v; };
   // "Ag./Conta/Subconta" tolerante a ruído de OCR (pontuação/espaço podem
   // sair diferentes) — exige as 3 palavras próximas, não a pontuação exata.
-  const RE_MARCA_CONTA=/AG[^A-Z0-9]{0,3}CONTA[^A-Z0-9]{0,3}SUBCONTA/i;
+  const RE_MARCA_CONTA=/AG.{0,3}CONTA.{0,3}SUBCONTA/i; // OCR já leu "Ag./Conta" como "Ag.sConta"
 
   // PASSO 1: mapear página → CNPJ do fundo pelo rodapé com Ag./Conta/Subconta.
   // A página consolidada (folha 001) tem só "Ag./Conta" (sem Subconta) →
@@ -42232,6 +42271,15 @@ function _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto){
     }
   }
   if(!Object.keys(pagToCnpj).length) return {error:'NO_FUND_BLOCKS_FOUND'};
+  // O fundo pode continuar na página seguinte (quebra de página não é fim do fundo): página sem cabeçalho próprio, mas com
+  // conteúdo de Posição por Aplicação / Detalhamento, herda o CNPJ da página anterior.
+  { const txtPag={}; todasLinhas.forEach(({texto,pagina})=>{ (txtPag[pagina]=txtPag[pagina]||[]).push(texto); });
+    let ultimo=null;
+    Object.keys(txtPag).map(Number).sort((a,b)=>a-b).forEach(pg=>{
+      if(pagToCnpj[pg]){ ultimo=pagToCnpj[pg]; return; }
+      const t=txtPag[pg].join(' ');
+      if(ultimo&&/Posi[çc][ãa]o por Aplica|Detalhamento de Resgate|Data da Aplica|Valor Rendimento|Valor do IOF/i.test(t)&&!/Resumo do Per/i.test(t)) pagToCnpj[pg]=ultimo; else ultimo=null;
+    }); }
 
   // PASSO 2: coletar valores e nome do fundo por CNPJ.
   // Coleta qualquer linha cujo rótulo normalizado bata com GANHO_ITAU_FUNDO_DESCRICOES
@@ -42241,11 +42289,13 @@ function _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto){
   for(const {texto:linha,pagina} of todasLinhas){
     const cnpjPag=pagToCnpj[pagina];
     if(!cnpjPag) continue;
-    if(!fundoMap[cnpjPag]) fundoMap[cnpjPag]={cnpjNorm:cnpjPag,cnpjRaw:cnpjToRaw[cnpjPag]||'',resumo:[],competence,nome:'',pagina};
+    if(!fundoMap[cnpjPag]) fundoMap[cnpjPag]={cnpjNorm:cnpjPag,cnpjRaw:cnpjToRaw[cnpjPag]||'',resumo:[],competence,nome:'',pagina,linhas:[]};
+    fundoMap[cnpjPag].linhas.push(linha);
     // Nome do fundo: primeira linha começando com "ITAU " nessa página.
     if(!fundoMap[cnpjPag].nome){ const t=linha.trim(); if(/^ITAU\s+/i.test(t)&&t.length>8) fundoMap[cnpjPag].nome=t; }
     // Valor do Resumo: último número BR da linha, rótulo normalizado no mapa.
-    const mVal=linha.match(RE_NUM_FIM);
+    let mVal=linha.match(RE_NUM_FIM);
+    if(!mVal){ const mZ=linha.match(/\s0{3}\s*$/); if(mZ){ mVal=['0,00','0,00']; mVal.index=mZ.index; } } // OCR leu "0,00" como "000"
     if(mVal){
       const descRaw=linha.slice(0,mVal.index).trim();
       const key=GANHO_ITAU_FUNDO_DESCRICOES[_ganhoNormalizarDescricaoFundo(descRaw)];
@@ -42256,6 +42306,7 @@ function _ganhoItauFundoInterpretarLinhas(todasLinhas,textoCompleto){
   }
   const fundos=Object.values(fundoMap);
   if(!fundos.length) return {error:'NO_FUND_BLOCKS_FOUND'};
+  fundos.forEach(f=>{ f.movimento=_ganhoItauFundoLerMovimento(f.linhas); });
   return {fundos,competence};
 }
 // Lê o PDF via pdf.js (texto nativo) — devolve null se o layout não bater
@@ -42288,9 +42339,29 @@ async function _ganhoExtrairItauFundoConsolidado(file){
 // via Tesseract.js (roda inteiramente no navegador; NUNCA envia o PDF/
 // imagens pra nenhum serviço de IA generativa/LLM). Só é chamada quando
 // _ganhoExtrairItauFundoConsolidado devolveu null por falta de texto nativo.
-const GANHO_ITAU_FUNDO_ANCORAS=[/EXTRATO DE FUNDOS DE INVESTIMENTO/i,/RESUMO DO PER[IÍ]ODO/i,/INFORMA[ÇC][ÕO]ES COMPLEMENTARES DO FUNDO/i,/CNPJ/i];
+// Âncoras tolerantes (o OCR de texto pequeno erra letras soltas); em 1,3x nenhuma rotação pontuava — ver _ganhoItauFundoDetectarRotacao.
+const GANHO_ITAU_FUNDO_ANCORAS=[/EXTRATO DE FUNDOS/i,/FUNDOS DE INVESTIMENTO/i,/POSI[ÇC][ÃA]O CONSOLIDADA/i,/RENTABILIDADE/i,/CNPJ/i,/RESUMO DO PER/i,/SALDO BRUTO/i];
 function _ganhoItauFundoScoreAncoras(texto){
   return GANHO_ITAU_FUNDO_ANCORAS.reduce((s,rx)=>s+(rx.test(texto||'')?1:0),0);
+}
+// Pontuação de uma orientação: âncoras reconhecidas (peso alto) + quantidade de palavras lidas com boa confiança.
+function _ganhoItauFundoScoreRotacao(data){
+  const pal=(data.words||[]).filter(w=>w.confidence>70&&/^[A-Za-zÀ-ú]{4,}$/.test(w.text)).length;
+  return _ganhoItauFundoScoreAncoras(data.text)*1000+pal;
+}
+// Renderiza a página já na rotação escolhida e recorta a área útil (borda branca fora): em setembro o conteúdo é uma coluna
+// estreita no meio de uma página larga, e sem recorte o OCR truncava CNPJ e trocava dígitos.
+async function _ganhoItauFundoRenderizarRecortada(page,rotacao,scale){
+  const canvas=await _ganhoItauFundoRenderizarPagina(page,rotacao,scale);
+  const w=canvas.width,h=canvas.height,ctx=canvas.getContext('2d');
+  const d=ctx.getImageData(0,0,w,h).data;
+  let x0=w,y0=h,x1=0,y1=0;
+  for(let y=0;y<h;y+=2){ for(let x=0;x<w;x+=2){ const i=(y*w+x)*4; if(d[i]<240||d[i+1]<240||d[i+2]<240){ if(x<x0)x0=x; if(x>x1)x1=x; if(y<y0)y0=y; if(y>y1)y1=y; } } }
+  if(x1<=x0||y1<=y0) return canvas;
+  const m=12; x0=Math.max(0,x0-m); y0=Math.max(0,y0-m); x1=Math.min(w,x1+m); y1=Math.min(h,y1+m);
+  const out=document.createElement('canvas'); out.width=x1-x0; out.height=y1-y0;
+  out.getContext('2d').drawImage(canvas,x0,y0,x1-x0,y1-y0,0,0,x1-x0,y1-y0);
+  return out;
 }
 async function _ganhoItauFundoRenderizarPagina(page,rotacao,scale){
   const viewport=page.getViewport({scale,rotation:((page.rotate||0)+rotacao)%360});
@@ -42303,6 +42374,7 @@ async function _ganhoItauFundoRenderizarPagina(page,rotacao,scale){
     const canvas=document.createElement('canvas');
     canvas.width=viewport.width;canvas.height=viewport.height;
     const ctx=canvas.getContext('2d');
+    ctx.fillStyle='#fff'; ctx.fillRect(0,0,canvas.width,canvas.height);
     const timeout=new Promise(r=>setTimeout(()=>r('TIMEOUT'),20000));
     const resultado=await Promise.race([page.render({canvasContext:ctx,viewport}).promise.then(()=>'OK'),timeout]);
     if(resultado==='OK') return canvas;
@@ -42331,9 +42403,9 @@ async function _ganhoExtrairItauFundoConsolidadoOCR(file,statusCb){
   let melhorRotacao=0, melhorScore=-1;
   for(const rot of [0,90,180,270]){
     if(statusCb) statusCb(`Detectando orientação da página (testando ${rot}°)…`);
-    const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,1.3);
+    const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,2.0);
     const {data}=await worker.recognize(canvas);
-    const score=_ganhoItauFundoScoreAncoras(data.text);
+    const score=_ganhoItauFundoScoreRotacao(data);
     if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; }
   }
 
@@ -42344,7 +42416,7 @@ async function _ganhoExtrairItauFundoConsolidadoOCR(file,statusCb){
   for(let p=1;p<=pdf.numPages;p++){
     if(statusCb) statusCb(`Lendo página ${p}/${pdf.numPages} via OCR (pode levar um tempo)…`);
     const page=p===1?page1:await pdf.getPage(p);
-    const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,2.3);
+    const canvas=await _ganhoItauFundoRenderizarRecortada(page,melhorRotacao,4);
     const {data}=await worker.recognize(canvas);
     const linhas=String(data.text||'').split('\n').map(t=>t.trim()).filter(Boolean);
     linhas.forEach(t=>todasLinhas.push({texto:t,pagina:p}));
@@ -42415,6 +42487,12 @@ async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw,statusCb){
     value:r2(it.value), calculationType:'DIRECT_TOTAL',
     fund_cnpj:fundo.cnpjNorm, fund_name:fundo.nome, raw_description:it.raw_description, raw_value:it.raw_value, page_number:it.page,
   }));
+  // Sem resgate no mês o extrato NÃO imprime a linha "IR RETIDO NO PERIODO": o IRRF do mês é 0 (e não "sem valor").
+  { const rs=fundo.resumo.find(it=>it.key==='summary.redemptions');
+    if(rs&&Math.abs(rs.value)<0.005&&!fundo.resumo.some(it=>it.key==='summary.ir_withheld_period')){
+      sources.push({key:M+'.summary.ir_withheld_period',label:ROTULOS['summary.ir_withheld_period']+' (linha ausente sem resgate = 0,00)',section:'Resumo do Período',product:null,value:0,calculationType:'DIRECT_TOTAL',fund_cnpj:fundo.cnpjNorm,fund_name:fundo.nome,raw_description:'IR RETIDO NO PERIODO',raw_value:null,page_number:rs.page});
+      fundo.resumo.push({key:'summary.ir_withheld_period',value:0,raw_description:'IR RETIDO NO PERIODO',raw_value:null,page:rs.page});
+    } }
   // Fonte derivada: RESGATES já líquido do IR retido no período — pedido do
   // usuário 14/09/2026 ("no campo resgate, precisa informar o resultado de
   // RESGATE DO PDF MENOS IR RETIDO NO PERIODO DO PDF"). Só existe quando os
@@ -42431,12 +42509,39 @@ async function _aplicfinParseItauFundoConsolidado(file,targetCnpjRaw,statusCb){
       raw_description:'RESGATES − IR RETIDO NO PERÍODO', raw_value:null, page_number:vResgates.page,
     });
   }
+  // Movimentação no Período + Detalhamento de Resgate (pedido do usuário 10/2026): resgate LÍQUIDO = VALOR LIQUIDO da
+  // movimentação (nunca o "Total líquido p/ resgate" do Resumo, que é a posição remanescente); IOF vem do detalhamento;
+  // Rendimento Bruto s/ Resgates = Rendimento-Base Calc. IR + IOF.
+  const vv=k=>{ const it=fundo.resumo.find(x=>x.key===k); return it?it.value:null; };
+  const mov=fundo.movimento||{liquido:null,det:{rend:0,ir:0,iof:0,n:0}};
+  const resg=vv('summary.redemptions')||0, irRes=vv('summary.ir_withheld_period'), baseRes=vv('summary.taxable_yield_base');
+  const temResgate=resg>0.004;
+  const iofDet=mov.det.n?mov.det.iof:(temResgate?null:0);
+  const netMov=mov.liquido!=null?mov.liquido:(temResgate?null:0);
+  const avisosFundo=[];
+  const mkSrc=(key,label,section,value)=>({key:M+'.'+key,label,section,product:null,value:r2(value),calculationType:'DIRECT_TOTAL',fund_cnpj:fundo.cnpjNorm,fund_name:fundo.nome,raw_description:label,raw_value:null,page_number:null});
+  sources.push(mkSrc('movement.net_redemptions','Movimentação no Período → VALOR LÍQUIDO do resgate (soma)','Movimentação no Período',netMov));
+  sources.push(mkSrc('detail.iof','Detalhamento de Resgate → Valor do IOF (soma)','Detalhamento de Resgate',iofDet));
+  sources.push(mkSrc('calc.gross_yield_on_redemptions','Calculado: Rendimento-Base Calc. IR + IOF dos resgates (Rendimento Bruto s/ Resgates)','Calculado',baseRes==null?null:baseRes+(iofDet||0)));
+  // Conferências — valor que não fecha vira aviso para REVISAR; nunca é ajustado sozinho.
+  { const prev=vv('summary.previous_gross_balance'), apl=vv('summary.applications')||0, atual=vv('summary.current_gross_balance'), rend=vv('summary.gross_yield_month');
+    if(prev!=null&&atual!=null&&rend!=null){ const calc=r2(prev+apl-resg+rend); if(Math.abs(calc-atual)>0.05) avisosFundo.push(`REVISAR: Saldo anterior ${prev} + aplicações ${apl} − resgates ${resg} + rendimento ${rend} = ${calc}, mas o Saldo Bruto Atual lido foi ${atual} (algum número pode ter sido lido errado pelo OCR).`); }
+    if(temResgate){
+      if(netMov==null) avisosFundo.push('REVISAR: há resgate no Resumo, mas não achei a linha "VALOR LIQUIDO" na Movimentação no Período.');
+      else if(irRes!=null){ const esperado=r2(resg-irRes-(iofDet||0)); if(Math.abs(esperado-netMov)>0.05) avisosFundo.push(`REVISAR: Resgate ${resg} − IR ${irRes} − IOF ${iofDet||0} = ${esperado}, mas o VALOR LIQUIDO lido foi ${netMov}.`); }
+      if(!mov.det.n) avisosFundo.push('REVISAR: não consegui ler o Detalhamento de Resgate (IOF e conferência do IR/rendimento-base).');
+      else {
+        if(irRes!=null&&Math.abs(mov.det.ir-irRes)>0.05) avisosFundo.push(`REVISAR: soma do Valor I.R. no Detalhamento (${mov.det.ir}) difere do IR RETIDO NO PERIODO (${irRes}).`);
+        if(baseRes!=null&&!mov.det.rendIncompleto&&Math.abs(mov.det.rend-baseRes)>0.05) avisosFundo.push(`REVISAR: soma do Rend. Base Calc. IR no Detalhamento (${mov.det.rend}) difere do RENDIMENTO-BASE do Resumo (${baseRes}).`);
+      }
+    }
+  }
   return {
     bank:'ITAU', model:M, competence:fundo.competence, account:null,
     fund:{name:fundo.nome,cnpj:fundo.cnpjNorm},
     fingerprint:_aplicfinFingerprint('ITAU',M,[fundo.cnpjNorm,viaOcr?'ITAU_FUNDOS_INVESTIMENTO_IMAGEM':'RESUMO DO PERIODO ITAU FUNDO']),
     productMode:'single', products:[], sources, validations:[],
-    warnings:viaOcr?['Lido via OCR local (Tesseract.js) — o PDF não tinha texto selecionável. Confira os valores antes de salvar o mapeamento.']:[],
+    warnings:(viaOcr?['Lido via OCR local (Tesseract.js) — o PDF não tinha texto selecionável. Confira os valores antes de salvar o mapeamento.']:[]).concat(avisosFundo),
     pageCount:null,
   };
 }
@@ -43995,7 +44100,8 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
   // o nome do modelo inteiro como chave do mapa acima, só o prefixo.
   if(/^itau_fundo_(img_)?/.test(model)){
     const sug={
-      bruto:model+'.summary.gross_yield_month',
+      bruto:model+'.calc.gross_yield_on_redemptions',
+      iof:model+'.detail.iof',
       irrf:model+'.summary.ir_withheld_period',
       rendMes:model+'.summary.gross_yield_month',
       aplic:model+'.summary.applications',
@@ -44003,7 +44109,7 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       // resultado de RESGATE DO PDF MENOS IR RETIDO NO PERIODO DO PDF" —
       // sugere direto a fonte já derivada (RESGATES − IR RETIDO), não a
       // RESGATES crua.
-      resgate:model+'.summary.redemptions_net_of_ir',
+      resgate:model+'.movement.net_redemptions',
       saldoBrutoExtrato:model+'.summary.current_gross_balance',
     };
     return sug[siteColId]||'';
