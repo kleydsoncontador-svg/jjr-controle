@@ -35198,6 +35198,183 @@ async function _cpfpConfirmar(){
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
+// ─── RR: "RELATÓRIO DE RECEBIMENTOS" (aluguel, Karater) — explode cada tipo em 1 linha do Fluxo ───
+// Leitor SEM IA, por coordenadas (x/y do pdf.js). "Valor Total" nunca vira linha: só valida a soma.
+// O PDF pode vir inteiro numa página (ago/2026) ou com as colunas de valor numa 2ª página (set/2026) —
+// as linhas das duas partes se casam pela ordem (de cima pra baixo).
+const RR_HEADERS={nome:/^Nome Escrit\.?$/,cnpj:/^CNPJ\/CPF$/,razao:/^Raz[aã]o Social$/,cod:/^C[oó]d\. Cliente$/,numfat:/^N[uú]m\. Fat\.?$/,nf:/^N[ºo] Nota Fiscal$/,emi:/^Data Emi\.?$/,venc:/^Data Venc\.?$/,pagto:/^Data Pagto\/Canc\.?$/,parcela:/^Parcela$/,aluguel:/^Valor Aluguel$/,iptu:/^IPTU$/,cond:/^Condom[ií]nio$/,outros:/^(Outros|reembolsos|Outros reembolsos)$/,adm:/^Administra[cç][aã]o$/,cor:/^Corretagem$/,total:/^Valor Total$/,banco:/^(Banco|Recebimento|Banco Recebimento)$/};
+const RR_TIPOS=[
+  {k:'aluguel',rotulo:'Valor Aluguel',desc:'Recebimento - Valor Aluguel',sinal:1},
+  {k:'iptu',rotulo:'IPTU',desc:'Recebimento - IPTU',sinal:1},
+  {k:'cond',rotulo:'Condomínio',desc:'Recebimento - Condomínio',sinal:1},
+  {k:'outros',rotulo:'Outros reembolsos',desc:'Recebimento - Outros reembolsos',sinal:1},
+  {k:'adm',rotulo:'Taxa de Administração',desc:'Taxa de Administração',sinal:-1},
+  {k:'cor',rotulo:'Taxa de Corretagem',desc:'Taxa de Corretagem',sinal:-1},
+];
+function _rrHeaderish(s){ s=s.trim(); return Object.values(RR_HEADERS).some(re=>re.test(s))||/^\(-\) Taxa de$/.test(s)||/RELAT[ÓO]RIO DE RECEBIMENTOS/i.test(s); }
+function _rrColunas(itens){
+  const m={};
+  itens.forEach(i=>{ const s=i.str.trim(); for(const k in RR_HEADERS){ if(RR_HEADERS[k].test(s)){ const a=m[k]||(m[k]={k,l:i.x,r:i.x+i.w}); a.l=Math.min(a.l,i.x); a.r=Math.max(a.r,i.x+i.w); break; } } });
+  const cols=Object.values(m).sort((a,b)=>a.l-b.l);
+  cols.forEach((c,i)=>{ c.min=i?(cols[i-1].r+c.l)/2:-1e9; c.max=i<cols.length-1?(c.r+cols[i+1].l)/2:1e9; });
+  return cols;
+}
+function _rrParseMoney(s){
+  const t=String(s).trim().replace(/^R\$\s*/,'');
+  if(!/^\(?-?\d{1,3}(\.\d{3})*,\d{2}\)?$/.test(t)) return null;
+  return Math.abs(parseFloat(t.replace(/[()\-.]/g,'').replace(',','.')));
+}
+function _rrLinhasDaPagina(itens,cols,ehIdentidade){
+  const linhas=_lancctbAgruparLinhasPorY(itens,3);
+  const anchors=linhas.filter(l=>ehIdentidade?l.itens.some(i=>/^\d{2}\/\d{2}\/\d{4}$/.test(i.str.trim())):l.itens.some(i=>i.str.trim()==='R$')).map(l=>l.y);
+  const rows=anchors.map(y=>({y,items:[]}));
+  itens.forEach(it=>{
+    if(_rrHeaderish(it.str)) return;
+    let best=null,bd=1e9; rows.forEach(r=>{ const d=Math.abs(r.y-it.y); if(d<bd){bd=d;best=r;} });
+    if(best&&bd<=14) best.items.push(it);
+  });
+  return rows.sort((a,b)=>b.y-a.y).map(r=>{
+    const txt={},val={};
+    r.items.sort((a,b)=>b.y-a.y||a.x-b.x).forEach(it=>{
+      const cx=it.x+it.w/2, col=cols.find(c=>cx>=c.min&&cx<c.max); if(!col) return;
+      const v=_rrParseMoney(it.str);
+      if(['aluguel','iptu','cond','outros','adm','cor','total'].includes(col.k)){ if(v!==null) val[col.k]=(val[col.k]||0)+v; }
+      else (txt[col.k]=txt[col.k]||[]).push(it.str.trim());
+    });
+    return {y:r.y,txt,val};
+  });
+}
+function _rrParsearItens(paginas,nomeArquivo){
+  const todo=paginas.flat().map(i=>i.str).join(' ');
+  if(!/RELAT[ÓO]RIO DE RECEBIMENTOS/i.test(todo)) return null;
+  const mComp=todo.match(/RECEBIMENTOS\s+(\d{2})\.(\d{4})/i);
+  const competencia=mComp?`${mComp[1]}/${mComp[2]}`:null;
+  const idRows=[],valRows=[]; let achouId=false;
+  paginas.forEach(itens=>{
+    const cols=_rrColunas(itens), ks=cols.map(c=>c.k);
+    if(ks.includes('razao')&&ks.includes('pagto')){ achouId=true; idRows.push(..._rrLinhasDaPagina(itens,cols,true)); }
+    else if(ks.includes('total')) valRows.push(..._rrLinhasDaPagina(itens,cols,false));
+  });
+  if(!achouId) return null;
+  const avisos=[];
+  if(valRows.length){
+    if(valRows.length!==idRows.length) return {erro:`Colunas de valor (${valRows.length} linhas) não batem com as linhas de identificação (${idRows.length}) — confira o PDF.`};
+    idRows.forEach((r,i)=>{ Object.entries(valRows[i].val).forEach(([k,v])=>{ r.val[k]=(r.val[k]||0)+v; }); if(valRows[i].txt.banco&&!r.txt.banco) r.txt.banco=valRows[i].txt.banco; });
+  }
+  const registros=[]; let somaTotalPdf=0,somaGerada=0,divergentes=0;
+  const cnpjPorNome={};
+  idRows.forEach((r,idx)=>{
+    const razao=(r.txt.razao||[]).join(' ').replace(/\s+/g,' ').trim();
+    const cnpjTxt=(r.txt.cnpj||[]).join('').replace(/\s+/g,'');
+    const cnpj=cnpjTxt.replace(/\D/g,'');
+    const mData=(r.txt.pagto||[]).join(' ').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    const parcelaTxt=(r.txt.parcela||[]).join(' ').trim()||null;
+    const nf=(r.txt.nf||[]).join(' ').trim(), numfat=(r.txt.numfat||[]).join(' ').trim();
+    const banco=(r.txt.banco||[]).join(' ').trim()||null;
+    const v=r.val; const g=k=>Math.round((v[k]||0)*100)/100;
+    const soma=Math.round((g('aluguel')+g('iptu')+g('cond')+g('outros')-g('adm')-g('cor'))*100)/100;
+    const total=v.total!=null?g('total'):null;
+    const ok=total!=null&&Math.abs(soma-total)<0.015;
+    if(total!=null) somaTotalPdf+=total;
+    const avisosLinha=[];
+    if(total==null) avisosLinha.push('Valor Total não encontrado');
+    else if(!ok) avisosLinha.push(`Soma dos componentes R$ ${_fmt(soma)} ≠ Valor Total R$ ${_fmt(total)}`);
+    if(!mData) avisosLinha.push('Data Pagto/Canc. não encontrada');
+    else if(competencia&&`${mData[2]}/${mData[3]}`!==competencia) avisosLinha.push(`Data de pagamento ${mData[0]} fora da competência ${competencia}`);
+    if(razao&&cnpj){ const a=cnpjPorNome[razao]; if(a&&a!==cnpj) avisosLinha.push(`CNPJ ${cnpj} diferente de ${a} (mesma razão social)`); else if(!a) cnpjPorNome[razao]=cnpj; }
+    if(!ok) divergentes++;
+    if(!mData||!razao) return;
+    RR_TIPOS.forEach(t=>{
+      const valor=g(t.k); if(!(valor>0)) return;
+      somaGerada+=t.sinal*valor;
+      registros.push({
+        data:`${mData[3]}-${mData[2]}-${mData[1]}`,
+        descricao:t.desc+(parcelaTxt?` - parcela ${parcelaTxt}`:''),
+        cliente_fornecedor_nome:`${razao} (${t.rotulo})`,
+        cnpj_cpf:cnpj||null,
+        documento_numero:nf||numfat||null,
+        parcela:parcelaTxt&&/^\d+/.test(parcelaTxt)?parseInt(parcelaTxt,10):null,
+        port_nom:banco,
+        valor_entrada:t.sinal*valor, valor_saida:0,
+        arquivo_origem:nomeArquivo,
+        _tipo:t.rotulo, _parcela_txt:parcelaTxt, _linha:idx+1, _aviso:avisosLinha.join(' · ')||null,
+        _incluir:ok,
+      });
+    });
+    if(!ok&&avisosLinha.length){ registros.filter(x=>x._linha===idx+1).forEach(x=>{ x._incluir=false; }); }
+  });
+  return {registros,competencia,qtdLinhasPdf:idRows.length,somaTotalPdf:Math.round(somaTotalPdf*100)/100,somaGerada:Math.round(somaGerada*100)/100,divergentes,avisos,nomeArquivo};
+}
+let _rrResultado=null;
+async function _rrParsearArquivo(pdf,nomeArquivo){
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++) paginas.push(await _lancctbExtrairItensPaginaComLargura(await pdf.getPage(p)));
+  return _rrParsearItens(paginas,nomeArquivo);
+}
+function _rrPreviewHtml(){
+  const R=_rrResultado;
+  if(R.erro) return `<div style="color:#dc2626;font-size:12.5px;padding:8px">⚠ ${esc(R.erro)}</div>`;
+  const bate=Math.abs(R.somaTotalPdf-R.somaGerada)<0.015&&!R.divergentes;
+  let html=`<div style="font-size:12px;margin-bottom:8px">
+    <div>Relatório de Recebimentos${R.competencia?' '+esc(R.competencia):''} · ${R.qtdLinhasPdf} linha(s) do PDF → <strong>${R.registros.length}</strong> lançamento(s) no Fluxo</div>
+    <div>Soma dos lançamentos <strong>R$ ${_fmt(R.somaGerada)}</strong> / soma do "Valor Total" do PDF <strong>R$ ${_fmt(R.somaTotalPdf)}</strong> ${bate?'<span style="color:var(--teal)">✓ bate</span>':'<span style="color:#dc2626">⚠ confira as linhas marcadas</span>'}</div>
+  </div>
+  <div style="overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;border-collapse:collapse;font-size:11.5px">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+        <th style="padding:6px 8px"><input type="checkbox" checked onclick="_rrToggleTodos(this.checked)"></th>
+        <th style="padding:6px 8px;text-align:left">Data</th>
+        <th style="padding:6px 8px;text-align:left">Cliente/Fornecedor</th>
+        <th style="padding:6px 8px;text-align:left">CPF/CNPJ</th>
+        <th style="padding:6px 8px;text-align:left">Descrição</th>
+        <th style="padding:6px 8px;text-align:left">Banco</th>
+        <th style="padding:6px 8px;text-align:right">Valor</th>
+      </tr></thead><tbody>`;
+  R.registros.forEach((r,i)=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${r._incluir?1:.45}${r._aviso?';background:#fffbeb':''}" ${r._aviso?`title="${esc(r._aviso)}"`:''}>
+      <td style="padding:4px 8px"><input type="checkbox" ${r._incluir?'checked':''} onclick="_rrResultado.registros[${i}]._incluir=this.checked;document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_rrPreviewHtml()"></td>
+      <td style="padding:4px 8px">${new Date(r.data+'T00:00:00').toLocaleDateString('pt-BR')}</td>
+      <td style="padding:4px 8px">${esc(r.cliente_fornecedor_nome)}${r._aviso?`<div style="color:#b45309;font-size:10.5px">⚠ ${esc(r._aviso)}</div>`:''}</td>
+      <td style="padding:4px 8px;font-family:var(--mono)">${esc(r.cnpj_cpf||'—')}</td>
+      <td style="padding:4px 8px">${esc(r.descricao)}</td>
+      <td style="padding:4px 8px">${esc(r.port_nom||'—')}</td>
+      <td style="padding:4px 14px;text-align:right${r.valor_entrada<0?';color:#dc2626':''}">R$ ${_fmt(r.valor_entrada)}</td>
+    </tr>`;
+  });
+  const qtd=R.registros.filter(r=>r._incluir).length;
+  html+=`</tbody></table></div>
+  <div class="ma" style="margin-top:14px">
+    <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+    <button class="btn bp" onclick="confirmarLancctbFluxoImportRr()">✓ Importar ${qtd} lançamento(s)</button>
+  </div>`;
+  return html;
+}
+function _rrToggleTodos(m){ _rrResultado.registros.forEach(r=>r._incluir=m); document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_rrPreviewHtml(); }
+async function confirmarLancctbFluxoImportRr(){
+  const sel=_rrResultado.registros.filter(r=>r._incluir);
+  if(!sel.length){ toast('Nenhum lançamento selecionado','err'); return; }
+  const contaSel=document.getElementById('lancctbFluxoImportConta')?.value||null;
+  const { data: existentes } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    .select('data,cliente_fornecedor_nome,descricao,cnpj_cpf,valor_entrada').eq('empresa_eid',_lancctbEidAtual));
+  const norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+  // O tipo da operação (no Cliente/Fornecedor) entra na chave: IPTU e Valor Aluguel do mesmo cliente/data/valor são lançamentos diferentes.
+  const chave=r=>`${r.data}|${norm(r.cliente_fornecedor_nome)}|${norm(r.descricao)}|${String(r.cnpj_cpf||'').replace(/\D/g,'')}|${Math.round(Number(r.valor_entrada)*100)}`;
+  const ja=new Set((existentes||[]).map(chave));
+  const novos=sel.filter(r=>!ja.has(chave(r))).map(r=>({
+    empresa_eid:_lancctbEidAtual, conta_bancaria_id:contaSel, data:r.data, descricao:r.descricao,
+    valor_entrada:r.valor_entrada, valor_saida:0, cliente_fornecedor_nome:r.cliente_fornecedor_nome,
+    cnpj_cpf:r.cnpj_cpf, documento_numero:r.documento_numero, parcela:r.parcela, port_nom:r.port_nom,
+    arquivo_origem:r.arquivo_origem,
+  }));
+  const puladas=sel.length-novos.length;
+  if(!novos.length){ toast('Todos os lançamentos selecionados já tinham sido importados antes.','err'); return; }
+  const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(novos);
+  if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
+  toast(`${novos.length} lançamento(s) importado(s)${puladas?` — ${puladas} já existiam e foram ignorados`:''}`,'ok');
+  closeModal('mLancctbUpload');
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
+}
 // ─── Bling — "Relatório de Contas a Pagar" (pedido do usuário 28/09/2026) ──────────────────
 // Leitor SEM IA, dedicado a este layout exato do Bling — reaproveita a MESMA tabela de Fluxo
 // de Caixa já existente (nunca cria módulo paralelo). Reconstrói cada registro por POSIÇÃO
@@ -35415,6 +35592,14 @@ async function _lancctbFluxoLerPdf(file,status){
       document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_cpfpPreviewHtml(_cpfpResultados,avisos);
       document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
       if(status) status.textContent=`CONTAS_PAGAR_FORNECEDORES_PAGOS · ${resultadoCpfp.registros.length} registros${resultadoCpfp.empresa?' · '+resultadoCpfp.empresa:''}`;
+      return;
+    }
+    const resultadoRr=await _rrParsearArquivo(pdf,file.name);
+    if(resultadoRr){
+      _rrResultado=resultadoRr;
+      status.textContent=resultadoRr.erro?'Relatório de Recebimentos reconhecido, mas com problema na leitura.':'Modelo reconhecido: Relatório de Recebimentos (leitura direta, sem IA).';
+      document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_rrPreviewHtml();
+      document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
       return;
     }
     const resultadoBling=await _lancctbParsearFluxoBlingContasPagar(pdf,status);
