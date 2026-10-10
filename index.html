@@ -28969,9 +28969,25 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   const creditosPendentesPorDia={};
   lancamentos.forEach(o=>{ if(o.valor_entrada>0) creditosPendentesPorDia[o.data_pagamento]=(creditosPendentesPorDia[o.data_pagamento]||0)+1; });
 
+  // Pré-índice do Fluxo de Caixa por data → evita varredura linear O(N_fluxo)
+  // para cada um dos 13k+ lançamentos (Fast Lube MP: 120M operações → <1ms).
+  const _idxFlxData={};
+  (fluxoCaixa||[]).forEach(f=>{ const k=f.data; if(k)((_idxFlxData[k]=_idxFlxData[k]||[]).push(f)); });
+  const _flxProximos=(data)=>{
+    const r=[]; const dt=new Date(data+'T12:00:00');
+    for(let d=-LANCCTB_MATCH_TOLERANCIA_DIAS;d<=LANCCTB_MATCH_TOLERANCIA_DIAS;d++){
+      const dt2=new Date(dt); dt2.setDate(dt2.getDate()+d);
+      const k=dt2.toISOString().slice(0,10); if(_idxFlxData[k]) r.push(..._idxFlxData[k]);
+    }
+    return r;
+  };
+
   for(let i=0;i<lancamentos.length;i++){
+    // Yield a cada 200 itens para liberar o event loop e evitar "Página sem
+    // resposta" em contas com muitos lançamentos pendentes (ex: Fast Lube MP).
+    if(i>0&&i%200===0) await new Promise(r=>setTimeout(r,0));
     const l=lancamentos[i];
-    log(`Processando ${i+1}/${lancamentos.length}…`);
+    if(i%200===0||i===lancamentos.length-1) log(`Processando ${i+1}/${lancamentos.length}…`);
     const valor=l.valor_saida||l.valor_entrada;
     const ehSaida=l.valor_saida>0;
     // Botões separados de Comprovante de Pagamento/Recebimento (pedido do
@@ -29428,12 +29444,12 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // (crédito único + um débito por imposto) — aqui o Passo 3 não encosta nele.
     if(!resolvido&&!/^\s*\[(TRIBUTO COMPOSTO|PAGAMENTO DE \d+ GUIAS)/i.test(String(l.historico_bancario||''))){
       const bancoTipo=ehSaida?'C':'D';
-      const fluxoMatch=(fluxoCaixa||[]).find(f=>{
+      const fluxoMatch=_flxProximos(l.data_pagamento).find(f=>{
         if(f.conta_bancaria_id&&String(f.conta_bancaria_id)!==String(contaId)) return false;
         if(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||''))) return false;
         const v=f.valor_saida||f.valor_entrada;
         const mesmaDirecao=ehSaida?f.valor_saida>0:f.valor_entrada>0;
-        return mesmaDirecao&&Math.abs(v-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
+        return mesmaDirecao&&Math.abs(v-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR;
       });
       const contrapartidaTipo=ehSaida?'D':'C';
       const regra=regras.find(r=>{
@@ -43653,7 +43669,7 @@ async function _aplicfinSalvarMapeamento(){
       empresa_eid:String(eid), modulo:'ganhos', aplicacao_id:String(pid),
       banco:parsed.bank, modelo:parsed.model, fingerprint_hash:parsed.fingerprint,
       produto_filtro:produto||'', site_column:c.id, source_key:key,
-      source_label:src.label||null, calc_type:src.calculationType||'DIRECT_TOTAL',
+      source_label:src.label||null, calc_type:['DIRECT_TOTAL','SUM','CONDITIONAL_SUM','FIRST_POSITION','LAST_POSITION'].includes(src.calculationType)?src.calculationType:'DIRECT_TOTAL',
       parser_version:APLICFIN_PARSER_VERSION, created_by:(currentUser&&currentUser.login)||null,
     });
   });
