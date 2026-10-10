@@ -43723,7 +43723,7 @@ function _aplicfinColPorHeader(headerCols,xr){
 const BRAD_INV_COLS=['taxa','principal','bruto','renda_total','iof','irrf','liquido','renda_bruta_periodo'];
 function _aplicfinParseBradescoInvestimentosLinhas(linhas,qtdPaginas){
   const texto=linhas.map(L=>L.join(' ')).join(' ').replace(/\s+/g,' ');
-  if(!(/Extrato de Investimentos|Bradesco Net Empresa/i.test(texto)&&/Dt\.\s*Vencto/i.test(texto)&&/Vlr\s*Princ/i.test(texto)&&/Renda\s*Bruta/i.test(texto)&&/Saldo anterior em/i.test(texto)&&/Resgates\s*\/\s*Vencimentos/i.test(texto))) return null;
+  if(!(/Extrato de Investimentos|Bradesco Net Empresa/i.test(texto)&&/Dt\.\s*Vencto/i.test(texto)&&/V[lI1i]r\s*Princ/i.test(texto)&&/Renda\s*Bruta|Bruta\s*Per/i.test(texto)&&/Saldo anterior em/i.test(texto)&&/Resgates\s*\/\s*Vencimentos/i.test(texto))) return null;
   const warnings=[];
   const mPer=texto.match(/Per[ií]odo de:?\s*(\d{2})\/(\d{2})\/(\d{4})\s*at[eé]:?\s*(\d{2})\/(\d{2})\/(\d{4})/i);
   const competence=mPer?(mPer[6]+'-'+mPer[5]):null;
@@ -43738,7 +43738,7 @@ function _aplicfinParseBradescoInvestimentosLinhas(linhas,qtdPaginas){
   linhas.forEach(L=>{
     const txt=L.join(' ').replace(/\s+/g,' ').trim();
     for(const [re,id] of SECOES){ if(re.test(txt)){ sec=id; return; } }
-    if(sec&&/^Total$/i.test(String(L[0]).trim())){
+    if(sec&&/^T[o0]ta[lI1]$/i.test(String(L[0]).trim())){
       const nums=L.slice(1).filter(ehNum).map(br);
       if(nums.length!==BRAD_INV_COLS.length){ warnings.push(`EXTRACTION_ERROR: linha Total de "${sec}" com ${nums.length} números (esperado ${BRAD_INV_COLS.length}).`); return; }
       const o={}; BRAD_INV_COLS.forEach((c,i)=>{ o[c]=nums[i]; });
@@ -43781,6 +43781,32 @@ async function _aplicfinParseBradescoInvestimentos(pdf){
   }
   return _aplicfinParseBradescoInvestimentosLinhas(linhas,pdf.numPages);
 }
+// PDF em IMAGEM (sem texto): OCR local (Tesseract.js, sem IA) linha a linha; cada linha vira uma lista de palavras e passa
+// pela MESMA leitura do PDF/XLS acima. Os números do OCR são conferidos pela validação Bruto − IOF − IRRF = Líquido.
+async function _aplicfinParseBradescoInvestimentosOcr(pdf,onStatus){
+  const p1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  if(p1.length) return null; // tem texto: já foi tentado pelo leitor normal
+  await _bbRFGarantirTesseract();
+  const worker=await Tesseract.createWorker('por+eng');
+  const linhas=[];
+  try{
+    for(let p=1;p<=pdf.numPages;p++){
+      if(onStatus) onStatus(`Bradesco (imagem): OCR p.${p}/${pdf.numPages}…`);
+      const vp=(await pdf.getPage(p)).getViewport({scale:3});
+      const canvas=document.createElement('canvas'); canvas.width=vp.width; canvas.height=vp.height;
+      const ctx=canvas.getContext('2d');
+      await (await pdf.getPage(p)).render({canvasContext:ctx,viewport:vp}).promise;
+      const img=ctx.getImageData(0,0,canvas.width,canvas.height), d=img.data;
+      for(let i=0;i<d.length;i+=4){ const g=0.299*d[i]+0.587*d[i+1]+0.114*d[i+2]; d[i]=d[i+1]=d[i+2]=Math.min(255,Math.max(0,(g-128)*1.6+128)); }
+      ctx.putImageData(img,0,0);
+      const {data}=await worker.recognize(canvas);
+      (data.lines||[]).forEach(l=>{ const t=l.text.trim(); if(t) linhas.push(t.split(/\s+/)); });
+    }
+  } finally { await worker.terminate(); }
+  const r=_aplicfinParseBradescoInvestimentosLinhas(linhas,pdf.numPages);
+  if(r) r.warnings.unshift('Lido via OCR local (o PDF é imagem) — confira os valores antes de salvar.');
+  return r;
+}
 async function _aplicfinParseBradescoInvestimentosXls(file){
   const wb=XLSX.read(await file.arrayBuffer(),{type:'array'});
   const linhas=[];
@@ -43805,6 +43831,7 @@ async function _aplicfinExtrairSemIA(file){
   // Último recurso: PDF em IMAGEM do Itaú Aut Mais (só o OCR consegue ler) —
   // mesmo leitor que o "Importar PDF" das Aplicações Financeiras já usa.
   try{ const r=await _aplicfinItauAutMaisViaOcr(file,pdf.numPages); if(r) return r; }catch(e){ console.error('Parser aplicfin Itaú Aut Mais OCR:',e); }
+  try{ const r=await _aplicfinParseBradescoInvestimentosOcr(pdf); if(r) return r; }catch(e){ console.error('Parser aplicfin Bradesco Investimentos OCR:',e); }
   return null;
 }
 
