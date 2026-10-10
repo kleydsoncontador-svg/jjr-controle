@@ -28129,9 +28129,18 @@ async function _lancctbProcessarFluxo(){
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')));
     if(!pendencias||!pendencias.length){ toast('Nenhuma pendência no período filtrado nesta conta.','ok'); return; }
-    const { data: fluxoTodo } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    // Limita o fluxo pela faixa de datas das pendências ±tolerância (mesmo
+    // padrão do matching; evita varrer 9k+ linhas sem filtro — Fast Lube).
+    const _pfDatas=pendencias.map(p=>p.data_pagamento).filter(Boolean).sort();
+    const _pfAddD=(d,n)=>{ const dt=new Date(d+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+    const _pfDmin=_pfDatas.length?_pfAddD(_pfDatas[0],-LANCCTB_MATCH_TOLERANCIA_DIAS):null;
+    const _pfDmax=_pfDatas.length?_pfAddD(_pfDatas[_pfDatas.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS):null;
+    const { data: fluxoTodo } = await _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('fluxo_caixa_lancamentos')
       .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,status_associado,lancamento_extrato_id')
-      .eq('empresa_eid',eid));
+      .eq('empresa_eid',eid);
+      if(_pfDmin) q=q.gte('data',_pfDmin);
+      if(_pfDmax) q=q.lte('data',_pfDmax);
+      return q; });
     if(!fluxoTodo||!fluxoTodo.length){ toast('Nenhuma linha de Fluxo de Caixa importada pra esta empresa — importe o Fluxo de Caixa primeiro (aba Fluxo de Caixa).','err'); return; }
     const pendIds=new Set(pendencias.map(p=>p.id));
     // "Livre" = não associada, ou associada a nada, ou associada a um
@@ -28169,31 +28178,42 @@ async function _lancctbProcessarFluxo(){
       }
     }
     const usados=new Set();
+    // Resolve os pares (extrato → fluxo) localmente antes de gravar,
+    // depois salva em lote paralelo (8 simultâneos) para evitar N round-trips.
+    const pares=[];
+    if(fluxoPend.length){
+      for(let i=0;i<pendencias.length;i++){
+        const l=pendencias[i];
+        const ehSaida=l.valor_saida>0;
+        const valor=l.valor_saida||l.valor_entrada;
+        const cand=fluxoPend.filter(f=>!usados.has(f.id))
+          .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
+          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
+          .filter(f=>{
+            const par=indicadaDe(f); if(!par) return true;
+            if(par.status_conciliacao==='conciliado') return par.lancamento_extrato_id===l.id;
+            return Math.abs(par.valor_parcela-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005);
+          });
+        if(!cand.length) continue;
+        const vDe=f=>ehSaida?f.valor_saida:f.valor_entrada;
+        cand.sort((a,b)=>(Math.abs(vDe(a)-valor)<0.005?0:1)-(Math.abs(vDe(b)-valor)<0.005?0:1)
+          ||(_lancctbNomeCompativel([l.historico_bancario],b.cliente_fornecedor_nome)?1:0)-(_lancctbNomeCompativel([l.historico_bancario],a.cliente_fornecedor_nome)?1:0)
+          ||_lancctbTextoScoreSimilaridade(l.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(l.historico_bancario,a.descricao));
+        const f=cand[0];
+        usados.add(f.id);
+        pares.push({fId:f.id,lId:l.id});
+      }
+    }
+    // Grava em ondas de 8 updates simultâneos
     let associados=0;
-    for(let i=0;i<(fluxoPend.length?pendencias.length:0);i++){
-      const l=pendencias[i];
-      if(statusEl) statusEl.textContent=`Associando Fluxo ${i+1}/${pendencias.length}…`;
-      const ehSaida=l.valor_saida>0;
-      const valor=l.valor_saida||l.valor_entrada;
-      const cand=fluxoPend.filter(f=>!usados.has(f.id))
-        .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
-        .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
-        .filter(f=>{
-          // O Fluxo indica NF+parcela: se ela já está conciliada em OUTRO
-          // lançamento, ou tem valor diferente deste extrato, a linha não é daqui.
-          const par=indicadaDe(f); if(!par) return true;
-          if(par.status_conciliacao==='conciliado') return par.lancamento_extrato_id===l.id;
-          return Math.abs(par.valor_parcela-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005);
-        });
-      if(!cand.length) continue;
-      const vDe=f=>ehSaida?f.valor_saida:f.valor_entrada;
-      cand.sort((a,b)=>(Math.abs(vDe(a)-valor)<0.005?0:1)-(Math.abs(vDe(b)-valor)<0.005?0:1)
-        ||(_lancctbNomeCompativel([l.historico_bancario],b.cliente_fornecedor_nome)?1:0)-(_lancctbNomeCompativel([l.historico_bancario],a.cliente_fornecedor_nome)?1:0)
-        ||_lancctbTextoScoreSimilaridade(l.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(l.historico_bancario,a.descricao));
-      const f=cand[0];
-      const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',f.id);
-      if(error){ console.error('Erro ao associar fluxo:',error); continue; }
-      usados.add(f.id); associados++;
+    if(statusEl) statusEl.textContent=`Associando ${pares.length} linha(s) ao Fluxo…`;
+    for(let i=0;i<pares.length;i+=8){
+      const onda=pares.slice(i,i+8);
+      const resultados=await Promise.all(onda.map(({fId,lId})=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:lId}).eq('id',fId)));
+      for(const {error} of resultados){
+        if(error) console.error('Erro ao associar fluxo:',error);
+        else associados++;
+      }
     }
     // Pedido do usuário 18/09/2026: o Fluxo também indica a NF (número +
     // parcela) — depois de associar, amarra as NFs que ele indica.
@@ -28373,24 +28393,66 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
     .order('data_pagamento',{ascending:true})));
+  // Faixa de datas dos lançamentos pendentes ±tolerância — limita as queries
+  // grandes abaixo sem perder nenhum candidato relevante (mesmo padrão do
+  // renderLancctbRegistroContabil, commit 9f2c4da).
+  const _mDatas=(lancamentos||[]).map(l=>l.data_pagamento).filter(Boolean).sort();
+  const _mAddD=(d,n)=>{ const dt=new Date(d+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+  const _mDmin=_mDatas.length?_mAddD(_mDatas[0],-LANCCTB_MATCH_TOLERANCIA_DIAS):null;
+  const _mDmax=_mDatas.length?_mAddD(_mDatas[_mDatas.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS):null;
   // Comprovante de Pagamento (saída) e de Recebimento (entrada) vivem em
   // tabelas separadas (decisão do usuário — ver Fase 9) — cada lançamento só
   // pode usar a fonte do seu próprio lado (saída→pagamento, entrada→
   // recebimento), nunca a do lado oposto.
-  const { data: comprovantesPag } = await _lancctbFetchTudo(()=>_supaClient.from('comprovantes_bancarios')
-    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,valor_documento,juros,multa,desconto')
-    .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
-  const { data: comprovantesReceb } = await _lancctbFetchTudo(()=>_supaClient.from('comprovantes_recebimento')
-    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela')
-    .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
-  const { data: parcelas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
-    .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
-    .eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+  // Queries independentes rodam em paralelo para reduzir latência total.
+  const [
+    { data: comprovantesPag },
+    { data: comprovantesReceb },
+    { data: parcelas },
+    { data: regras },
+    { data: fluxoCaixaPonteBase },
+    { data: fluxoCaixa },
+  ] = await Promise.all([
+    _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('comprovantes_bancarios')
+      .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,valor_documento,juros,multa,desconto')
+      .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
+      if(_mDmin) q=q.gte('data_pagamento',_mDmin);
+      if(_mDmax) q=q.lte('data_pagamento',_mDmax);
+      return q; }),
+    _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('comprovantes_recebimento')
+      .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela')
+      .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
+      if(_mDmin) q=q.gte('data_pagamento',_mDmin);
+      if(_mDmax) q=q.lte('data_pagamento',_mDmax);
+      return q; }),
+    // parcelas: filtra por data_vencimento (campo equivalente a data_pagamento)
+    _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('notas_fiscais_parcelas')
+      .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
+      .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
+      if(_mDmin) q=q.gte('data_vencimento',_mDmin);
+      if(_mDmax) q=q.lte('data_vencimento',_mDmax);
+      return q; }),
+    // regras: pequena, sem filtro de data
+    _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
+      .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
+      .eq('empresa_eid',eid).eq('ativo',true).is('fluxo_historico_gatilho',null).is('fluxo_cliente_gatilho',null).is('fluxo_numero_gatilho',null).is('fluxo_descconta_gatilho',null)),
+    // fluxo ponte: inclui linhas já associadas a pendências desta conta
+    _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,lancamento_extrato_id,numero,documento_numero,parcela')
+      .eq('empresa_eid',eid);
+      if(_mDmin) q=q.gte('data',_mDmin);
+      if(_mDmax) q=q.lte('data',_mDmax);
+      return q; }),
+    // fluxo não-associado: melhorador de texto para Passo 3 (Regra)
+    _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id')
+      .eq('empresa_eid',eid).eq('status_associado','nao_associado');
+      if(_mDmin) q=q.gte('data',_mDmin);
+      if(_mDmax) q=q.lte('data',_mDmax);
+      return q; }),
+  ]);
   // Regra criada com gatilho de FLUXO DE CAIXA (fluxo_*_gatilho) só vale quando o Fluxo associado também bate — ou seja, só no "Processar Fluxo (Regras)".
   // Aqui (matching geral) ela é ignorada: antes aplicava só o gatilho do extrato e pegava todo lançamento parecido (achado 03/10/2026, regra ACORDO).
-  const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
-    .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
-    .eq('empresa_eid',eid).eq('ativo',true).is('fluxo_historico_gatilho',null).is('fluxo_cliente_gatilho',null).is('fluxo_numero_gatilho',null).is('fluxo_descconta_gatilho',null));
   // Linhas 2+ de regra rateada (Fase 11/12) — mapa por regra_id. Só é usada
   // pra resolver sozinho no Passo 3 quando TODAS as linhas filhas têm
   // valor_fixo preenchido (rateio sempre igual todo mês); quando algum
@@ -28402,16 +28464,6 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   const linhasRateioPorRegra={};
   (linhasRateioRows||[]).forEach(l=>{ (linhasRateioPorRegra[l.regra_id]=linhasRateioPorRegra[l.regra_id]||[]).push(l); });
   const fluxoPonteUsados=new Set();
-  // Pra securitizadora (ponte): inclui também linhas do Fluxo JÁ associadas a
-  // ESTE extrato pendente (ex.: "Processar Fluxo" já ligou, mas não classificou).
-  const { data: fluxoCaixaPonteBase } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,lancamento_extrato_id,numero,documento_numero,parcela')
-    .eq('empresa_eid',eid));
-  // Fluxo de Caixa (Fase 10) ainda não associado — usado só como melhorador
-  // de texto pro Passo 3 (Regra) bater; nunca resolve sozinho.
-  const { data: fluxoCaixa } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-    .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id')
-    .eq('empresa_eid',eid).eq('status_associado','nao_associado'));
   const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
     .select('conta_contabil_id,plano_contas(classificacao)')
     .eq('id',contaId).single();
