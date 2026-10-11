@@ -29093,6 +29093,46 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const pr=(async()=>{ try{ await tarefa(); }catch(e){ erros.push('Falha ao gravar um lançamento: '+(e&&e.message?e.message:e)); } })();
     _filaGrav.add(pr); pr.then(()=>_filaGrav.delete(pr));
   }
+  // ── Lote no servidor: a Regra (Passo 3) acumula itens e manda 100 de uma vez pra função criar_lancamentos_partida_dobrada_lote, que faz
+  // no banco o mesmo que as 2-4 chamadas de antes (lançamento + status do extrato + comprovante + fluxo). Se a função ainda não existir no
+  // banco, cai sozinho no caminho item a item. A função é idempotente (não duplica lançamento se a chamada for repetida).
+  const LOTE_TAM=100; let _bufLote=[]; let _loteOk=null; // null = ainda não sabe; false = função não existe → caminho antigo
+  function _compensarRegra(it,msg){
+    erros.push(`Lançamento de ${it.l.data_pagamento} (R$ ${_fmt(it.valor)}): ${msg}`);
+    resolvRegra--; aindaPendente++;
+    if(it.comprovanteId) comprovantesUsados.delete(it.comprovanteId);
+  }
+  async function _gravarRegraItem(it){
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:it.linhas });
+    if(error){ _compensarRegra(it,error.message); return; }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',it.l.id);
+    if(it.comprovanteId) await _supaClient.from(it.tabela).update({status_conciliacao:'conciliado',lancamento_extrato_id:it.l.id}).eq('id',it.comprovanteId);
+    if(it.fluxoId) await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:it.l.id}).eq('id',it.fluxoId);
+    await checarAlertaAutomatico(it.linhas,it.l,it.valor,it.historicoBanco,it.nomeParaLinha);
+  }
+  async function _descarregarLote(){
+    if(!_bufLote.length) return;
+    const itens=_bufLote; _bufLote=[];
+    await _gravarEmParalelo(async()=>{
+      if(_loteOk===false){ for(const it of itens) await _gravarRegraItem(it); return; }
+      const payload=itens.map(it=>({linhas:it.linhas,extrato_id:it.l.id,comprovante_id:it.comprovanteId||null,comprovante_tabela:it.tabela,fluxo_id:it.fluxoId||null}));
+      let resp=await _supaClient.rpc('criar_lancamentos_partida_dobrada_lote',{ itens:payload });
+      if(resp.error&&resp.error.code==='PGRST202'){ _loteOk=false; for(const it of itens) await _gravarRegraItem(it); return; } // função não existe no banco
+      if(resp.error) resp=await _supaClient.rpc('criar_lancamentos_partida_dobrada_lote',{ itens:payload }); // 1 nova tentativa — segura, a função é idempotente
+      if(resp.error){ itens.forEach(it=>_compensarRegra(it,resp.error.message)); return; }
+      _loteOk=true;
+      for(const r of (resp.data||[])){
+        const it=itens[r.idx-1]; if(!it) continue;
+        if(r.ok) await checarAlertaAutomatico(it.linhas,it.l,it.valor,it.historicoBanco,it.nomeParaLinha);
+        else _compensarRegra(it,r.erro||'erro ao gravar');
+      }
+    });
+  }
+  async function _enfileirarRegra(it){
+    if(_loteOk===false){ await _gravarEmParalelo(()=>_gravarRegraItem(it)); return; }
+    _bufLote.push(it);
+    if(_bufLote.length>=LOTE_TAM) await _descarregarLote();
+  }
   for(let i=0;i<lancamentos.length;i++){
     const _agora=Date.now();
     if(_agora-_ultimoYield>30){ await new Promise(r=>setTimeout(r,0)); _ultimoYield=Date.now(); }
@@ -29642,27 +29682,15 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         // Marca já (na memória) o que esta gravação vai consumir, pra o próximo item não pegar o mesmo comprovante enquanto ela está em voo.
         resolvRegra++; resolvido=true;
         if(comprovanteMatch) comprovantesUsados.add(comprovanteMatch.id);
-        await _gravarEmParalelo(async()=>{
-          const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
-          if(error){
-            // Falhou: desfaz a contagem e libera o comprovante — o lançamento continua pendente, igual ao comportamento de antes.
-            erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
-            resolvRegra--; aindaPendente++;
-            if(comprovanteMatch) comprovantesUsados.delete(comprovanteMatch.id);
-            return;
-          }
-          await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-          if(comprovanteMatch) await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',comprovanteMatch.id);
-          if(fluxoMatch) await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxoMatch.id);
-          await checarAlertaAutomatico(linhas,l,valor,historicoBanco,nomeParaLinha);
-        });
+        await _enfileirarRegra({ l, linhas, valor, comprovanteId:comprovanteMatch?comprovanteMatch.id:null, tabela:tabelaComprovante, fluxoId:fluxoMatch?fluxoMatch.id:null, historicoBanco, nomeParaLinha });
       }
     }
 
     if(!resolvido) aindaPendente++;
   }
 
-  if(statusCb&&_filaGrav.size) log('Finalizando gravações…');
+  if(statusCb&&(_bufLote.length||_filaGrav.size)) log('Finalizando gravações…');
+  await _descarregarLote();
   await Promise.all([..._filaGrav]);
   return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, resolvSocio, resolvVt, aindaPendente, erros, diagAglutinado, resolvAbertas };
 }
