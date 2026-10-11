@@ -37949,6 +37949,49 @@ function _lancctbParseValorFlex(s){
   return neg?-v:v;
 }
 
+// ── C/C em Excel montada pelo escritório ("Fluxo de Caixa em Excel/Extrato Banco … C-C …xlsx") — pedido do usuário 11/10/2026 (Nexus, Santander C/C 13003041) ──
+// Colunas A–N (Data do lancamento | Descrição/Histórico | Vlr. à crédito | Vlr. à débito | Cnpj/CPF | Juros | Multa | Desconto | VLR TOTAL | DOCUMENTO | …).
+// Regras combinadas: traz SÓ as colunas A a D (data, histórico, crédito, débito); a coluna SALDO é ignorada; data fora do mês da planilha
+// (ex.: 25/08 numa aba de 09/2026) é corrigida pro mês da planilha (25/09/2026). Tarifa do mês anterior paga no mês é normal — nada a ajustar.
+function _lancctbParsearExtratoJjrCcXlsx(wb){
+  const ws=wb.Sheets[wb.SheetNames[0]]; if(!ws) return null;
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+  if(!aoa.length) return null;
+  const n=s=>String(s==null?'':s).normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+  const h=aoa[0]||[];
+  if(!(/^data do lancamento$/.test(n(h[0]))&&/^descricao\/historico$/.test(n(h[1]))&&/^vlr\.? a credito$/.test(n(h[2]))&&/^vlr\.? a debito$/.test(n(h[3])))) return null;
+  const pad=x=>String(x).padStart(2,'0');
+  const diaIso=v=>{
+    if(v instanceof Date&&!isNaN(v)) return v.getFullYear()+'-'+pad(v.getMonth()+1)+'-'+pad(v.getDate()); // SheetJS entrega a data "de parede" nos campos locais
+    if(typeof v==='number'&&v>20000&&v<80000){ const t=new Date(Math.round((v-25569)*86400000)); return t.getUTCFullYear()+'-'+pad(t.getUTCMonth()+1)+'-'+pad(t.getUTCDate()); } // serial do Excel
+    return _lancctbDataIsoFlex(v);
+  };
+  const num=v=>{ if(typeof v==='number') return v; const x=_lancctbParseValorFlex(v); return isNaN(x)?0:x; };
+  const brutas=[];
+  for(let i=1;i<aoa.length;i++){
+    const r=aoa[i];
+    const data=diaIso(r[0]); if(!data) continue;
+    const cred=Math.abs(num(r[2])), deb=Math.abs(num(r[3]));
+    if(!(cred>0||deb>0)) continue;
+    const historico=String(r[1]==null?'':r[1]).trim(); if(!historico) continue;
+    brutas.push({data,historico,valor_entrada:Math.round(cred*100)/100,valor_saida:Math.round(deb*100)/100,documento:null});
+  }
+  if(!brutas.length) return null;
+  // Mês da planilha: nome da aba "09.26" (MM.AA); senão, o mês mais frequente das datas
+  let ym=null;
+  const mAba=String(wb.SheetNames[0]).trim().match(/^(\d{2})[.\-\/](\d{2}|\d{4})$/);
+  if(mAba&&+mAba[1]>=1&&+mAba[1]<=12) ym=(mAba[2].length===2?'20'+mAba[2]:mAba[2])+'-'+mAba[1];
+  if(!ym){ const c={}; brutas.forEach(l=>{ const k=l.data.slice(0,7); c[k]=(c[k]||0)+1; }); ym=Object.keys(c).sort((a,b)=>c[b]-c[a])[0]; }
+  let ajustadas=0;
+  const [ano,mes]=ym.split('-').map(Number), ultimo=new Date(ano,mes,0).getDate();
+  brutas.forEach(l=>{
+    if(l.data.slice(0,7)===ym) return;
+    const dia=Math.min(+l.data.slice(8,10),ultimo);
+    l.data=ym+'-'+pad(dia); ajustadas++;
+  });
+  return { lancamentos:brutas, saldoAnteriorDoc:null, saldoFinalDoc:null,
+    layout:'C/C em Excel do escritório (colunas A–D)'+(ajustadas?' — '+ajustadas+' data(s) fora do mês ajustada(s) para '+pad(mes)+'/'+ano:'') };
+}
 // ── Mercado Pago — "account_statement…xlsx" ──
 function _lancctbParsearExtratoMercadoPagoXlsx(wb){
   const ws=wb.Sheets[wb.SheetNames[0]];
@@ -39608,7 +39651,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
       // Formatos de C/C de marketplace/fintech (Mercado Pago, ShopeePay) —
       // leitura direta, sem IA, antes do mapeador genérico de colunas.
-      const recExcel=_lancctbParsearExtratoContaAzulXlsx(wb)||_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb)||_lancctbParsearExtratoBBContaCorrenteXlsx(wb)||_lancctbParsearExtratoHotmartXlsx(wb);
+      const recExcel=_lancctbParsearExtratoContaAzulXlsx(wb)||_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb)||_lancctbParsearExtratoBBContaCorrenteXlsx(wb)||_lancctbParsearExtratoHotmartXlsx(wb)||_lancctbParsearExtratoJjrCcXlsx(wb);
       if(recExcel){
         // 'excel' — precisa ser um dos valores aceitos por
         // lancamentos_extrato_origem_importacao_check (achado real
