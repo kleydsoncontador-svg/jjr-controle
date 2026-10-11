@@ -29084,6 +29084,15 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // duravam >5s de CPU sincronamente).
   let _ultimoYield=Date.now();
   let _ultimoLog=0;
+  // Gravações da Regra (Passo 3) vão em PARALELO (8 por vez) em vez de uma chamada depois da outra — era o gargalo (2 a 4 idas ao banco
+  // por lançamento, em série). Cada lançamento continua sendo gravado por UMA chamada atômica (criar_lancamento_partida_dobrada, que usa
+  // um identificador aleatório e confere débito = crédito) e as decisões de matching seguem exatamente na mesma ordem.
+  const _filaGrav=new Set(); const GRAV_CONCORRENCIA=8;
+  async function _gravarEmParalelo(tarefa){
+    while(_filaGrav.size>=GRAV_CONCORRENCIA) await Promise.race(_filaGrav);
+    const pr=(async()=>{ try{ await tarefa(); }catch(e){ erros.push('Falha ao gravar um lançamento: '+(e&&e.message?e.message:e)); } })();
+    _filaGrav.add(pr); pr.then(()=>_filaGrav.delete(pr));
+  }
   for(let i=0;i<lancamentos.length;i++){
     const _agora=Date.now();
     if(_agora-_ultimoYield>30){ await new Promise(r=>setTimeout(r,0)); _ultimoYield=Date.now(); }
@@ -29630,22 +29639,31 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         filhas.forEach((f,i)=>{
           linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:f.plano_contas?.classificacao||'', conta_contabil_id:f.conta_contabil_id, tipo:f.dc, valor:Number(f.valor_fixo), historico:historicosResolvidos[i+1], cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' });
         });
-        const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
-        if(error){
-          erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
-        } else {
+        // Marca já (na memória) o que esta gravação vai consumir, pra o próximo item não pegar o mesmo comprovante enquanto ela está em voo.
+        resolvRegra++; resolvido=true;
+        if(comprovanteMatch) comprovantesUsados.add(comprovanteMatch.id);
+        await _gravarEmParalelo(async()=>{
+          const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+          if(error){
+            // Falhou: desfaz a contagem e libera o comprovante — o lançamento continua pendente, igual ao comportamento de antes.
+            erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
+            resolvRegra--; aindaPendente++;
+            if(comprovanteMatch) comprovantesUsados.delete(comprovanteMatch.id);
+            return;
+          }
           await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-          if(comprovanteMatch){ comprovantesUsados.add(comprovanteMatch.id); await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',comprovanteMatch.id); }
+          if(comprovanteMatch) await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',comprovanteMatch.id);
           if(fluxoMatch) await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxoMatch.id);
           await checarAlertaAutomatico(linhas,l,valor,historicoBanco,nomeParaLinha);
-          resolvRegra++; resolvido=true;
-        }
+        });
       }
     }
 
     if(!resolvido) aindaPendente++;
   }
 
+  if(statusCb&&_filaGrav.size) log('Finalizando gravações…');
+  await Promise.all([..._filaGrav]);
   return { total:lancamentos.length, resolvNF, resolvSubsetSum, resolvRegra, resolvSocio, resolvVt, aindaPendente, erros, diagAglutinado, resolvAbertas };
 }
 async function _lancctbReprocessarPendencias(){
