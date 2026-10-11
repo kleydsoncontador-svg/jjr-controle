@@ -29190,7 +29190,10 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const tarifaItem=bruto?grupoCompleto.find(c=>c.tipo_operacao==='tarifa_cobranca'):null;
       const grupo=tarifaItem?grupoCompleto.filter(c=>c.id!==tarifaItem.id):grupoCompleto;
       const valorBanco=tarifaItem?Math.round((ancoraLiquidacao.valor_pago-tarifaItem.valor_pago)*100)/100:ancoraLiquidacao.valor_pago;
-      const [nfNum,parcelaNum]=String(ancoraLiquidacao.documento_numero).split('-');
+      const [nfNum,parcelaDoc]=String(ancoraLiquidacao.documento_numero).split('-');
+      // Banco do Brasil: o documento é só a NF e a parcela real fica em numero_parcela, igual em TODAS as linhas do boleto.
+      // (No Itaú numero_parcela é só a sequência da operação — linhas diferentes têm números diferentes — e a parcela vem no "NF-parcela".)
+      const parcelaNum=parcelaDoc||((grupoCompleto.length>=2&&grupoCompleto.every(c=>c.numero_parcela===ancoraLiquidacao.numero_parcela))?String(ancoraLiquidacao.numero_parcela):'');
       const refTexto=nfNum?` ref. NF ${nfNum}${parcelaNum?` (parcela ${parcelaNum})`:''} de ${ancoraLiquidacao.cliente_fornecedor_nome||''}`.trim():'';
       // Tenta achar a NF real (empresa emitiu, direção=venda) pelo número —
       // não achando, segue mesmo assim com a conta fixa 10000 (usuário:
@@ -32708,22 +32711,24 @@ function _lancctbParsearBBCobrancaExcel(matriz){
       data_pagamento: _lancctbFluxoParseData(row[iDataSit]),
       cliente_fornecedor_nome: String(row[iNome]||'').trim(),
       cnpj_cpf: String(row[iCnpj]||'').replace(/\D/g,''),
-      documento_numero: _lancctbDocumentoDeSeuNumero(row[iSeuNum]),
+      documento_numero: (_lancctbSeuNumeroNfParcela(row[iSeuNum])||{}).nf||'',
       data_vencimento: _lancctbFluxoParseData(row[iVenc]),
       valor_documento: _lancctbFluxoParseValorCel(row[iValor]),
       juros:0, multa:0, desconto:0, observacao:'',
     };
     const valorLiq=_lancctbFluxoParseValorCel(row[iValorLiq]);
+    // "Seu Número" = NF + parcela no último dígito (o "1" que vem antes é sempre ignorado). Documento fica só com a NF e a parcela
+    // vai na coluna Parcela — pra amarrar com a NF (pedido do usuário 10/2026).
+    const parcelaReal=parseInt((_lancctbSeuNumeroNfParcela(row[iSeuNum])||{}).parcela,10)||1;
     const valorPrincipal=iValor>=0?_lancctbFluxoParseValorCel(row[iValor]):0;
-    if(!(valorPrincipal>0)){ registros.push({...base,valor_pago:valorLiq}); continue; } // sem coluna "Valor": mantém 1 linha só (como antes)
+    if(!(valorPrincipal>0)){ registros.push({...base,valor_pago:valorLiq,numero_parcela:parcelaReal}); continue; } // sem coluna "Valor": mantém 1 linha só (como antes)
     // Mesmo padrão do boleto do Itaú (ver _lancctbMontarGrupoLiquidacao): uma linha pro valor da NF/parcela, uma pra liquidação (o que
     // entrou no banco) e uma PARA A DIFERENÇA — Liquidação maior que o Valor = juros (receita); menor = desconto concedido.
-    let parcela=1;
-    registros.push({...base,valor_pago:valorPrincipal,tipo_operacao:'valor_boleto',numero_parcela:parcela++});
-    registros.push({...base,valor_pago:valorLiq,tipo_operacao:'liquidacao',numero_parcela:parcela++});
+    registros.push({...base,valor_pago:valorPrincipal,tipo_operacao:'valor_boleto',numero_parcela:parcelaReal});
+    registros.push({...base,valor_pago:valorLiq,tipo_operacao:'liquidacao',numero_parcela:parcelaReal});
     const dif=Math.round((valorLiq-valorPrincipal)*100)/100;
-    if(dif>=0.005) registros.push({...base,valor_pago:dif,juros:dif,tipo_operacao:'juros',numero_parcela:parcela++});
-    else if(dif<=-0.005) registros.push({...base,valor_pago:Math.abs(dif),desconto:Math.abs(dif),tipo_operacao:'desconto',numero_parcela:parcela++});
+    if(dif>=0.005) registros.push({...base,valor_pago:dif,juros:dif,tipo_operacao:'juros',numero_parcela:parcelaReal});
+    else if(dif<=-0.005) registros.push({...base,valor_pago:Math.abs(dif),desconto:Math.abs(dif),tipo_operacao:'desconto',numero_parcela:parcelaReal});
   }
   return registros.filter(r=>r.data_pagamento&&r.valor_pago);
 }
