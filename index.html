@@ -33901,16 +33901,26 @@ async function confirmarLancctbImportComprovantes(){
   const chaveComprov=r=>[r.data_pagamento||'',Number(r.valor_pago||0).toFixed(2),String(r.cliente_fornecedor_nome||'').trim().toUpperCase(),String(r.documento_numero||'').trim(),String(r.cnpj_cpf||'').replace(/\D/g,'')].join('|');
   const datasLote=registros.map(r=>r.data_pagamento).filter(Boolean).sort();
   const jaExistem=new Set();
+  const orfasSemConta={}; // comprovantes já salvos SEM conta bancária (chave → ids)
   if(datasLote.length){
     const { data: exist }=await _lancctbFetchTudo(()=>_supaClient.from(_lancctbComprovTabela(tipo))
-      .select('conta_bancaria_id,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf')
+      .select('id,conta_bancaria_id,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf')
       .eq('empresa_eid',_lancctbEidAtual).gte('data_pagamento',datasLote[0]).lte('data_pagamento',datasLote[datasLote.length-1]));
-    (exist||[]).forEach(r=>jaExistem.add(chaveComprov(r)));
+    (exist||[]).forEach(r=>{ const k=chaveComprov(r); jaExistem.add(k); if(contaSel&&r.conta_bancaria_id==null) (orfasSemConta[k]=orfasSemConta[k]||[]).push(r.id); });
   }
   const registrosUnicos=[];
-  registros.forEach(r=>{ const k=chaveComprov(r); if(jaExistem.has(k)) return; jaExistem.add(k); registrosUnicos.push(r); });
+  const adotar=[];
+  registros.forEach(r=>{ const k=chaveComprov(r); if(jaExistem.has(k)){ if(orfasSemConta[k]&&orfasSemConta[k].length) adotar.push(orfasSemConta[k].shift()); return; } jaExistem.add(k); registrosUnicos.push(r); });
   const duplicadosPulados=registros.length-registrosUnicos.length;
-  if(!registrosUnicos.length){ toast(`Nada a salvar — ${duplicadosPulados} comprovante(s) já existiam (duplicados ignorados).`,'ok'); return; }
+  // Já existiam, mas sem conta bancária (salvos antes de a conta ser escolhida): em vez de só ignorar, vincula à conta atual.
+  let adotados=0;
+  if(adotar.length){ await _lancctbEmLotesDb(adotar,200,lote=>_supaClient.from(_lancctbComprovTabela(tipo)).update({conta_bancaria_id:contaSel}).in('id',lote)); adotados=adotar.length; }
+  const msgAdotados=adotados?` ${adotados} que já existiam sem conta foram vinculados a esta conta.`:'';
+  if(!registrosUnicos.length){
+    toast(`Nada a salvar — ${duplicadosPulados} comprovante(s) já existiam (duplicados ignorados).${msgAdotados}`,'ok');
+    if(adotados){ closeModal('mLancctbUpload'); if(tipo==='recebimento'){ _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb(); } else if(tipo==='salarios'){ _lancctbComprovSalPagina=0; renderLancctbComprovantesSalarios(); } else { _lancctbComprovPagina=0; renderLancctbComprovantes(); } }
+    return;
+  }
   registros.length=0; registrosUnicos.forEach(r=>registros.push(r));
   // Pagamento: upsert ignorando duplicados (dedup por hash_dedup, spec) —
   // reimportar o mesmo PDF não cria linhas repetidas. Recebimento/salários:
@@ -33921,7 +33931,7 @@ async function confirmarLancctbImportComprovantes(){
   if(error){ toast('Erro ao salvar: '+error.message,'err'); return; }
   const salvos=(typeof count==='number')?count:registros.length;
   const ignorados=registros.length-salvos+duplicadosPulados;
-  toast(`${salvos} comprovante(s) salvo(s)${ignorados>0?` (${ignorados} já existiam, ignorados)`:''}${semData.length?` — ${semData.length} sem data, ainda pendente(s) de correção`:''}`,'ok');
+  toast(`${salvos} comprovante(s) salvo(s)${ignorados>0?` (${ignorados} já existiam, ignorados)`:''}${semData.length?` — ${semData.length} sem data, ainda pendente(s) de correção`:''}${msgAdotados}`,'ok');
   // Vínculo com o Visão Geral (Fase 16) — só Comprovantes de Pagamento por
   // enquanto, pedido do usuário (05/09/2026); mesma ideia do Extrato/Aplicações.
   if(tipo==='pagamento'){
@@ -33967,6 +33977,22 @@ function _lancctbComprovRecebSelecionarConta(id){
 function _lancctbComprovRecebMudarMes(v){
   _lancctbComprovRecebMes=v; _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb();
 }
+// Vincula à conta selecionada os comprovantes de recebimento do período que estão sem conta bancária (confirma antes).
+async function vincularLancctbComprovRecebSemConta(contaId){
+  const eid=_lancctbEidAtual, mes=_lancctbComprovRecebMes;
+  const { data: ids, error } = await _lancctbFetchTudo(()=>{
+    let q=_supaClient.from('comprovantes_recebimento').select('id').eq('empresa_eid',eid).is('conta_bancaria_id',null);
+    if(mes){ const [a,m]=mes.split('-').map(Number); q=q.gte('data_pagamento',`${mes}-01`).lte('data_pagamento',`${mes}-${String(new Date(a,m,0).getDate()).padStart(2,'0')}`); }
+    return q.order('id',{ascending:true});
+  });
+  if(error){ toast('Erro ao buscar comprovantes: '+error.message,'err'); return; }
+  const lista=(ids||[]).map(r=>r.id);
+  if(!lista.length){ toast('Nenhum comprovante sem conta neste período.','info'); return; }
+  if(!confirm(`Vincular ${lista.length} comprovante(s) ${mes?'de '+mes.split('-').reverse().join('/')+' ':''}sem conta bancária a esta conta?\n\nConfira se são mesmo desta conta (ex.: boletos do Itaú numa conta Itaú).`)) return;
+  await _lancctbEmLotesDb(lista,200,lote=>_supaClient.from('comprovantes_recebimento').update({conta_bancaria_id:contaId}).in('id',lote));
+  toast(`${lista.length} comprovante(s) vinculado(s) a esta conta.`,'ok');
+  _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb();
+}
 async function renderLancctbComprovantesReceb(){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
@@ -33994,10 +34020,23 @@ async function renderLancctbComprovantesReceb(){
 
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar comprovantes de recebimento: ${esc(error.message)}</div>`; return; }
   _lancctbUltimoComprovReceb=comprovantes||[];
+  // Conta selecionada mas nada aparece: pode ser que os comprovantes tenham sido salvos SEM conta bancária (o filtro é pela conta).
+  let semContaQtd=0;
+  if(!(count>0)&&_lancctbComprovRecebContaSel){
+    let q2=_supaClient.from('comprovantes_recebimento').select('id',{count:'exact',head:true}).eq('empresa_eid',eid).is('conta_bancaria_id',null);
+    if(_lancctbComprovRecebMes){ const [a2,m2]=_lancctbComprovRecebMes.split('-').map(Number); q2=q2.gte('data_pagamento',`${_lancctbComprovRecebMes}-01`).lte('data_pagamento',`${_lancctbComprovRecebMes}-${String(new Date(a2,m2,0).getDate()).padStart(2,'0')}`); }
+    semContaQtd=(await q2).count||0;
+  }
 
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   let html=(agencias&&agencias.length)?_lancctbContaCardsHtml(agencias,_lancctbComprovRecebContaSel,'_lancctbComprovRecebSelecionarConta',false):'';
   const contaComprovRecebSel=(agencias||[]).find(a=>String(a.id)===String(_lancctbComprovRecebContaSel));
+  if(semContaQtd>0&&contaComprovRecebSel){
+    html+=`<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px;padding:10px 14px;border:1px solid #D97706;background:rgba(217,119,6,.12);border-radius:8px;font-size:12.5px">
+      <span>⚠ Há <b>${semContaQtd}</b> comprovante(s) ${_lancctbComprovRecebMes?'deste mês ':''}salvo(s) <b>sem conta bancária</b> — por isso não aparecem nesta conta (${esc(contaComprovRecebSel.banco_nome)} ${esc(contaComprovRecebSel.conta_corrente||'')}).</span>
+      <button class="btn bp bsm" onclick="vincularLancctbComprovRecebSemConta(${contaComprovRecebSel.id})">Vincular a esta conta</button>
+    </div>`;
+  }
   html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
     <input class="si" data-filtro="comprov-receb-busca" placeholder="🔍 Cliente/Fornecedor, documento, CNPJ/CPF ou nosso número..." value="${esc(_lancctbComprovRecebBusca)}" style="flex:1;min-width:220px" oninput="_lancctbComprovRecebBuscaDebounced(this.value)">
   </div>
