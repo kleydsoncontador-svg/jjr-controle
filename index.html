@@ -28515,7 +28515,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(_mDmax) q=q.lte('data_pagamento',_mDmax);
       return q; }),
     _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('comprovantes_recebimento')
-      .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela')
+      .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,documento_numero,tipo_operacao,numero_parcela,observacao')
       .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
       if(_mDmin) q=q.gte('data_pagamento',_mDmin);
       if(_mDmax) q=q.lte('data_pagamento',_mDmax);
@@ -29187,7 +29187,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // aqui, o grupo juntava as linhas dos dois meses e a partida dobrada saía
       // desbalanceada (D/C dobrado). Cada liquidação só pode se agrupar com as
       // operações (valor_boleto/tarifa/juros/multa/desconto) DA MESMA DATA.
-      const grupoCompleto=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.documento_numero===ancoraLiquidacao.documento_numero&&c.cliente_fornecedor_nome===ancoraLiquidacao.cliente_fornecedor_nome&&c.data_pagamento===ancoraLiquidacao.data_pagamento);
+      const grupoCompleto=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&c.documento_numero===ancoraLiquidacao.documento_numero&&c.cliente_fornecedor_nome===ancoraLiquidacao.cliente_fornecedor_nome&&c.data_pagamento===ancoraLiquidacao.data_pagamento&&!(c.tipo_operacao==='tarifa_cobranca'&&/cobrada à parte/i.test(c.observacao||'')));
       // "bruto" (Passo 0.6, LOTE do dia — pedido do usuário 29/09/2026, "CORREÇÃO DA
       // CONCILIAÇÃO DOS RECEBIMENTOS ITAÚ"): pra crédito consolidado tipo "Mov Tit Cob
       // Disp", o banco credita o valor ANTES da tarifa (liquidação − tarifa, tarifa
@@ -29267,7 +29267,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // − tarifa, tarifa negativa = soma de volta) — nunca a liquidação líquida de
       // tarifa. Ver "CORREÇÃO DA CONCILIAÇÃO DOS RECEBIMENTOS ITAÚ" (usuário 29/09/2026).
       const valorBrutoCandidata=c=>{
-        const tarifa=comprovantesReceb.find(t=>t.tipo_operacao==='tarifa_cobranca'&&t.documento_numero===c.documento_numero&&t.cliente_fornecedor_nome===c.cliente_fornecedor_nome);
+        const tarifa=comprovantesReceb.find(t=>t.tipo_operacao==='tarifa_cobranca'&&!/cobrada à parte/i.test(t.observacao||'')&&t.documento_numero===c.documento_numero&&t.cliente_fornecedor_nome===c.cliente_fornecedor_nome);
         return tarifa?c.valor_pago-tarifa.valor_pago:c.valor_pago;
       };
       const somaCent=Math.round(candidatas.reduce((s,c)=>s+valorBrutoCandidata(c),0)*100);
@@ -32756,7 +32756,7 @@ function _lancctbParsearBBMovimentosCobrancaExcel(matriz){
   const idx=nome=>headers.indexOf(nome);
   const iNome=idx('nome do pagador'), iNosso=idx('nosso numero'), iDoc=headers.findIndex(h=>/^seu nr/.test(h)), iVenc=idx('vencimento'),
         iData=headers.findIndex(h=>/^data op/.test(h)), iBoleto=idx('valor boleto'), iAcr=idx('acrescimos'), iDesc=idx('descontos'),
-        iLiq=idx('valor liquido'), iAg=idx('agencia rec'), iOper=idx('operacao');
+        iLiq=idx('valor liquido'), iAg=idx('agencia rec'), iOper=idx('operacao'), iTarifa=idx('tarifa');
   if(iNome<0||iBoleto<0||iLiq<0||iData<0) return null;
   const registros=[];
   for(let i=iCab+1;i<matriz.length;i++){
@@ -32786,6 +32786,11 @@ function _lancctbParsearBBMovimentosCobrancaExcel(matriz){
     const juros=fecha?acr:(dif>0?dif:0), desconto=fecha?desc:(dif<0?-dif:0);
     if(juros>=0.005) registros.push({...base,valor_pago:juros,juros:juros,tipo_operacao:'juros',numero_parcela:parcelaReal});
     if(desconto>=0.005) registros.push({...base,valor_pago:desconto,desconto:desconto,tipo_operacao:'desconto',numero_parcela:parcelaReal});
+    // Tarifa de cobrança do boleto: o banco NÃO a desconta do crédito (o crédito é o Valor Líquido) e não debita 1 tarifa por boleto no
+    // extrato (só o "Tarifa Pacote de Serviços Cobrança" mensal). Entra como linha informativa, marcada "cobrada à parte", que o
+    // lançamento do recebimento ignora — se entrasse, débito e crédito não fechariam.
+    const tarifa=iTarifa>=0?_lancctbFluxoParseValorCel(row[iTarifa]):0;
+    if(tarifa>=0.005) registros.push({...base,valor_pago:tarifa,tipo_operacao:'tarifa_cobranca',numero_parcela:parcelaReal,observacao:'Tarifa BB cobrada à parte (não compõe o crédito do boleto)'});
   }
   return registros.filter(r=>r.data_pagamento&&r.valor_pago);
 }
