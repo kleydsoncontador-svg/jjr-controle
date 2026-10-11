@@ -2520,6 +2520,18 @@ tr.ta-pago .badge,.ta-pago button{text-decoration:none}
   </div>
 </div>
 
+<!-- Modal: Retenções desconsideradas (ISS/PIS/COFINS/CSLL) das NFS-e -->
+<div class="mb" id="mLancctbRetIgn" style="display:none">
+  <div class="modal" style="max-width:640px">
+    <div class="mt">
+      <h3>⚙ Retenções desconsideradas (NFS-e)</h3>
+      <button onclick="closeModal('mLancctbRetIgn')">&#x2715;</button>
+    </div>
+    <div class="mc" id="lancctbRetIgnBody"></div>
+    <div class="ma"><button class="btn bo" onclick="closeModal('mLancctbRetIgn')">Fechar</button></div>
+  </div>
+</div>
+
 <!-- Modal: Importar Excel Mercado Pago (multi-arquivo, sem IA) -->
 <div class="mb" id="mLancctbAplicImportExcel" style="display:none">
   <div class="modal" style="max-width:660px">
@@ -21767,9 +21779,36 @@ function _lancctbParsearNFSeXml(xml){
 // menos ISS, PIS, COFINS, CSLL e IRRF retidos — usado na coluna "Valor
 // Líquido" da tela e no matching (tenta bruto E líquido, ver
 // _lancctbNfseValoresParaMatching).
+// Retenções que o usuário mandou DESCONSIDERAR (pedido 11/10/2026): "pro fornecedor/cliente ou todos, e fique salvo pras próximas NF, tanto em
+// serviços tomados quanto prestados". Cada regra: { escopo:'todos'|'cnpj', cnpj, dir:'tomado'|'prestado'|'ambos', impostos:['iss','pis','cofins','csll'] }.
+// Fica em S (dados_app) por empresa; vale pras NFs já importadas e pras próximas (é aplicada na hora de calcular o Valor Líquido).
+let _lancctbRetIgnCache={};
+function _lancctbRetIgnGet(eid){
+  const k=String(eid);
+  if(!_lancctbRetIgnCache[k]){ let v=null; try{ v=S.g('lancctb_ret_ign_'+k); }catch(e){} _lancctbRetIgnCache[k]=Array.isArray(v)?v:[]; }
+  return _lancctbRetIgnCache[k];
+}
+function _lancctbRetIgnSet(eid,lista){ _lancctbRetIgnCache[String(eid)]=lista; S.s('lancctb_ret_ign_'+eid,lista); }
+// devolve { iss:true, pis:true, ... } só com os impostos desconsiderados pra ESTA nota
+function _lancctbRetIgnPara(nf){
+  const regras=_lancctbRetIgnGet(nf.empresa_eid||_lancctbEidAtual);
+  const out={};
+  if(!regras.length) return out;
+  const dir=nf.direcao;
+  const cnpj=String((dir==='venda'?nf.cnpj_destinatario:nf.cnpj_emitente)||'').replace(/\D/g,'');
+  regras.forEach(r=>{
+    const dr=r.dir||'ambos';
+    if(dr==='tomado'&&dir!=='compra') return;
+    if(dr==='prestado'&&dir!=='venda') return;
+    if(r.escopo==='cnpj'&&String(r.cnpj||'').replace(/\D/g,'')!==cnpj) return;
+    (r.impostos||[]).forEach(k=>{ out[k]=true; });
+  });
+  return out;
+}
 function _lancctbNfValorLiquido(nf){
   const bruto=Number(nf.valor_total)||0;
-  const deduzir=(Number(nf.iss_valor)||0)+(Number(nf.pis_valor)||0)+(Number(nf.cofins_valor)||0)+(Number(nf.csll_valor)||0)+(Number(nf.irrf_valor)||0);
+  const ign=_lancctbRetIgnPara(nf);
+  const deduzir=(ign.iss?0:(Number(nf.iss_valor)||0))+(ign.pis?0:(Number(nf.pis_valor)||0))+(ign.cofins?0:(Number(nf.cofins_valor)||0))+(ign.csll?0:(Number(nf.csll_valor)||0))+(Number(nf.irrf_valor)||0);
   return Math.round((bruto-deduzir)*100)/100;
 }
 // CNPJs do grupo (matriz + filiais) pra essa empresa — usado pelo parser de
@@ -24602,6 +24641,7 @@ async function renderLancctbNotas(aba){
       <button class="btn bo bsm" onclick="ignorarLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico},false)" title="Volta pra Pendente as parcelas IGNORADAS das NFs que batem com os filtros da tela (filtre Status = Ignorado)">↩ Reativar filtradas</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico})" title="Apaga todas as NFs que batem com os filtros ativos acima — NFs já conciliadas (com lançamento contábil gerado) nunca são apagadas">🗑️ Excluir todas as filtradas</button>
       ${(ehServico&&aba.direcaoNf==='venda'&&LANCCTB_ISS_TXT_EMPRESAS.includes(String(_lancctbEidAtual)))?`<button class="btn bo bsm" onclick="gerarLancctbIssRetidoTxt()" title="TXT de lançamentos do ISS retido das NFS-e listadas (débito = conta que você informa, crédito = 10000)">📄 Gerar TXT ISS Retido</button>`:''}
+      ${ehServico?`<button class="btn bo bsm" onclick="abrirLancctbRetIgn('')" title="Escolha se ISS, PIS, COFINS e CSLL retidos devem ou não ser descontados no Valor Líquido — por fornecedor/cliente (CNPJ) ou pra todos. Fica salvo pras próximas NFs.">⚙ Retenções desconsideradas${_lancctbRetIgnGet(_lancctbEidAtual).length?' ('+_lancctbRetIgnGet(_lancctbEidAtual).length+')':''}</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
     <div style="margin-bottom:8px">${_lancctbPagGenericaHtml(_lancctbNfePagina,count,from,to,totalPaginas,'_lancctbNfePagina','renderLancctbConteudo')}</div>
@@ -24663,12 +24703,12 @@ async function renderLancctbNotas(aba){
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(p.valor_parcela||0)}</td>
         <td style="padding:7px 10px;text-align:center">${p.numero_parcela}</td>
         <td style="padding:7px 10px;text-align:center">${qtdParcelas}</td>
-        ${ehServico?`<td style="padding:7px 10px;text-align:right">R$ ${_fmt(nf.iss_valor||0)}</td>
-        <td style="padding:7px 10px;text-align:right">${nf.pis_valor?'R$ '+_fmt(nf.pis_valor):'—'}</td>
-        <td style="padding:7px 10px;text-align:right">${nf.cofins_valor?'R$ '+_fmt(nf.cofins_valor):'—'}</td>
-        <td style="padding:7px 10px;text-align:right">${nf.csll_valor?'R$ '+_fmt(nf.csll_valor):'—'}</td>
+        ${ehServico?(()=>{ const ign=_lancctbRetIgnPara(nf); const rs=k=>ign[k]?';text-decoration:line-through;opacity:.5" title="Retenção desconsiderada (não entra no Valor Líquido)':''; return `<td style="padding:7px 10px;text-align:right${rs('iss')}">R$ ${_fmt(nf.iss_valor||0)}</td>
+        <td style="padding:7px 10px;text-align:right${rs('pis')}">${nf.pis_valor?'R$ '+_fmt(nf.pis_valor):'—'}</td>
+        <td style="padding:7px 10px;text-align:right${rs('cofins')}">${nf.cofins_valor?'R$ '+_fmt(nf.cofins_valor):'—'}</td>
+        <td style="padding:7px 10px;text-align:right${rs('csll')}">${nf.csll_valor?'R$ '+_fmt(nf.csll_valor):'—'}</td>
         <td style="padding:7px 10px;text-align:right">${nf.irrf_valor?'R$ '+_fmt(nf.irrf_valor):'—'}</td>
-        <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(_lancctbNfValorLiquido(nf))}</td>`:`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
+        <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(_lancctbNfValorLiquido(nf))} <button type="button" class="btn bo bsm" style="font-size:10px;padding:1px 5px" title="Desconsiderar retenções (ISS/PIS/COFINS/CSLL) deste fornecedor/cliente" onclick="abrirLancctbRetIgn('${esc(String(cnpjTerc||''))}')">⚙</button></td>`; })():`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
         <td style="padding:7px 10px;text-align:center"><button class="btn bo bsm" style="font-size:10.5px;padding:3px 6px" title="Editar/dividir a(s) parcela(s) desta NF — use quando o XML veio sem abertura de parcela mas o pagamento real foi parcelado" onclick="abrirLancctbDividirParcelaModal(${p.nf_id})">✂️ Parcela</button></td>
@@ -24889,11 +24929,13 @@ async function gerarLancctbIssRetidoTxt(){
   if(!esc_) return;
   S.s(chaveConta,esc_.conta);
   const { data: rows, error } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais')
-    .select('numero,data_emissao,iss_valor,nome_destinatario')
+    .select('numero,data_emissao,iss_valor,nome_destinatario,cnpj_destinatario,cnpj_emitente,direcao,empresa_eid')
     .eq('empresa_eid',eid).eq('tipo','nfse').eq('direcao','venda')
     .gte('data_emissao',esc_.ini).lte('data_emissao',esc_.fim).gt('iss_valor',0).order('data_emissao').order('numero'));
   if(error){ toast('Erro ao buscar NFS-e: '+error.message,'err'); return; }
-  if(!rows||!rows.length){ toast('Nenhuma NFS-e com ISS no período informado.','err'); return; }
+  const _semIgn=(rows||[]).filter(nf=>!_lancctbRetIgnPara(nf).iss), _qtdIgn=(rows||[]).length-_semIgn.length;
+  if(_qtdIgn) rows.splice(0,rows.length,..._semIgn); // ISS desconsiderado (Retenções desconsideradas) não entra no TXT
+  if(!rows||!rows.length){ toast(_qtdIgn?'Todas as NFS-e do período estão com o ISS desconsiderado.':'Nenhuma NFS-e com ISS no período informado.','err'); return; }
   const emp=S.emps().find(e=>String(e.eid)===eid);
   const cnpj=String((emp&&(emp.cnpjNum||emp.cnpj))||'').replace(/\D/g,'');
   const br=d=>d?d.slice(8,10)+'/'+d.slice(5,7)+'/'+d.slice(0,4):'';
@@ -24903,7 +24945,78 @@ async function gerarLancctbIssRetidoTxt(){
   const salvou=await _lancctbSalvarTxtNaPastaTransfRede(nomeArq,gerarTxtMisterContador(cnpj,linhas));
   if(!salvou) baixarTxtMisterContador(cnpj,linhas,nomeArq);
   const total=Math.round(rows.reduce((a,x)=>a+x.iss_valor,0)*100)/100;
-  toast(`TXT gerado: ${rows.length} NFS-e, ISS total R$ ${_fmt(total)}.${salvou?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador.'}`,'ok');
+  toast(`TXT gerado: ${rows.length} NFS-e, ISS total R$ ${_fmt(total)}.${_qtdIgn?' ('+_qtdIgn+' com ISS desconsiderado ficaram de fora)':''}${salvou?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador.'}`,'ok');
+}
+
+// ── Modal "Retenções desconsideradas" ───────────────────────────────────────────────────────────────────────────────────────────────
+let _lancctbRetIgnCtx={cnpj:''};
+function abrirLancctbRetIgn(cnpjPre){
+  _lancctbRetIgnCtx={cnpj:String(cnpjPre||'').replace(/\D/g,'')};
+  _lancctbRetIgnRender();
+  openModal('mLancctbRetIgn');
+}
+function _lancctbRetIgnRender(){
+  const eid=_lancctbEidAtual;
+  const regras=_lancctbRetIgnGet(eid);
+  const NOMES={iss:'ISS',pis:'PIS',cofins:'COFINS',csll:'CSLL'};
+  const aba=LANCCTB_ABAS.find(a=>a.id===_lancctbAbaAtiva);
+  const dirPadrao=aba&&aba.direcaoNf==='venda'?'prestado':(aba&&aba.direcaoNf==='compra'?'tomado':'ambos');
+  const lista=regras.length?regras.map((r,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg);border-radius:4px;margin-bottom:5px;font-size:12px">
+      <span style="flex:1"><b>${r.escopo==='cnpj'?esc(_fmtCnpjCpf(r.cnpj)):'Todos os fornecedores/clientes'}</b> · ${r.dir==='tomado'?'serviços tomados':r.dir==='prestado'?'serviços prestados':'tomados e prestados'} · não descontar: <b>${(r.impostos||[]).map(k=>NOMES[k]||k).join(', ')}</b></span>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="_lancctbRetIgnExcluir(${i})" title="Remover esta regra (volta a descontar)">Remover</button></div>`).join(''):`<div style="font-size:12px;color:var(--slate);margin-bottom:8px">Nenhuma regra ainda — hoje todas as retenções (ISS, PIS, COFINS, CSLL e IRRF) são descontadas do Valor Líquido.</div>`;
+  document.getElementById('lancctbRetIgnBody').innerHTML=`
+    <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Marque as retenções que <b>não</b> devem ser descontadas do Valor Líquido (e do ISS retido do TXT). Vale pras NFs já importadas e pras próximas, e fica salvo. O IRRF continua sendo descontado.</div>
+    <div style="margin-bottom:12px">${lista}</div>
+    <div style="border:1px solid var(--border);border-radius:6px;padding:10px">
+      <div style="font-size:12px;font-weight:700;margin-bottom:8px">Nova regra</div>
+      <div class="grid2">
+        <div class="fg"><div class="fl">Aplicar a</div>
+          <select class="si" id="lancctbRetIgnEscopo" style="width:100%" onchange="document.getElementById('lancctbRetIgnCnpjWrap').style.display=this.value==='cnpj'?'':'none'">
+            <option value="cnpj" ${_lancctbRetIgnCtx.cnpj?'selected':''}>Um fornecedor/cliente (CNPJ)</option>
+            <option value="todos" ${_lancctbRetIgnCtx.cnpj?'':'selected'}>Todos os fornecedores/clientes</option>
+          </select></div>
+        <div class="fg"><div class="fl">Em quais notas</div>
+          <select class="si" id="lancctbRetIgnDir" style="width:100%">
+            <option value="tomado" ${dirPadrao==='tomado'?'selected':''}>Serviços tomados</option>
+            <option value="prestado" ${dirPadrao==='prestado'?'selected':''}>Serviços prestados</option>
+            <option value="ambos" ${dirPadrao==='ambos'?'selected':''}>Tomados e prestados</option>
+          </select></div>
+      </div>
+      <div class="fg" id="lancctbRetIgnCnpjWrap" style="${_lancctbRetIgnCtx.cnpj?'':'display:none'}"><div class="fl">CNPJ do fornecedor/cliente</div>
+        <input class="si" id="lancctbRetIgnCnpj" style="width:100%" value="${esc(_lancctbRetIgnCtx.cnpj?_fmtCnpjCpf(_lancctbRetIgnCtx.cnpj):'')}" placeholder="00.000.000/0000-00"></div>
+      <div class="fg"><div class="fl">Não descontar</div>
+        <div style="display:flex;gap:16px;flex-wrap:wrap">${Object.keys(NOMES).map(k=>`<label style="display:flex;gap:5px;align-items:center;font-size:12.5px;cursor:pointer"><input type="checkbox" class="lancctbRetIgnChk" value="${k}" checked> ${NOMES[k]}</label>`).join('')}</div></div>
+      <div style="display:flex;justify-content:flex-end"><button class="btn bp" onclick="_lancctbRetIgnAdicionar()">+ Adicionar regra</button></div>
+    </div>`;
+}
+function _lancctbRetIgnAdicionar(){
+  const escopo=document.getElementById('lancctbRetIgnEscopo').value;
+  const dir=document.getElementById('lancctbRetIgnDir').value;
+  const cnpj=(document.getElementById('lancctbRetIgnCnpj').value||'').replace(/\D/g,'');
+  const impostos=[...document.querySelectorAll('.lancctbRetIgnChk:checked')].map(c=>c.value);
+  if(escopo==='cnpj'&&cnpj.length!==14&&cnpj.length!==11){ toast('Informe o CNPJ (ou CPF) completo do fornecedor/cliente.','err'); return; }
+  if(!impostos.length){ toast('Marque pelo menos uma retenção pra não descontar.','err'); return; }
+  const eid=_lancctbEidAtual;
+  const lista=[..._lancctbRetIgnGet(eid)];
+  // mesma combinação (escopo+cnpj+direção): junta os impostos em vez de duplicar
+  const ex=lista.find(r=>r.escopo===escopo&&(r.dir||'ambos')===dir&&(escopo!=='cnpj'||String(r.cnpj||'').replace(/\D/g,'')===cnpj));
+  if(ex) ex.impostos=[...new Set([...(ex.impostos||[]),...impostos])];
+  else lista.push({escopo,cnpj:escopo==='cnpj'?cnpj:null,dir,impostos});
+  _lancctbRetIgnSet(eid,lista);
+  toast('Regra salva — vale pras NFs atuais e futuras.','ok');
+  _lancctbRetIgnCtx={cnpj:''};
+  _lancctbRetIgnRender();
+  renderLancctbConteudo();
+}
+function _lancctbRetIgnExcluir(i){
+  const eid=_lancctbEidAtual;
+  const lista=[..._lancctbRetIgnGet(eid)];
+  if(!lista[i]) return;
+  lista.splice(i,1);
+  _lancctbRetIgnSet(eid,lista);
+  toast('Regra removida.','ok');
+  _lancctbRetIgnRender();
+  renderLancctbConteudo();
 }
 function exportarLancctbNotasExcel(abaId){
   const aba=LANCCTB_ABAS.find(a=>a.id===abaId);
