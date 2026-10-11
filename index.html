@@ -44291,6 +44291,97 @@ async function _aplicfinParseBradescoCdbMulti(pdf){
     productMode:'multiple', products:produtos, productFilter:null, sources, validations, warnings, pageCount:pdf.numPages,
   };
 }
+// ── Santander · CDB ContaMax Empresarial (pedido do usuário 11/10/2026, Nexus Automotive) ─────────────────────────────────────────────
+// PDF com texto nativo (sem OCR). DUAS tabelas, e as duas são necessárias:
+//  A) "Movimentação Mensal" → usa SÓ a linha "Acumulado Mês": Aplicações, Principal resgatado, Resgates brutos, Rendimento das aplicações
+//     RESGATADAS (base IR/IOF), IOF, IR (vem NEGATIVO no PDF, o site guarda positivo) e Valor líquido creditado.
+//  B) "Posição Consolidada" → Saldo bruto anterior, Rendimento apurado no mês (A+B = rendimento TOTAL do mês), Saldo bruto final.
+// Três conceitos que NÃO se misturam: 114,07 = rendimento dos resgates; 381,78 = rendimento total do mês; 467.450,81 = líquido dos resgates.
+// As páginas de Conta Corrente do mesmo PDF (APLICACAO/RESGATE CONTAMAX) são ignoradas.
+async function _aplicfinParseSantanderContaMax(pdf){
+  const norm=s=>String(s).toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+  const reNum=/(-\s*)?\d{1,3}(?:\.\d{3})*,\d{2}(?!\d)/g;
+  const numsDe=txt=>[...String(txt).matchAll(reNum)].map(m=>_convCobrParseValor(m[0].replace(/\s+/g,'')));
+  const linhasTodas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    const linhas=_aplicfinLinhas(_aplicfinItens(page,content),3);
+    linhas.forEach(L=>linhasTodas.push({ p, txt:L.map(i=>i.s).join(' '), n:norm(L.map(i=>i.s).join(' ')) }));
+  }
+  const todo=linhasTodas.map(l=>l.n).join(' | ');
+  if(!/CONTAMAX EMPRESARIAL/.test(todo)||!/MOVIMENTACAO MENSAL/.test(todo)||!/POSICAO CONSOLIDADA/.test(todo)) return null;
+  const M='santander_cdb_contamax';
+  const idxMov=linhasTodas.findIndex(l=>/MOVIMENTACAO MENSAL/.test(l.n));
+  const idxAcum=linhasTodas.findIndex((l,i)=>i>idxMov&&/ACUMULADO MES/.test(l.n));
+  const idxPos=linhasTodas.findIndex((l,i)=>i>Math.max(idxAcum,idxMov)&&/POSICAO CONSOLIDADA/.test(l.n));
+  if(idxAcum<0) return { error:'ACUMULADO_MES_NOT_FOUND' };
+  if(idxPos<0) return { error:'POSICAO_CONSOLIDADA_NOT_FOUND' };
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  const warnings=[], validations=[];
+  // Competência = mês das datas de movimento (1ª data de cada linha da tabela: "03/SET/26")
+  const MES={JAN:1,FEV:2,MAR:3,ABR:4,MAI:5,JUN:6,JUL:7,AGO:8,SET:9,OUT:10,NOV:11,DEZ:12};
+  const cont={};
+  for(let i=idxMov+1;i<idxAcum;i++){
+    const m=linhasTodas[i].n.match(/\b(\d{2})\/(JAN|FEV|MAR|ABR|MAI|JUN|JUL|AGO|SET|OUT|NOV|DEZ)\/(\d{2})\b/);
+    if(m){ const k=(2000+(+m[3]))+'-'+String(MES[m[2]]).padStart(2,'0'); cont[k]=(cont[k]||0)+1; }
+  }
+  const ks=Object.keys(cont).sort((a,b)=>cont[b]-cont[a]);
+  const competence=ks.length?ks[0]:null;
+  if(ks.length>1) warnings.push('Datas de movimento em mais de um mês ('+ks.join(', ')+') — usei '+competence+'.');
+  // A) Acumulado Mês — 7 valores, nesta ordem
+  const a=numsDe(linhasTodas[idxAcum].txt);
+  if(a.length<7) return { error:'ACUMULADO_MES_INCOMPLETE', detail:'achei '+a.length+' valores (esperava 7)' };
+  const [aplic,principalResg,resgBrutos,rendResgatado,iof,irRaw,liquido]=a.slice(0,7);
+  const irrf=Math.abs(irRaw);
+  // B) Posição Consolidada — linha 1 (6 valores) e linha 2 (5 valores), na ordem de leitura
+  const bn=[]; for(let i=idxPos;i<linhasTodas.length&&bn.length<11;i++){ numsDe(linhasTodas[i].txt).forEach(v=>bn.push(v)); }
+  if(bn.length<11) return { error:'POSICAO_CONSOLIDADA_INCOMPLETE', detail:'achei '+bn.length+' valores (esperava 11)' };
+  let [saldoAnt,aplicPos,resgPos,vA,vB,vTotal]=bn.slice(0,6);
+  if(Math.abs(vA+vB-vTotal)>0.02&&Math.abs(bn[0]+bn[1]-bn[2])<=0.02){ // (A),(B),Total vieram antes dos 3 primeiros
+    [vA,vB,vTotal,saldoAnt,aplicPos,resgPos]=bn.slice(0,6);
+  }
+  const [saldoFinal,saldoLiquido,rendResgPos,iofPos,irPos]=bn.slice(6,11);
+  const rendMes=vTotal;
+  const rendaTributavel=r2(rendResgatado-iof);
+  const ok=(nome,x,y,det)=>{ const o=Math.abs(x-y)<=0.02; validations.push({name:nome,ok:o,detail:det+': '+r2(x)+' vs '+r2(y)}); return o; };
+  ok('resgate_bruto_menos_principal',resgBrutos-principalResg,rendResgatado,'Resgates brutos − principal = rendimento resgatado');
+  ok('liquido_creditado',resgBrutos-iof-irrf,liquido,'Resgates brutos − IOF − IR = valor líquido creditado');
+  ok('total_a_mais_b',vA+vB,vTotal,'(A)+(B) = total no mês');
+  ok('aplicacoes_bate_posicao',aplic,aplicPos,'Aplicações (Movimentação × Posição)');
+  ok('resgates_bate_posicao',resgBrutos,resgPos,'Resgates brutos (Movimentação × Posição)');
+  ok('rend_resgatado_bate_posicao',rendResgatado,rendResgPos,'Rendimento resgatado (Movimentação × Posição)');
+  ok('iof_bate_posicao',iof,iofPos,'IOF (Movimentação × Posição)');
+  ok('ir_bate_posicao',irrf,Math.abs(irPos),'IR (Movimentação × Posição)');
+  const recon=saldoFinal-saldoAnt-aplic+resgBrutos;
+  const reconOk=ok('reconciliacao_rendimento_mes',recon,rendMes,'Saldo final − saldo anterior − aplicações + resgates = rendimento do mês');
+  if(!reconOk) return { error:'SANTANDER_CONTAMAX_RECONCILIATION_ERROR', detail:'Saldo final − anterior − aplicações + resgates = '+r2(recon).toFixed(2)+', mas o rendimento do mês lido é '+r2(rendMes).toFixed(2) };
+  validations.filter(v=>!v.ok).forEach(v=>warnings.push('Conferência não bateu — '+v.detail));
+  const sec1='Movimentação Mensal → Acumulado Mês', sec2='Posição Consolidada';
+  const mk=(k,label,section,v,calc)=>({key:M+'.'+k,label,section,product:null,value:r2(v),calculationType:calc||'DIRECT_TOTAL'});
+  const sources=[
+    mk('movement.redeemed_yield','Acumulado Mês → Rendimento das aplicações RESGATADAS (base IR/IOF) = Rendimento bruto s/ resgates',sec1,rendResgatado),
+    mk('movement.iof','Acumulado Mês → IOF',sec1,iof),
+    mk('movement.taxable_income','Acumulado Mês → Renda tributável (rendimento resgatado − IOF)',sec1,rendaTributavel,'CALCULATED'),
+    mk('movement.irrf','Acumulado Mês → IR (valor positivo; no PDF vem '+irRaw.toFixed(2).replace('.',',')+')',sec1,irrf),
+    mk('movement.irrf_raw','Acumulado Mês → IR como impresso (com sinal)',sec1,irRaw),
+    mk('movement.applications','Acumulado Mês → Aplicações',sec1,aplic),
+    mk('movement.net_credited','Acumulado Mês → Valor líquido creditado (= Resgate líquido)',sec1,liquido),
+    mk('movement.principal_redeemed','Acumulado Mês → Valor principal resgatado',sec1,principalResg),
+    mk('movement.gross_redemptions','Acumulado Mês → Resgates brutos',sec1,resgBrutos),
+    mk('position.month_yield_total','Posição Consolidada → Rendimento apurado no mês: Total (A+B) = Rendimento do mês',sec2,rendMes),
+    mk('position.month_yield_redeemed','Posição Consolidada → Rendimento sobre valor resgatado (A)',sec2,vA),
+    mk('position.month_yield_not_redeemed','Posição Consolidada → Rendimento sobre valor não resgatado (B)',sec2,vB),
+    mk('position.previous_gross_balance','Posição Consolidada → Saldo bruto anterior',sec2,saldoAnt),
+    mk('position.final_gross_balance','Posição Consolidada → Saldo bruto final (= Saldo bruto atualizado)',sec2,saldoFinal),
+    mk('position.final_net_balance','Posição Consolidada → Saldo líquido final (não usar no quadro)',sec2,saldoLiquido),
+  ];
+  return {
+    bank:'SANTANDER', model:M, competence, account:null,
+    fingerprint:_aplicfinFingerprint('SANTANDER',M,['CONTAMAX EMPRESARIAL','MOVIMENTACAO MENSAL','POSICAO CONSOLIDADA','ACUMULADO MES']),
+    productMode:'single', products:[], sources, validations, warnings, pageCount:pdf.numPages,
+  };
+}
 // Colunas numéricas do Bradesco são alinhadas à DIREITA — a borda direita do
 // valor fica ~alinhada com a borda direita do rótulo do cabeçalho. Casa pela
 // menor distância entre a borda direita do valor e a de cada cabeçalho.
@@ -44500,6 +44591,18 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       resgate:'bradesco_cdb_multi.resgates.principal',
       rendLiq:'bradesco_cdb_multi.resgates.credito',
       saldoBrutoExtrato:'bradesco_cdb_multi.saldo_atual.atualizado',
+    },
+    // Santander CDB ContaMax Empresarial (pedido do usuário 11/10/2026): Movimentação Mensal → Acumulado Mês + Posição Consolidada.
+    // "Rendimento do Mês" = Total (A+B) da Posição Consolidada (NÃO o 114,07 do rendimento resgatado); "Resgate" = valor LÍQUIDO creditado.
+    santander_cdb_contamax:{
+      bruto:'santander_cdb_contamax.movement.redeemed_yield',
+      iof:'santander_cdb_contamax.movement.iof',
+      trib:'santander_cdb_contamax.movement.taxable_income',
+      irrf:'santander_cdb_contamax.movement.irrf',
+      rendMes:'santander_cdb_contamax.position.month_yield_total',
+      aplic:'santander_cdb_contamax.movement.applications',
+      resgate:'santander_cdb_contamax.movement.net_credited',
+      saldoBrutoExtrato:'santander_cdb_contamax.position.final_gross_balance',
     },
     bb_rende_facil:{
       bruto:'bb_rende_facil.history.redemption_yield_sum',
@@ -45052,6 +45155,23 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdfXp=await pdfjsLib.getDocument({data:buf}).promise;
+    // Santander · CDB ContaMax Empresarial (Movimentação Mensal + Posição Consolidada) — pedido do usuário 11/10/2026
+    const santanderCm=await _aplicfinParseSantanderContaMax(pdfXp);
+    if(santanderCm){
+      if(santanderCm.error){
+        const MSGS_CM={
+          SANTANDER_CONTAMAX_RECONCILIATION_ERROR:'Santander ContaMax: os números lidos não fecham entre si — '+(santanderCm.detail||'')+'. Nada foi gravado.',
+          ACUMULADO_MES_NOT_FOUND:'Santander ContaMax: não achei a linha "Acumulado Mês" na Movimentação Mensal.',
+          POSICAO_CONSOLIDADA_NOT_FOUND:'Santander ContaMax: não achei a "Posição Consolidada".',
+          ACUMULADO_MES_INCOMPLETE:'Santander ContaMax: a linha "Acumulado Mês" veio incompleta ('+(santanderCm.detail||'')+').',
+          POSICAO_CONSOLIDADA_INCOMPLETE:'Santander ContaMax: a "Posição Consolidada" veio incompleta ('+(santanderCm.detail||'')+').',
+        };
+        toast(MSGS_CM[santanderCm.error]||('Santander ContaMax: '+santanderCm.error),'err');
+        if(statusEl) statusEl.textContent='';
+        return 'NAO_RECONHECIDO';
+      }
+      return await _ganhoAplicarParserSemIA(eid,pid,santanderCm,file,statusEl);
+    }
     const xpPerf=await _aplicfinParseXpXperformance(pdfXp);
     if(xpPerf) return await _ganhoAplicarParserSemIA(eid,pid,xpPerf,file,statusEl);
     const xpPos=await _aplicfinParseXpPosicaoConsolidada(pdfXp);
