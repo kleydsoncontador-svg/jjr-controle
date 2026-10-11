@@ -21025,6 +21025,51 @@ function renderLancctbConteudo(){
   </div>`;
 }
 
+// ── Auditoria 10/2026 · bloco 1 — telas de Lançamentos Contábeis: "última chamada vence" + erro visível ───────────────────────────────
+// Problemas que isto resolve, sem mexer em NENHUMA regra de negócio nem no conteúdo das telas:
+//  1) Resposta antiga sobrescrevendo a tela nova (trocar de aba/mês/conta rápido): todas as telas escrevem no MESMO contêiner
+//     (#lancctbConteudoAba) e cada uma termina quando termina — a que terminava por último ganhava, mesmo sendo a mais velha.
+//     Agora só UMA tela roda por vez; se chegar outro pedido enquanto roda, o mais recente espera e roda em seguida (pedidos
+//     intermediários são descartados). O resultado final na tela é sempre o do último clique.
+//  2) "Carregando…" eterno: se a tela lançava exceção, o texto de carregando ficava para sempre. Agora vira mensagem de erro com
+//     botão "Tentar de novo" (e o erro vai para o console).
+// Quem espera uma dessas telas (await renderLancctbRegistroContabil() em "Processar Tributos") continua esperando até a tela final.
+// Se uma tela ficar presa por mais de 30s, um novo pedido passa por cima dela (não trava a navegação).
+window.addEventListener('load',function(){
+  const NOMES=['renderLancctbImportarXmls','renderLancctbNotas','renderLancctbPlanoContas','renderLancctbAgencias','renderLancctbAplicacoes','renderLancctbRegras','renderLancctbRegistroContabil','renderLancctbComprovantes','renderLancctbComprovantesReceb','renderLancctbComprovantesSalarios','renderLancctbFluxoCaixa','renderLancctbExtrato'];
+  let emAndamento=false, inicio=0, pendente=null;
+  function mostrarErro(e){
+    console.error('Erro ao carregar a tela:',e);
+    const el=document.getElementById('lancctbConteudoAba');
+    if(el) el.innerHTML='<div style="padding:20px;color:var(--red)">Não foi possível carregar esta tela'+((e&&e.message)?' ('+esc(e.message)+')':'')+'. <button class="btn bo bsm" onclick="renderLancctbConteudo()">Tentar de novo</button></div>';
+  }
+  async function rodar(fn,args){
+    emAndamento=true; inicio=Date.now();
+    try{ await fn.apply(null,args); }
+    catch(e){ if(!pendente) mostrarErro(e); }
+    finally{ emAndamento=false; }
+    if(pendente){
+      const p=pendente; pendente=null;
+      try{ await rodar(p.fn,p.args); } finally { p.resolvers.forEach(r=>r()); }
+    }
+  }
+  NOMES.forEach(function(nome){
+    const orig=window[nome];
+    if(typeof orig!=='function') return;
+    window[nome]=function(){
+      const args=arguments;
+      if(emAndamento&&Date.now()-inicio<30000){
+        // chegou um pedido novo com outro em andamento: o mais recente substitui o que estava esperando
+        return new Promise(function(resolve){
+          const resolvers=pendente?pendente.resolvers:[];
+          resolvers.push(resolve);
+          pendente={fn:orig,args:args,resolvers:resolvers};
+        });
+      }
+      return rodar(orig,args);
+    };
+  });
+});
 // Guarda a última leitura de cada aba de notas (parcelas+dados), pra
 // exportar em Excel exatamente o que está na tela sem precisar refazer
 // a consulta ao Supabase.
