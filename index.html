@@ -5439,7 +5439,7 @@ function _rufatoCompararDiario(fluxoPorDia,extratoPorDia){
 function _rufatoRenderRelatorioDiario(linhas){
   if(!linhas.length)return '';
   var okCount=linhas.filter(function(l){return l.bate;}).length;
-  var html='<div style="margin-top:18px"><h4 style="margin:0 0 8px;color:#1E3558">Conciliação diária — Extrato x Excel</h4>';
+  var html='<div style="margin-top:18px"><div style="display:flex;align-items:center;gap:12px;margin-bottom:8px"><h4 style="margin:0;color:#1E3558">Conciliação diária — Extrato x Excel</h4><button class="action-btn action-btn-excel" style="font-size:11px" onclick="_rufatoBaixarConciliacaoDiaria()">📊 Gerar Excel</button></div>';
   html+='<div style="font-size:12px;color:var(--slate);margin-bottom:8px">'+okCount+' de '+linhas.length+' dia(s) batendo certinho. Diferença = Excel − Extrato (positivo = Excel maior). Nos dias com diferença, as linhas que faltavam já foram incluídas no Excel baixado.</div>';
   html+='<div style="max-height:340px;overflow:auto;border:1px solid var(--border);border-radius:8px"><table style="width:100%;border-collapse:collapse;font-size:12px">';
   html+='<thead style="position:sticky;top:0;background:#F4F6FA"><tr>'+
@@ -5730,7 +5730,7 @@ async function _rufatoProcessar(bancoId){
     // Não gera/baixa o Excel aqui — só deixa tudo pronto em memória. O
     // usuário revisa o relatório, pode incluir linhas manuais (data/valor/
     // pagamento ou recebimento) e só então clica em "Baixar Excel".
-    _rufatoEstado={banco:banco, linhasFinal:linhasFinal, linhasManuais:[]};
+    _rufatoEstado={banco:banco, linhasFinal:linhasFinal, linhasManuais:[], conciliacaoDiaria:(typeof comparacao!=='undefined'?comparacao:null), competencia:{ano:competenciaAno,mes:competenciaMes}};
 
     var msgFinal='Competência '+String(competenciaMes).padStart(2,'0')+'/'+competenciaAno+': '+linhasFinal.length+' lançamento(s) prontos (de '+todasLinhas.length+' lidos, '+(todasLinhas.length-linhasLimpas.length)+' linha(s) de resumo/vazias removida(s))';
     if(qtdInseridas>0)msgFinal+=' — '+qtdInseridas+' linha(s) incluída(s) automaticamente por conferência com o(s) PDF(s)';
@@ -5800,6 +5800,44 @@ function _rufatoRemoverLinhaManual(idx){
   _rufatoRenderAreaBaixar();
 }
 
+// Excel da tabela "Conciliação diária — Extrato x Excel" (pedido do usuário 10/2026): mesmas colunas da tela, datas e valores
+// como número de verdade, diferenças e dias com diferença em vermelho, linha de total no fim.
+async function _rufatoBaixarConciliacaoDiaria(){
+  var est=_rufatoEstado;
+  if(!est||!est.conciliacaoDiaria||!est.conciliacaoDiaria.length){toast('Processe o Fluxo de Caixa com o extrato em PDF para ter a conciliação diária','warn');return;}
+  if(typeof ExcelJS==='undefined'){toast('Biblioteca ExcelJS não carregada','err');return;}
+  var linhas=est.conciliacaoDiaria;
+  var wb=new ExcelJS.Workbook();
+  var ws=wb.addWorksheet('Conciliação diária');
+  var cab=ws.addRow(['Data','Entradas Extrato','Entradas Excel','Diferença Entradas','Saídas Extrato','Saídas Excel','Diferença Saídas','Status']);
+  cab.eachCell(function(c){c.font={bold:true};c.alignment={horizontal:'center'};});
+  var soma=[0,0,0,0,0,0], ok=0;
+  linhas.forEach(function(l){
+    var p=l.data.split('-');
+    var r=ws.addRow([new Date(+p[0],+p[1]-1,+p[2]),l.extratoEntradas,l.fluxoEntradas,l.diffEntradas,l.extratoSaidas,l.fluxoSaidas,l.diffSaidas,l.bate?'bate':'diferença']);
+    r.getCell(1).numFmt='dd/mm/yyyy';
+    [2,3,4,5,6,7].forEach(function(n){r.getCell(n).numFmt='#,##0.00;-#,##0.00';});
+    if(Math.abs(l.diffEntradas)>0.02)r.getCell(4).font={bold:true,color:{argb:'FFDC2626'}};
+    if(Math.abs(l.diffSaidas)>0.02)r.getCell(7).font={bold:true,color:{argb:'FFDC2626'}};
+    r.getCell(8).font={bold:true,color:{argb:l.bate?'FF16A34A':'FFDC2626'}};
+    if(l.bate)ok++;
+    soma[0]+=l.extratoEntradas;soma[1]+=l.fluxoEntradas;soma[2]+=l.diffEntradas;soma[3]+=l.extratoSaidas;soma[4]+=l.fluxoSaidas;soma[5]+=l.diffSaidas;
+  });
+  var tot=ws.addRow(['Total',soma[0],soma[1],soma[2],soma[3],soma[4],soma[5],ok+' de '+linhas.length+' dia(s) batem']);
+  tot.eachCell(function(c){c.font={bold:true};c.border={top:{style:'thin'}};});
+  [2,3,4,5,6,7].forEach(function(n){tot.getCell(n).numFmt='#,##0.00;-#,##0.00';});
+  ws.columns.forEach(function(col){col.width=20;});
+  ws.getColumn(8).width=26;
+  ws.views=[{state:'frozen',ySplit:1}];
+  var comp=est.competencia?String(est.competencia.mes).padStart(2,'0')+'-'+est.competencia.ano:'';
+  var buf=await wb.xlsx.writeBuffer();
+  var blob=new Blob([buf],{type:'application/octet-stream'});
+  var url=URL.createObjectURL(blob);
+  var a=document.createElement('a');
+  a.href=url; a.download='Rufato - '+(est.banco?est.banco.banco_nome:'Banco')+' - Conciliação diária'+(comp?' '+comp:'')+'.xlsx'; a.click();
+  URL.revokeObjectURL(url);
+  toast('Conciliação diária em Excel gerada ✓','ok');
+}
 async function _rufatoGerarEBaixarExcel(){
   if(!_rufatoEstado){toast('Processe o Fluxo de Caixa antes de baixar','warn');return;}
   if(typeof ExcelJS==='undefined'){toast('Biblioteca ExcelJS não carregada','err');return;}
