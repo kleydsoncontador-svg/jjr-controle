@@ -32732,6 +32732,57 @@ function _lancctbParsearBBCobrancaExcel(matriz){
   }
   return registros.filter(r=>r.data_pagamento&&r.valor_pago);
 }
+// Banco do Brasil — "Movimentações de Cobrança (boletos recebidos no mês)", aba "Movimentos - Lista" (pedido do usuário 10/2026).
+// Colunas: Nome do Pagador | Nosso Número | Seu Nr. Doc | Vencimento | Data Op/Lq | Valor Boleto | Tarifa | Acréscimos | Descontos |
+// Valor Líquido | Agência Rec | Canal Pagamento | Op | Operação | Convênio. Não traz CNPJ. O crédito no banco é o VALOR LÍQUIDO
+// (= Valor Boleto + Acréscimos − Descontos; a tarifa é cobrada à parte e NÃO entra nesse crédito — conferido no extrato da Fast Lube).
+// Cada boleto vira linhas separadas, como no Itaú: valor da NF/parcela, liquidação, juros (acréscimo) ou desconto concedido.
+// Documento = só a NF e a parcela real em numero_parcela ("1  1546894" → NF 154689, parcela 4; o "1" inicial é sempre ignorado).
+function _lancctbParsearBBMovimentosCobrancaExcel(matriz){
+  if(!matriz||!matriz.length) return null;
+  let iCab=-1;
+  for(let i=0;i<Math.min(matriz.length,40);i++){
+    const hs=(matriz[i]||[]).map(h=>_lancctbNormalizarHeader(h));
+    if(hs.includes('nome do pagador')&&hs.includes('valor boleto')&&hs.includes('valor liquido')){ iCab=i; break; }
+  }
+  if(iCab<0) return null;
+  const headers=(matriz[iCab]||[]).map(h=>_lancctbNormalizarHeader(h));
+  const idx=nome=>headers.indexOf(nome);
+  const iNome=idx('nome do pagador'), iNosso=idx('nosso numero'), iDoc=headers.findIndex(h=>/^seu nr/.test(h)), iVenc=idx('vencimento'),
+        iData=headers.findIndex(h=>/^data op/.test(h)), iBoleto=idx('valor boleto'), iAcr=idx('acrescimos'), iDesc=idx('descontos'),
+        iLiq=idx('valor liquido'), iAg=idx('agencia rec'), iOper=idx('operacao');
+  if(iNome<0||iBoleto<0||iLiq<0||iData<0) return null;
+  const registros=[];
+  for(let i=iCab+1;i<matriz.length;i++){
+    const row=matriz[i]||[];
+    if(!String(row[iNome]||'').trim()) continue;
+    // só liquidação é dinheiro recebido (registro/baixa/instrução não entram)
+    if(iOper>=0&&!/liquidad/i.test(String(row[iOper]||''))) continue;
+    const dataPg=_lancctbFluxoParseData(row[iData]);
+    const valorBoleto=_lancctbFluxoParseValorCel(row[iBoleto]);
+    const valorLiq=_lancctbFluxoParseValorCel(row[iLiq]);
+    if(!dataPg||!(valorLiq>0)) continue;
+    const seu=_lancctbSeuNumeroNfParcela(row[iDoc])||{};
+    const parcelaReal=parseInt(seu.parcela,10)||1;
+    const base={
+      data_pagamento:dataPg, cliente_fornecedor_nome:String(row[iNome]||'').trim(), cnpj_cpf:'',
+      documento_numero:seu.nf||'', data_vencimento:iVenc>=0?_lancctbFluxoParseData(row[iVenc]):null, valor_documento:valorBoleto,
+      juros:0, multa:0, desconto:0, observacao:'',
+      nosso_numero:iNosso>=0?String(row[iNosso]||'').trim():'', agencia_receptora:iAg>=0?String(row[iAg]||'').trim():'',
+    };
+    if(!(valorBoleto>0)){ registros.push({...base,valor_pago:valorLiq,numero_parcela:parcelaReal}); continue; }
+    registros.push({...base,valor_pago:valorBoleto,tipo_operacao:'valor_boleto',numero_parcela:parcelaReal});
+    registros.push({...base,valor_pago:valorLiq,tipo_operacao:'liquidacao',numero_parcela:parcelaReal});
+    const acr=iAcr>=0?_lancctbFluxoParseValorCel(row[iAcr]):0, desc=iDesc>=0?_lancctbFluxoParseValorCel(row[iDesc]):0;
+    const dif=Math.round((valorLiq-valorBoleto)*100)/100;
+    // Fecha a conta: líquido = boleto + acréscimos − descontos. Se não fechar, a diferença real (líquido − boleto) é o que vale.
+    const fecha=Math.abs(valorBoleto+acr-desc-valorLiq)<=0.01;
+    const juros=fecha?acr:(dif>0?dif:0), desconto=fecha?desc:(dif<0?-dif:0);
+    if(juros>=0.005) registros.push({...base,valor_pago:juros,juros:juros,tipo_operacao:'juros',numero_parcela:parcelaReal});
+    if(desconto>=0.005) registros.push({...base,valor_pago:desconto,desconto:desconto,tipo_operacao:'desconto',numero_parcela:parcelaReal});
+  }
+  return registros.filter(r=>r.data_pagamento&&r.valor_pago);
+}
 // Itaú — "Extrato de movimentação de boletos" (PDF multi-página). Só conta
 // linhas "liquidação" (boleto efetivamente pago); "entrada"/"tarifa de
 // cobrança" são ignoradas (não são recebimento em si — a linha de
@@ -32981,10 +33032,16 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
     status.textContent=`"${file.name}" — lendo planilha…`;
     const buf=await file.arrayBuffer();
     const wb=XLSX.read(buf,{type:'array',cellDates:true});
-    const ws=wb.Sheets[wb.SheetNames[0]];
-    const matriz=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
-    const registros=_lancctbParsearBBCobrancaExcel(matriz);
-    if(!registros||!registros.length) throw new Error('Planilha não reconhecida — esperava o formato "BoletosConsulta" do Banco do Brasil.');
+    // Tenta os dois modelos do Banco do Brasil em cada aba: "BoletosConsulta" e "Movimentações de Cobrança (boletos recebidos no mês)",
+    // cujos dados ficam na aba "Movimentos - Lista" (a 1ª aba é só o resumo de totais).
+    let registros=null;
+    for(const nomeAba of wb.SheetNames){
+      const matriz=XLSX.utils.sheet_to_json(wb.Sheets[nomeAba],{header:1,raw:true,defval:''});
+      registros=_lancctbParsearBBCobrancaExcel(matriz);
+      if(!registros||!registros.length) registros=_lancctbParsearBBMovimentosCobrancaExcel(matriz);
+      if(registros&&registros.length) break;
+    }
+    if(!registros||!registros.length) throw new Error('Planilha não reconhecida — esperava o "BoletosConsulta" ou as "Movimentações de Cobrança (boletos recebidos no mês)" do Banco do Brasil.');
     const pathArquivo=`${_lancctbEidAtual}/${Date.now()}_${file.name.replace(/[^a-zA-Z0-9._-]/g,'_')}`;
     const erroUpload=true; // Não guarda mais o arquivo original no Supabase Storage (19/09/2026: só dados nas tabelas — pedido do usuário; cota grátis estourada)
     return registros.map(c=>({...c,_incluir:true,_arquivoNome:file.name,_arquivoStoragePath:erroUpload?null:pathArquivo}));
