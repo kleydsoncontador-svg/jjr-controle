@@ -328,7 +328,7 @@ html.dark-mode .btn-ia-gemini:hover{background:#e5e5e5;border-color:#e5e5e5}
 .action-btn-excel{background:#27ae60}.action-btn-excel:hover{background:#229954}
 .action-btn-txt{background:#3498db}.action-btn-txt:hover{background:#2980b9}
 /* Andamento do 'Processar...' do Registro Contábil: faixa fixa, bem visível, só aparece enquanto há texto */
-#lancctbRegistroProcessarStatus:not(:empty){position:fixed;top:92px;left:50%;transform:translateX(-50%);z-index:9000;min-width:560px;width:min(760px,80vw);box-sizing:border-box;text-align:center;color:#fff;border:1px solid var(--teal);border-radius:22px;padding:10px 24px;font-size:15px;font-weight:700;box-shadow:0 4px 16px rgba(0,0,0,.35);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:linear-gradient(90deg,rgba(34,197,94,.55) var(--pct,0%),var(--ink2) var(--pct,0%));transition:background .25s}
+#lancctbRegistroProcessarStatus:not(:empty){position:fixed;top:92px;left:50%;transform:translateX(-50%);z-index:9000;min-width:min(560px,92vw);width:min(760px,80vw);box-sizing:border-box;text-align:center;color:#fff;border:1px solid var(--teal);border-radius:22px;padding:10px 24px;font-size:15px;font-weight:700;box-shadow:0 4px 16px rgba(0,0,0,.35);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;background:linear-gradient(90deg,rgba(34,197,94,.55) var(--pct,0%),var(--ink2) var(--pct,0%));transition:background .25s}
 #lancctbRegistroProcessarStatus:not(:empty)::after{content:attr(data-pct);margin-left:14px;color:#86efac}
 .action-btn-back{background:#999;margin-left:auto}.action-btn-back:hover{background:#888}
 .export-bar{display:flex;gap:6px;align-items:center;margin-bottom:12px;justify-content:flex-end}
@@ -20626,12 +20626,13 @@ async function _lancctbFetchTudoParalelo(construirQuery){
 // para filtrar; ids = lista completa de valores.
 // Busca em lotes de 500 em ondas de LOTE_PARALELO simultâneos.
 const _LANCCTB_IN_LOTE=500;
-async function _lancctbFetchPorIds(construirQuery,col,ids){
+async function _lancctbFetchPorIds(construirQuery,col,ids,cancelado){
   if(!ids||!ids.length) return { data:[], error:null };
   const lotes=[];
   for(let i=0;i<ids.length;i+=_LANCCTB_IN_LOTE) lotes.push(ids.slice(i,i+_LANCCTB_IN_LOTE));
   let todos=[];
   for(let i=0;i<lotes.length;i+=_LANCCTB_FETCH_PARALELO_LOTE){
+    if(cancelado&&cancelado()) return { data:[], error:null, cancelado:true }; // tela já mudou: não gasta conexão à toa
     const onda=lotes.slice(i,i+_LANCCTB_FETCH_PARALELO_LOTE);
     const resultados=await Promise.all(onda.map(lote=>_lancctbFetchTudo(()=>construirQuery().in(col,lote))));
     for(const r of resultados){
@@ -21139,7 +21140,7 @@ window.addEventListener('load',function(){
 // Agora, enquanto uma destas rotinas está em andamento, nova chamada da MESMA rotina é ignorada (com aviso). Nada muda no que elas fazem.
 // Trava de segurança: após 10 min a trava se solta sozinha, para nunca deixar o botão morto.
 window.addEventListener('load',function(){
-  const NOMES=['processarLancctbUploadExtrato','processarUploadEntradas','processarLancctbImportPlano','processarConvSignus','processarConvSicoob','processarConvShopee','processarConvRazaoConc','processarConvNubank','processarConvMp','processarConvLmaTxtPadrao','processarConvLma','processarConvItau','processarConvCobr','processarConvBB','processarConvAtivo','gerarTxtGanhos','_rufatoProcessar','_nfeclGerarTxt','_lancctbRodarImportarExtratosLote','_lancctbReprocessarPendencias','_lancctbProcessarTributos','_lancctbProcessarFopag','_lancctbProcessarFluxo','_lancctbProcessarCtesRufato'];
+  const NOMES=['processarLancctbUploadExtrato','processarUploadEntradas','processarLancctbImportPlano','processarConvSignus','processarConvSicoob','processarConvShopee','processarConvRazaoConc','processarConvNubank','processarConvMp','processarConvLmaTxtPadrao','processarConvLma','processarConvItau','processarConvCobr','processarConvBB','processarConvAtivo','gerarTxtGanhos','_rufatoProcessar','_nfeclGerarTxt','_lancctbRodarImportarExtratosLote','_lancctbReprocessarPendencias','_lancctbProcessarTributos','_lancctbProcessarFopag','_lancctbProcessarFluxo','_lancctbProcessarCtesRufato','_lancctbCorrigirDataParcelaExistente','_lancctbCorrigirParcelasPorFluxo'];
   NOMES.forEach(function(nome){
     const orig=window[nome];
     if(typeof orig!=='function') return;
@@ -24368,6 +24369,7 @@ async function salvarLancctbDividirParcela(){
 async function _lancctbCorrigirParcelasPorFluxo(){
   const eid=_lancctbEidAtual;
   const btn=document.getElementById('lancctbDividirParcelasFluxoBtn');
+  const statusEl=document.getElementById('lancctbRegistroProcessarStatus'); if(statusEl) statusEl.textContent='Dividindo parcelas: lendo o Fluxo…';
   if(btn){ btn.disabled=true; btn.textContent='Verificando…'; }
   try{
     const { data: fluxoRows } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('fluxo_caixa_lancamentos')
@@ -24386,7 +24388,9 @@ async function _lancctbCorrigirParcelasPorFluxo(){
       return;
     }
     let divididas=0, puladas=0;
+    let _di=0;
     for(const nfNum of nfNumeros){
+      _di++; if(statusEl) statusEl.textContent=`Dividindo parcelas ${_di}/${nfNumeros.length}…`;
       const { data: nfs } = await _supaClient.from('notas_fiscais').select('id,numero,valor_total').eq('empresa_eid',eid).eq('numero',nfNum);
       if(!nfs||nfs.length!==1){ puladas++; continue; } // não achou, ou número ambíguo (mais de 1 NF)
       const nfId=nfs[0].id, valorTotalNf=nfs[0].valor_total||0;
@@ -24421,6 +24425,7 @@ async function _lancctbCorrigirParcelasPorFluxo(){
     toast(`${divididas} NF(s) tiveram a parcela dividida automaticamente a partir do Fluxo de Caixa (inclusive saldo residual +30 dias, quando houve), ${puladas} pulada(s) (já dividida, já conciliada, sem diferença de valor, ou NF não encontrada/ambígua).`, divididas?'ok':'err');
     renderLancctbConteudo();
   } finally {
+    if(statusEl) statusEl.textContent='';
     if(btn){ btn.disabled=false; btn.textContent='🔀 Dividir Parcelas via Fluxo'; }
   }
 }
@@ -28442,6 +28447,7 @@ async function _lancctbProcessarFluxo(){
     const pares=[];
     if(fluxoPend.length){
       for(let i=0;i<pendencias.length;i++){
+        if(statusEl&&i%200===0){ statusEl.textContent=`Comparando com o Fluxo ${i}/${pendencias.length}…`; await new Promise(r=>setTimeout(r,0)); }
         const l=pendencias[i];
         const ehSaida=l.valor_saida>0;
         const valor=l.valor_saida||l.valor_entrada;
@@ -28465,9 +28471,10 @@ async function _lancctbProcessarFluxo(){
     }
     // Grava em ondas de 8 updates simultâneos
     let associados=0;
-    if(statusEl) statusEl.textContent=`Associando ${pares.length} linha(s) ao Fluxo…`;
+    if(statusEl) statusEl.textContent=`Associando ao Fluxo 0/${pares.length}…`;
     for(let i=0;i<pares.length;i+=8){
       const onda=pares.slice(i,i+8);
+      if(statusEl) statusEl.textContent=`Associando ao Fluxo ${Math.min(i+onda.length,pares.length)}/${pares.length}…`;
       const resultados=await Promise.all(onda.map(({fId,lId})=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:lId}).eq('id',fId)));
       for(const {error} of resultados){
         if(error) console.error('Erro ao associar fluxo:',error);
@@ -30746,7 +30753,9 @@ async function _lancctbCorrigirDataParcelaExistente(){
   const eid=_lancctbEidAtual;
   if(!confirm('Varre os lançamentos já conciliados desta empresa e tenta preencher "Data Parcela"/"Mês Bate?" pra quem foi amarrado a uma NF mas ficou sem isso salvo (bug de lançamentos antigos, já corrigido pra novos). Não altera valor, conta nem histórico. Continuar?')) return;
   const btn=document.getElementById('lancctbCorrigirParcelaBtn');
+  const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn){ btn.disabled=true; btn.textContent='Corrigindo…'; }
+  if(statusEl) statusEl.textContent='Corrigindo Data Parcela: lendo lançamentos…';
   try{
     const { data: linhas } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_contabeis')
       .select('id,cnpj_cpf,historico')
@@ -30756,8 +30765,9 @@ async function _lancctbCorrigirDataParcelaExistente(){
       return m?{ id:l.id, cnpj:l.cnpj_cpf, numero:m[1].replace(/[.,]$/,''), parcela:+m[2] }:null;
     }).filter(Boolean);
     if(!alvo.length){ toast('Nada pra corrigir — nenhum lançamento com "Data Parcela" faltando nesse padrão.','ok'); return; }
-    let corrigidos=0, semAchado=0;
+    let corrigidos=0, semAchado=0, _ci=0;
     for(const item of alvo){
+      _ci++; if(statusEl) statusEl.textContent=`Corrigindo Data Parcela ${_ci}/${alvo.length}…`;
       const { data: candidatas } = await _supaClient.from('notas_fiscais_parcelas')
         .select('id,numero_parcela,notas_fiscais!inner(id,numero,cnpj_emitente,cnpj_destinatario)')
         .eq('empresa_eid',eid).eq('numero_parcela',item.parcela).eq('notas_fiscais.numero',item.numero);
@@ -30772,6 +30782,7 @@ async function _lancctbCorrigirDataParcelaExistente(){
     toast(`Data Parcela corrigida em ${corrigidos} lançamento(s)${semAchado?`, ${semAchado} sem NF correspondente encontrada`:''}.`,'ok');
     renderLancctbRegistroContabil();
   } finally {
+    if(statusEl) statusEl.textContent='';
     if(btn){ btn.disabled=false; btn.textContent='🔧 Corrigir Data Parcela'; }
   }
 }
@@ -31191,6 +31202,7 @@ let _lancctbRegistroCache=null; // {eid, html} — conteúdo anterior para exibi
 async function renderLancctbRegistroContabil(){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
+  window.__regSeq=(window.__regSeq||0)+1; const _mySeq=window.__regSeq;
   if(!_supaClient){ el.innerHTML='<div style="padding:20px;color:var(--red)">Sem conexão com o Supabase.</div>'; return; }
   // Mostrar conteúdo anterior imediatamente para evitar flash de "Carregando..."
   // nas trocas de aba — usuário vê o dado antigo enquanto o novo chega.
@@ -31311,6 +31323,11 @@ async function renderLancctbRegistroContabil(){
     if(_lancctbRegistroBusca.trim()){ const t=_lancctbRegistroBusca.trim().replace(/[%_]/g,''); qs=qs.ilike('historico_bancario',`%${t}%`); }
     return qs;
   }
+  let qPendencias=_supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true})
+    .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel).eq('status_conciliacao','pendente');
+  if(_lancctbRegistroDataDe) qPendencias=qPendencias.gte('data_pagamento',_lancctbRegistroDataDe);
+  if(_lancctbRegistroDataAte) qPendencias=qPendencias.lte('data_pagamento',_lancctbRegistroDataAte);
+  const _pPend=Promise.resolve(qPendencias); _pPend.catch(()=>{});
   // Página atual e soma geral em paralelo.
   // linhasSoma usa _lancctbFetchTudoParalelo: para 27k registros faz 28 requests
   // em ondas de 8 simultâneos (~1-2s) em vez de 28 sequenciais (~6s).
@@ -31335,25 +31352,24 @@ async function renderLancctbRegistroContabil(){
   // .in() direto estouraria a URL; aqui batelamos em lotes de 500 em paralelo.
   const idsTodosFiltro=(linhasSoma||[]).map(r=>r.id);
   const idsExtrato=(extratoRows||[]).map(r=>r.id);
-  const [ctbLinhasRes, ctbTodosRes] = await Promise.all([
-    idsExtrato.length
-      ? _supaClient.from('lancamentos_contabeis')
-          .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,informacao_extra,nf_parcela_id,notas_fiscais_parcelas(data_vencimento),plano_contas(numero_conta,descricao)')
-          .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true})
-      : Promise.resolve({data:[]}),
-    idsTodosFiltro.length
+  const _iniciarTodos=()=>(idsTodosFiltro.length
       ? _lancctbFetchPorIds(
           ()=>_supaClient.from('lancamentos_contabeis')
             .select('lancamento_extrato_id,origem_match,regra_matching_id')
             .eq('empresa_eid',eid).eq('estornado',false),
-          'lancamento_extrato_id',idsTodosFiltro)
-      : Promise.resolve({data:[]}),
-  ]);
+          'lancamento_extrato_id',idsTodosFiltro,()=>window.__regSeq!==_mySeq)
+      : Promise.resolve({data:[]}));
+  const ctbLinhasRes = await (idsExtrato.length
+      ? _supaClient.from('lancamentos_contabeis')
+          .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,informacao_extra,nf_parcela_id,notas_fiscais_parcelas(data_vencimento),plano_contas(numero_conta,descricao)')
+          .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true})
+      : Promise.resolve({data:[]}));
   let ctbPorExtrato={};
   (ctbLinhasRes.data||[]).forEach(l=>{ (ctbPorExtrato[l.lancamento_extrato_id]=ctbPorExtrato[l.lancamento_extrato_id]||[]).push(l); });
   let linhas=(extratoRows||[]).map(r=>({ extrato:r, ctb:ctbPorExtrato[r.id]||[] }));
 
-  let percAutomatico=null;
+  const _calcPercAuto=async function(ctbTodosRes){
+    let percAutomatico=null;
   if(idsTodosFiltro.length){
     const origemPorExtrato={};
     (ctbTodosRes.data||[]).forEach(l=>{ if(!(l.lancamento_extrato_id in origemPorExtrato)) origemPorExtrato[l.lancamento_extrato_id]=l; });
@@ -31368,12 +31384,17 @@ async function renderLancctbRegistroContabil(){
     percAutomatico={pct:Math.round(automatico/idsTodosFiltro.length*100),automatico,total:idsTodosFiltro.length};
   }
 
+    return percAutomatico;
+  };
+  let percAutomatico=null; // preenchido depois que a tabela já está na tela (ver fim da função)
+
   // Pedido do usuário 18/09/2026: "pra fins de conferência, mesmo os
   // lançamentos conciliados devem mostrar como está o pagamento no fluxo de
   // caixa, cliente/fornecedor e Número entre parênteses". Conciliado mostra
   // a linha do Fluxo ligada a ele (lancamento_extrato_id); se nenhuma está
   // ligada, tenta a de mesmo valor+data (palpite em itálico) só pra conferir.
   const conciliadosItens=linhas.filter(l=>l.ctb.length);
+  const _pConc=(async()=>{
   if(conciliadosItens.length){
     // Antes: varredura total da tabela fluxo_caixa_lancamentos da empresa (maior gargalo).
     // Agora: 2 queries direcionadas em paralelo — vinculadas à página + livres da mesma conta.
@@ -31417,6 +31438,8 @@ async function renderLancctbRegistroContabil(){
       if(cand.length){ item.fluxoConciliado=cand[0]; usados.add(cand[0].id); }
     });
   }
+  })();
+  _pConc.catch(()=>{});
 
   // Pra pendente sem classificação ainda, sugere o Cliente/Fornecedor de um
   // comprovante que bate por valor+data — só visual (não altera nada),
@@ -31576,6 +31599,7 @@ async function renderLancctbRegistroContabil(){
       }
     }
   }
+  await _pConc;
   if(_lancctbRegistroFiltroFluxo.trim()){
     const t=_lancctbRegistroFiltroFluxo.trim().toLowerCase();
     linhas=linhas.filter(item=>{ const f=item.fluxoSugerido||item.fluxoConciliado; return ((f?.cliente_fornecedor_nome||'')+' '+(f?.descricao||'')+' '+(f?.documento_numero||'')).toLowerCase().includes(t); });
@@ -31587,11 +31611,7 @@ async function renderLancctbRegistroContabil(){
   // TXT de um mês já fechado e 100% conciliado (bug real relatado pelo
   // usuário 08/09/2026: pendência de 07/2026 impedia gerar o TXT de
   // 08/2026, mesmo os dois meses sendo períodos independentes de fechamento).
-  let qPendencias=_supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true})
-    .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel).eq('status_conciliacao','pendente');
-  if(_lancctbRegistroDataDe) qPendencias=qPendencias.gte('data_pagamento',_lancctbRegistroDataDe);
-  if(_lancctbRegistroDataAte) qPendencias=qPendencias.lte('data_pagamento',_lancctbRegistroDataAte);
-  const { count: pendenciasTotaisConta } = await qPendencias;
+  const { count: pendenciasTotaisConta } = await _pPend;
 
   _lancctbUltimoRegistro=linhas;
   const _htmlRegistro=_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico});
@@ -31599,6 +31619,13 @@ async function renderLancctbRegistroContabil(){
   _lancctbSetConteudo(el,_htmlRegistro);
   _lancctbAtivarScrollTopoRegistro();
   if(String(eid)==='4') _lancctbAtualizarEstadoBotoesAcesso();
+  if(idsTodosFiltro.length){
+    _iniciarTodos().then(function(r){ return window.__regSeq!==_mySeq?null:_calcPercAuto(r); }).then(function(pa){
+      if(!pa||window.__regSeq!==_mySeq) return;
+      const slot=document.getElementById('lancctbPercAutoSlot');
+      if(slot) slot.innerHTML=_lancctbPercAutoHtml(pa);
+    }).catch(function(e){ console.warn('selo de % automático:',e); });
+  }
 }
 // Pedido do usuário 09/09/2026: "barra de rolagem sempre na parte de cima,
 // embaixo fica muito ruim" — a tabela do Registro Contábil é bem larga
@@ -31881,6 +31908,9 @@ async function _lancctbExecutarDesclassificarLote(){
   renderLancctbRegistroContabil();
 }
 
+function _lancctbPercAutoHtml(percAutomatico){
+  return `<span style="font-size:11.5px;color:var(--slate)" title="De todos os ${percAutomatico.total} lançamento(s) do filtro atual, ${percAutomatico.automatico} já foram resolvidos sozinhos pelos botões de processamento (matching automático ou Regra já existente) — sem você precisar escolher a conta na mão em 'Classificar'.">⚙️ <b style="color:${percAutomatico.pct>=80?'var(--teal)':percAutomatico.pct>=50?'var(--amber)':'var(--red)'}">${percAutomatico.pct}%</b> fechado só com os botões de processamento (${percAutomatico.automatico}/${percAutomatico.total})</span>`;
+}
 function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta,somaEntrada,somaSaida,percAutomatico}){
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
@@ -31918,7 +31948,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <input class="si" data-filtro="registro-data-de" type="date" value="${_lancctbRegistroDataDe}" onchange="_lancctbRegistroDataDe=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data inicial" style="width:145px">
     <input class="si" data-filtro="registro-data-ate" type="date" value="${_lancctbRegistroDataAte}" onchange="_lancctbRegistroDataAte=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()" title="Data final" style="width:145px">
     <span style="font-size:11px;color:var(--slate)">— use os campos abaixo do cabeçalho da tabela pra filtrar por coluna</span>
-    ${percAutomatico?`<span style="font-size:11.5px;color:var(--slate);margin-left:auto" title="De todos os ${percAutomatico.total} lançamento(s) do filtro atual, ${percAutomatico.automatico} já foram resolvidos sozinhos pelos botões de processamento (matching automático ou Regra já existente) — sem você precisar escolher a conta na mão em 'Classificar'.">⚙️ <b style="color:${percAutomatico.pct>=80?'var(--teal)':percAutomatico.pct>=50?'var(--amber)':'var(--red)'}">${percAutomatico.pct}%</b> fechado só com os botões de processamento (${percAutomatico.automatico}/${percAutomatico.total})</span>`:''}
+    <span id="lancctbPercAutoSlot" style="margin-left:auto">${percAutomatico?_lancctbPercAutoHtml(percAutomatico):''}</span>
   </div>
   ${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida)}
   <div id="lancctbRegistroScrollTopo" style="overflow-x:auto;overflow-y:hidden;height:16px"><div id="lancctbRegistroScrollTopoEspacador" style="height:1px"></div></div>
