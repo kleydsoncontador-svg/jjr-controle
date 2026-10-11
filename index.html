@@ -32704,16 +32704,26 @@ function _lancctbParsearBBCobrancaExcel(matriz){
     const row=matriz[i]||[];
     if(!row.length) continue;
     if(String(row[iSituacao]||'').trim().toLowerCase()!=='liquidado') continue;
-    registros.push({
+    const base={
       data_pagamento: _lancctbFluxoParseData(row[iDataSit]),
       cliente_fornecedor_nome: String(row[iNome]||'').trim(),
       cnpj_cpf: String(row[iCnpj]||'').replace(/\D/g,''),
       documento_numero: _lancctbDocumentoDeSeuNumero(row[iSeuNum]),
       data_vencimento: _lancctbFluxoParseData(row[iVenc]),
       valor_documento: _lancctbFluxoParseValorCel(row[iValor]),
-      valor_pago: _lancctbFluxoParseValorCel(row[iValorLiq]),
       juros:0, multa:0, desconto:0, observacao:'',
-    });
+    };
+    const valorLiq=_lancctbFluxoParseValorCel(row[iValorLiq]);
+    const valorPrincipal=iValor>=0?_lancctbFluxoParseValorCel(row[iValor]):0;
+    if(!(valorPrincipal>0)){ registros.push({...base,valor_pago:valorLiq}); continue; } // sem coluna "Valor": mantém 1 linha só (como antes)
+    // Mesmo padrão do boleto do Itaú (ver _lancctbMontarGrupoLiquidacao): uma linha pro valor da NF/parcela, uma pra liquidação (o que
+    // entrou no banco) e uma PARA A DIFERENÇA — Liquidação maior que o Valor = juros (receita); menor = desconto concedido.
+    let parcela=1;
+    registros.push({...base,valor_pago:valorPrincipal,tipo_operacao:'valor_boleto',numero_parcela:parcela++});
+    registros.push({...base,valor_pago:valorLiq,tipo_operacao:'liquidacao',numero_parcela:parcela++});
+    const dif=Math.round((valorLiq-valorPrincipal)*100)/100;
+    if(dif>=0.005) registros.push({...base,valor_pago:dif,juros:dif,tipo_operacao:'juros',numero_parcela:parcela++});
+    else if(dif<=-0.005) registros.push({...base,valor_pago:Math.abs(dif),desconto:Math.abs(dif),tipo_operacao:'desconto',numero_parcela:parcela++});
   }
   return registros.filter(r=>r.data_pagamento&&r.valor_pago);
 }
@@ -33902,23 +33912,31 @@ async function confirmarLancctbImportComprovantes(){
   const datasLote=registros.map(r=>r.data_pagamento).filter(Boolean).sort();
   const jaExistem=new Set();
   const orfasSemConta={}; // comprovantes já salvos SEM conta bancária (chave → ids)
+  const semTipoOp={}; // recebimentos já salvos SEM tipo de operação (chave → ids)
   if(datasLote.length){
     const { data: exist }=await _lancctbFetchTudo(()=>_supaClient.from(_lancctbComprovTabela(tipo))
-      .select('id,conta_bancaria_id,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf')
+      .select(tipo==='recebimento'?'id,conta_bancaria_id,tipo_operacao,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf':'id,conta_bancaria_id,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf')
       .eq('empresa_eid',_lancctbEidAtual).gte('data_pagamento',datasLote[0]).lte('data_pagamento',datasLote[datasLote.length-1]));
-    (exist||[]).forEach(r=>{ const k=chaveComprov(r); jaExistem.add(k); if(contaSel&&r.conta_bancaria_id==null) (orfasSemConta[k]=orfasSemConta[k]||[]).push(r.id); });
+    (exist||[]).forEach(r=>{ const k=chaveComprov(r); jaExistem.add(k); if(contaSel&&r.conta_bancaria_id==null) (orfasSemConta[k]=orfasSemConta[k]||[]).push(r.id); if(tipo==='recebimento'&&!r.tipo_operacao) (semTipoOp[k]=semTipoOp[k]||[]).push(r.id); });
   }
   const registrosUnicos=[];
-  const adotar=[];
-  registros.forEach(r=>{ const k=chaveComprov(r); if(jaExistem.has(k)){ if(orfasSemConta[k]&&orfasSemConta[k].length) adotar.push(orfasSemConta[k].shift()); return; } jaExistem.add(k); registrosUnicos.push(r); });
+  const adotar=[], completar=[];
+  registros.forEach(r=>{ const k=chaveComprov(r); if(jaExistem.has(k)){ if(orfasSemConta[k]&&orfasSemConta[k].length) adotar.push(orfasSemConta[k].shift()); if(tipo==='recebimento'&&r.tipo_operacao&&semTipoOp[k]&&semTipoOp[k].length) completar.push({id:semTipoOp[k].shift(),tipo_operacao:r.tipo_operacao,numero_parcela:r.numero_parcela}); return; } jaExistem.add(k); registrosUnicos.push(r); });
   const duplicadosPulados=registros.length-registrosUnicos.length;
   // Já existiam, mas sem conta bancária (salvos antes de a conta ser escolhida): em vez de só ignorar, vincula à conta atual.
   let adotados=0;
   if(adotar.length){ await _lancctbEmLotesDb(adotar,200,lote=>_supaClient.from(_lancctbComprovTabela(tipo)).update({conta_bancaria_id:contaSel}).in('id',lote)); adotados=adotar.length; }
-  const msgAdotados=adotados?` ${adotados} que já existiam sem conta foram vinculados a esta conta.`:'';
+  // Importado antes de o leitor abrir as linhas por componente: grava o tipo da operação (liquidação etc.) na linha que já existia.
+  let completados=0;
+  if(completar.length){
+    const grupos={}; completar.forEach(c=>{ const g=c.tipo_operacao+'|'+c.numero_parcela; (grupos[g]=grupos[g]||{tipo_operacao:c.tipo_operacao,numero_parcela:c.numero_parcela,ids:[]}).ids.push(c.id); });
+    for(const g of Object.values(grupos)) await _lancctbEmLotesDb(g.ids,200,lote=>_supaClient.from('comprovantes_recebimento').update({tipo_operacao:g.tipo_operacao,numero_parcela:g.numero_parcela}).in('id',lote));
+    completados=completar.length;
+  }
+  const msgAdotados=(adotados?` ${adotados} que já existiam sem conta foram vinculados a esta conta.`:'')+(completados?` ${completados} que já existiam foram completados com o tipo da operação.`:'');
   if(!registrosUnicos.length){
     toast(`Nada a salvar — ${duplicadosPulados} comprovante(s) já existiam (duplicados ignorados).${msgAdotados}`,'ok');
-    if(adotados){ closeModal('mLancctbUpload'); if(tipo==='recebimento'){ _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb(); } else if(tipo==='salarios'){ _lancctbComprovSalPagina=0; renderLancctbComprovantesSalarios(); } else { _lancctbComprovPagina=0; renderLancctbComprovantes(); } }
+    if(adotados||completados){ closeModal('mLancctbUpload'); if(tipo==='recebimento'){ _lancctbComprovRecebPagina=0; renderLancctbComprovantesReceb(); } else if(tipo==='salarios'){ _lancctbComprovSalPagina=0; renderLancctbComprovantesSalarios(); } else { _lancctbComprovPagina=0; renderLancctbComprovantes(); } }
     return;
   }
   registros.length=0; registrosUnicos.forEach(r=>registros.push(r));
