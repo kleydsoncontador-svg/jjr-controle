@@ -21639,8 +21639,19 @@ function _lancctbContaSemNfVinculo(ag){
 // "PIX EMIT.OUTRA IF | Pagamento Pix | 00.360.305 0001-04" (PIX pra Caixa Econômica Federal = guia do FGTS) não tinham
 // "cara de tributo" e o Processar Tributos nem olhava essas linhas.
 const LANCCTB_CNPJS_ARRECADADORES=['00360305000104' /* Caixa Econômica Federal — FGTS */, '00394460000141' /* Receita Federal */];
+const _lancctbEhTributoCache=new Map();
 function _lancctbHistoricoEhTributo(historico){
   if(!historico) return false;
+  const chave=String(historico);
+  let r=_lancctbEhTributoCache.get(chave);
+  if(r===undefined){
+    r=_lancctbHistoricoEhTributoCalc(historico);
+    if(_lancctbEhTributoCache.size>50000) _lancctbEhTributoCache.clear();
+    _lancctbEhTributoCache.set(chave,r);
+  }
+  return r;
+}
+function _lancctbHistoricoEhTributoCalc(historico){
   const t=_convMpRemoverAcentos(String(historico).toUpperCase());
   if(LANCCTB_HISTORICOS_TRIBUTO.some(termo=>t.includes(termo))) return true;
   if(/\bDB\.?\s?CONV\.?\s?TR\b|\bFD[\s.\-]?RFB\b|\bCONV\.?\s?TR\.?\s?FD\b/.test(t)) return true;
@@ -28352,8 +28363,10 @@ function _lancctbOpcoesDocVisaoGeral(eid,selecionado){
   return html;
 }
 
+const _lancctbDiaMsCache=new Map();
+function _lancctbDiaMs(d){ let v=_lancctbDiaMsCache.get(d); if(v===undefined){ v=new Date(d+'T00:00:00').getTime(); if(_lancctbDiaMsCache.size>20000) _lancctbDiaMsCache.clear(); _lancctbDiaMsCache.set(d,v); } return v; }
 function _lancctbDiffDias(d1,d2){
-  return Math.abs((new Date(d1+'T00:00:00')-new Date(d2+'T00:00:00'))/86400000);
+  return Math.abs((_lancctbDiaMs(d1)-_lancctbDiaMs(d2))/86400000);
 }
 // Conta quantas palavras (3+ letras, sem stopword) dois textos têm em
 // comum — usado pra desempatar sugestões (ex: Fluxo de Caixa) que batem
@@ -28518,20 +28531,27 @@ async function _lancctbProcessarFluxoRegras(silencioso){
   if(btn){ btn.disabled=true; btn.textContent='Processando…'; }
   const _toast=silencioso?(()=>{}):toast;
   try{
-    const { data: pendencias } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
-      .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id')
-      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente'));
-    if(!pendencias||!pendencias.length){ _toast('Nenhuma pendência nesta conta.','ok'); return; }
-    // Fluxo "não associado" (candidato por valor/data) + Fluxo JÁ associado a um extrato pendente (o usuário já confirmou a ligação com o
-    // botão Associar, mas o lançamento ainda não foi gerado — achado 03/10/2026, ACCI "ACORDO": ficava pendente e este botão não pegava).
-    const { data: fluxoPend } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem,status_associado,lancamento_extrato_id')
-      .eq('empresa_eid',eid).or('status_associado.eq.nao_associado,lancamento_extrato_id.not.is.null'));
     const { data: todasRegras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
       .select('id,historico_fixo,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao),fluxo_historico_gatilho,fluxo_cliente_gatilho,fluxo_numero_gatilho,fluxo_descconta_gatilho')
       .eq('empresa_eid',eid).eq('ativo',true));
     const regras=(todasRegras||[]).filter(r=>r.fluxo_historico_gatilho||r.fluxo_cliente_gatilho||r.fluxo_numero_gatilho||r.fluxo_descconta_gatilho);
-    if(!regras.length){ _toast('Nenhuma Regra com gatilho de Fluxo de Caixa cadastrada ainda — crie uma associando manualmente um lançamento ao Fluxo, com "Também criar uma Regra" marcado.','err'); return; }
+    // Sem nenhuma Regra de Fluxo, não há o que fazer: não baixa as milhares de pendências/linhas do Fluxo só pra depois avisar isso (era ~14 s). Mesmas mensagens de antes.
+    if(!regras.length){
+      const { data: _p1 } = await _supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').limit(1);
+      if(!_p1||!_p1.length) _toast('Nenhuma pendência nesta conta.','ok');
+      else _toast('Nenhuma Regra com gatilho de Fluxo de Caixa cadastrada ainda — crie uma associando manualmente um lançamento ao Fluxo, com "Também criar uma Regra" marcado.','err');
+      return;
+    }
+    // Pendências e Fluxo carregados ao mesmo tempo (antes um depois do outro).
+    const [ { data: pendencias }, { data: fluxoPend } ] = await Promise.all([
+      _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
+      .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')),
+      _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem,status_associado,lancamento_extrato_id')
+      .eq('empresa_eid',eid).or('status_associado.eq.nao_associado,lancamento_extrato_id.not.is.null')),
+    ]);
+    if(!pendencias||!pendencias.length){ _toast('Nenhuma pendência nesta conta.','ok'); return; }
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
     if(!contaBancoInfo?.conta_contabil_id){ _toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
@@ -28594,7 +28614,11 @@ async function _lancctbProcessarFluxoRegras(silencioso){
 // rápido) — alvo e valores em CENTAVOS inteiros pra evitar erro de ponto
 // flutuante. Testa combinações com menos itens primeiro (mais plausível
 // serem a resposta certa). Retorna os ÍNDICES do subconjunto, ou null.
-function _lancctbSubsetSum(valoresCentavos,alvoCentavos,toleranciaCentavos){
+// Mesmo resultado de antes (menos itens primeiro; em empate, menor máscara), sem gerar/ordenar 2^n máscaras.
+// 1) "Existe alguma combinação?" por meet-in-the-middle (2 metades): se não existe, devolve null na hora — era o caso comum
+//    (Fast Lube/Mercado Pago, 13 mil lançamentos: ~250 ms por chamada com n≈20, 85% do tempo do "Processar Pagamentos").
+// 2) Se existe, percorre as combinações por tamanho k (Gosper) em ordem crescente de máscara — exatamente a ordem do sort antigo (estável).
+function _lancctbSubsetSumLegado(valoresCentavos,alvoCentavos,toleranciaCentavos){
   const n=valoresCentavos.length;
   if(!n) return null;
   const masks=[];
@@ -28607,6 +28631,39 @@ function _lancctbSubsetSum(valoresCentavos,alvoCentavos,toleranciaCentavos){
       const idxs=[];
       for(let i=0;i<n;i++){ if(mask&(1<<i)) idxs.push(i); }
       return idxs;
+    }
+  }
+  return null;
+}
+function _lancctbSubsetSumTalvezExista(v,alvo,tol){
+  const n=v.length, h=n>>1;
+  const somas=(ini,fim)=>{ const s=[0]; for(let i=ini;i<fim;i++){ const x=v[i], l=s.length; for(let j=0;j<l;j++) s.push(s[j]+x); } return s; };
+  const A=somas(0,h), B=somas(h,n).sort((a,b)=>a-b);
+  for(let i=0;i<A.length;i++){
+    const lo=alvo-tol-A[i], hi=alvo+tol-A[i];
+    let a=0,b=B.length; while(a<b){ const m=(a+b)>>1; if(B[m]<lo) a=m+1; else b=m; }
+    if(a<B.length&&B[a]<=hi) return true;
+  }
+  return false;
+}
+function _lancctbSubsetSum(valoresCentavos,alvoCentavos,toleranciaCentavos){
+  const n=valoresCentavos.length;
+  if(!n) return null;
+  if(n>29) return _lancctbSubsetSumLegado(valoresCentavos,alvoCentavos,toleranciaCentavos); // fora do uso real; mantém o comportamento antigo
+  if(n>=8&&!_lancctbSubsetSumTalvezExista(valoresCentavos,alvoCentavos,toleranciaCentavos)) return null;
+  const limite=1<<n;
+  for(let k=1;k<=n;k++){
+    let mask=(1<<k)-1;
+    while(mask<limite){
+      let soma=0;
+      for(let i=0;i<n;i++){ if(mask&(1<<i)) soma+=valoresCentavos[i]; }
+      if(Math.abs(soma-alvoCentavos)<=toleranciaCentavos){
+        const idxs=[];
+        for(let i=0;i<n;i++){ if(mask&(1<<i)) idxs.push(i); }
+        return idxs;
+      }
+      const c=mask&-mask, r=mask+c; // próxima máscara com o mesmo número de bits (Gosper)
+      mask=(((r^mask)>>>2)/c)|r;
     }
   }
   return null;
@@ -28648,6 +28705,17 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
 async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo',restringirPeriodo=false){
   const log=(msg)=>{ if(statusCb) statusCb(msg); };
   log('Carregando pendências…');
+  // Consultas pequenas e independentes: disparadas já aqui, em paralelo com o carregamento das pendências (antes rodavam em fila no fim — cerca de 12 s).
+  const _pAgInfoNf=Promise.resolve(_supaClient.from('agencias_bancarias').select('banco_codigo,banco_nome,descricao').eq('id',contaId).single());
+  const _pContaBanco=Promise.resolve(_supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single());
+  const _pContasFixas=Promise.resolve(_supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['10000','10001']));
+  const _cpad0=_lancctbContasPadraoGet(eid);
+  const _nums0=[...new Set(Object.values(_cpad0).filter(Boolean).map(String))];
+  const _pContasPad=_nums0.length?Promise.resolve(_supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',_nums0)):Promise.resolve({data:[]});
+  const _pAlerta=_lancctbFetchTudoParalelo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',eid).eq('enviar_pontos_atencao',true));
+  const _socios0=lucSocGet(eid);
+  const _pSocPag=_socios0.length?_lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',eid).ilike('classificacao','1.2.9%').eq('ativo',true)):Promise.resolve({data:[]});
+  const _pSocRec=_socios0.length?_lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao').eq('empresa_eid',eid).ilike('classificacao','2.2.9%').eq('ativo',true)):Promise.resolve({data:[]});
 
   // restringirPeriodo=true pros botões "Processar..." do Registro Contábil
   // (pedido do usuário 12/09/2026: trocar de mês na tela não pode deixar o
@@ -28655,7 +28723,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // fica false quando quem chama é o reaprendizado automático depois de
   // salvar uma Regra nova (linha ~22522), que precisa mesmo varrer a conta
   // inteira pra aplicar a regra recém-criada em qualquer mês pendente.
-  let { data: lancamentos } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato')
+  let { data: lancamentos } = await _lancctbFetchTudoParalelo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
     .order('data_pagamento',{ascending:true})));
@@ -28671,6 +28739,8 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // pode usar a fonte do seu próprio lado (saída→pagamento, entrada→
   // recebimento), nunca a do lado oposto.
   // Queries independentes rodam em paralelo para reduzir latência total.
+  const { data: agenciaInfoNf } = await _pAgInfoNf;
+  const _pulaParcelasNf=_lancctbContaSemNfVinculo(agenciaInfoNf)&&(modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento'||modo==='recebimentos_so_regras');
   const [
     { data: comprovantesPag },
     { data: comprovantesReceb },
@@ -28692,7 +28762,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(_mDmax) q=q.lte('data_pagamento',_mDmax);
       return q; }),
     // parcelas: filtra por data_vencimento (campo equivalente a data_pagamento)
-    _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('notas_fiscais_parcelas')
+    _pulaParcelasNf?Promise.resolve({data:[]}):_lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('notas_fiscais_parcelas')
       .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
       .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
       if(_mDmin) q=q.gte('data_vencimento',_mDmin);
@@ -28730,27 +28800,19 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   const linhasRateioPorRegra={};
   (linhasRateioRows||[]).forEach(l=>{ (linhasRateioPorRegra[l.regra_id]=linhasRateioPorRegra[l.regra_id]||[]).push(l); });
   const fluxoPonteUsados=new Set();
-  const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
-    .select('conta_contabil_id,plano_contas(classificacao)')
-    .eq('id',contaId).single();
-  const { data: agenciaInfoNf } = await _supaClient.from('agencias_bancarias').select('banco_codigo,banco_nome,descricao').eq('id',contaId).single();
+  const { data: contaBancoInfo } = await _pContaBanco;
   const semNfReceb=_lancctbBancoSemNfRecebimento(eid,agenciaInfoNf);
-  const { data: contasFixasNF } = await _supaClient.from('plano_contas')
-    .select('id,numero_conta,classificacao')
-    .eq('empresa_eid',eid).in('numero_conta',['10000','10001']);
+  const { data: contasFixasNF } = await _pContasFixas;
   // Contas padrão (juros/multa/desconto...) configuradas pra empresa
   const cpad=_lancctbContasPadraoGet(eid);
   const numsPad=[...new Set(Object.values(cpad).filter(Boolean).map(String))];
-  const { data: contasPadRows } = numsPad.length
-    ? await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',numsPad)
-    : { data:[] };
+  const { data: contasPadRows } = await _pContasPad;
   const contaPad=(k)=>{ const n=cpad[k]; const r=n?(contasPadRows||[]).find(x=>String(x.numero_conta)===String(n)):null; return r?{id:r.id,classificacao:r.classificacao}:null; };
   // Contas marcadas em Plano de Contas pra avisar automaticamente o Pontos
   // de Atenção sempre que forem debitadas/creditadas (ver
   // _lancctbEnviarAoPontosAtencao) — mapa por id pra consulta rápida linha a
   // linha depois que cada lançamento é gravado.
-  const { data: contasAlertaRows } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas')
-    .select('id,numero_conta,classificacao,descricao').eq('empresa_eid',eid).eq('enviar_pontos_atencao',true));
+  const { data: contasAlertaRows } = await _pAlerta;
   const contasAlertaMap=new Map((contasAlertaRows||[]).map(c=>[String(c.id),c]));
   // Sócios (Lucro/Dividendos) + contas — carregados 1x aqui e reaproveitados
   // linha a linha no Passo 0 (ver _lancctbAcharSocioPorHistorico). PAGAMENTO
@@ -28759,15 +28821,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // do Passivo/PL 2.2.9.x — são contas DIFERENTES, achado real 12/09/2026
   // (Accurare: PIX recebido de sócia estava indo pro 1.2.9.x, que é conta de
   // Ativo — direção errada). Cada lado busca no seu próprio grupo de contas.
-  const socios=lucSocGet(eid);
-  const { data: contasSociosPagamento } = socios.length
-    ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
-        .eq('empresa_eid',eid).ilike('classificacao','1.2.9%').eq('ativo',true))
-    : { data:[] };
-  const { data: contasSociosRecebimento } = socios.length
-    ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
-        .eq('empresa_eid',eid).ilike('classificacao','2.2.9%').eq('ativo',true))
-    : { data:[] };
+  const socios=_socios0;
+  const { data: contasSociosPagamento } = await _pSocPag;
+  const { data: contasSociosRecebimento } = await _pSocRec;
 
   if(!contaBancoInfo?.conta_contabil_id){
     return { erro:'A conta bancária selecionada não tem Conta Contábil vinculada — cadastre em "Agência Bancária" antes de rodar o matching.' };
@@ -29528,10 +29584,10 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     if(modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
       for(const c of comprovantesFonte){
         if(comprovantesUsados.has(c.id)) continue;
-        if(!_lancctbComprovanteCombinaHistorico(c,l.historico_bancario)) continue;
-        if(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome)) continue;
         if(Math.abs(c.valor_pago-valor)>tolComp) continue;
         if(_lancctbDiffDias(c.data_pagamento,l.data_pagamento)>LANCCTB_MATCH_TOLERANCIA_DIAS) continue;
+        if(!_lancctbComprovanteCombinaHistorico(c,l.historico_bancario)) continue;
+        if(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome)) continue;
         comprovanteMatch=c; cnpjAncora=c.cnpj_cpf; break;
       }
     }
@@ -29543,7 +29599,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // comprovante batendo sozinho sempre tem prioridade sobre um grupo.
     let gruposComprovantes=null;
     if(!comprovanteMatch&&modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
-      const candidatosGrupo=comprovantesFonte.filter(c=>!comprovantesUsados.has(c.id)&&(!_lancctbHistoricoEhTributo(l.historico_bancario)||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome))&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS).slice(0,20);
+      const candidatosGrupo=comprovantesFonte.filter(c=>!comprovantesUsados.has(c.id)&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS&&(!_lancctbHistoricoEhTributo(l.historico_bancario)||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome))).slice(0,20);
       const alvoCentavosGrupo=Math.round(valor*100);
       const subsetGrupo=_lancctbSubsetSum(candidatosGrupo.map(c=>Math.round(c.valor_pago*100)),alvoCentavosGrupo,Math.round(tolComp*100));
       if(subsetGrupo&&subsetGrupo.length>1) gruposComprovantes=subsetGrupo.map(idx=>candidatosGrupo[idx]);
