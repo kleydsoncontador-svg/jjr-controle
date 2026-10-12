@@ -44571,6 +44571,79 @@ async function _aplicfinParseBradescoCdbMulti(pdf){
     productMode:'multiple', products:produtos, productFilter:null, sources, validations, warnings, pageCount:pdf.numPages,
   };
 }
+// ── Banco do Brasil · "Extratos - Investimentos Fundos - Mensal" (ex.: RF CP Empresa Ágil, Fast Lube) — pedido do usuário 12/10/2026 ───────────────────
+// PDF com texto nativo. A fonte do quadro é o bloco "Resumo do mês": SALDO ANTERIOR, APLICAÇÕES (+), RESGATES (-), RENDIMENTO BRUTO (+), IMPOSTO DE RENDA (-),
+// IOF (-), RENDIMENTO LÍQUIDO e SALDO ATUAL. Regras combinadas:
+//  • Competência = "Mês/ano referência" (nunca a data de emissão/impressão).
+//  • RENDIMENTO DO MÊS = Rendimento BRUTO (nunca o líquido). Aplicação = Aplicações; Resgates = Resgates; Saldo atualizado = Saldo atual.
+//  • "COBRANÇA DE IR" no detalhamento SEM resgate = come-cotas: o IR vai na coluna IRRF (não é resgate; RESGATES continua 0) e a base tributável
+//    NÃO é inventada (não existe no PDF): "Rendimento bruto s/ resgates" e "Renda tributável" vêm vazios nesse mês, pra não sobrescrever o que já foi lançado (maio/2026 = 184,84).
+//  • Mês normal (sem resgate e sem IR): Rendimento bruto s/ resgates, IOF, Renda tributável, IRRF e Perda no mês = 0,00.
+//  • Rendimento líquido negativo (por causa do IR) NÃO é perda. Rentabilidade (%) e Valor da cota não alimentam valores.
+//  • O CNPJ que aparece no PDF é o do FUNDO — não é a fonte pagadora do cabeçalho do site.
+//  • Confere: saldo anterior + aplicações − resgates + rendimento bruto − IR − IOF = saldo atual (senão, BB_RF_CP_RECONCILIATION_ERROR).
+async function _aplicfinParseBbFundoMensal(pdf){
+  const norm=s=>String(s).toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+  const reNum=/-?\d{1,3}(?:\.\d{3})*,\d{2}(?!\d)/g;
+  const numsDe=t=>[...String(t).matchAll(reNum)].map(m=>_convCobrParseValor(m[0]));
+  const linhas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const content=await page.getTextContent();
+    _aplicfinLinhas(_aplicfinItens(page,content),3).forEach(L=>{ const txt=L.map(i=>i.s).join(' '); linhas.push({txt,n:norm(txt)}); });
+  }
+  const todo=linhas.map(l=>l.n).join(' | ');
+  if(!/EXTRATOS - INVESTIMENTOS FUNDOS - MENSAL/.test(todo)||!/RESUMO DO MES/.test(todo)) return null;
+  const MES={JANEIRO:1,FEVEREIRO:2,MARCO:3,ABRIL:4,MAIO:5,JUNHO:6,JULHO:7,AGOSTO:8,SETEMBRO:9,OUTUBRO:10,NOVEMBRO:11,DEZEMBRO:12};
+  const mRef=todo.match(/MES\/ANO REFERENCIA\s*\|?\s*([A-Z]+)\s*\/\s*(\d{4})/);
+  const competence=(mRef&&MES[mRef[1]])?(mRef[2]+'-'+String(MES[mRef[1]]).padStart(2,'0')):null;
+  const mFundo=linhas.map(l=>l.txt).join('\n').match(/^(.*?)\s*-\s*CNPJ:\s*([\d.\/-]+)/m);
+  const fundoNome=mFundo?mFundo[1].trim():'Fundo BB', fundoCnpj=mFundo?mFundo[2]:null;
+  const iRes=linhas.findIndex(l=>/^RESUMO DO MES/.test(l.n));
+  const resumo={};
+  const CHAVES=[['saldoAnt',/^SALDO ANTERIOR/],['aplic',/^APLICACOES/],['resg',/^RESGATES/],['rendBruto',/^RENDIMENTO BRUTO/],['ir',/^IMPOSTO DE RENDA/],['iof',/^IOF/],['rendLiq',/^RENDIMENTO LIQUIDO/],['saldoAtual',/^SALDO ATUAL/]];
+  for(let i=iRes+1;i<linhas.length;i++){
+    const l=linhas[i];
+    if(/^VALOR DA COTA|^RENTABILIDADE/.test(l.n)) break;
+    for(const [k,re] of CHAVES){ if(re.test(l.n)&&resumo[k]==null){ const v=numsDe(l.txt); if(v.length) resumo[k]=v[0]; } }
+  }
+  const faltam=CHAVES.map(c=>c[0]).filter(k=>resumo[k]==null);
+  if(faltam.length) return { error:'RESUMO_DO_MES_INCOMPLETO', detail:'faltou: '+faltam.join(', ') };
+  if(!competence) return { error:'COMPETENCIA_NAO_ENCONTRADA' };
+  const r2=v=>v==null?null:Math.round(v*100)/100;
+  const warnings=[], validations=[];
+  const temCobrancaIr=linhas.slice(0,iRes).some(l=>/COBRANCA DE IR/.test(l.n));
+  const calc=r2(resumo.saldoAnt+resumo.aplic-resumo.resg+resumo.rendBruto-resumo.ir-resumo.iof);
+  const fecha=Math.abs(calc-resumo.saldoAtual)<=0.02;
+  validations.push({name:'saldo_fecha',ok:fecha,detail:`${resumo.saldoAnt} + ${resumo.aplic} − ${resumo.resg} + ${resumo.rendBruto} − ${resumo.ir} − ${resumo.iof} = ${calc} (extrato: ${resumo.saldoAtual})`});
+  if(!fecha) return { error:'BB_RF_CP_RECONCILIATION_ERROR', detail:`saldo anterior + rendimento − IR − IOF dá ${calc.toFixed(2)}, mas o saldo atual do extrato é ${resumo.saldoAtual.toFixed(2)}` };
+  const comeCotas=temCobrancaIr&&resumo.ir>0&&resumo.resg===0;
+  const normal=resumo.resg===0&&resumo.ir===0&&!temCobrancaIr;
+  if(!comeCotas&&!normal) warnings.push('Mês com resgate ou IR fora do padrão (come-cotas/sem movimento): confira IRRF e Rendimento bruto s/ resgates antes de salvar.');
+  if(comeCotas) warnings.push(`Come-cotas (COBRANÇA DE IR R$ ${resumo.ir.toFixed(2).replace('.',',')}): vai na coluna IRRF; "Rendimento bruto s/ resgates" e "Renda tributável" não são preenchidos (a base não consta no PDF).`);
+  const M='bb_fundos_mensal';
+  const sec='Resumo do mês';
+  const mk=(k,label,v,section,calcType)=>({key:M+'.'+k,label,section:section||sec,product:null,value:r2(v),calculationType:calcType||'DIRECT_TOTAL'});
+  const sources=[
+    mk('summary.balance_prev','Resumo do mês → Saldo anterior',resumo.saldoAnt),
+    mk('summary.applications','Resumo do mês → Aplicações (+)',resumo.aplic),
+    mk('summary.redemptions','Resumo do mês → Resgates (-)',resumo.resg),
+    mk('summary.gross_yield','Resumo do mês → Rendimento bruto (+) = Rendimento do mês',resumo.rendBruto),
+    mk('summary.ir','Resumo do mês → Imposto de renda (-)',resumo.ir),
+    mk('summary.iof','Resumo do mês → IOF (-)',resumo.iof),
+    mk('summary.net_yield','Resumo do mês → Rendimento líquido (não usar como rendimento do mês)',resumo.rendLiq),
+    mk('summary.balance_end','Resumo do mês → Saldo atual (= Saldo bruto atualizado)',resumo.saldoAtual),
+    mk('derived.irrf','IRRF (IR do mês: come-cotas ou retido; 0,00 se não houve)',resumo.ir,'Derivado do Resumo do mês','DERIVED_SUBTRACTION'),
+    mk('derived.gross_without_redemptions','Rendimento bruto s/ resgates ('+(comeCotas?'não consta no PDF no mês de come-cotas — fica vazio':'0,00 em mês sem resgate')+')',comeCotas?null:(normal?0:null),'Derivado do Resumo do mês','CALCULATED'),
+    mk('derived.taxable_income','Renda tributável ('+(comeCotas?'vazio no mês de come-cotas':'0,00 em mês sem resgate')+')',comeCotas?null:(normal?0:null),'Derivado do Resumo do mês','CALCULATED'),
+    mk('derived.loss','Perda no mês (0,00: rendimento líquido negativo por IR não é perda)',0,'Derivado do Resumo do mês','CALCULATED'),
+  ];
+  return {
+    bank:'BB', model:M, competence, account:null, fundo:{nome:fundoNome,cnpj:fundoCnpj},
+    fingerprint:_aplicfinFingerprint('BB',M,['EXTRATOS - INVESTIMENTOS FUNDOS - MENSAL','RESUMO DO MES','SALDO ANTERIOR','RENDIMENTO BRUTO','SALDO ATUAL']),
+    productMode:'single', products:[], sources, validations, warnings, pageCount:pdf.numPages,
+  };
+}
 // ── Santander · CDB ContaMax Empresarial (pedido do usuário 11/10/2026, Nexus Automotive) ─────────────────────────────────────────────
 // PDF com texto nativo (sem OCR). DUAS tabelas, e as duas são necessárias:
 //  A) "Movimentação Mensal" → usa SÓ a linha "Acumulado Mês": Aplicações, Principal resgatado, Resgates brutos, Rendimento das aplicações
@@ -44871,6 +44944,17 @@ function _aplicfinSugestaoSourceKey(model,siteColId){
       resgate:'bradesco_cdb_multi.resgates.principal',
       rendLiq:'bradesco_cdb_multi.resgates.credito',
       saldoBrutoExtrato:'bradesco_cdb_multi.saldo_atual.atualizado',
+    },
+    // Banco do Brasil "Extratos - Investimentos Fundos - Mensal" (12/10/2026): Rendimento do mês = Rendimento BRUTO do Resumo do mês (nunca o líquido).
+    bb_fundos_mensal:{
+      bruto:'bb_fundos_mensal.derived.gross_without_redemptions',
+      iof:'bb_fundos_mensal.summary.iof',
+      trib:'bb_fundos_mensal.derived.taxable_income',
+      irrf:'bb_fundos_mensal.derived.irrf',
+      rendMes:'bb_fundos_mensal.summary.gross_yield',
+      aplic:'bb_fundos_mensal.summary.applications',
+      resgate:'bb_fundos_mensal.summary.redemptions',
+      saldoBrutoExtrato:'bb_fundos_mensal.summary.balance_end',
     },
     // Santander CDB ContaMax Empresarial (pedido do usuário 11/10/2026): Movimentação Mensal → Acumulado Mês + Posição Consolidada.
     // "Rendimento do Mês" = Total (A+B) da Posição Consolidada (NÃO o 114,07 do rendimento resgatado); "Resgate" = valor LÍQUIDO creditado.
@@ -45435,6 +45519,17 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdfXp=await pdfjsLib.getDocument({data:buf}).promise;
+    // Banco do Brasil · "Extratos - Investimentos Fundos - Mensal" (RF CP Empresa Ágil etc.) — pedido do usuário 12/10/2026
+    const bbFundo=await _aplicfinParseBbFundoMensal(pdfXp);
+    if(bbFundo){
+      if(bbFundo.error){
+        const MSGS_BBF={ BB_RF_CP_RECONCILIATION_ERROR:'BB fundo: os números do Resumo do mês não fecham — '+(bbFundo.detail||'')+'. Nada foi gravado.', RESUMO_DO_MES_INCOMPLETO:'BB fundo: o "Resumo do mês" veio incompleto ('+(bbFundo.detail||'')+').', COMPETENCIA_NAO_ENCONTRADA:'BB fundo: não achei o "Mês/ano referência".' };
+        toast(MSGS_BBF[bbFundo.error]||('BB fundo: '+bbFundo.error),'err');
+        if(statusEl) statusEl.textContent='';
+        return 'NAO_RECONHECIDO';
+      }
+      return await _ganhoAplicarParserSemIA(eid,pid,bbFundo,file,statusEl);
+    }
     // Santander · CDB ContaMax Empresarial (Movimentação Mensal + Posição Consolidada) — pedido do usuário 11/10/2026
     const santanderCm=await _aplicfinParseSantanderContaMax(pdfXp);
     if(santanderCm){
