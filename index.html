@@ -28639,6 +28639,34 @@ function _lancctbTextoScoreSimilaridade(a,b){
 // do Registro Contábil. Essa identificação apoia depois o Processar FOPAG
 // (quem recebeu o salário) e o Processar Tributos (nome do favorecido).
 // Deve ser o PRIMEIRO passo do fluxo de trabalho.
+// ── Fluxo de Caixa ligado ao extrato: escolha do melhor vínculo + vínculos já "ocupados" (12/10/2026) ──────────────────────────────────────────
+// Achado real (Peixoto): 84 lançamentos do extrato têm 2+ linhas do Fluxo ligadas a eles (ex.: boleto REDE ÂNCORA R$ 1.640,94 com a linha da REDE ÂNCORA e a da
+// COMDIP, de mesmo valor/dia; boleto EMBREPAR R$ 655,29 com a da EMBREPAR e a da ELETROPAR R$ 656,63). A tela mostrava a ÚLTIMA que vinha do banco — às vezes a de
+// outro fornecedor. Agora mostra a que mais combina: valor exato primeiro, depois o nome do fornecedor no histórico do banco, depois o texto, depois a data.
+function _lancctbEscolherFluxoLigado(lista,r){
+  if(!lista||!lista.length) return null;
+  if(lista.length===1) return lista[0];
+  const valor=r.valor_saida||r.valor_entrada, ehSaida=r.valor_saida>0;
+  const vF=f=>(ehSaida?f.valor_saida:f.valor_entrada)||0;
+  return [...lista].sort((a,b)=>{
+    const ea=Math.abs(vF(a)-valor)<0.005?0:1, eb=Math.abs(vF(b)-valor)<0.005?0:1; if(ea!==eb) return ea-eb;
+    const na=_lancctbNomeCompativel([r.historico_bancario],a.cliente_fornecedor_nome)?0:1, nb=_lancctbNomeCompativel([r.historico_bancario],b.cliente_fornecedor_nome)?0:1; if(na!==nb) return na-nb;
+    const sa=_lancctbTextoScoreSimilaridade(r.historico_bancario,a.descricao), sb=_lancctbTextoScoreSimilaridade(r.historico_bancario,b.descricao); if(sa!==sb) return sb-sa;
+    return _lancctbDiffDias(a.data,r.data_pagamento)-_lancctbDiffDias(b.data,r.data_pagamento);
+  })[0];
+}
+// Ids de extrato (entre os ligados a linhas do Fluxo, fora de 'ignorarIds') que JÁ ESTÃO CONCILIADOS — essa ligação é válida, a linha do Fluxo não está livre pra outro lançamento.
+async function _lancctbExtratosLigadosConciliados(fluxoLinhas,ignorarIds){
+  const ids=[...new Set((fluxoLinhas||[]).map(f=>f.lancamento_extrato_id).filter(x=>x&&!(ignorarIds&&ignorarIds.has(x))))];
+  const conc=new Set();
+  for(let i=0;i<ids.length;i+=150){
+    try{
+      const { data } = await _supaClient.from('lancamentos_extrato').select('id,status_conciliacao').in('id',ids.slice(i,i+150));
+      (data||[]).forEach(x=>{ if(x.status_conciliacao==='conciliado') conc.add(x.id); });
+    }catch(e){ console.warn('status dos extratos ligados ao Fluxo:',e); }
+  }
+  return conc;
+}
 async function _lancctbProcessarFluxo(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -28666,7 +28694,8 @@ async function _lancctbProcessarFluxo(){
     const pendIds=new Set(pendencias.map(p=>p.id));
     // "Livre" = não associada, ou associada a nada, ou associada a um
     // lançamento que não é mais uma pendência desta conta (associação velha).
-    const fluxoPend=fluxoTodo.filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||!pendIds.has(f.lancamento_extrato_id));
+    const _extConcPF=await _lancctbExtratosLigadosConciliados(fluxoTodo,pendIds); // ligada a lançamento JÁ conciliado = ocupada (não é "associação velha")
+    const fluxoPend=fluxoTodo.filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||(!pendIds.has(f.lancamento_extrato_id)&&!_extConcPF.has(f.lancamento_extrato_id)));
     // O Fluxo é quem manda (pedido do usuário 18/09/2026): a NF+parcela que
     // ele indica decide a que extrato a linha pertence. Carrega as parcelas
     // (qualquer status) das NFs citadas no Fluxo.
@@ -28817,7 +28846,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
     for(const l of pendencias){
       const ehSaida=l.valor_saida>0;
       const valor=l.valor_saida||l.valor_entrada;
-      const jaLigado=(fluxoPend||[]).find(f=>f.lancamento_extrato_id!=null&&String(f.lancamento_extrato_id)===String(l.id)); // ligação já confirmada pelo usuário
+      const jaLigado=_lancctbEscolherFluxoLigado((fluxoPend||[]).filter(f=>f.lancamento_extrato_id!=null&&String(f.lancamento_extrato_id)===String(l.id)),l); // ligação já confirmada pelo usuário (se houver várias, a que mais combina)
       const candidatos=jaLigado?[jaLigado]:(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado')
         .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
         .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; });
@@ -31732,8 +31761,9 @@ async function renderLancctbRegistroContabil(){
       contaAtual && _datMinLiv ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`).gte('data',_datMinLiv).lte('data',_datMaxLiv)) : Promise.resolve({data:[]}),
     ]);
     const fluxoAll=[...(_flxLig||[]),...(_flxLiv||[])];
-    const fluxoPorExtrato={};
-    (fluxoAll||[]).forEach(f=>{ if(f.lancamento_extrato_id&&!fluxoPorExtrato[f.lancamento_extrato_id]) fluxoPorExtrato[f.lancamento_extrato_id]=f; });
+    const fluxoPorExtrato={}, _ligPorExtC={};
+    (fluxoAll||[]).forEach(f=>{ if(f.lancamento_extrato_id) (_ligPorExtC[f.lancamento_extrato_id]=_ligPorExtC[f.lancamento_extrato_id]||[]).push(f); });
+    (extratoRows||[]).forEach(r=>{ const lig=_ligPorExtC[r.id]; if(lig) fluxoPorExtrato[r.id]=_lancctbEscolherFluxoLigado(lig,r); });
     const livres=(fluxoAll||[]).filter(f=>!f.lancamento_extrato_id);
     const usados=new Set();
     conciliadosItens.forEach(item=>{
@@ -31838,11 +31868,13 @@ async function renderLancctbRegistroContabil(){
     ]);
     const pendenteIds=new Set(pendentes.map(it=>it.extrato.id));
     // Linha do Fluxo JÁ associada a UMA pendência específica → confirmada.
-    const fluxoAssocPorPend={};
-    (fluxoPend||[]).forEach(f=>{ if(f.lancamento_extrato_id&&pendenteIds.has(f.lancamento_extrato_id)) fluxoAssocPorPend[f.lancamento_extrato_id]=f; });
+    const fluxoAssocPorPend={}, _ligPorExt={};
+    (fluxoPend||[]).forEach(f=>{ if(f.lancamento_extrato_id&&pendenteIds.has(f.lancamento_extrato_id)) (_ligPorExt[f.lancamento_extrato_id]=_ligPorExt[f.lancamento_extrato_id]||[]).push(f); });
+    pendentes.forEach(it=>{ const lig=_ligPorExt[it.extrato.id]; if(lig) fluxoAssocPorPend[it.extrato.id]=_lancctbEscolherFluxoLigado(lig,it.extrato); });
+    const _extConc=await _lancctbExtratosLigadosConciliados(fluxoPend,pendenteIds);
     // Linhas "livres" pra sugestão: não associadas, ou associadas a nada,
     // ou associadas a um lançamento que não é mais uma pendência daqui.
-    const fluxoDisponivel=(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||!pendenteIds.has(f.lancamento_extrato_id));
+    const fluxoDisponivel=(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||(!pendenteIds.has(f.lancamento_extrato_id)&&!_extConc.has(f.lancamento_extrato_id))); // ligada a lançamento JÁ conciliado = ocupada
     const fluxoUsadoSugestao=new Set(Object.values(fluxoAssocPorPend).map(f=>f.id));
     // Pré-índices por data → busca O(7) por pendente em vez de O(M) linear.
     // Monta mapa data→[itens] e coleta itens dentro da janela ±dias.
