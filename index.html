@@ -7300,6 +7300,27 @@ function calcStatusMes(chk, mes, eid){
   return 'completo';
 }
 
+// Cache do badge "Automação" + "Ag./C-C" por empresa: aplicado de forma SÍNCRONA logo depois de cada desenho do checklist.
+const _empAutoCache={};
+function _empAplicarAutomacaoCache(eid){
+  const c=_empAutoCache[String(eid)]; if(!c) return;
+  const wrap=document.getElementById('empDocsWrap'); if(!wrap) return;
+  const nomes=new Set(c.nomes||[]), mapa=c.mapa||{};
+  wrap.querySelectorAll('td.nm').forEach(td=>{
+    const nome=(td.childNodes[0]?td.childNodes[0].textContent:td.textContent).trim();
+    if(nomes.has(nome)&&!td.querySelector('.badge-automacao')) td.insertAdjacentHTML('beforeend',' <span class="badge-automacao">Automação</span>');
+    const ags=mapa[nome];
+    if(ags&&ags.length&&!td.querySelector('.ag-info')){
+      ags.forEach(({ag,cc})=>{
+        const d=document.createElement('div');
+        d.className='ag-info';
+        d.style.cssText='font-size:10px;color:var(--slate);margin-top:1px;white-space:nowrap';
+        d.textContent=(ag?'Ag. '+ag+' / ':'')+( cc?'C-C '+cc:'');
+        td.appendChild(d);
+      });
+    }
+  });
+}
 async function _atualizarBadgeAutomacao(eid){
   try{
     const{data}=await _supaClient.from('agencias_bancarias')
@@ -7310,16 +7331,11 @@ async function _atualizarBadgeAutomacao(eid){
     const el=document.getElementById('empChips');
     if(el&&!el.querySelector('.chip-automacao'))
       el.innerHTML+=`<span class="chip chip-automacao" style="background:#1d4ed8;color:#fff;font-weight:600">🤖 Automação</span>`;
-    // Badges nas células do checklist correspondentes ao doc_visao_geral_nome
+    // Badges nas células do checklist correspondentes ao doc_visao_geral_nome (guardados em cache e reaplicados a cada redesenho)
     const nomes=new Set(data.map(a=>a.doc_visao_geral_nome).filter(Boolean));
     if(!nomes.size) return;
-    const wrap=document.getElementById('empDocsWrap');
-    if(!wrap) return;
-    wrap.querySelectorAll('td.nm').forEach(td=>{
-      const nome=td.childNodes[0]?td.childNodes[0].textContent.trim():td.textContent.trim();
-      if(nomes.has(nome)&&!td.querySelector('.badge-automacao'))
-        td.innerHTML+=` <span class="badge-automacao">Automação</span>`;
-    });
+    (_empAutoCache[String(eid)]=_empAutoCache[String(eid)]||{}).nomes=[...nomes];
+    _empAplicarAutomacaoCache(eid);
   }catch(e){}
 }
 async function _atualizarInfoAgenciaChecklist(eid){
@@ -7337,19 +7353,8 @@ async function _atualizarInfoAgenciaChecklist(eid){
       if(!mapa[k]) mapa[k]=[];
       if(a.agencia||a.conta_corrente) mapa[k].push({ag:a.agencia||'',cc:a.conta_corrente||''});
     });
-    const wrap=document.getElementById('empDocsWrap'); if(!wrap) return;
-    wrap.querySelectorAll('td.nm').forEach(td=>{
-      if(td.querySelector('.ag-info')) return;
-      const nome=(td.childNodes[0]&&td.childNodes[0].nodeType===3?td.childNodes[0].textContent:td.textContent).trim();
-      const ags=mapa[nome]; if(!ags||!ags.length) return;
-      ags.forEach(({ag,cc})=>{
-        const d=document.createElement('div');
-        d.className='ag-info';
-        d.style.cssText='font-size:10px;color:var(--slate);margin-top:1px;white-space:nowrap';
-        d.textContent=(ag?'Ag. '+ag+' / ':'')+( cc?'C-C '+cc:'');
-        td.appendChild(d);
-      });
-    });
+    (_empAutoCache[String(eid)]=_empAutoCache[String(eid)]||{}).mapa=mapa;
+    _empAplicarAutomacaoCache(eid);
   }catch(e){}
 }
 // ─── FICHA DA EMPRESA ────────────────────────────────────────────────────────
@@ -7369,6 +7374,7 @@ function renderEmpresaPage(eid){
   const fs=emp.fechamentoStatus||{tipo:'ativo'};
   if(fs.tipo&&fs.tipo!=='ativo') chips.push({ativo:'Ativo',bloqueio:'Bloqueio',saida:'Saída definitiva',extincao:'Extinção'}[fs.tipo]||(fs.tipo));
   document.getElementById('empChips').innerHTML = chips.map(c=>`<span class="chip">${c}</span>`).join('');
+  if(((_empAutoCache[String(eid)]||{}).nomes||[]).length) document.getElementById('empChips').insertAdjacentHTML('beforeend','<span class="chip chip-automacao" style="background:#1d4ed8;color:#fff;font-weight:600">🤖 Automação</span>'); // chip volta no mesmo desenho (sem piscar)
   renderEmpresaChecklist(eid);
   _atualizarBadgeAutomacao(eid);
   _atualizarInfoAgenciaChecklist(eid);
@@ -7687,6 +7693,7 @@ function renderEmpresaChecklist(eid){
   const wrap2 = document.getElementById('empTarefasWrap');
   if(wrap){ wrap.innerHTML = tableHtml; wrap.style.overflowX='auto'; wrap.style.overflowY='auto'; wrap.style.maxHeight='calc(100vh - 280px)'; }
   if(wrap2){ wrap2.innerHTML=''; wrap2.style.display='none'; wrap2.style.borderTop='none'; }
+  _empAplicarAutomacaoCache(eid); // badge Automação / Ag.-C-C voltam já no mesmo desenho (sem pulo)
 }
 
 // Keep renderChecklistTable as alias for toggleCelula/delLinha re-renders
@@ -11378,8 +11385,14 @@ function _isEditingSomething(){
   const tag=(ae.tagName||'').toUpperCase();
   return tag==='INPUT'||tag==='TEXTAREA'||tag==='SELECT';
 }
+let _mouseApertado=false, _mouseSoltoEm=0;
+document.addEventListener('mousedown',()=>{ _mouseApertado=true; },true);
+document.addEventListener('mouseup',()=>{ _mouseApertado=false; _mouseSoltoEm=Date.now(); },true);
+document.addEventListener('touchstart',()=>{ _mouseApertado=true; },true);
+document.addEventListener('touchend',()=>{ _mouseApertado=false; _mouseSoltoEm=Date.now(); },true);
 function _flushRealtimePending(){
   if(_isEditingSomething()||!_rtPendingPayloads.length)return;
+  if(_mouseApertado||Date.now()-_mouseSoltoEm<500) return; // clique em andamento (ou acabou de acontecer): deixa o botão responder antes de redesenhar
   const toApply=_rtPendingPayloads.splice(0);
   toApply.forEach(_applyRealtimePayload);
 }
@@ -11402,6 +11415,7 @@ function _applyRealtimePayload(payload){
     // só depois de você já ter editado os campos 2 e 3) apagava as edições
     // mais novas, mesmo elas já estando salvas localmente.
     if(localTs&&rowTs&&new Date(rowTs)<new Date(localTs))return;
+    if(payload.eventType!=='DELETE'&&row.value!==undefined&&JSON.stringify(cccCache[key])===JSON.stringify(row.value)){ if(rowTs)cccLocalUpdatedAt[key]=rowTs; return; } // eco da minha própria gravação: nada mudou, não redesenha
     if(payload.eventType==='DELETE'){delete cccCache[key];}
     else{cccCache[key]=row.value;cccIdbSet(key,row.value);}
     if(rowTs)cccLocalUpdatedAt[key]=rowTs;
