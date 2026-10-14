@@ -23655,6 +23655,39 @@ async function _lancctbExtrairValorTotalGenerico(pdf){
   const melhor=_lancctbItemPertoDoRotulo(itens,/^total\b/i,LANCCTB_RE_MONETARIO);
   return melhor?_lancctbParseValorBR2(melhor.str.trim()):null;
 }
+// DAE de Minas Gerais (ICMS, ICMS ST, DIFAL, parcelamento — SEF/MG): o rodapé traz "TOTAL ........ R$ ........ 524,62" na MESMA linha, só que o rótulo fica a ~150 pt do
+// valor (a busca por proximidade acima só aceita até 120) e a tabela de cima usa ponto decimal ("524.62"). Sem isso a guia não tinha valor lido: caía no OCR (~8 s por PDF)
+// e nunca casava com o pagamento (achado 14/10/2026, Peixoto: 13 DAEs sem valor, "Processar Tributos" levava minutos e os pagamentos "GUIA ICMS ST" ficavam pendentes).
+// Pega o "R$" que tem "TOTAL" à esquerda na mesma linha e o valor à direita dele; a 1ª via (contribuinte) e a 2ª (banco) precisam concordar.
+// SÓ é usada por _lancctbExtrairGuiaDaeMg (documento DAE): o mesmo padrão "TOTAL R$" existe em Recibo de DCTFWeb, que não é guia de pagamento e não pode virar guia.
+function _lancctbValorTotalLinhaRS(itens){
+  const mesmaLinha=(a,b)=>Math.abs(a.y-b.y)<=4;
+  const achados=[];
+  itens.filter(it=>/^R\$$/.test(it.str.trim())).forEach(rs=>{
+    if(!itens.some(t=>/^total$/i.test(t.str.trim())&&mesmaLinha(t,rs)&&t.x<rs.x)) return;
+    const v=itens.filter(c=>LANCCTB_RE_MONETARIO.test(c.str.trim())&&mesmaLinha(c,rs)&&c.x>rs.x).sort((a,b)=>a.x-b.x)[0];
+    if(v) achados.push(_lancctbParseValorBR2(v.str.trim()));
+  });
+  itens.forEach(c=>{ // DAE de parcelamento: "TOTAL" e "R$ 1.234,04" (R$ colado no valor) na mesma linha
+    const mm=c.str.trim().match(/^R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})$/); if(!mm) return;
+    if(itens.some(t=>/^total$/i.test(t.str.trim())&&mesmaLinha(t,c)&&t.x<c.x)) achados.push(_lancctbParseValorBR2(mm[1]));
+  });
+  if(!achados.length) return null;
+  return achados.every(x=>Math.abs(x-achados[0])<=0.005)?achados[0]:null;
+}
+// Guia DAE (SEF/MG) com o campo "Receita: 0209-7 ICMS ST ENTRADAS" → composição de 1 item (código + nome da receita), como o DARF faz com o código de receita.
+// Sem isso o nome do arquivo ("DAE ICMS ST NFe ...") só dá a sigla "DAE", e a Regra criada pra uma receita (ICMS ST) passaria a valer pra todas (ICMS comércio, DIFAL…).
+async function _lancctbExtrairGuiaDaeMg(pdf){
+  try{
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+    if(!/DOCUMENTO DE ARRECADA[ÇC][ÃA]O ESTADUAL/i.test(itens.map(i=>i.str).join(' '))) return null;
+    const valor=_lancctbValorTotalLinhaRS(itens); if(!(valor>0)) return null;
+    const cod=itens.find(i=>/^\d{4}-\d(\s|$)/.test(i.str.trim())); if(!cod) return { valor, composicao:null, competencia:null }; // sem receita (ex: parcelamento): só o valor
+    const linha=itens.filter(i=>Math.abs(i.y-cod.y)<=2&&i.x>=cod.x-1).sort((a,b)=>a.x-b.x).map(i=>i.str.trim()).filter(Boolean).join(' ');
+    const m=linha.match(/^(\d{4}-\d)\s+(\S.*)$/); if(!m) return { valor, composicao:null, competencia:null };
+    return { valor, composicao:[{ codigo:m[1], denominacao:m[2].trim(), valor }], competencia:null };
+  }catch(e){ return null; }
+}
 // Composição por linha de uma guia DAMSP (Prefeitura de SP — TFE, ISS
 // próprio, taxas municipais) — mesmo espírito de _lancctbExtrairComposicaoDarf,
 // mas pro layout de campos (rótulo em cima, valor embaixo/à direita) desse
@@ -23784,32 +23817,108 @@ function _lancctbOcrValorGuiaMunicipal(itens){
   const total=Math.round((doc+correcao+juros+multa-desc)*100)/100;
   return (cobrado&&cobrado>0)?cobrado:total;
 }
+// Cache do que o OCR LEU de cada guia escaneada (14/10/2026, Peixoto: "Processar Tributos" levava minutos — 3 guias escaneadas = ~66 s de Tesseract, e o fluxo
+// lia as mesmas guias 2-3x; o modal "Cadastrar regra" refazia tudo a cada abertura). Guarda só o resultado BRUTO do OCR (palavras+posição e texto por página),
+// nunca o valor final: o parser continua rodando em cima dele a cada vez, então melhorar o parser vale na hora, sem cache velho. A chave inclui nome+tamanho+data
+// do arquivo (guia trocada = lê de novo) e uma versão — SUBIR a versão se mudar a renderização/resolução do OCR abaixo. Persiste no IndexedDB do navegador.
+const _LANCCTB_OCR_CACHE_VERSAO='v1';
+const _lancctbOcrCacheMem=new Map();
+let _lancctbOcrCacheDbPromise=null;
+function _lancctbOcrCacheDb(){
+  if(!_lancctbOcrCacheDbPromise) _lancctbOcrCacheDbPromise=new Promise(res=>{
+    try{
+      const rq=indexedDB.open('jjr_ocr_cache',1);
+      rq.onupgradeneeded=()=>{ rq.result.createObjectStore('tributos',{keyPath:'k'}); };
+      rq.onsuccess=()=>res(rq.result); rq.onerror=()=>res(null); rq.onblocked=()=>res(null);
+    }catch(e){ res(null); }
+  });
+  return _lancctbOcrCacheDbPromise;
+}
+async function _lancctbOcrCacheGet(k){
+  if(!k) return null;
+  if(_lancctbOcrCacheMem.has(k)) return _lancctbOcrCacheMem.get(k);
+  const db=await _lancctbOcrCacheDb(); if(!db) return null;
+  return new Promise(res=>{
+    try{ const rq=db.transaction('tributos').objectStore('tributos').get(k); rq.onsuccess=()=>{ const v=rq.result?rq.result.v:null; if(v) _lancctbOcrCacheMem.set(k,v); res(v||null); }; rq.onerror=()=>res(null); }catch(e){ res(null); }
+  });
+}
+async function _lancctbOcrCachePut(k,v){
+  if(!k||!v) return;
+  _lancctbOcrCacheMem.set(k,v);
+  const db=await _lancctbOcrCacheDb(); if(!db) return;
+  try{
+    const st=db.transaction('tributos','readwrite').objectStore('tributos');
+    st.put({k,v,t:Date.now()});
+    // limpeza: o que não é usado há mais de 120 dias sai (guia de mês antigo não volta a ser lida)
+    const corte=Date.now()-120*86400000;
+    st.openCursor().onsuccess=ev=>{ const c=ev.target.result; if(c){ if((c.value.t||0)<corte) c.delete(); c.continue(); } };
+  }catch(e){}
+}
+// Abre o PDF de uma guia e já marca a chave do cache de OCR (nome|tamanho|data|versão)
+async function _lancctbAbrirPdfTributo(fileHandle){
+  const arq=await fileHandle.getFile();
+  const pdf=await pdfjsLib.getDocument({data:await arq.arrayBuffer()}).promise;
+  pdf._ocrChave=[arq.name,arq.size,arq.lastModified,_LANCCTB_OCR_CACHE_VERSAO].join('|');
+  return pdf;
+}
+// Piscina de workers do Tesseract (até 3) — várias guias escaneadas são lidas AO MESMO TEMPO (cada worker roda em sua própria thread). O 1º é o worker
+// compartilhado do sistema (_ganhoOcrWorker); os extras são criados sob demanda e encerrados por _lancctbOcrPoolEnxugar ao fim da leitura em lote.
+const _lancctbOcrPool={ livres:[], total:0, fila:[], max:3 };
+async function _lancctbOcrEmprestar(){
+  const P=_lancctbOcrPool;
+  if(P.livres.length) return P.livres.pop();
+  if(P.total<P.max){
+    P.total++;
+    try{ return P.total===1?await _ganhoOcrWorker():await Tesseract.createWorker('por'); }
+    catch(e){ P.total--; throw e; }
+  }
+  return new Promise(res=>P.fila.push(res));
+}
+function _lancctbOcrDevolver(w){ const q=_lancctbOcrPool.fila.shift(); if(q) q(w); else _lancctbOcrPool.livres.push(w); }
+async function _lancctbOcrPoolEnxugar(){
+  const P=_lancctbOcrPool; if(P.fila.length) return;
+  let compartilhado=null; try{ compartilhado=await _ganhoOcrWorkerPromise; }catch(e){}
+  const extras=P.livres.filter(w=>w!==compartilhado);
+  P.livres=P.livres.filter(w=>w===compartilhado); P.total-=extras.length;
+  extras.forEach(w=>{ try{ w.terminate(); }catch(e){} });
+}
 async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
-  const worker=await _ganhoOcrWorker();
+  const chaveOcr=pdf._ocrChave||null;
+  let porPagina=await _lancctbOcrCacheGet(chaveOcr);
+  if(!porPagina){
+  const worker=await _lancctbOcrEmprestar();
+  try{
   const page1=await pdf.getPage(1);
   // Detecta orientação (0/90/180/270°) igual ao leitor de Itaú Fundos
   // escaneado — guia de tributo digitalizada pode vir girada. Só testa na
   // página 1 (as demais páginas da mesma guia vêm sempre na mesma orientação).
-  let melhorRotacao=0, melhorScore=-1;
+  // Medido nas guias reais da Peixoto: cada teste custa 2-5 s e a página em pé (0°) tem confiança do OCR de 56-71 contra no máximo 37 nas outras —
+  // então para já no 0° quando a confiança é boa (>=50) e só testa os giros quando ela é baixa (escaneada de lado/de cabeça pra baixo).
+  // A escolha passou a considerar a confiança além das âncoras do DARF (que no escaneado costumam dar 0 em todos os giros).
+  let melhorRotacao=0, melhorScore=-1, melhorConf=-1;
   for(const rot of [0,90,180,270]){
-    if(statusCb) statusCb(`Detectando orientação da guia (testando ${rot}°)…`);
+    if(statusCb) statusCb(rot===0?'Lendo guia escaneada (OCR)…':`Guia escaneada: testando orientação (${rot}°)…`);
     const canvasTeste=await _ganhoItauFundoRenderizarPagina(page1,rot,1.3);
     const {data:dataTeste}=await worker.recognize(canvasTeste);
-    const score=_lancctbDarfScoreAncoras(dataTeste.text);
-    if(score>melhorScore){ melhorScore=score; melhorRotacao=rot; }
+    const score=_lancctbDarfScoreAncoras(dataTeste.text), conf=Number(dataTeste.confidence)||0;
+    if(score>melhorScore||(score===melhorScore&&conf>melhorConf)){ melhorScore=score; melhorConf=conf; melhorRotacao=rot; }
+    if(rot===0&&(conf>=50||score>=1)) break; // página em pé: não precisa testar os outros giros
   }
   // Guia composta (DARF/DCTFWEB) pode ter o detalhamento por código de
   // receita espalhado por VÁRIAS páginas, com o "Total"/"Totais" só na
   // última (achado real 01/10/2026, Rufato: INSS Pessoal 07/2026,
   // R$531.506,60, 16 códigos em 2 páginas — OCR só da página 1 achava 9 dos
   // 16 códigos e o valor nunca batia com a pendência). OCR TODAS as páginas.
-  const porPagina=[];
+  porPagina=[];
   for(let p=1;p<=pdf.numPages;p++){
-    if(statusCb) statusCb(pdf.numPages>1?`Lendo guia via OCR local (Tesseract.js) — página ${p}/${pdf.numPages}…`:'Lendo guia via OCR local (Tesseract.js)…');
+    if(statusCb) statusCb(pdf.numPages>1?`Lendo guia escaneada (OCR) — página ${p} de ${pdf.numPages}…`:'Lendo guia escaneada (OCR)…');
     const page=p===1?page1:await pdf.getPage(p);
     const canvas=await _ganhoItauFundoRenderizarPagina(page,melhorRotacao,3);
     const { data } = await worker.recognize(canvas);
     porPagina.push({ itens:_lancctbOcrDataParaItens(data), texto:String(data.text||'').replace(/\s+/g,' ') });
+  }
+  } finally { _lancctbOcrDevolver(worker); }
+  await _lancctbOcrCachePut(chaveOcr,porPagina);
   }
   // Tolerância de linha maior que o texto nativo (18 em vez de 3) — a bbox
   // de cada palavra do OCR varia mais entre si do que a posição exata de um
@@ -23866,6 +23975,8 @@ async function _lancctbExtrairValorPdfTributo(pdf,permitirIA,statusCb){
   if(gfd) return gfd;
   const damsp=await _lancctbExtrairComposicaoDamsp(pdf);
   if(damsp) return { valor:damsp.valorTotal, composicao:damsp.itens.length>1?damsp.itens:null, competencia:damsp.competencia };
+  const daeMg=await _lancctbExtrairGuiaDaeMg(pdf);
+  if(daeMg) return daeMg;
   const generico=await _lancctbExtrairValorTotalGenerico(pdf);
   if(generico!=null) return { valor:generico, composicao:null };
   try{
@@ -23969,8 +24080,7 @@ async function _lancctbAtualizarSugestoesTributos(){
   const encontrados=[];
   for(const f of todosDoMes){
     try{
-      const arquivo=await f.fileHandle.getFile();
-      const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
+      const pdfDoc=await _lancctbAbrirPdfTributo(f.fileHandle);
       const extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
       if(extraido&&Math.abs(extraido.valor-valorAlvo)<=LANCCTB_MATCH_TOLERANCIA_VALOR) encontrados.push(f);
     }catch(e){ console.error('Falha ao conferir valor do PDF de tributo '+f.nome+':',e); }
@@ -30444,12 +30554,18 @@ async function _lancctbProcessarFonteRegistro(modo){
 // Antes: a guia legível cabia na "folga de 30%" e o resto virava "DIFERENÇA" — errado, o resto era OUTRA guia. Agora, antes da folga,
 // procura combinação de 2+ guias do mês cuja soma bate o pagamento. Guia que é só imagem (sem texto) entra pelo valor que falta,
 // mas só se for a ÚNICA guia sem texto com vencimento próximo do pagamento (senão fica ambíguo e nada é inferido).
-async function _lancctbLerGuiasDoMes(eid,anoMes,permitirIA){
+// cacheLeitura (opcional) = o mesmo mapa chave→valor extraído que o laço principal de _lancctbProcessarTributos já preencheu: cada PDF é lido UMA vez por rodada
+async function _lancctbLerGuiasDoMes(eid,anoMes,permitirIA,cacheLeitura,statusCb){
   const cand=await _lancctbBuscarPdfsTributosDoMes(eid,anoMes); const out=[];
   for(const f of cand){
+    const chave=anoMes+'|'+f.nome;
     let extraido=null;
-    try{ const arq=await f.fileHandle.getFile(); const pdf=await pdfjsLib.getDocument({data:await arq.arrayBuffer()}).promise; extraido=await _lancctbExtrairValorPdfTributo(pdf,permitirIA); }catch(e){ console.warn('guia ilegível',f.nome,e); }
-    out.push({ f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave:anoMes+'|'+f.nome });
+    if(cacheLeitura&&chave in cacheLeitura) extraido=cacheLeitura[chave];
+    else {
+      try{ const pdf=await _lancctbAbrirPdfTributo(f.fileHandle); extraido=await _lancctbExtrairValorPdfTributo(pdf,permitirIA,statusCb?s=>statusCb(f.nome,s):undefined); }catch(e){ console.warn('guia ilegível',f.nome,e); }
+      if(cacheLeitura) cacheLeitura[chave]=extraido;
+    }
+    out.push({ f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave });
   }
   return out;
 }
@@ -30807,6 +30923,38 @@ async function _lancctbProcessarCtesRufato(){
     _lancctbMatchingEmExecucao.delete(_chaveLock);
   }
 }
+// Lê de ANTEMÃO, em paralelo (texto: ~50 ms por PDF; escaneada: OCR em até 3 workers), todas as guias que o laço de _lancctbProcessarTributos vai consultar: as do mês de
+// cada pagamento e, pra pagamento do dia 10 em diante, as do mês seguinte com vencimento até 15 dias depois (mesma regra do laço). Preenche o MESMO mapa
+// cacheLeituraPdf (chave "AAAA-MM|nome") — o laço e a busca de várias guias passam a só consultar. Antes: 1ª pendência lia tudo sozinha, em fila, sem mostrar nada.
+async function _lancctbPreLerGuiasTributos(eid,pendencias,cacheLeituraPdf,cachePorMes,statusEl){
+  const tarefas=new Map();
+  const mes=async(anoMes)=>{ if(!cachePorMes[anoMes]) cachePorMes[anoMes]=await _lancctbBuscarPdfsTributosDoMes(eid,anoMes); return cachePorMes[anoMes]; };
+  for(const l of pendencias){
+    const anoMes=l.data_pagamento.slice(0,7);
+    (await mes(anoMes)).forEach(f=>tarefas.set(anoMes+'|'+f.nome,f));
+    if(parseInt(l.data_pagamento.slice(8,10),10)>=10){
+      const [a,m]=anoMes.split('-'); let mn=parseInt(m,10)+1, an=parseInt(a,10); if(mn>12){ mn=1; an++; }
+      const seg=`${an}-${String(mn).padStart(2,'0')}`;
+      (await mes(seg)).forEach(f=>{ const info=_lancctbParsearNomeArquivoTributo(f.nome); if(!info.vencimento) return; const d=_lancctbDiasEntre(info.vencimento,l.data_pagamento); if(d>=0&&d<=15) tarefas.set(seg+'|'+f.nome,f); });
+    }
+  }
+  const lista=[...tarefas.entries()].filter(([k])=>!(k in cacheLeituraPdf));
+  const total=lista.length; if(!total) return;
+  let idx=0, feitos=0;
+  const msg=()=>{ if(statusEl) statusEl.textContent=`Lendo as guias do mês ${feitos}/${total}…`; };
+  msg();
+  const trabalhador=async()=>{
+    while(idx<total){
+      const [chave,f]=lista[idx++];
+      let extraido=null;
+      try{ const pdf=await _lancctbAbrirPdfTributo(f.fileHandle); extraido=await _lancctbExtrairValorPdfTributo(pdf,_lancctbTributosPermitirIA); }
+      catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); extraido=null; }
+      cacheLeituraPdf[chave]=extraido; feitos++; msg();
+    }
+  };
+  try{ await Promise.all(Array.from({length:Math.min(3,total)},trabalhador)); }
+  finally { await _lancctbOcrPoolEnxugar(); }
+}
 async function _lancctbProcessarTributos(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   // Achado real 15/09/2026 (Accurare, TFE 27/07 duplicada 2x): o botão só
@@ -30889,6 +31037,8 @@ async function _lancctbProcessarTributos(){
   // automaticamente ao final, em vez de deixar só pendente esperando o
   // contador achar o ícone de lápis na tabela.
   const composicoesParaAbrir=[];
+  try{ await _lancctbPreLerGuiasTributos(eid,pendencias,cacheLeituraPdf,cachePorMes,statusEl); }
+  catch(e){ console.error('Leitura antecipada das guias falhou (o laço lê uma a uma):',e); }
   for(let i=0;i<pendencias.length;i++){
     const l=pendencias[i];
     if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length}…`;
@@ -30930,9 +31080,8 @@ async function _lancctbProcessarTributos(){
       if(chaveArquivo in cacheLeituraPdf) extraido=cacheLeituraPdf[chaveArquivo];
       else {
         try{
-          const arquivo=await f.fileHandle.getFile();
-          const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
-          extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
+          const pdfDoc=await _lancctbAbrirPdfTributo(f.fileHandle);
+          extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA,s=>{ if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length} — ${s}`; });
         }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); extraido=null; }
         cacheLeituraPdf[chaveArquivo]=extraido;
       }
@@ -30967,10 +31116,17 @@ async function _lancctbProcessarTributos(){
       // Usa os candidatos já enriquecidos (incluindo guias do mês seguinte
       // para pagamentos antecipados) em vez de releer só a pasta do anoMes.
       if(!leiturasPorMes[anoMes]){
-        const leitMes=await _lancctbLerGuiasDoMes(eid,anoMes,_lancctbTributosPermitirIA);
+        const leitMes=await _lancctbLerGuiasDoMes(eid,anoMes,_lancctbTributosPermitirIA,cacheLeituraPdf,(nome,s)=>{ if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length} — ${s}`; });
         // Adiciona guias do mês seguinte que já foram injetadas em candidatos
         const extras=candidatos.filter(f=>f._mesPasta);
-        const extrasLidos=await Promise.all(extras.map(async f=>{ let extraido=null; try{ const arq=await f.fileHandle.getFile(); const pdf=await pdfjsLib.getDocument({data:await arq.arrayBuffer()}).promise; extraido=await _lancctbExtrairValorPdfTributo(pdf,_lancctbTributosPermitirIA); }catch(e){} return { f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave:f._mesPasta+'|'+f.nome }; }));
+        const extrasLidos=[];
+        for(const f of extras){ // sequencial e com o cache da rodada (o OCR usa 1 worker só; em paralelo só empilhava e relia o que o laço acima já tinha lido)
+          const chave=f._mesPasta+'|'+f.nome;
+          let extraido=null;
+          if(chave in cacheLeituraPdf) extraido=cacheLeituraPdf[chave];
+          else { try{ const pdf=await _lancctbAbrirPdfTributo(f.fileHandle); extraido=await _lancctbExtrairValorPdfTributo(pdf,_lancctbTributosPermitirIA,s=>{ if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length} — ${s}`; }); }catch(e){} cacheLeituraPdf[chave]=extraido; }
+          extrasLidos.push({ f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave });
+        }
         leiturasPorMes[anoMes]=[...leitMes,...extrasLidos];
       }
       const comb=_lancctbAcharCombinacaoGuias(valor,l.data_pagamento,leiturasPorMes[anoMes],arquivosUsados);
