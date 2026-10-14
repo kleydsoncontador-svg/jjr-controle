@@ -43893,6 +43893,127 @@ async function _aplicfinParseItauAplicAutMais(pdf){
   };
 }
 
+// ── MODELO 1b: Itaú "APLIC AUT MAIS - EXTRATO DETALHADO DE MOVIMENTAÇÃO" (BRI Capital 08 e 09/2026 — pedido do usuário 14/10/2026) ──────────────────────
+// Mesmo conjunto de colunas do CONSOLIDADO (modelo 1), mas com OUTRO título e uma linha por operação: "A…" = aplicação, "R…" = resgate (com a data da aplicação resgatada),
+// "Total" = soma dos resgates DAQUELE DIA (+ a posição do fim do dia) e linhas só de posição nos dias sem movimento. "Acum. Mês" no fim traz os totais do mês — inclusive o
+// IOF Retido (no consolidado o IOF não tinha total e era somado dia a dia). Mesmo model 'itau_aplic_aut_mais' e mesmas source_keys do consolidado → o mapeamento já ensinado vale.
+// Colunas por ALINHAMENTO À DIREITA (xr dos números): a grade vem da própria linha "Acum. Mês" (8 colunas do mês) e de uma linha só de posição (5 colunas), nunca de coordenada
+// fixa — só cai numa grade padrão do Itaú se não achar essas linhas (e avisa). Linhas "Total" NUNCA entram em soma (duplicariam o dia): servem só pra conferir.
+// Fontes extras (não existem no consolidado): posição inicial (Saldo Bruto Anterior = 1ª posição do período) e Rendimento do Mês calculado
+// = Saldo Bruto final + Valor Bruto Resgatado − Saldo Bruto anterior − Aplicações (o "Rendimento Pago Bruto" é só o das operações resgatadas, NÃO é o rendimento do mês).
+async function _aplicfinParseItauAplicAutMaisDetalhado(pdf){
+  let itens=[], texto='';
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p);
+    const its=_aplicfinItens(page,await page.getTextContent()).map(i=>({...i,y:i.y+p*100000}));
+    itens=itens.concat(its); texto+=' '+its.map(i=>i.s).join(' ');
+  }
+  texto=texto.replace(/\s+/g,' ');
+  if(!/APLIC AUT MAIS\s*-\s*EXTRATO DETALHADO DE MOVIMENTA[ÇC][ÃA]O/i.test(texto)) return null;
+  const warnings=[], validations=[];
+  const r2=v=>Math.round(v*100)/100, num=_convCobrParseValor;
+  const meses={janeiro:1,fevereiro:2,marco:3,abril:4,maio:5,junho:6,julho:7,agosto:8,setembro:9,outubro:10,novembro:11,dezembro:12};
+  const mC=texto.match(/Movimenta[çc][ãa]o em ([A-Za-zç]+)\/(\d{4})/i);
+  let competence=null;
+  if(mC){ const mn=meses[mC[1].toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'')]; if(mn) competence=mC[2]+'-'+String(mn).padStart(2,'0'); }
+  if(!competence) warnings.push('Competência não identificada ("Movimentação em Mês/Ano").');
+  const mAcc=texto.match(/Ag[êe]ncia\/conta:\s*([\d.\-\/]+)/i);
+  const account=mAcc?mAcc[1]:null;
+
+  const MES=['applications','principal_redeemed','gross_redeemed','iof_retido','irrf_retido','net_redeemed','paid_yield_gross','paid_yield_net'];
+  const POS=['principal','gross','iof','irrf','net'];
+  const linhas=_aplicfinLinhas(itens,2);
+  const txt=L=>L.map(i=>i.s).join(' ');
+  const ehNum=i=>_aplicfinEhNum(i.s);
+  const linhaAcum=linhas.find(L=>/^Acum\.?\s*M[êe]s/i.test(L[0].s));
+  if(!linhaAcum) warnings.push('EXTRACTION_ERROR: linha "Acum. Mês" não encontrada — totais do mês não preenchidos (não foram somados dia a dia).');
+  // grade de colunas (xr = borda direita dos números)
+  let gradeMes=null, gradePos=null;
+  const numsAcum=linhaAcum?linhaAcum.filter(ehNum).sort((a,b)=>a.xr-b.xr):[];
+  if(numsAcum.length===8) gradeMes=numsAcum.map(i=>i.xr);
+  const linhasData=linhas.filter(L=>_aplicfinEhData(L[0].s)&&L[0].x<90);
+  const linhaSoPos=linhasData.find(L=>L.filter(ehNum).length===5&&L.length===6);
+  if(linhaSoPos) gradePos=linhaSoPos.filter(ehNum).sort((a,b)=>a.xr-b.xr).map(i=>i.xr);
+  if(!gradeMes||!gradePos){ gradeMes=gradeMes||[171,267,316,364,412,460,509,557]; gradePos=gradePos||[605,654,702,750,798]; warnings.push('Grade de colunas padrão do Itaú usada (não achei a linha "Acum. Mês" completa ou uma linha só de posição pra medir) — confira os valores.'); }
+  const grade=gradeMes.map((x,i)=>[x,'mes',MES[i]]).concat(gradePos.map((x,i)=>[x,'pos',POS[i]]));
+  const colDe=i=>{ let m=null,d=Infinity; grade.forEach(g=>{ const dx=Math.abs(i.xr-g[0]); if(dx<d){ d=dx; m=g; } }); return d<=14?m:null; };
+
+  // totais do mês: "Acum. Mês"
+  const acum={};
+  numsAcum.forEach(i=>{ const g=colDe(i); if(g&&g[1]==='mes'&&acum[g[2]]==null) acum[g[2]]=num(i.s); });
+  // linhas diárias (só pra conferir)
+  const dia={ applications:0, principal_redeemed:0, gross_redeemed:0, iof_retido:0, irrf_retido:0, net_redeemed:0, paid_yield_gross:0, paid_yield_net:0 };
+  let somaApl=0, nA=0, nR=0, posInicial=null, posFinal=null, dataPosInicial=null;
+  linhasData.forEach(L=>{
+    const tipo=/^A\d/.test((L[1]||{}).s||'')?'A':/^R\d/.test((L[1]||{}).s||'')?'R':/^Total$/i.test((L[1]||{}).s||'')?'T':'P';
+    const mes={}, pos={};
+    L.filter(ehNum).forEach(i=>{ const g=colDe(i); if(!g) return; (g[1]==='mes'?mes:pos)[g[2]]=num(i.s); });
+    if(tipo==='A'){ nA++; somaApl=r2(somaApl+(mes.applications||0)); }
+    if(tipo==='R'){ nR++; MES.slice(1).forEach(k=>{ dia[k]=r2(dia[k]+(mes[k]||0)); }); }
+    if(Object.keys(pos).length>=3){ // linha com posição: a 1ª é o saldo anterior, a última é o saldo atual
+      if(!posInicial){ posInicial=pos; dataPosInicial=L[0].s; }
+      posFinal=pos;
+    }
+  });
+  dia.applications=somaApl;
+  if(!posInicial||!posFinal) warnings.push('EXTRACTION_ERROR: não achei as linhas de "Posição em Ser no Dia" (saldo anterior/atual).');
+  if(competence&&dataPosInicial){ const [dd,mm,aa]=dataPosInicial.split('/'); if(aa+'-'+mm===competence) warnings.push('A 1ª posição da tabela ('+dataPosInicial+') já é do próprio mês — o Saldo Bruto Anterior pode não ser o do último dia do mês passado.'); }
+
+  // conferências do roteiro (valores do texto do PDF; mensagens só se NÃO fecharem)
+  const ok2=(a,b)=>a!=null&&b!=null&&Math.abs(a-b)<=0.02;
+  const conf=(name,detail,ok)=>{ validations.push({name,ok,detail}); if(!ok) warnings.push('VALIDATION_FAILED: '+detail); };
+  if(acum.principal_redeemed!=null&&acum.paid_yield_gross!=null&&acum.gross_redeemed!=null){
+    const calc=r2(acum.principal_redeemed+acum.paid_yield_gross);
+    conf('principal_mais_rendimento_igual_bruto',`Valor Principal ${acum.principal_redeemed} + Rendimento Pago Bruto ${acum.paid_yield_gross} = ${calc} (Valor Bruto Resgatado ${acum.gross_redeemed})`,ok2(calc,acum.gross_redeemed));
+  }
+  if(acum.gross_redeemed!=null&&acum.net_redeemed!=null){
+    const calc=r2(acum.gross_redeemed-(acum.iof_retido||0)-(acum.irrf_retido||0));
+    conf('bruto_menos_impostos_igual_liquido',`Valor Bruto ${acum.gross_redeemed} − IOF ${acum.iof_retido||0} − IRRF ${acum.irrf_retido||0} = ${calc} (Valor Líquido Resgatado ${acum.net_redeemed})`,ok2(calc,acum.net_redeemed));
+  }
+  if(acum.paid_yield_gross!=null&&acum.paid_yield_net!=null){
+    const calc=r2(acum.paid_yield_gross-(acum.iof_retido||0)-(acum.irrf_retido||0));
+    conf('rendimento_bruto_menos_impostos_igual_liquido',`Rendimento Pago Bruto ${acum.paid_yield_gross} − IOF ${acum.iof_retido||0} − IRRF ${acum.irrf_retido||0} = ${calc} (Rendimento Pago Líquido ${acum.paid_yield_net})`,ok2(calc,acum.paid_yield_net));
+  }
+  if(linhaAcum){
+    // as linhas diárias de aplicação/resgate (sem as "Total") têm que somar o "Acum. Mês" — tolerância de centavos de arredondamento por linha
+    const tol=0.05+0.01*(nA+nR);
+    MES.forEach(k=>{ if(acum[k]==null) return; const ok=Math.abs(dia[k]-acum[k])<=tol; validations.push({name:'dia_a_dia_'+k,ok,detail:`Σ linhas diárias de ${k} ${dia[k]} vs Acum. Mês ${acum[k]}`}); if(!ok) warnings.push(`VALIDATION_FAILED: soma das linhas diárias de ${k} (${dia[k]}) ≠ Acum. Mês (${acum[k]}) — confira o PDF.`); });
+  }
+  // Rendimento do mês (patrimonial) e renda tributável
+  let monthYield=null, taxable=null;
+  if(posFinal&&posInicial&&posFinal.gross!=null&&posInicial.gross!=null&&acum.gross_redeemed!=null&&acum.applications!=null){
+    monthYield=r2(posFinal.gross+acum.gross_redeemed-posInicial.gross-acum.applications);
+  }
+  if(acum.paid_yield_gross!=null) taxable=r2(acum.paid_yield_gross-(acum.iof_retido||0));
+
+  const M='itau_aplic_aut_mais';
+  const mk=(sec,k,lbl,val,ct)=>({key:M+'.'+sec+'.'+k,label:lbl,section:sec==='month_total'?'Acum. Mês':sec==='final_position'?'Posição em Ser no Dia (final)':sec==='initial_position'?'Posição em Ser no Dia (inicial)':'Calculado',product:null,value:(val==null?null:r2(val)),calculationType:ct});
+  const sources=[
+    mk('month_total','applications','Acum. Mês → Aplicações',acum.applications,'DIRECT_TOTAL'),
+    mk('month_total','principal_redeemed','Acum. Mês → Valor Principal Resgatado',acum.principal_redeemed,'DIRECT_TOTAL'),
+    mk('month_total','gross_redeemed','Acum. Mês → Valor Bruto Resgatado',acum.gross_redeemed,'DIRECT_TOTAL'),
+    mk('month_total','iof_retido','Acum. Mês → IOF Retido',acum.iof_retido,'DIRECT_TOTAL'),
+    mk('month_total','irrf_retido','Acum. Mês → IRRF Retido',acum.irrf_retido,'DIRECT_TOTAL'),
+    mk('month_total','net_redeemed','Acum. Mês → Valor Líquido Resgatado',acum.net_redeemed,'DIRECT_TOTAL'),
+    mk('month_total','paid_yield_gross','Acum. Mês → Rendimento Pago (Bruto)',acum.paid_yield_gross,'DIRECT_TOTAL'),
+    mk('month_total','paid_yield_net','Acum. Mês → Rendimento Pago (Líquido)',acum.paid_yield_net,'DIRECT_TOTAL'),
+    mk('final_position','principal','Última Posição → Saldo Principal',posFinal&&posFinal.principal,'LAST_POSITION'),
+    mk('final_position','gross','Última Posição → Saldo Bruto',posFinal&&posFinal.gross,'LAST_POSITION'),
+    mk('final_position','iof','Última Posição → Provisão de IOF',posFinal&&posFinal.iof,'LAST_POSITION'),
+    mk('final_position','irrf','Última Posição → Provisão de IRRF',posFinal&&posFinal.irrf,'LAST_POSITION'),
+    mk('final_position','net','Última Posição → Saldo Líquido',posFinal&&posFinal.net,'LAST_POSITION'),
+    mk('initial_position','principal','Primeira Posição ('+(dataPosInicial||'?')+') → Saldo Principal',posInicial&&posInicial.principal,'FIRST_POSITION'),
+    mk('initial_position','gross','Primeira Posição ('+(dataPosInicial||'?')+') → Saldo Bruto (= Saldo Bruto Anterior)',posInicial&&posInicial.gross,'FIRST_POSITION'),
+    mk('calc','month_yield','Calculado: Saldo Bruto final + Valor Bruto Resgatado − Saldo Bruto anterior − Aplicações (= Rendimento do Mês)',monthYield,'CALCULATED'),
+    mk('calc','taxable_income','Calculado: Rendimento Pago Bruto − IOF Retido (= Renda Tributável)',taxable,'CALCULATED'),
+  ];
+  return {
+    bank:'ITAU', model:M, competence, account,
+    fingerprint:_aplicfinFingerprint('ITAU',M,['APLIC AUT MAIS - EXTRATO DETALHADO DE MOVIMENTAÇÃO','DATA','APLICAÇÕES','RESGATES ANTECIPADOS/VENCIMENTOS','POSIÇÃO EM SER NO DIA']),
+    productMode:'single', products:[], sources, validations, warnings, pageCount:pdf.numPages,
+  };
+}
+
 // ── MODELO 2: Itaú "Extrato de movimentação mensal - CDB-DI" (ITAU_CDB_DI_MOVIMENTACAO) ──
 // Título e fingerprint DISTINTOS de "APLIC AUT MAIS" (modelo 1 acima) — nunca confundir. 3 seções
 // independentes na mesma página, cada uma com SEU cabeçalho e colunas por coordenada (nunca por ordem
@@ -45615,7 +45736,7 @@ async function _aplicfinExtrairSemIA(file,statusCb){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
-  const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseItauCdbDi,_aplicfinParseBradescoPadrao,_aplicfinParseBradescoCdbMulti,_aplicfinParseBradescoInvestimentos];
+  const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseItauAplicAutMaisDetalhado,_aplicfinParseItauCdbDi,_aplicfinParseBradescoPadrao,_aplicfinParseBradescoCdbMulti,_aplicfinParseBradescoInvestimentos];
   let parcialCdbDi=null;
   for(const fn of parsers){
     try{
@@ -45668,7 +45789,9 @@ function _aplicfinColunasSite(ganho){
   return base;
 }
 // Palpite de source_key default por coluna do site (o usuário confirma/troca)
-function _aplicfinSugestaoSourceKey(model,siteColId){
+function _aplicfinSugestaoSourceKey(model,siteColId,parsed){
+  // Aut Mais DETALHADO: o Rendimento Pago Bruto é só o das operações resgatadas — o Rendimento do Mês é o calculado pelo saldo (14/10/2026, BRI)
+  if(model==='itau_aplic_aut_mais'&&siteColId==='rendMes'&&parsed&&(parsed.sources||[]).some(x=>x.key==='itau_aplic_aut_mais.calc.month_yield')) return 'itau_aplic_aut_mais.calc.month_yield';
   const map={
     itau_aplic_aut_mais:{
       bruto:'itau_aplic_aut_mais.month_total.paid_yield_gross',
@@ -45797,7 +45920,7 @@ function _renderAplicfinMapeamentoForm(ganho,parsed,produtoSel){
   if(parsed.warnings.length) html+=`<div style="font-size:11px;color:#b45309;background:#fffbeb;border:1px solid #fde68a;border-radius:4px;padding:6px;margin-bottom:8px">${parsed.warnings.map(esc).join('<br>')}</div>`;
   html+=`<div style="display:grid;gap:7px">`;
   cols.forEach((c,i)=>{
-    const sug=_aplicfinSugestaoSourceKey(parsed.model,c.id);
+    const sug=_aplicfinSugestaoSourceKey(parsed.model,c.id,parsed);
     html+=`<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:6px;background:var(--bg);border-radius:4px">
       <b style="font-size:11.5px;min-width:210px;text-transform:uppercase">${esc(c.nome)}</b>
       <select class="si" id="aplicfinMap_${i}" data-col="${esc(c.id)}" style="min-width:340px;font-size:11px">${opts(sug)}</select>
