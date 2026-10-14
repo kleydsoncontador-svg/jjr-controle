@@ -21980,7 +21980,18 @@ function _lancctbParsearCTeXml(xml,cnpjsEmpresa){
 async function _lancctbChavesConhecidas(eid){
   const { data } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais')
     .select('chave_acesso').eq('empresa_eid',eid).not('chave_acesso','is',null));
-  return new Set((data||[]).map(r=>r.chave_acesso));
+  const conhecidas=new Set((data||[]).map(r=>r.chave_acesso));
+  // NFS-e também é reconhecida por emitente + número + ano: a mesma nota pode ter chaves diferentes conforme a fonte (SIEG no layout da Prefeitura de SP,
+  // sem a chave nacional nas notas até maio/2026, × Portal Nacional, que traz a chave) — sem isso a nota entraria 2x (14/10/2026, Faria Kawakami).
+  try{
+    const { data: nfs } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais')
+      .select('cnpj_emitente,numero,data_emissao').eq('empresa_eid',eid).eq('tipo','nfse').order('id'));
+    (nfs||[]).forEach(r=>conhecidas.add(_lancctbChaveNumeroNfse(r.cnpj_emitente,r.numero,r.data_emissao)));
+  }catch(e){ console.warn('NFS-e já importadas (por número):',e); }
+  return conhecidas;
+}
+function _lancctbChaveNumeroNfse(cnpj,numero,dataEmissao){
+  return 'NFSE|'+String(cnpj||'').replace(/\D/g,'')+'|'+String(numero||'').replace(/^0+/,'')+'|'+String(dataEmissao||'').slice(0,4);
 }
 let _lancctbImportXmlArquivos=[];
 function processarLancctbImportXmlLocal(fileList){
@@ -21996,6 +22007,41 @@ function processarLancctbImportXmlLocal(fileList){
 // duplica). direcaoConhecida vem pronta no fluxo automático (Importar mês,
 // que já sabe de qual subpasta veio); no fluxo manual (pasta escolhida à
 // mão) é inferida do caminho relativo do arquivo.
+// NFS-e no layout da PREFEITURA DE SÃO PAULO (<RetornoConsulta><NFe>…, é o que a SIEG baixa em NFS-es\{cnpj}\Servico Prestado|Tomado\ano\mês).
+// Antes o importador só entendia o layout NACIONAL (<infNFSe>): esses XMLs caíam em "não reconhecida" e o mês ficava sem as notas que não vieram pelo Portal
+// (pedido do usuário 14/10/2026 — Faria Kawakami, agosto/2026, notas 542–545). A chave de acesso é a MESMA do layout nacional ("NFS"+ChaveNotaNacional), então a nota
+// que já veio pelo Portal é reconhecida como já existente (não duplica) e só entra o que ainda não existe. Retenções iguais às do layout nacional:
+// PIS+COFINS+CSLL vêm somados em ValorCSLL → separa em 0,65% / 3,00% / 1,00% do valor do serviço; IRRF = ValorIR.
+function _lancctbParsearNFSeSpXml(xml){
+  const numero=_lancctbExtrairTag(xml,'NumeroNFe');
+  if(!numero) return null;
+  const status=_lancctbExtrairTag(xml,'StatusNFe');
+  if(status&&/^C/i.test(status)) return null; // nota cancelada na prefeitura: não importa
+  const dig=x=>String(x||'').replace(/\D/g,'');
+  const prestBloco=_lancctbExtrairBloco(xml,'CPFCNPJPrestador')||'', tomaBloco=_lancctbExtrairBloco(xml,'CPFCNPJTomador')||'';
+  const cnpjEmit=dig(_lancctbExtrairTag(prestBloco,'CNPJ')||_lancctbExtrairTag(prestBloco,'CPF'));
+  if(!cnpjEmit) return null;
+  const cnpjToma=dig(_lancctbExtrairTag(tomaBloco,'CNPJ')||_lancctbExtrairTag(tomaBloco,'CPF'));
+  const dataEmissao=(_lancctbExtrairTag(xml,'DataEmissaoNFe')||'').slice(0,10);
+  const valorTotal=parseFloat(_lancctbExtrairTag(xml,'ValorServicos')||'0')||0;
+  const n=tag=>{ const v=parseFloat(_lancctbExtrairTag(xml,tag)||''); return v>0?v:null; };
+  const issValor=n('ValorISS');
+  const temRetFederal=n('ValorCSLL')!==null;
+  const r2=v=>Math.round(v*100)/100;
+  const chaveNac=_lancctbExtrairTag(xml,'ChaveNotaNacional');
+  const chave=chaveNac?('NFS'+chaveNac):('NFSSP'+(_lancctbExtrairTag(xml,'InscricaoPrestador')||cnpjEmit)+'-'+numero);
+  return {
+    chave_acesso:chave,
+    numero:String(numero), serie:null, modelo:'NFSe',
+    cnpj_emitente:cnpjEmit, nome_emitente:_lancctbExtrairTag(xml,'RazaoSocialPrestador'),
+    cnpj_destinatario:cnpjToma||null, nome_destinatario:_lancctbExtrairTag(xml,'RazaoSocialTomador'),
+    data_emissao:dataEmissao,
+    valor_total:valorTotal, iss_valor:issValor,
+    pis_valor:temRetFederal?r2(valorTotal*0.0065):null, cofins_valor:temRetFederal?r2(valorTotal*0.03):null, csll_valor:temRetFederal?r2(valorTotal*0.01):null,
+    irrf_valor:n('ValorIR'),
+    parcelas:[{numero_parcela:1,data_vencimento:dataEmissao,valor_parcela:valorTotal}],
+  };
+}
 async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice,chavesConhecidas}={}){
   try{
     const xml=await file.text();
@@ -22003,19 +22049,21 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
     const direcao=direcaoConhecida||_lancctbDirecaoDoCaminho(caminho);
     const ehNFSe=/xmlns="http:\/\/www\.sped\.fazenda\.gov\.br\/nfse"|<NFSe[ >]/.test(xml);
     const ehCTe=/<CTe[ >]|<cteProc[ >]/.test(xml);
-    const nf=ehCTe?_lancctbParsearCTeXml(xml,_lancctbCnpjsDaEmpresa(eid)):(ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml));
+    const ehNFSeSp=!ehNFSe&&!ehCTe&&/<RetornoConsulta[ >]/.test(xml)&&/<NumeroNFe>/.test(xml); // layout da Prefeitura de São Paulo (SIEG)
+    const nf=ehCTe?_lancctbParsearCTeXml(xml,_lancctbCnpjsDaEmpresa(eid)):(ehNFSeSp?_lancctbParsearNFSeSpXml(xml):(ehNFSe?_lancctbParsearNFSeXml(xml):_lancctbParsearNFeXml(xml)));
     if(!nf||!nf.cnpj_emitente||!direcao) return 'naoReconhecido';
     // NFC-e usa o MESMO schema XML da NF-e (infNFe), só muda o modelo (mod
     // 65 em vez de 55) — acrescentado 11/09/2026, sem parser novo nenhum,
     // só reclassifica pelo campo já extraído por _lancctbParsearNFeXml.
-    const tipo=ehCTe?'cte':(ehNFSe?'nfse':(nf.modelo==='65'?'nfce':'nfe'));
+    const tipo=ehCTe?'cte':((ehNFSe||ehNFSeSp)?'nfse':(nf.modelo==='65'?'nfce':'nfe'));
     if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte) return 'ignoradaData';
     // Já capturada antes (mesma chave de acesso) — pula upload+upsert, que
     // são os passos caros (rede). Achado real (05/09/2026): "Importar mês"
     // reprocessando um mês com ~40 mil arquivos, quase tudo já importado
     // de uma rodada anterior — sem esse atalho, reimporta tudo de novo do
     // zero toda vez, bem mais lento do que precisa ser.
-    if(chavesConhecidas&&nf.chave_acesso&&chavesConhecidas.has(nf.chave_acesso)) return 'jaExistente';
+    const chaveNum=(ehNFSe||ehNFSeSp)?_lancctbChaveNumeroNfse(nf.cnpj_emitente,nf.numero,nf.data_emissao):null;
+    if(chavesConhecidas&&((nf.chave_acesso&&chavesConhecidas.has(nf.chave_acesso))||(chaveNum&&chavesConhecidas.has(chaveNum)))) return 'jaExistente';
 
     // Não guarda mais cópia do XML no Supabase (19/09/2026): o projeto estourou a
     // cota grátis de Storage (2,69 GB de 1 GB, ~279 mil XMLs) e a intenção sempre
@@ -22048,6 +22096,9 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
         tipo, direcao,
       },{onConflict:'nf_id,numero_parcela'});
     }
+    // A SIEG grava a MESMA nota 2x na pasta (ex.: "542.xml" e "54202480785000172.xml"): depois de salvar, a chave entra no conjunto de conhecidas —
+    // a 2ª cópia vira "já existente" (não regrava nem conta como salva de novo). Só não duplicar, nunca pular o mês (pedido do usuário 14/10/2026).
+    if(chavesConhecidas){ if(nf.chave_acesso) chavesConhecidas.add(nf.chave_acesso); if(chaveNum) chavesConhecidas.add(chaveNum); }
     return 'importada';
   } catch(e){ return 'erro'; }
 }
