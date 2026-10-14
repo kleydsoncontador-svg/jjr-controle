@@ -44707,6 +44707,21 @@ const CDBDI_ANCORAS=[/CDB.?DI/i,/extrato.*movimenta/i,/saldo.*bruto.*final/i,/re
 function _cdbdiScoreAncoras(t){ return CDBDI_ANCORAS.reduce((s,rx)=>s+(rx.test(t||'')?1:0),0); }
 
 async function _lancctbAplicParseItauCdbDiOcrDet(file){
+  // Leitor novo (âncoras + colunas pelo cabeçalho, com conferências matemáticas) primeiro; o antigo (coordenadas fixas da MRS) fica só como reserva.
+  try{
+    const pdfN=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+    const novo=await _aplicfinParseItauCdbDiOcr(pdfN,file);
+    if(novo&&novo.error){ toast('Itaú CDB-DI (imagem): '+novo.detail,'err'); return null; }
+    if(novo&&novo.movimentos){
+      const rs=novo.sources.reduce((o,x)=>{ o[x.key.replace('itau_cdb_di.','')]=x.value; return o; },{});
+      return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas:novo.movimentos,
+        resumo:{ saldoAnterior:rs['summary.previous_balance']||0, aplicacoes:rs['summary.applications']||0, resgatesRecompras:rs['summary.redemptions']||0, vencimentos:rs['summary.maturities']||0,
+          rendAcumulado:rs['summary.accumulated_yield']||0, saldoBrutoFinal:rs['summary.final_gross_balance']||0, impostosEstimados:rs['summary.estimated_taxes']||0, saldoFinalLiquido:rs['summary.final_net_balance']||0 } };
+    }
+  }catch(e){ console.error('Itaú CDB-DI OCR (leitor novo):',e); }
+  return _lancctbAplicParseItauCdbDiOcrDetLegado(file);
+}
+async function _lancctbAplicParseItauCdbDiOcrDetLegado(file){
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
   const page1=await pdf.getPage(1);
@@ -44838,6 +44853,320 @@ async function _lancctbAplicParseItauCdbDiOcrDet(file){
       validacoes:{v1,v2},
     }
   };
+}
+
+// ── Itaú CDB-DI em PDF IMAGEM (camada de texto corrompida/ausente) — OCR local + âncoras + colunas pelo cabeçalho ─────────────────────────────────
+// Pedido do usuário 14/10/2026 (BRI Capital, 08 e 09/2026: "ENSINAR LEITURA — ITAÚ CDB-DI EM PDF IMAGEM"). Sem IA, sem coordenadas absolutas: acha "Resumo do período",
+// a linha "Total", o cabeçalho da Movimentação e a "Posição em ..." pelas PALAVRAS do OCR (com posição) e liga cada número à coluna do cabeçalho mais próxima.
+// Mesmo contrato (model 'itau_cdb_di', mesmas source_keys) do leitor de texto _aplicfinParseItauCdbDi — o mapeamento já ensinado vale pros dois.
+// Se os números lidos não fecham entre si (conferências do roteiro), NÃO devolve valor: tenta reler cada número sozinho (célula a célula, só dígitos) e, se ainda
+// assim não fechar, devolve erro — nunca grava número em que o OCR possa ter errado.
+const _CDBDI_RE_NUM=/^-?\d{1,3}(?:\.\d{3})*,\d{2}$/;
+const _CDBDI_RE_DATA=/^\d{2}\/\d{2}\/\d{4}$/;
+const _CDBDI_OCR_VERSAO='v1'; // subir se mudar a resolução/renderização do OCR abaixo (invalida o cache do que o OCR leu)
+function _cdbdiNum(s){ // limpa ruído do OCR (pontuação solta no fim: "12.338,77."; aspas/barras coladas) e só aceita número BR válido
+  const t=String(s||'').trim().replace(/^[|\[(]+/,'').replace(/[|\]);:'"”“]+$/,'').replace(/[.,]+$/,'');
+  return _CDBDI_RE_NUM.test(t)?t:null;
+}
+function _cdbdiPv(t){ return parseFloat(String(t).replace(/\./g,'').replace(',','.')); }
+function _cdbdiReconhecido(texto){
+  const T=String(texto||'');
+  return /CDB[\s\-]?(?:D[I1l|]|PLUS|PR[EÉ])/i.test(T)&&/movimenta/i.test(T)&&/Resumo\s+do\s+per/i.test(T);
+}
+// A camada de texto do PDF é inútil? (sem texto nenhum = imagem pura; ou só itens de 1-2 caracteres e quase nenhuma palavra de verdade = corrompida)
+async function _cdbdiTextoInutil(pdf){
+  const c=await (await pdf.getPage(1)).getTextContent();
+  const strs=c.items.map(i=>i.str).filter(s=>s&&s.trim());
+  if(!strs.length) return true;
+  const palavras=(strs.join(' ').match(/[A-Za-zÀ-ÿ]{4,}/g)||[]).length;
+  const longos=strs.filter(s=>s.trim().length>=4).length;
+  return palavras<5||(longos/strs.length)<0.15;
+}
+// Núcleo PURO (testável sem OCR): palavras do OCR [[texto,x0,y0,x1,y1],...] → { ok:true, contrato } | { ok:false, erros, validacoes } | null (não é este documento)
+function _cdbdiOcrParse(ocr){
+  const T=String(ocr.texto||(ocr.words||[]).map(a=>a[0]).join(' '));
+  if(!_cdbdiReconhecido(T)) return null;
+  let W=(ocr.words||[]).map(a=>({t:String(a[0]==null?'':a[0]).trim(),x0:a[1],y0:a[2],x1:a[3],y1:a[4]})).filter(w=>w.t);
+  W.sort((a,b)=>a.y0-b.y0||a.x0-b.x0);
+  const hs=W.map(w=>w.y1-w.y0).sort((a,b)=>a-b); const H=hs.length?hs[Math.floor(hs.length/2)]:20;
+  // funde "356," + "62" que o Tesseract às vezes separa
+  const fund=[];
+  for(let i=0;i<W.length;i++){
+    const a=W[i], b=W[i+1];
+    if(b&&/^\d[\d.]*,$/.test(a.t)&&/^\d{1,2}$/.test(b.t)&&Math.abs((a.y0+a.y1)/2-(b.y0+b.y1)/2)<H*0.7&&b.x0-a.x1<H*1.2&&b.x0>=a.x1-4){
+      fund.push({t:a.t+b.t,x0:a.x0,y0:Math.min(a.y0,b.y0),x1:b.x1,y1:Math.max(a.y1,b.y1)}); i++; continue;
+    }
+    fund.push(a);
+  }
+  W=fund.map(w=>({...w,xc:(w.x0+w.x1)/2,yc:(w.y0+w.y1)/2}));
+  const erros=[], avisos=[], validacoes=[];
+  const r2=v=>Math.round(v*100)/100;
+  const num=w=>_cdbdiNum(w.t);
+  const mesmaLinha=(a,b,tol)=>Math.abs(a.yc-b.yc)<=(tol||H*0.8);
+  const ok2=(a,b)=>a!=null&&b!=null&&Math.abs(a-b)<=0.02;
+
+  // ── identificação ──
+  const mNome=T.match(/Nome:\s*([^\n]+)/i), mCnpj=T.match(/CPF\/CNPJ:\s*([\d.\/-]+)/i), mAg=T.match(/Ag[êe]ncia:\s*(\d+)/i), mConta=T.match(/Conta:\s*([\d-]+)/i);
+  const mPer=T.match(/Per[íi]odo:\s*(\d{2})\/(\d{2})\/(\d{4})\s*\S{0,3}\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  const competence=mPer?(mPer[6]+'-'+mPer[5]):null;
+  if(!competence) erros.push('COMPETENCE_NOT_FOUND: não achei a linha "Período: dd/mm/aaaa à dd/mm/aaaa".');
+  const account=(mAg?mAg[1]:'?')+'/'+(mConta?mConta[1]:'?');
+
+  // ── Resumo do período: linha "Total" ──
+  const wResumo=W.find(w=>/^Resumo$/i.test(w.t)&&W.some(v=>/^per[ií]odo:?$/i.test(v.t)&&mesmaLinha(v,w)&&v.x0>w.x0));
+  const COLS_RES=['previous_balance','applications','redemptions','maturities','accumulated_yield','final_gross_balance','estimated_taxes','final_net_balance'];
+  let resumo=null, wTotalR=null;
+  if(!wResumo) erros.push('SUMMARY_NOT_FOUND: seção "Resumo do período" não encontrada.');
+  else {
+    wTotalR=W.filter(w=>/^Total$/i.test(w.t)&&w.yc>wResumo.yc).sort((a,b)=>a.yc-b.yc)[0];
+    if(!wTotalR) erros.push('SUMMARY_TOTAL_NOT_FOUND: linha "Total" do Resumo não encontrada.');
+    else {
+      const nums=W.filter(w=>num(w)&&mesmaLinha(w,wTotalR,H*1.1)).sort((a,b)=>a.xc-b.xc);
+      const monta=arr=>Object.fromEntries(COLS_RES.map((k,i)=>[k,arr[i]]));
+      const fecha=r=>r&&ok2(r2(r.previous_balance+r.applications-r.redemptions-r.maturities+r.accumulated_yield),r.final_gross_balance)&&ok2(r2(r.final_gross_balance-r.estimated_taxes),r.final_net_balance);
+      // 1) pela ORDEM das 8 células (layout fixo do Itaú), 2) pelo CABEÇALHO (nearest) se a contagem não for 8 — vale a que fechar nas duas conferências
+      const tentativas=[];
+      if(nums.length===8) tentativas.push(monta(nums.map(n=>_cdbdiPv(num(n)))));
+      const hdr=W.filter(w=>w.yc>wResumo.yc&&w.yc<wTotalR.yc-2);
+      const centro=(...res)=>{ const ws=res.map(re=>hdr.find(w=>re.test(w.t))).filter(Boolean); return ws.length?ws.reduce((s,w)=>s+w.xc,0)/ws.length:null; };
+      const finais=hdr.filter(w=>/^final\(\*+\)$/i.test(w.t)).sort((a,b)=>b.x0-a.x0);
+      const cc={ previous_balance:centro(/^anterior$/i), applications:centro(/^Aplica[çc][õo]es$/i), redemptions:centro(/^Resgates\/?$/i,/^Recompras$/i), maturities:centro(/^Vencimentos$/i),
+        accumulated_yield:centro(/^Rendim\.?$/i,/^acumulado$/i), final_gross_balance:centro(/^bruto$/i), estimated_taxes:centro(/^Impostos$/i,/^estimados$/i), final_net_balance:finais[0]?finais[0].xc:null };
+      if(Object.values(cc).every(v=>v!=null)){
+        const r={}; COLS_RES.forEach(k=>r[k]=null);
+        nums.forEach(n=>{ let melhor=null,d=Infinity; COLS_RES.forEach(k=>{ const dx=Math.abs(n.xc-cc[k]); if(dx<d){ d=dx; melhor=k; } }); if(melhor&&d<=H*5&&r[melhor]==null) r[melhor]=_cdbdiPv(num(n)); });
+        if(COLS_RES.every(k=>r[k]!=null)) tentativas.push(r);
+      }
+      resumo=tentativas.find(fecha)||null;
+      if(!resumo){
+        const t0=tentativas[0];
+        if(t0) validacoes.push({name:'saldo_bruto_final',ok:false,detail:`${t0.previous_balance} + ${t0.applications} − ${t0.redemptions} − ${t0.maturities} + ${t0.accumulated_yield} = ${r2(t0.previous_balance+t0.applications-t0.redemptions-t0.maturities+t0.accumulated_yield)} (lido ${t0.final_gross_balance}); bruto − impostos = ${r2(t0.final_gross_balance-t0.estimated_taxes)} (lido ${t0.final_net_balance})`});
+        erros.push('ITAU_CDB_DI_MONTH_RECONCILIATION_ERROR: o Resumo do período não fecha (Saldo anterior + Aplicações − Resgates − Vencimentos + Rendimento = Saldo bruto final; Saldo bruto − Impostos = Saldo final)'+(nums.length!==8?` — li ${nums.length} números na linha Total (esperado 8)`:'')+'.');
+      } else {
+        validacoes.push({name:'saldo_bruto_final',ok:true,detail:`${resumo.previous_balance} + ${resumo.applications} − ${resumo.redemptions} − ${resumo.maturities} + ${resumo.accumulated_yield} = ${resumo.final_gross_balance}`});
+        validacoes.push({name:'saldo_liquido_final',ok:true,detail:`${resumo.final_gross_balance} − ${resumo.estimated_taxes} = ${resumo.final_net_balance}`});
+      }
+    }
+  }
+
+  // ── Movimentação mensal ──
+  const yFimMov=(W.find(w=>/^\(.{1,2}\)Valor/i.test(w.t)&&wResumo&&w.yc<wResumo.yc)||wResumo||{yc:Infinity}).yc;
+  const wHist=W.find(w=>/^Hist[óo]rico$/i.test(w.t)&&(!wResumo||w.yc<wResumo.yc));
+  const mov={applications:0,redemptions:0,redemption_iof:0,redemption_ir:0,redemption_credit:0,redemption_principal:0};
+  const movimentos=[];
+  if(!wHist) erros.push('MOVEMENT_HEADER_NOT_FOUND: cabeçalho "Histórico" da Movimentação não encontrado.');
+  else {
+    const hb=W.filter(w=>Math.abs(w.yc-wHist.yc)<=H*2.6);
+    const col=(re)=>hb.find(w=>re.test(w.t));
+    const cV=col(/^Valor\(/i), cI=col(/^(IOF|10F|lOF)$/i), cR=col(/^(IR|\|R|lR)$/i), cC=col(/^creditado$/i), cP=col(/^principal$/i);
+    if(!(cV&&cI&&cR&&cC&&cP)) erros.push('MOVEMENT_HEADER_INCOMPLETE: não achei todas as colunas (Valor(*), IOF, IR, Valor creditado, Valor principal) no cabeçalho da Movimentação.');
+    else {
+      const colunas=[['valor',cV],['iof',cI],['ir',cR],['cred',cC],['princ',cP]];
+      const linhasData=W.filter(w=>_CDBDI_RE_DATA.test(w.t)&&w.yc>wHist.yc+H&&w.yc<yFimMov&&w.x1<=wHist.x0+H).sort((a,b)=>a.yc-b.yc);
+      const rows=linhasData.map(d=>({data:d.t,yc:d.yc,hist:[],v:{}}));
+      const nearestRows=(y)=>rows.map((r,i)=>({i,d:Math.abs(r.yc-y)})).sort((a,b)=>a.d-b.d);
+      W.filter(w=>w.yc>wHist.yc+H&&w.yc<yFimMov&&w.x0>=wHist.x0-H*1.5&&w.x1<=cV.x0+H*2&&/^(RESGATE|APLICA|SALDO|ANTERIOR|FINAL|VENCIMENTO)/i.test(w.t)).forEach(w=>{ const n=nearestRows(w.yc)[0]; if(n) rows[n.i].hist.push(w.t.toUpperCase()); });
+      rows.forEach(r=>{ const h=r.hist.join(' '); r.tipo=/RESGATE|VENCIMENTO/.test(h)?'RESGATE':/APLICA/.test(h)?'APLICACAO':/SALDO/.test(h)?'SALDO':'?'; });
+      const celulas=[];
+      W.filter(w=>num(w)&&w.yc>wHist.yc+H&&w.yc<yFimMov&&w.xc>=cV.xc-H*4.5&&w.xc<=cP.xc+H*3.5).forEach(w=>{
+        let melhor=null,d=Infinity; colunas.forEach(([k,c])=>{ const dx=Math.abs(w.xc-c.xc); if(dx<d){ d=dx; melhor=k; } });
+        if(!melhor||d>H*3.8) return;
+        const nr=nearestRows(w.yc); if(!nr.length) return;
+        celulas.push({k:melhor,val:_cdbdiPv(num(w)),yc:w.yc,cand:nr.slice(0,2).map(x=>x.i),row:nr[0].i});
+      });
+      // atribuição inicial = linha mais próxima; IOF/IR ficam entre duas linhas (célula mesclada) → se a equação Bruto − IOF − IR = Creditado não fecha, testa a 2ª linha
+      const atribui=()=>{ rows.forEach(r=>{ r.v={}; }); celulas.forEach(c=>{ if(rows[c.row].v[c.k]==null) rows[c.row].v[c.k]=c.val; }); };
+      atribui();
+      const linhaOk=r=>r.tipo!=='RESGATE'||(r.v.valor!=null&&r.v.cred!=null&&ok2(r2(r.v.valor-(r.v.iof||0)-(r.v.ir||0)),r.v.cred));
+      if(!rows.every(linhaOk)){
+        const amb=celulas.filter(c=>(c.k==='iof'||c.k==='ir')&&c.cand.length>1);
+        const n=Math.min(amb.length,10); let achou=false;
+        for(let m=0;m<(1<<n)&&!achou;m++){
+          amb.slice(0,n).forEach((c,i)=>{ c.row=c.cand[(m>>i)&1]; });
+          atribui(); if(rows.every(linhaOk)) achou=true;
+        }
+        if(!achou){ celulas.forEach(c=>{ c.row=c.cand[0]; }); atribui(); }
+      }
+      rows.forEach(r=>{
+        if(r.tipo==='APLICACAO'){ mov.applications=r2(mov.applications+(r.v.valor||0)); movimentos.push({Data:r.data,Principal:r.v.valor||0,Bruto:null,IOF:null,IRRF:null,Liquido:null,Historico:'Aplicação'}); }
+        else if(r.tipo==='RESGATE'){
+          const bruto=r.v.valor||0, ir=r.v.ir||0, cred=r.v.cred||0, iof=r.v.iof==null?0:r.v.iof, pr=r.v.princ||0;
+          mov.redemptions=r2(mov.redemptions+bruto); mov.redemption_iof=r2(mov.redemption_iof+iof); mov.redemption_ir=r2(mov.redemption_ir+ir);
+          mov.redemption_credit=r2(mov.redemption_credit+cred); mov.redemption_principal=r2(mov.redemption_principal+pr);
+          const calc=r2(bruto-iof-ir), ok=ok2(calc,cred);
+          validacoes.push({name:'resgate_'+r.data.replace(/\//g,'')+'_bruto_menos_impostos_igual_creditado',ok,detail:`RESGATE ${r.data}: ${bruto} − ${r.v.iof==null?'0 (IOF em branco)':iof} − ${ir} = ${calc} (esperado ${cred})`});
+          if(!ok) erros.push(`VALIDATION_FAILED: resgate de ${r.data} — Bruto − IOF − IR ≠ Valor creditado (${calc} vs ${cred}).`);
+          if(!(pr>0)) avisos.push(`RESGATE de ${r.data}: Valor principal não lido.`);
+          movimentos.push({Data:r.data,Principal:pr,Bruto:bruto,IOF:iof,IRRF:ir,Liquido:cred,Historico:'Resgate'});
+        } else if(r.tipo==='?') avisos.push(`Linha de ${r.data} na Movimentação: tipo (Histórico) não reconhecido — ignorada.`);
+      });
+      if(resumo){
+        const okA=ok2(mov.applications,resumo.applications);
+        validacoes.push({name:'aplicacoes_tabela_bate_resumo',ok:okA,detail:`Σ APLICACAO na Movimentação ${mov.applications} vs Resumo/Aplicações ${resumo.applications}`});
+        if(!okA) erros.push(`ITAU_CDB_DI_MONTH_RECONCILIATION_ERROR: soma das APLICACAO da Movimentação (${mov.applications}) ≠ Aplicações do Resumo (${resumo.applications}).`);
+        const resgResumo=r2(resumo.redemptions+resumo.maturities);
+        const okR=ok2(mov.redemptions,resgResumo)||ok2(mov.redemptions,resumo.redemptions);
+        validacoes.push({name:'resgates_tabela_bate_resumo',ok:okR,detail:`Σ RESGATE (valor bruto) na Movimentação ${mov.redemptions} vs Resumo/Resgates ${resumo.redemptions}`});
+        if(!okR) erros.push(`ITAU_CDB_DI_MONTH_RECONCILIATION_ERROR: soma dos RESGATES da Movimentação (${mov.redemptions}) ≠ Resgates/Recompras do Resumo (${resumo.redemptions}).`);
+      }
+    }
+  }
+
+  // ── Posição em DD/MM/AAAA ──
+  const posicao={total_invested_value:null,previous_date_value:null,current_date_value:null};
+  let dataPosAtual=null, dataPosAnt=null; const detalhePos=[];
+  const wPos=W.find(w=>/^Posi[çc][ãa]o$/i.test(w.t)&&(!wResumo||w.yc>wResumo.yc)&&W.some(v=>/^em$/i.test(v.t)&&mesmaLinha(v,w)&&v.x0>w.x0));
+  if(!wPos) avisos.push('Seção "Posição em ..." não encontrada.');
+  else {
+    const dEm=W.find(w=>/^\d{2}\/\d{2}\/\d{4}:?$/.test(w.t)&&mesmaLinha(w,wPos)&&w.x0>wPos.x0);
+    dataPosAtual=dEm?dEm.t.replace(':',''):null;
+    const wOp=W.find(w=>/^\d{10,}$/.test(w.t)&&w.yc>wPos.yc);
+    const wTotP=W.filter(w=>/^TOTAL$/.test(w.t)&&w.yc>wPos.yc).sort((a,b)=>a.yc-b.yc)[0];
+    const yCorpo=wOp?wOp.yc:(wTotP?wTotP.yc:Infinity);
+    const hdrP=W.filter(w=>w.yc>wPos.yc+H&&w.yc<yCorpo-H);
+    const datasHdr=hdrP.filter(w=>_CDBDI_RE_DATA.test(w.t)).sort((a,b)=>a.xc-b.xc);
+    const aplicHdr=hdrP.filter(w=>/^aplica[çc][ãa]o$/i.test(w.t)).sort((a,b)=>a.xc-b.xc).pop();
+    const colsP=[]; if(aplicHdr) colsP.push(['total_invested_value',aplicHdr.xc]);
+    if(datasHdr.length>=2){ dataPosAnt=datasHdr[0].t; colsP.push(['previous_date_value',datasHdr[0].xc]); colsP.push(['current_date_value',datasHdr[1].xc]); }
+    else if(datasHdr.length===1) colsP.push(['current_date_value',datasHdr[0].xc]);
+    if(!wTotP||colsP.length<2) avisos.push('Posição: cabeçalho/linha TOTAL não encontrados — valores de Posição não preenchidos.');
+    else {
+      const colDe=w=>{ let melhor=null,d=Infinity; colsP.forEach(([k,x])=>{ const dx=Math.abs(w.xc-x); if(dx<d){ d=dx; melhor=k; } }); return d<=H*4.2?melhor:null; };
+      W.filter(w=>num(w)&&mesmaLinha(w,wTotP,H*1.1)).forEach(w=>{ const k=colDe(w); if(k&&posicao[k]==null) posicao[k]=_cdbdiPv(num(w)); });
+      const ops=W.filter(w=>/^\d{10,}$/.test(w.t)&&w.yc>wPos.yc&&w.yc<wTotP.yc).sort((a,b)=>a.yc-b.yc);
+      ops.forEach(o=>{ const d={n_operacao:o.t}; W.filter(w=>num(w)&&w.yc>wPos.yc&&w.yc<wTotP.yc-H&&Math.abs(w.yc-o.yc)<=H*1.3).forEach(w=>{ const k=colDe(w); if(k&&d[k]==null) d[k]=_cdbdiPv(num(w)); }); detalhePos.push(d); });
+    }
+  }
+  if(resumo&&posicao.current_date_value!=null){
+    const ok=ok2(resumo.final_gross_balance,posicao.current_date_value);
+    validacoes.push({name:'posicao_atual_bate_resumo',ok,detail:`Resumo/Saldo bruto final ${resumo.final_gross_balance} vs Posição/TOTAL Valor em ${dataPosAtual||'?'} ${posicao.current_date_value}`});
+    if(!ok) erros.push('ITAU_CDB_DI_MONTH_RECONCILIATION_ERROR: Saldo bruto final (Resumo) diverge do TOTAL de Valor em '+(dataPosAtual||'?')+' (Posição).');
+    const somaOps=detalhePos.filter(d=>d.current_date_value!=null);
+    if(somaOps.length){ const s=r2(somaOps.reduce((a,d)=>a+d.current_date_value,0)); const okS=ok2(s,posicao.current_date_value); validacoes.push({name:'posicao_soma_operacoes_bate_total',ok:okS,detail:`Σ operações ${s} vs TOTAL ${posicao.current_date_value}`}); if(!okS) erros.push('ITAU_CDB_DI_MONTH_RECONCILIATION_ERROR: soma das operações da Posição ≠ TOTAL.'); }
+  }
+  if(resumo&&posicao.previous_date_value!=null){
+    const ok=ok2(resumo.previous_balance,posicao.previous_date_value);
+    validacoes.push({name:'posicao_anterior_bate_resumo',ok,detail:`Resumo/Saldo anterior ${resumo.previous_balance} vs Posição/TOTAL Valor em ${dataPosAnt||'?'} ${posicao.previous_date_value}`});
+    if(!ok) erros.push('ITAU_CDB_DI_MONTH_RECONCILIATION_ERROR: Saldo anterior (Resumo) diverge de Valor em '+(dataPosAnt||'?')+' (Posição).');
+  }
+  if(erros.length) return { ok:false, erros, validacoes, avisos };
+
+  // ── contrato (mesmas fontes/identificadores do leitor de texto) ──
+  const realized_gross_yield=r2(mov.redemptions-mov.redemption_principal), realized_net_yield=r2(mov.redemption_credit-mov.redemption_principal);
+  const M='itau_cdb_di';
+  const mk=(key,label,section,value,ct)=>({key:M+'.'+key,label,section,product:null,value:value==null?null:r2(value),calculationType:ct});
+  const sources=[
+    mk('summary.previous_balance','Resumo do período → Total → Saldo anterior','Resumo do período',resumo.previous_balance,'DIRECT_TOTAL'),
+    mk('summary.applications','Resumo do período → Total → Aplicações','Resumo do período',resumo.applications,'DIRECT_TOTAL'),
+    mk('summary.redemptions','Resumo do período → Total → Resgates/Recompras','Resumo do período',resumo.redemptions,'DIRECT_TOTAL'),
+    mk('summary.maturities','Resumo do período → Total → Vencimentos','Resumo do período',resumo.maturities,'DIRECT_TOTAL'),
+    mk('summary.accumulated_yield','Resumo do período → Total → Rendim. acumulado','Resumo do período',resumo.accumulated_yield,'DIRECT_TOTAL'),
+    mk('summary.final_gross_balance','Resumo do período → Total → Saldo bruto final(**)','Resumo do período',resumo.final_gross_balance,'DIRECT_TOTAL'),
+    mk('summary.estimated_taxes','Resumo do período → Total → Impostos estimados','Resumo do período',resumo.estimated_taxes,'DIRECT_TOTAL'),
+    mk('summary.final_net_balance','Resumo do período → Total → Saldo final(**)','Resumo do período',resumo.final_net_balance,'DIRECT_TOTAL'),
+    mk('movements.applications','Movimentação mensal → soma de Valor(*) nas linhas APLICACAO (conferência)','Movimentação mensal',mov.applications,'CONDITIONAL_SUM'),
+    mk('movements.redemptions_gross','Movimentação mensal → soma de Valor(*) nas linhas RESGATE (conferência)','Movimentação mensal',mov.redemptions,'CONDITIONAL_SUM'),
+    mk('movements.redemption_principal','Movimentação mensal → soma de Valor principal nas linhas RESGATE','Movimentação mensal',mov.redemption_principal,'CONDITIONAL_SUM'),
+    mk('movements.redemption_ir','Movimentação mensal → soma de IR nas linhas RESGATE','Movimentação mensal',mov.redemption_ir,'CONDITIONAL_SUM'),
+    mk('movements.redemption_iof','Movimentação mensal → soma de IOF nas linhas RESGATE','Movimentação mensal',mov.redemption_iof,'CONDITIONAL_SUM'),
+    mk('movements.redemption_credit','Movimentação mensal → soma de Valor creditado nas linhas RESGATE','Movimentação mensal',mov.redemption_credit,'CONDITIONAL_SUM'),
+    mk('movements.realized_gross_yield','Calculado: Valor bruto resgatado − Valor principal resgatado','Movimentação mensal (calculado)',realized_gross_yield,'CALCULATED'),
+    mk('movements.realized_net_yield','Calculado: Valor creditado − Valor principal resgatado','Movimentação mensal (calculado)',realized_net_yield,'CALCULATED'),
+    mk('position.total_invested_value','Posição em '+(dataPosAtual||'?')+' → TOTAL → Valor aplicação','Posição',posicao.total_invested_value,'DIRECT_TOTAL'),
+    mk('position.previous_date_value','Posição em '+(dataPosAtual||'?')+' → TOTAL → Valor em '+(dataPosAnt||'?'),'Posição',posicao.previous_date_value,'DIRECT_TOTAL'),
+    mk('position.current_date_value','Posição em '+(dataPosAtual||'?')+' → TOTAL → Valor em '+(dataPosAtual||'?'),'Posição',posicao.current_date_value,'DIRECT_TOTAL'),
+  ];
+  avisos.unshift('Extrato em IMAGEM lido por OCR local (Tesseract, sem IA) — as conferências matemáticas fecharam, mas confira os valores antes de confirmar.');
+  // IRRF/alíquota/renda tributável: conferência informativa do roteiro (a tela calcula Renda Tributável e Alíquota)
+  const rendTrib=r2(realized_gross_yield-mov.redemption_iof);
+  return { ok:true, contrato:{
+    bank:'ITAU', model:M, competence, account, cnpj:mCnpj?mCnpj[1]:null, nome:mNome?mNome[1].trim():null, readMode:'OCR',
+    fingerprint:_aplicfinFingerprint('ITAU',M,['EXTRATO DE MOVIMENTACAO MENSAL - CDB-DI','RESUMO DO PERIODO','POSICAO EM']),
+    productMode:'single', products:[], sources, validations:validacoes, warnings:avisos, pageCount:1,
+    detalhePosicao:detalhePos, movimentos,
+    derivados:{ renda_tributavel:rendTrib, aliquota_irrf:rendTrib>0?r2(mov.redemption_ir/rendTrib*100):null },
+  } };
+}
+// Relê CADA número sozinho (recorte da célula bem ampliado, só dígitos/pontuação, "palavra única"). A releitura NÃO substitui a 1ª leitura às cegas: ela pode errar também.
+// Por isso devolve só os CONFLITOS (leituras diferentes da da página) e _cdbdiOcrResolver escolhe a combinação em que TODAS as conferências matemáticas fecham, mudando o
+// mínimo de números possível. Configuração medida nos PDFs reais da BRI (08 e 09/2026, 60 células): PSM 8 + margem 6 + ampliação 8x → 0 erros (o PSM 7 com margem maior errava
+// 82,75→82,15 e 5.286.266,98→5.266.266,98); a ampliação 6x entra como 2ª leitura independente.
+async function _cdbdiOcrCelulas(ocr,canvas,worker){
+  const CFGS=[{esc:8,pad:6},{esc:6,pad:6}], conflitos=[];
+  await worker.setParameters({tessedit_pageseg_mode:'8',tessedit_char_whitelist:'0123456789.,-'});
+  try{
+    for(let i=0;i<ocr.words.length;i++){
+      const a=ocr.words[i], t=String(a[0]||'');
+      if(!(/\d/.test(t)&&/,/.test(t)&&t.length>=4)) continue; // só candidatos a valor monetário
+      const pagina=_cdbdiNum(t), alts=new Set();
+      for(const {esc,pad} of CFGS){
+        const x0=Math.max(0,Math.floor(a[1])-pad), y0=Math.max(0,Math.floor(a[2])-pad), w=Math.min(canvas.width-x0,Math.ceil(a[3]-a[1])+pad*2), h=Math.min(canvas.height-y0,Math.ceil(a[4]-a[2])+pad*2);
+        const cell=document.createElement('canvas'); cell.width=w*esc+40; cell.height=h*esc+40;
+        const cx=cell.getContext('2d'); cx.fillStyle='#fff'; cx.fillRect(0,0,cell.width,cell.height); cx.drawImage(canvas,x0,y0,w,h,20,20,w*esc,h*esc);
+        try{ const {data}=await worker.recognize(cell); const lido=_cdbdiNum((data.text||'').replace(/\s+/g,'')); if(lido&&lido!==pagina) alts.add(lido); }catch(e){}
+      }
+      if(alts.size) conflitos.push({i,alts:[...alts]});
+    }
+  } finally { try{ await worker.setParameters({tessedit_pageseg_mode:'3',tessedit_char_whitelist:''}); }catch(e){} }
+  return conflitos;
+}
+// Tenta as combinações de conflitos (da que muda menos números pra que muda mais) e devolve a 1ª em que o parser fecha todas as conferências.
+function _cdbdiOcrResolver(ocr,conflitos){
+  const cs=conflitos.slice(0,8); // na prática são 0-4; acima disso a leitura é ruim demais pra adivinhar
+  if(conflitos.length>8) return null;
+  const n=cs.length;
+  const aplica=(escolhas)=>{ const words=ocr.words.map(a=>a.slice()); escolhas.forEach(([k,alt])=>{ words[cs[k].i][0]=alt; }); return { ...ocr, words }; };
+  const combos=(k,ini,atual,out)=>{ if(atual.length===k){ out.push(atual.slice()); return; } for(let j=ini;j<n;j++){ atual.push(j); combos(k,j+1,atual,out); atual.pop(); } };
+  const produto=(idxs)=>idxs.reduce((acc,k)=>{ const nx=[]; acc.forEach(p=>cs[k].alts.forEach(alt=>nx.push(p.concat([[k,alt]])))); return nx; },[[]]);
+  for(let k=1;k<=n;k++){
+    const lista=[]; combos(k,0,[],lista);
+    const bons=[];
+    for(const idxs of lista) for(const escolhas of produto(idxs)){ const novo=aplica(escolhas); const r=_cdbdiOcrParse(novo); if(r&&r.ok) bons.push({novo,r,qtd:escolhas.length}); }
+    if(bons.length===1) return bons[0];
+    if(bons.length>1){ // mais de uma combinação fecha com o mesmo nº de trocas: só aceita se todas dão EXATAMENTE os mesmos valores
+      const vals=new Set(bons.map(b=>JSON.stringify(b.r.contrato.sources.map(s=>s.value))));
+      return vals.size===1?bons[0]:null;
+    }
+  }
+  return null;
+}
+// Ponto de entrada: PDF cuja camada de texto é inútil → OCR local → parser acima. Devolve contrato | {error,detail} | null (não é este documento)
+async function _aplicfinParseItauCdbDiOcr(pdf,file,statusCb,forcar){
+  if(!forcar&&!(await _cdbdiTextoInutil(pdf))) return null; // tem texto bom: quem lê é o leitor de texto (forcar = o de texto já tentou e saiu incompleto)
+  const chave=file?[file.name,file.size,file.lastModified,'cdbdi',_CDBDI_OCR_VERSAO].join('|'):null;
+  let ocr=await _lancctbOcrCacheGet(chave);
+  const page1=await pdf.getPage(1);
+  const say=m=>{ if(statusCb) statusCb(m); };
+  if(!ocr){
+    say('Lendo o extrato em imagem (OCR local, ~10 s)…');
+    const worker=await _lancctbOcrEmprestar();
+    try{
+      for(const rot of [0,90,180,270]){
+        const canvas=await _ganhoItauFundoRenderizarPagina(page1,rot,3);
+        const {data}=await worker.recognize(canvas);
+        const cand={ w:canvas.width, h:canvas.height, rot, texto:data.text||'', words:(data.words||[]).filter(w=>w.text&&w.text.trim()).map(w=>[w.text,w.bbox.x0,w.bbox.y0,w.bbox.x1,w.bbox.y1,Math.round(w.confidence)]) };
+        if(_cdbdiReconhecido(cand.texto)){ ocr=cand; break; }
+        if(rot===0&&(Number(data.confidence)||0)>=50) return null; // legível, mas não é um extrato CDB-DI
+      }
+    } finally { _lancctbOcrDevolver(worker); }
+    if(!ocr) return null;
+  }
+  let r=_cdbdiOcrParse(ocr);
+  if(r&&!r.ok){
+    // conferências não fecharam: relê cada número sozinho e procura a combinação (de leituras da página × da célula) em que TUDO fecha
+    say('Conferindo os números lidos (releitura célula a célula)…');
+    const worker=await _lancctbOcrEmprestar();
+    try{
+      const canvas=await _ganhoItauFundoRenderizarPagina(page1,ocr.rot||0,3);
+      const conflitos=await _cdbdiOcrCelulas(ocr,canvas,worker);
+      const res=conflitos.length?_cdbdiOcrResolver(ocr,conflitos):null;
+      if(res){ ocr={ ...res.novo, texto:ocr.texto }; r=res.r; r.contrato.warnings.push(`${res.qtd} número(s) corrigido(s) pela releitura célula a célula (a 1ª leitura não fechava nas conferências).`); }
+    } finally { _lancctbOcrDevolver(worker); }
+  }
+  if(!r) return null;
+  if(!r.ok) return { error:'ITAU_CDB_DI_MONTH_RECONCILIATION_ERROR', detail:r.erros.join(' '), validations:r.validacoes, warnings:r.avisos };
+  if(chave) await _lancctbOcrCachePut(chave,ocr); // só guarda leitura que FECHOU nas conferências
+  return r.contrato;
 }
 
 // Adaptador pro "Extrair sem IA" dos Ganhos/Rendimentos: o PDF do Itaú Aut
@@ -45282,14 +45611,29 @@ async function _aplicfinParseBradescoInvestimentosXls(file){
 }
 
 // Dispatcher SEM IA (contrato padrão). Devolve o objeto do parser ou null.
-async function _aplicfinExtrairSemIA(file){
+async function _aplicfinExtrairSemIA(file,statusCb){
   _convItauGarantirWorker();
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
   const parsers=[_aplicfinParseItauAplicAutMais,_aplicfinParseItauCdbDi,_aplicfinParseBradescoPadrao,_aplicfinParseBradescoCdbMulti,_aplicfinParseBradescoInvestimentos];
+  let parcialCdbDi=null;
   for(const fn of parsers){
-    try{ const r=await fn(pdf); if(r) return r; }catch(e){ console.error('Parser aplicfin sem IA:',e); }
+    try{
+      const r=await fn(pdf);
+      if(r){
+        // CDB-DI lido do TEXTO mas incompleto (sem competência, ou Rendim./Saldo bruto final em branco — variação de layout do PDF, ex.: MRS 09/2026 com "Período :" e
+        // cabeçalhos quebrados): guarda e tenta o OCR local antes de aceitar; se o OCR não resolver, volta pro resultado de texto (como era).
+        if(r.model==='itau_cdb_di'&&(!r.competence||(r.sources||[]).some(x=>/summary\.(accumulated_yield|final_gross_balance)$/.test(x.key)&&x.value==null))){ parcialCdbDi=r; continue; }
+        return r;
+      }
+    }catch(e){ console.error('Parser aplicfin sem IA:',e); }
   }
+  if(parcialCdbDi){
+    try{ const o=await _aplicfinParseItauCdbDiOcr(pdf,file,statusCb,true); if(o&&!o.error) return o; }catch(e){ console.error('Parser aplicfin Itaú CDB-DI OCR (reserva):',e); }
+    return parcialCdbDi;
+  }
+  // PDF do Itaú CDB-DI com camada de texto corrompida/ausente (BRI Capital, 14/10/2026): OCR local + conferências matemáticas.
+  try{ const r=await _aplicfinParseItauCdbDiOcr(pdf,file,statusCb); if(r) return r; }catch(e){ console.error('Parser aplicfin Itaú CDB-DI OCR:',e); }
   // Último recurso: PDF em IMAGEM do Itaú Aut Mais (só o OCR consegue ler) —
   // mesmo leitor que o "Importar PDF" das Aplicações Financeiras já usa.
   try{ const r=await _aplicfinItauAutMaisViaOcr(file,pdf.numPages); if(r) return r; }catch(e){ console.error('Parser aplicfin Itaú Aut Mais OCR:',e); }
@@ -45940,7 +46284,12 @@ async function _ganhoExtrairDeterministico(file,eid,pid,statusEl){
     return await _ganhoAplicarParserSemIA(eid,pid,itauFundo,file,statusEl);
   }
 
-  const itau=await _aplicfinExtrairSemIA(file);
+  const itau=await _aplicfinExtrairSemIA(file,msg=>{ if(statusEl) statusEl.textContent=msg; });
+  if(itau&&itau.error){
+    toast('Itaú CDB-DI (imagem): os números lidos por OCR não fecham entre si — '+(itau.detail||'')+' Nada foi gravado.','err');
+    if(statusEl) statusEl.textContent='';
+    return 'NAO_RECONHECIDO';
+  }
   if(itau){
     return await _ganhoAplicarParserSemIA(eid,pid,itau,file,statusEl);
   }
