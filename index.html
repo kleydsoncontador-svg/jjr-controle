@@ -23987,7 +23987,25 @@ async function _lancctbExtrairGuiaFgtsDigital(pdf){
     return { valor:_lancctbParseValorBR2(mTotal[1]), composicao:null, competencia:mComp?mComp[1]:null };
   }catch(e){ return null; }
 }
+// Número do parcelamento impresso na guia (pedido do usuário 14/10/2026, Peixoto: "nesses parcelamentos, quando possível informe no histórico o nº do parcelamento"):
+// DAE de Minas "PARCELAMENTO: 62.044499300.53 PARCELA: 032/059", DAS do Simples "Número do Parcelamento: 9131 Parcela: 52/64", DARE de SP "Número do parcelamento:" + valor logo depois.
+// Guia RFB/PGFN não imprime o número — fica sem (null). O número sempre começa por dígito (descarta texto solto depois do rótulo).
+async function _lancctbExtrairParcelamentoPdf(pdf){
+  const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const t=itens.map(i=>i.str).join(' ').replace(/\s+/g,' ');
+  if(!/parcelament/i.test(t)) return null;
+  const m=t.match(/N[úu]mero do parcelamento\s*:?\s*(\d[A-Za-z0-9.\-\/]*)/i)||t.match(/\bPARCELAMENTO\s*:\s*(\d[\d.\-\/]*)/i);
+  if(!m) return null;
+  const numero=m[1].replace(/[.\-\/]+$/,'');
+  const mp=t.match(/\bPARCELA\s*:?\s*0*(\d+)\s*\/\s*0*(\d+)/i)||t.match(/Nr\.?\s*Parcela\s*:?\s*0*(\d+)/i);
+  return { numero, parcela:mp?+mp[1]:null, total:(mp&&mp[2])?+mp[2]:null };
+}
 async function _lancctbExtrairValorPdfTributo(pdf,permitirIA,statusCb){
+  const r=await _lancctbExtrairValorPdfTributoBase(pdf,permitirIA,statusCb);
+  if(r&&r.valor>0&&!r.parcelamento){ try{ const parc=await _lancctbExtrairParcelamentoPdf(pdf); if(parc) r.parcelamento=parc; }catch(e){} }
+  return r;
+}
+async function _lancctbExtrairValorPdfTributoBase(pdf,permitirIA,statusCb){
   const darf=await _lancctbExtrairComposicaoDarf(pdf);
   if(darf) return { valor:darf.valorTotal, composicao:darf.itens, competencia:darf.competencia };
   // GFD — Guia do FGTS Digital (achado real 26/09/2026, Peixoto Serviços): traz
@@ -24086,7 +24104,8 @@ function _lancctbJurisdicaoCompativel(historicoPagamento,nomeArquivo,extraido){
 // 09/09/2026, ver _lancctbProcessarTributos).
 function _lancctbSubstituirCompetenciaTexto(texto,novaCompetencia){
   if(!novaCompetencia) return texto;
-  const re=/(\d{2}[\.\/\-]\d{4}|\d[ºª]\s*Trim\.?\s*\d{4})/i;
+  // (?<!\d)…(?!\d): não casa pedaço de número maior — o nº do parcelamento "62.044499300.53" tem "62.0444", que virava competência e era trocado (14/10/2026).
+  const re=/(?<!\d)(\d{2}[\.\/\-]\d{4}|\d[ºª]\s*Trim\.?\s*\d{4})(?!\d)/i;
   if(re.test(texto)){
     // Troca TODAS as competências do texto, não só a 1ª (achado 03/10/2026, ACCI: "Pagamento ref. ISS_Retido_07.2026 07/2026"
     // virava "…ISS_Retido_08/2026 07/2026" no mês seguinte, deixando a competência velha na 2ª ocorrência).
@@ -24202,12 +24221,13 @@ async function _lancctbUsarSugestaoTributo(idx){
   // casa é _lancctbProcessarTributos comparando esse gatilho contra o NOME
   // DO ARQUIVO do PDF encontrado no mês, não contra o histórico bancário).
   const nomeLegivel=_lancctbNomeTributoLegivel(info.descricao);
-  let darf=null;
+  let darf=null, parcPdf=null;
   try{
     const arquivo=await f.fileHandle.getFile();
     const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
     darf=await _lancctbExtrairComposicaoDarf(pdfDoc)||await _lancctbExtrairComposicaoDamsp(pdfDoc)
       ||(_lancctbTributosPermitirIA?await _lancctbExtrairComposicaoTributoViaIA(pdfDoc):null);
+    parcPdf=await _lancctbExtrairParcelamentoPdf(pdfDoc).catch(()=>null);
   }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); }
   // Descarta o rótulo genérico "Tributo" (não achou o campo "Receita" no
   // PDF) em favor do nome tirado do arquivo, sempre mais específico.
@@ -24282,7 +24302,7 @@ async function _lancctbUsarSugestaoTributo(idx){
   // legível em vez do nome do arquivo cru).
   const textoHist=darf&&darf.itens&&darf.itens.length===1
     ? textoHistoricoTributo(darf.itens[0].denominacao,darf.itens[0].codigo)
-    : `Pagamento ref. ${nomeLegivel.nomeCompleto}${competenciaPdf?' '+competenciaPdf:''}`.trim();
+    : (parcPdf?`Pagamento ref. Parcelamento nº ${parcPdf.numero}${competenciaPdf?' '+competenciaPdf:''}`:`Pagamento ref. ${nomeLegivel.nomeCompleto}${competenciaPdf?' '+competenciaPdf:''}`.trim());
   if(_lancctbRateioAtivo&&_lancctbRateioRowIds.length){
     const rowIdVazia=_lancctbRateioRowIds.find(id=>!document.getElementById('lancctbRateioHistorico_'+id)?.value);
     const rowId=rowIdVazia!==undefined?rowIdVazia:_lancctbRateioRowIds[0];
@@ -24298,7 +24318,7 @@ async function _lancctbUsarSugestaoTributo(idx){
     // histórico bancário genérico (Sispag/PIX), porque é isso que
     // _lancctbProcessarTributos compara pra achar a Regra sozinho nos
     // meses seguintes. Sem token reconhecido, cai pro nome completo mesmo.
-    document.getElementById('lancctbRegraHistoricoGatilho').value=nomeLegivel.token||nomeLegivel.nomeCompleto;
+    document.getElementById('lancctbRegraHistoricoGatilho').value=parcPdf?('Parcelamento '+parcPdf.numero):(nomeLegivel.token||nomeLegivel.nomeCompleto);
     const hintTributo=document.getElementById('lancctbRegraGatilhoHintTributo');
     if(hintTributo) hintTributo.style.display='';
     // Histórico Utilizado: seleciona "Personalizado" e já preenche com o
@@ -31262,7 +31282,8 @@ async function _lancctbProcessarTributos(){
     // Gatilho casa com o nome do arquivo E com o que consta na guia (imposto
     // lido do PDF): "CP DESCONTADA SEGURADO", "DAS", "PIS", "COFINS"…
     const _nlR=_lancctbNomeTributoLegivel(info.descricao);
-    const palheiroGuia=[info.descricao,_nlR.nomeCompleto,_nlR.token,...((achou.extraido&&achou.extraido.composicao)||[]).flatMap(c=>[c.denominacao,String(c.denominacao||'').split(' - ')[0],String(c.denominacao||'').split(' - ')[0]+' cód. '+c.codigo,c.denominacao+' cód. '+c.codigo])].filter(Boolean).join(' | ').toLowerCase();
+    const _parcG=achou.extraido&&achou.extraido.parcelamento;
+    const palheiroGuia=[info.descricao,_nlR.nomeCompleto,_nlR.token,...(_parcG?['parcelamento '+_parcG.numero,_parcG.numero]:[]),...((achou.extraido&&achou.extraido.composicao)||[]).flatMap(c=>[c.denominacao,String(c.denominacao||'').split(' - ')[0],String(c.denominacao||'').split(' - ')[0]+' cód. '+c.codigo,c.denominacao+' cód. '+c.codigo])].filter(Boolean).join(' | ').toLowerCase();
     const guiaComVariosItens=!!(achou.extraido&&achou.extraido.composicao&&achou.extraido.composicao.length>=2);
     const _regrasDaGuia=guiaComVariosItens?[]:regras.filter(r=>{
       if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
@@ -31337,7 +31358,9 @@ async function _lancctbProcessarTributos(){
         // "39 - METODO…"), que casaria todas as guias da empresa.
         const c0g=(comp&&comp[0]&&comp[0].codigo&&comp[0].denominacao)?comp[0]:null;
         const nlg=_lancctbNomeTributoLegivel(info.descricao);
-        const gatilhoGuia=(c0g?String(c0g.denominacao).split(' - ')[0].trim():(nlg.token||nomeGuia))||nomeGuia;
+        // Guia de PARCELAMENTO com número impresso: o gatilho é "Parcelamento <nº>" — o nome do arquivo muda todo mês ("32ª Parcela… 09.2026" → "33ª…"), o número do parcelamento não.
+        const parc1=achou.extraido&&achou.extraido.parcelamento;
+        const gatilhoGuia=parc1?('Parcelamento '+parc1.numero):((c0g?String(c0g.denominacao).split(' - ')[0].trim():(nlg.token||nomeGuia))||nomeGuia);
         const semMarca1=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
         // DARF de 1 imposto (ex: CP DESCONTADA SEGURADO cód. 1099): o nome vem
         // da denominação DENTRO do PDF, com código — igual à guia composta
@@ -31347,7 +31370,8 @@ async function _lancctbProcessarTributos(){
         const c0=(comp&&comp[0]&&comp[0].codigo&&comp[0].denominacao)?comp[0]:null;
         const nomeItem=c0?String(c0.denominacao).split(' - ')[0].trim():nomeGuia;
         const resumo1=c0?`${nomeItem} cód. ${c0.codigo}${compet1?' ref. '+compet1:''}`:`${nomeGuia}${compet1?' ref. '+compet1:''}`;
-        const histItem=c0?`Pagamento ref. ${nomeItem} cód. ${c0.codigo}${compet1?' ref. '+compet1:''}`:`Pagamento ref. ${nomeGuia}${compet1?' '+compet1:''}`;
+        // Com nº do parcelamento: "Pagamento ref. Parcelamento nº 62.044499300.53 09/2026" (sem a ordem da parcela, que mudaria todo mês e ficaria velha numa Regra reaproveitada).
+        const histItem=parc1?`Pagamento ref. Parcelamento nº ${parc1.numero}${compet1?' '+compet1:''}`:(c0?`Pagamento ref. ${nomeItem} cód. ${c0.codigo}${compet1?' ref. '+compet1:''}`:`Pagamento ref. ${nomeGuia}${compet1?' '+compet1:''}`);
         const item1={ codigo:c0?c0.codigo:null, denominacao:nomeItem, valor:Math.round(valor*100)/100, resumo:resumo1, competencia:compet1||null, gatilho:gatilhoGuia, historico:histItem };
         const { error: eU1 } = await _supaClient.from('lancamentos_extrato').update({
           historico_bancario: `[${resumo1}] ${semMarca1}`.trim(),
