@@ -25262,11 +25262,12 @@ async function excluirLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico){
     const campoNomeTerc=direcaoNf==='venda'?'notas_fiscais.nome_destinatario':'notas_fiscais.nome_emitente';
     const campoCnpjTerc=direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
     let q=_supaClient.from('notas_fiscais_parcelas')
-      .select('id,nf_id,numero_parcela,status_conciliacao,notas_fiscais!inner(natureza_operacao,empresa_eid,tipo,direcao)')
+      .select('id,nf_id,numero_parcela,status_conciliacao,data_emissao,notas_fiscais!inner(natureza_operacao,empresa_eid,tipo,direcao)')
       .eq('empresa_eid',eid).eq('tipo',tipoDoc).eq('direcao',direcaoNf);
     q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc);
     const { data: parcelasFiltradas } = await _lancctbFetchTudo(()=>q);
     if(!parcelasFiltradas||!parcelasFiltradas.length){ toast('Nenhuma NF bate com os filtros ativos.','err'); return; }
+    const emissaoPorNf={}; parcelasFiltradas.forEach(p=>{ const d=p.data_emissao||''; if(emissaoPorNf[p.nf_id]===undefined||d<emissaoPorNf[p.nf_id]) emissaoPorNf[p.nf_id]=d; });
 
     // Qtd Parcelas TOTAL de cada NF encontrada (não só as que bateram no
     // filtro) — mesmo cálculo da listagem, necessário pro filtro de Qtd
@@ -25290,7 +25291,9 @@ async function excluirLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico){
       toast(`Nenhuma NF pôde ser apagada — todas as ${idsEncontrados.length} encontradas já têm parcela conciliada (lançamento contábil gerado).`,'err');
       return;
     }
-    _lancctbExclusaoNotasFiltro={tipoDoc,direcaoNf,idsApagar,qtdBloqueadas};
+    const datasApagar=idsApagar.map(i=>emissaoPorNf[i]||'');
+    if(_lancctbExclusaoBloqueada(eid,datasApagar,'as NFs')) return; // NF de mês já finalizado: só o Kleydson exclui
+    _lancctbExclusaoNotasFiltro={tipoDoc,direcaoNf,idsApagar,qtdBloqueadas,datasApagar};
     _lancctbExclusaoTipo='notas-filtradas';
     document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
       `Isso vai <strong>apagar permanentemente</strong> <strong>${idsApagar.length}</strong> NF(s) que batem com os filtros ativos na tela.${qtdBloqueadas?` (${qtdBloqueadas} outra(s) encontrada(s) já têm parcela conciliada — NÃO serão apagadas.)`:''} Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${idsApagar.length}</strong>:`;
@@ -25301,7 +25304,8 @@ async function excluirLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico){
   }
 }
 async function _lancctbExecutarExclusaoNotasFiltradas(){
-  const {idsApagar,qtdBloqueadas}=_lancctbExclusaoNotasFiltro;
+  const {idsApagar,qtdBloqueadas,datasApagar}=_lancctbExclusaoNotasFiltro;
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,datasApagar||[''],'as NFs')) return;
   const input=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
   if(input!==String(idsApagar.length)){ toast('Número digitado não confere.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
@@ -26673,8 +26677,9 @@ async function salvarLancctbAplicacaoMovimento(){
   renderLancctbAplicacoes();
 }
 async function excluirLancctbAplicacaoMovimento(movId){
+  const { data: mov } = await _supaClient.from('aplicacoes_financeiras_movimentos').select('lancamento_extrato_id,data').eq('id',movId).single();
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,mov?mov.data:null,'este movimento da aplicação')) return;
   if(!confirm('Excluir este movimento? Se ele gerou um lançamento no Extrato Bancário, esse lançamento também será removido (junto com a classificação contábil, se já tiver sido feita).'))return;
-  const { data: mov } = await _supaClient.from('aplicacoes_financeiras_movimentos').select('lancamento_extrato_id').eq('id',movId).single();
   if(mov?.lancamento_extrato_id){
     await _supaClient.from('lancamentos_contabeis').delete().eq('lancamento_extrato_id',mov.lancamento_extrato_id);
     await _supaClient.from('lancamentos_extrato').delete().eq('id',mov.lancamento_extrato_id);
@@ -28849,13 +28854,22 @@ async function salvarLancctbRegra(){
   renderLancctbRegras();
 }
 async function excluirLancctbRegra(id){
-  if(!confirm('Excluir esta regra? Os lançamentos que ela já resolveu voltam a ficar pendentes no Registro Contábil.'))return;
   // Desfaz na hora tudo que essa regra tinha resolvido — senão o Registro
   // Contábil continua mostrando "conciliado" apontando pra uma regra que
   // não existe mais (bug relatado pelo usuário: regra excluída, lançamento
   // continuava conciliado com o histórico/conta da regra apagada).
   const { data: linhasDaRegra } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
     .select('lancamento_extrato_id,comprovante_id').eq('regra_matching_id',id).eq('estornado',false));
+  // Excluir a Regra apaga os lançamentos contábeis que ela resolveu — se algum for de mês já finalizado, só o Kleydson pode (datas vêm do extrato de cada um).
+  if(!_ehKleydson(currentUser)&&getMenuFinalizado('lancctb',String(_lancctbEidAtual))){
+    const idsEx=[...new Set((linhasDaRegra||[]).map(l=>l.lancamento_extrato_id).filter(Boolean))], datasRegra=[];
+    for(let i=0;i<idsEx.length;i+=200){
+      const { data: ex } = await _supaClient.from('lancamentos_extrato').select('data_pagamento').in('id',idsEx.slice(i,i+200));
+      if(!ex) datasRegra.push(''); else ex.forEach(r=>datasRegra.push(r.data_pagamento));
+    }
+    if(_lancctbExclusaoBloqueada(_lancctbEidAtual,datasRegra,'esta Regra (ela desfaria lançamentos contábeis de período finalizado)')) return;
+  }
+  if(!confirm('Excluir esta regra? Os lançamentos que ela já resolveu voltam a ficar pendentes no Registro Contábil.'))return;
   const idsExtrato=[...new Set((linhasDaRegra||[]).map(l=>l.lancamento_extrato_id).filter(Boolean))];
   const idsComprovante=[...new Set((linhasDaRegra||[]).map(l=>l.comprovante_id).filter(Boolean))];
   if(idsExtrato.length){
@@ -32697,6 +32711,7 @@ async function _lancctbDesconciliarCore(extratoId){
 async function _lancctbDesconciliarLancamento(extratoId){
   const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId);
   if(!item){ toast('Lançamento não encontrado — atualize a tela e tente de novo.','err'); return; }
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,item.extrato.data_pagamento,'o lançamento contábil deste lançamento (desconciliar)')) return;
   if(!confirm('Desconciliar este lançamento? Isso desfaz o lançamento contábil e devolve a Nota Fiscal/Comprovante/Fluxo de Caixa amarrados pra pendente. Continuar?')) return;
   try{
     await _lancctbDesconciliarCore(extratoId);
@@ -32724,6 +32739,7 @@ function _lancctbAtualizarBotaoDesclassificarLote(){
 async function _lancctbExecutarDesclassificarLote(){
   const n=_lancctbRegistroSelecionadosDesclass.size;
   if(!n){ toast('Selecione ao menos um lançamento conciliado.','err'); return; }
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,[..._lancctbRegistroSelecionadosDesclass.values()].map(e=>e&&e.data_pagamento),'os lançamentos contábeis selecionados (desclassificar)')) return;
   if(!confirm(`Desconciliar ${n} lançamento(s) selecionado(s)? Isso desfaz os lançamentos contábeis e devolve NF/Comprovante/Fluxo de Caixa amarrados pra pendente. Continuar?`)) return;
   const btns=document.querySelectorAll('.lancctb-desclassificar-lote-btn');
   btns.forEach(b=>b.disabled=true);
@@ -35286,6 +35302,7 @@ function exportarLancctbComprovantesRecebExcel(){
 let _lancctbExclusaoComprovRecebQtd=0;
 function excluirLancctbComprovantesRecebConta(qtd){
   if(!qtd){ toast('Nenhum comprovante pra excluir com esse filtro.','err'); return; }
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbComprovRecebMes,'os comprovantes de recebimento')) return;
   _lancctbExclusaoTipo='comprovantes-receb';
   _lancctbExclusaoComprovRecebQtd=qtd;
   const partesEscopo=[];
@@ -35300,6 +35317,7 @@ function excluirLancctbComprovantesRecebConta(qtd){
   openModal('mLancctbConfirmarExclusao');
 }
 async function _lancctbExecutarExclusaoComprovantesReceb(){
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbComprovRecebMes,'os comprovantes de recebimento')) return;
   const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
   if(digitado!==String(_lancctbExclusaoComprovRecebQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
@@ -35482,6 +35500,7 @@ function exportarLancctbComprovantesSalariosExcel(){
 let _lancctbExclusaoComprovSalQtd=0;
 function excluirLancctbComprovantesSalariosConta(qtd){
   if(!qtd){ toast('Nenhum comprovante pra excluir com esse filtro.','err'); return; }
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbComprovSalMes,'os comprovantes de salários')) return;
   _lancctbExclusaoTipo='comprovantes-salarios';
   _lancctbExclusaoComprovSalQtd=qtd;
   const partesEscopo=[];
@@ -35496,6 +35515,7 @@ function excluirLancctbComprovantesSalariosConta(qtd){
   openModal('mLancctbConfirmarExclusao');
 }
 async function _lancctbExecutarExclusaoComprovantesSalarios(){
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbComprovSalMes,'os comprovantes de salários')) return;
   const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
   if(digitado!==String(_lancctbExclusaoComprovSalQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
@@ -37226,6 +37246,7 @@ async function _lancctbFluxoLimparNumeros(){
 }
 function excluirLancctbFluxoConta(qtd){
   if(!qtd){ toast('Nenhum lançamento pra excluir com esse filtro.','err'); return; }
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbFluxoMes,'os lançamentos do Fluxo de Caixa')) return;
   _lancctbExclusaoTipo='fluxo';
   _lancctbExclusaoFluxoQtd=qtd;
   const partesEscopo=[];
@@ -37240,6 +37261,7 @@ function excluirLancctbFluxoConta(qtd){
   openModal('mLancctbConfirmarExclusao');
 }
 async function _lancctbExecutarExclusaoFluxo(){
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbFluxoMes,'os lançamentos do Fluxo de Caixa')) return;
   const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
   if(digitado!==String(_lancctbExclusaoFluxoQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
@@ -37638,10 +37660,27 @@ async function renderLancctbExtrato(){
 // (digitar o número exato de lançamentos) via modal próprio do site —
 // prompt() nativo não funciona de forma confiável em automação de
 // navegador (retorna null direto, sem mostrar diálogo nenhum).
+// ── Período finalizado: só o Kleydson exclui (pedido do usuário 15/10/2026) ──
+// Depois que o "Período finalizado" da empresa (lista de Lançamentos Contábeis, ex.: 09/2026) cobre um mês, ninguém além do Kleydson pode excluir dados desse
+// mês (extrato, fluxo de caixa, comprovantes, NFs, movimentos de aplicação, desfazer lançamento contábil, Regra que desfaria lançamentos); quem tentar é avisado
+// de que precisa pedir a exclusão a ele. escopo = 'AAAA-MM' (filtro de mês), 'AAAA-MM-DD' (uma data), ''/null (SEM filtro ou data desconhecida = pode atingir
+// meses finalizados) ou uma lista disso. Devolve true quando BLOQUEOU (já avisou) — o chamador só dá return. É trava de tela (como o isAdmin do resto do site).
+function _lancctbExclusaoBloqueada(eid,escopo,oQue){
+  if(_ehKleydson(currentUser)) return false;
+  const fin=String(getMenuFinalizado('lancctb',String(eid))||'').slice(0,7);
+  if(!fin) return false;
+  const atingidos=(Array.isArray(escopo)?escopo:[escopo]).map(x=>String(x||'').slice(0,7));
+  if(!atingidos.some(m=>!m||m<=fin)) return false;
+  const rot=fin.slice(5)+'/'+fin.slice(0,4);
+  alert(`🔒 Período finalizado até ${rot}\n\nNão é possível excluir ${oQue}: esse período já foi finalizado nesta empresa.\nSó o usuário Kleydson pode excluir dados de períodos finalizados — peça a ele para fazer a exclusão.`
+    +(atingidos.some(m=>!m)?`\n\n(Sem filtro de mês, a exclusão alcançaria também os meses finalizados. Para excluir só meses depois de ${rot}, escolha o mês no filtro.)`:''));
+  return true;
+}
 let _lancctbExclusaoExtratoQtd=0;
 let _lancctbExclusaoTipo='extrato'; // 'extrato' | 'comprovantes' — qual delete o modal genérico executa
 function excluirLancctbExtratoConta(qtd){
   if(!qtd){ toast('Nenhum lançamento pra excluir nesta conta.','err'); return; }
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbExtratoMes,'os lançamentos de extrato')) return;
   _lancctbExclusaoTipo='extrato';
   _lancctbExclusaoExtratoQtd=qtd;
   const escopo=_lancctbExtratoMes
@@ -37666,6 +37705,7 @@ function _lancctbExecutarExclusaoGenerica(){
 let _lancctbExclusaoComprovQtd=0;
 function excluirLancctbComprovantesConta(qtd){
   if(!qtd){ toast('Nenhum comprovante pra excluir com esse filtro.','err'); return; }
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbComprovMes,'os comprovantes de pagamento')) return;
   _lancctbExclusaoTipo='comprovantes';
   _lancctbExclusaoComprovQtd=qtd;
   const partesEscopo=[];
@@ -37680,6 +37720,7 @@ function excluirLancctbComprovantesConta(qtd){
   openModal('mLancctbConfirmarExclusao');
 }
 async function _lancctbExecutarExclusaoComprovantes(){
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbComprovMes,'os comprovantes de pagamento')) return;
   const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
   if(digitado!==String(_lancctbExclusaoComprovQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
@@ -37714,6 +37755,7 @@ async function _lancctbExecutarExclusaoComprovantes(){
   renderLancctbComprovantes();
 }
 async function _lancctbExecutarExclusaoExtrato(){
+  if(_lancctbExclusaoBloqueada(_lancctbEidAtual,_lancctbExtratoMes,'os lançamentos de extrato')) return;
   const digitado=document.getElementById('lancctbConfirmarExclusaoInput').value.trim();
   if(digitado!==String(_lancctbExclusaoExtratoQtd)){ toast('Número não confere — nada foi excluído.','err'); return; }
   const btn=document.getElementById('lancctbConfirmarExclusaoBtn');
@@ -37844,6 +37886,10 @@ async function salvarLancctbEditarExtrato(){
   renderLancctbExtrato();
 }
 async function excluirLancctbExtratoLinha(id){
+  if(!_ehKleydson(currentUser)&&getMenuFinalizado('lancctb',String(_lancctbEidAtual))){
+    const { data: ex0 } = await _supaClient.from('lancamentos_extrato').select('data_pagamento,empresa_eid').eq('id',id).maybeSingle();
+    if(_lancctbExclusaoBloqueada(_lancctbEidAtual,ex0?ex0.data_pagamento:null,'este lançamento de extrato')) return;
+  }
   if(!confirm('Excluir só este lançamento de extrato? Se ele já tiver classificação no Registro Contábil, a classificação também é apagada (a NF/Comprovante/Fluxo de Caixa que bateu com ele volta a ficar pendente).')) return;
   // Mesmo desvincula-antes-de-apagar do delete em massa (idsPorConta etc.),
   // só que escopado a 1 id só.
