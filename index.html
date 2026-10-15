@@ -47524,13 +47524,22 @@ async function salvarContaContabilGanho(eid,id,valor){
 // IRRF, IOF e Perda no Mês = D conta do item / C conta da aplicação. Contas do item perguntadas na 1ª vez (por empresa) e
 // editáveis em "Contas do TXT"; a conta de cada aplicação vem do campo CONTA CONTÁBIL da tela do produto.
 const GANHOS_TXT_CAMPOS=[['rendimento','Rendimento do Mês (crédito)'],['irrf','IRRF (débito)'],['iof','IOF (débito)'],['perda','Perda no Mês (débito)']];
+// "Juros de Mora" e "Multas de Mora" têm contas FIXAS em qualquer empresa (pedido do usuário 15/10/2026 — "nem preciso criar as regras"):
+// Juros = D 10000 / C 433; Multa = D 10000 / C 475; valor = "Rendimento do Mês" do produto. Não dependem do "Contas do TXT" nem da CONTA CONTÁBIL do produto.
+const GANHOS_TXT_CONTAS_MORA={juros:{debito:'10000',credito:'433',rotulo:'Juros de Mora'},multa:{debito:'10000',credito:'475',rotulo:'Multa de Mora'}};
+function _ganhoMoraTipo(g){
+  const n=String((g&&g.nome)||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').toLowerCase().trim();
+  if(/^juros de mora/.test(n)) return 'juros';
+  if(/^multas? de mora/.test(n)) return 'multa';
+  return null;
+}
 let _ganhosTxtCtx=null;
 function _ganhosTxtContasGet(eid){ return S.g('ganhos_txt_contas_'+eid)||null; }
 function abrirGanhosTxtContas(eid,gerarDepois){
   _ganhosTxtCtx={eid:String(eid),gerar:!!gerarDepois};
   const atual=_ganhosTxtContasGet(eid)||{};
   const sug=S.g('ganhos_txt_contas_ultimas')||{};
-  let html='<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Informe a conta contábil de cada item. O <b>Rendimento</b> fica a crédito (a conta da aplicação vai a débito); <b>IRRF, IOF e Perda</b> ficam a débito (a conta da aplicação vai a crédito). Vale para esta empresa e pode ser alterada quando precisar.'+(atual.rendimento?'':' <b>Primeira vez nesta empresa — confirme as contas.</b>')+'</div><div style="display:grid;gap:8px">';
+  let html='<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Informe a conta contábil de cada item. O <b>Rendimento</b> fica a crédito (a conta da aplicação vai a débito); <b>IRRF, IOF e Perda</b> ficam a débito (a conta da aplicação vai a crédito). Vale para esta empresa e pode ser alterada quando precisar.'+(atual.rendimento?'':' <b>Primeira vez nesta empresa — confirme as contas.</b>')+'<br><span style="color:var(--teal)"><b>Juros de Mora</b> (D 10000 / C 433) e <b>Multas de Mora</b> (D 10000 / C 475) usam contas fixas em qualquer empresa — não precisam ser informadas aqui.</span></div><div style="display:grid;gap:8px">';
   GANHOS_TXT_CAMPOS.forEach(([k,rot])=>{
     html+=`<div style="display:flex;align-items:center;gap:10px"><label style="flex:1;font-size:12.5px;font-weight:600">${rot}</label><input class="fi" id="ganhosTxtConta_${k}" value="${esc(atual[k]||sug[k]||'')}" placeholder="nº da conta" style="width:130px"></div>`;
   });
@@ -47563,8 +47572,10 @@ function _ganhoColPerda(g){ return (g.cols||[]).find(c=>/^perda/i.test(String(c.
 async function gerarTxtGanhos(eid){
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   if(!emp){ toast('Empresa não encontrada','err'); return; }
-  const contas=_ganhosTxtContasGet(eid);
-  if(!contas||!contas.rendimento||!contas.irrf||!contas.iof||!contas.perda){ abrirGanhosTxtContas(eid,true); return; }
+  const contas=_ganhosTxtContasGet(eid)||{};
+  // as contas do "Contas do TXT" só servem pras aplicações; empresa que só tem Juros/Multas de Mora (contas fixas) gera sem precisar informá-las
+  const temAplicacao=Object.values(getGanhos(eid)).some(g=>!_ganhoMoraTipo(g)&&!_isSimpleLayout(g));
+  if(temAplicacao&&(!contas.rendimento||!contas.irrf||!contas.iof||!contas.perda)){ abrirGanhosTxtContas(eid,true); return; }
   const cnpjLimpo=String(emp.cnpj||'').replace(/\D/g,'');
   if(!cnpjLimpo){ toast('Empresa sem CNPJ cadastrado — não é possível gerar o TXT.','err'); return; }
   // O TXT é sempre de UM mês (informado pelo usuário). Sugere o mês seguinte ao último gerado nesta empresa; na 1ª vez, o Fechamento Atual.
@@ -47577,11 +47588,18 @@ async function gerarTxtGanhos(eid){
   if(!isoMes){ toast('Formato inválido — use MM/AAAA','err'); return; }
   const [ano,mesSel]=isoMes.split('-').map(Number);
   const meses=[mesSel];
-  const linhas=[], semConta=new Set();
+  const linhas=[], semConta=new Set(), moraNegativa=[];
   const dois=n=>String(n).padStart(2,'0');
   meses.forEach(m=>{
     const mk=dois(m)+'/'+ano, data=dois(new Date(ano,m,0).getDate())+'/'+dois(m)+'/'+ano;
     Object.values(getGanhos(eid)).forEach(g=>{
+      const moraTipo=_ganhoMoraTipo(g);
+      if(moraTipo){ // Juros/Multas de Mora: D 10000 / C 433 (juros) ou 475 (multa), pelo Rendimento do Mês
+        const v=parseFloat(((g.dados||{})[mk]||{}).rendMes)||0, f=GANHOS_TXT_CONTAS_MORA[moraTipo];
+        if(v>0) linhas.push({data,debito:f.debito,credito:f.credito,valor:v,historico:`${f.rotulo} ${mk}`});
+        else if(v<0) moraNegativa.push(g.nome);
+        return;
+      }
       if(_isSimpleLayout(g)) return; // "Demais Receitas" não tem IRRF/IOF/Perda — só aplicações financeiras
       const d=(g.dados||{})[mk]; if(!d) return;
       const colPerda=_ganhoColPerda(g);
@@ -47599,7 +47617,8 @@ async function gerarTxtGanhos(eid){
     });
   });
   if(semConta.size) toast('Aplicação(ões) sem CONTA CONTÁBIL informada, ficaram fora do TXT: '+[...semConta].join('; ')+'. Preencha o campo na tela do produto.','err');
-  if(!linhas.length){ toast('Nada para gerar neste período (sem Rendimento, IRRF, IOF ou Perda lançados, ou sem conta nas aplicações).','err'); return; }
+  if(moraNegativa.length) toast('Valor negativo em '+moraNegativa.join('; ')+' — ficou fora do TXT (juros/multa de mora não podem ser negativos). Confira o lançamento.','err');
+  if(!linhas.length){ toast('Nada para gerar neste período (sem Rendimento, IRRF, IOF, Perda, Juros ou Multa de Mora lançados, ou sem conta nas aplicações).','err'); return; }
   const conteudo=gerarTxtMisterContador(cnpjLimpo,linhas);
   const slug=(emp.nome||String(eid)).normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-zA-Z0-9]/g,'_');
   const periodo=`${ano}-${dois(mesSel)}`;
