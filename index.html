@@ -23510,6 +23510,8 @@ function _lancctbComposicaoDarfMultiPagina(porPaginaItens,tolY){
   const resultados=porPaginaItens.map(itensPagina=>_lancctbComposicaoDarfDeItens(itensPagina,tolY)).filter(Boolean);
   if(!resultados.length) return null;
   const ehDas=resultados.some(r=>r.itens===null);
+  // 1 página só e a soma das linhas lidas não fecha com o total declarado do documento: devolve o TOTAL DECLARADO sem composição (nunca um total parcial)
+  if(porPaginaItens.length===1&&resultados.length===1&&resultados[0].incompleta&&!ehDas) return { itens:null, valorTotal:resultados[0].declarado, competencia:resultados[0].competencia, incompleta:true };
   const itensTodos=resultados.flatMap(r=>r.itens||[]);
   const valorTotal=itensTodos.length?Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100:resultados[0].valorTotal;
   const competencia=(resultados.find(r=>r.competencia)||{}).competencia||null;
@@ -23526,12 +23528,14 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
   const texto=itens.map(it=>it.str).join(' ');
   if(!/composi[cç][aã]o do documento de arrecada[cç][aã]o/i.test(texto)) return null;
   const linhas=_lancctbAgruparLinhasPorY(itens,tolY);
-  const itensComp=[];
   // Posição (x) das colunas Principal / Multa / Juros no cabeçalho da tabela de composição
   let colsValores=null;
   { const cab={}; itens.forEach(it=>{ const k=String(it.str||'').trim().toLowerCase(); if(typeof it.x==='number'&&(k==='principal'||k==='multa'||k==='juros')&&cab[k]===undefined) cab[k]=it.x; });
     itens.forEach(it=>{ if(typeof it.x==='number'&&String(it.str||'').trim().toLowerCase()==='total'&&cab.total===undefined) cab.total=it.x; });
     if(cab.principal!==undefined&&cab.total!==undefined&&(cab.multa!==undefined||cab.juros!==undefined)) colsValores=cab; }
+  // lerLinhas(false) = leitura normal; lerLinhas(true) = leitura tolerante (denominação com qualquer caractere), usada só quando a soma das linhas NÃO fecha com o total do documento
+  const lerLinhas=(relaxado)=>{
+  const itensComp=[];
   for(const linha of linhas){
     // OCR local lê o 0 do código de receita como letra O (achado real 02/10/2026: '0561' IRRF virou 'O561' e a linha sumia da composição) — só corrige token de 4 caracteres com 2+ dígitos.
     const t=linha.itens.map(i=>i.str).join(' ').trim().replace(/^([0-9OoIl]{4})(?=\s)/,tok=>(tok.match(/\d/g)||[]).length>=2?tok.replace(/[Oo]/g,'0').replace(/[Il]/g,'1'):tok);
@@ -23539,7 +23543,9 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
     // vezes reconhece um traço espúrio ("—") entre o código e a
     // denominação (nunca acontece no texto nativo) — tolera até 3
     // caracteres não-alfanuméricos ali sem quebrar a linha inteira.
-    const m=t.match(/^(\d{4})\s+[^A-ZÀ-Ü0-9]{0,3}\s*([A-ZÀ-Ü][A-ZÀ-Ü0-9\s\-\/\.]*?)\s+((?:[\d.,]+\s*)+)$/);
+    // Achado real 14/10/2026 (Peixoto, DARF PIS/COFINS R$ 7.623,80): a linha do PIS tem "(LEI 10.637/02)" na denominação — sem aceitar parênteses ela era DESCARTADA e o leitor devolvia só a COFINS (6.263,88).
+    let m=t.match(/^(\d{4})\s+[^A-ZÀ-Ü0-9]{0,3}\s*([A-ZÀ-Ü][A-ZÀ-Ü0-9\s\-\/\.\(\)]*?)\s+((?:[\d.,]+\s*)+)$/);
+    if(!m&&relaxado) m=t.match(/^(\d{4})\s+(\S.*?)\s+((?:\d{1,3}(?:\.\d{3})*,\d{2}\s*)+)$/);
     if(!m) continue;
     const numeros=m[3].trim().split(/\s+/);
     const totalLinha=_lancctbParseValorBR2(numeros[numeros.length-1]);
@@ -23564,6 +23570,9 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
       if(partes.juros>0) itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.juros*100)/100, encargo:'juros' });
     } else itensComp.push({ codigo:m[1], denominacao:nome, valor:totalLinha });
   }
+  return itensComp;
+  };
+  let itensComp=lerLinhas(false);
   if(!itensComp.length) return null;
   // DAS do Simples Nacional também usa o cabeçalho "Composição do Documento
   // de Arrecadação" (com o detalhamento interno IRPJ/CSLL/COFINS/PIS/INSS/
@@ -23599,7 +23608,21 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
     if(!mPeriodoMes) mPeriodoMes=textoNorm.match(/\bpa\b\s*:?[^\d]{0,15}(\d{2})\/(\d{4})/);
     if(mPeriodoMes) competencia=`${mPeriodoMes[1]}/${mPeriodoMes[2]}`;
   }
-  return { itens:ehDas?null:itensComp, valorTotal: mTotal?_lancctbParseValorBR2(mTotal[1]):itensComp.reduce((s,i)=>s+i.valor,0), competencia };
+  // Conferência: a soma das linhas lidas tem que fechar com o "Valor Total do Documento" (ou a linha "Totais"). Não fechando, tenta a leitura tolerante; se ainda não fechar, NÃO devolve a soma
+  // parcial como se fosse o total (foi o que fez a guia de 7.623,80 virar 6.263,88 e nunca casar com o pagamento) — o total declarado vale e a composição é descartada.
+  const somaItens=a=>Math.round(a.reduce((s,i)=>s+i.valor,0)*100)/100;
+  let declarado=mTotal?_lancctbParseValorBR2(mTotal[1]):null;
+  if(!(declarado>0)){
+    const linhaTotais=linhas.find(l=>/^totais\b/i.test(l.itens.map(i=>i.str).join(' ').trim()));
+    const ns=linhaTotais?linhaTotais.itens.map(i=>String(i.str).trim()).filter(x=>LANCCTB_RE_MONETARIO.test(x)):[];
+    declarado=ns.length?_lancctbParseValorBR2(ns[ns.length-1]):null;
+  }
+  if(!ehDas&&declarado>0&&Math.abs(somaItens(itensComp)-declarado)>0.02){
+    const tolerante=lerLinhas(true);
+    if(tolerante.length>itensComp.length&&Math.abs(somaItens(tolerante)-declarado)<=0.02) itensComp=tolerante;
+  }
+  const incompleta=!ehDas&&declarado>0&&Math.abs(somaItens(itensComp)-declarado)>0.02;
+  return { itens:ehDas?null:itensComp, valorTotal: mTotal?_lancctbParseValorBR2(mTotal[1]):itensComp.reduce((s,i)=>s+i.valor,0), competencia, declarado, incompleta };
 }
 // Fallback genérico (GNRE, DAS, FGTS, ISS...) — procura rótulos comuns de
 // "total" em guias brasileiras. Best-effort: se não achar rótulo nenhum,
@@ -24030,6 +24053,33 @@ function _lancctbNomeTributoLegivel(descricaoOuNome){
   if(mGuia) return { nomeCompleto:`Guia de ${mGuia[1].toUpperCase()}`, token:mGuia[1].toUpperCase() };
   return { nomeCompleto:s, token:null };
 }
+// ── Esfera do tributo (federal / estadual / municipal / FGTS) — pedido do usuário 14/10/2026 (Peixoto): "ICMS é um imposto estadual e vc escolheu um que no próprio histórico diz ser
+// da Prefeitura, que é municipal". O pagamento "SISPAG TRIB MUNICIPAL PREF MUN IBIRITE MG" (R$ 1.307,24) foi casado com 4 guias de ICMS ST (soma 1.305,82, dentro da folga de R$ 2,00).
+// Só EXCLUI casamento quando as duas pontas dizem a esfera e ela é DIFERENTE; se qualquer lado não diz (histórico genérico "SISPAG TRIB COD BARRAS", guia sem marca) não filtra nada.
+function _lancctbSemAcento(s){ return String(s||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/_/g,' '); } // "_" separa palavra (nomes de guia: PIS_COFINS, IRPJ_CSLL)
+function _lancctbEsferaPagamento(historico){
+  const h=_lancctbSemAcento(historico), s=new Set();
+  if(/\bMUNICIPAL\b|\bPREFEITURA\b|\bPREF\.?\s*MUN|\bISSQN\b|\bIPTU\b|\bTFE\b/.test(h)) s.add('municipal');
+  if(/\bESTADUAL\b|\bSEFAZ\b|\bSEF[-\s]?MG\b|\bSEC(?:RET)?\.?\s+EST\b|\bDAE\b|\bDARE\b|\bGNRE\b|\bICMS\b/.test(h)) s.add('estadual');
+  if(/RECEITA\s+FED|\bRFB\b|\bDARF\b|\bDCTFWEB\b|\bGPS\b|\bINSS\b/.test(h)) s.add('federal');
+  if(/\bFGTS\b|CAIXA\s+ECON/.test(h)) s.add('fgts');
+  return s.size===1?[...s][0]:null;
+}
+function _lancctbEsferaGuia(nomeArquivo,extraido){
+  const info=_lancctbParsearNomeArquivoTributo(nomeArquivo);
+  const d=_lancctbSemAcento(info.descricao);
+  const den=_lancctbSemAcento(((extraido&&extraido.composicao)||[]).map(c=>c.denominacao||'').join(' | '));
+  const s=new Set();
+  if(/\bFGTS\b/.test(d)||/\bFGTS\b/.test(den)) s.add('fgts');
+  if(/\bDAE\b|\bDARE\b|\bICMS\b|\bDIFAL\b|\bGNRE\b|\bSEFAZ\b/.test(d)||/\bICMS\b/.test(den)) s.add('estadual');
+  if(/\bISS\b|\bISSQN\b|\bIPTU\b|\bTFE\b|\bITBI\b|\bDAMSP\b|PREFEITURA|MUNICIPAL/.test(d)||/\bISS\b|\bISSQN\b|\bIPTU\b|\bTFE\b/.test(den)) s.add('municipal');
+  if(/\bDARF\b|\bPIS\b|\bCOFINS\b|\bIRPJ\b|\bCSLL\b|\bINSS\b|\bGPS\b|\bDCTFWEB\b|\bIRRF\b|\bDAS\b|SIMPLES/.test(d)||/\bPIS\b|\bCOFINS\b|\bIRPJ\b|\bCSLL\b|\bINSS\b|\bIRRF\b|SEGURADO|PATRONAL/.test(den)) s.add('federal');
+  return s.size===1?[...s][0]:null;
+}
+function _lancctbJurisdicaoCompativel(historicoPagamento,nomeArquivo,extraido){
+  const p=_lancctbEsferaPagamento(historicoPagamento), g=_lancctbEsferaGuia(nomeArquivo,extraido);
+  return !p||!g||p===g;
+}
 // Recalcula a competência dentro de um texto de histórico já pronto — usado
 // pra reaproveitar a MESMA Regra em meses seguintes sem o texto ficar preso
 // na competência do mês em que a regra foi criada (pedido do usuário
@@ -24085,7 +24135,7 @@ async function _lancctbAtualizarSugestoesTributos(){
     try{
       const pdfDoc=await _lancctbAbrirPdfTributo(f.fileHandle);
       const extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
-      if(extraido&&Math.abs(extraido.valor-valorAlvo)<=LANCCTB_MATCH_TOLERANCIA_VALOR) encontrados.push(f);
+      if(extraido&&Math.abs(extraido.valor-valorAlvo)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbJurisdicaoCompativel(_lancctbRegraExtratoAlvo.historico_bancario,f.nome,extraido)) encontrados.push(f);
     }catch(e){ console.error('Falha ao conferir valor do PDF de tributo '+f.nome+':',e); }
   }
   _lancctbTributosSugeridosAtual=encontrados;
@@ -30575,8 +30625,11 @@ async function _lancctbLerGuiasDoMes(eid,anoMes,permitirIA,cacheLeitura,statusCb
 function _lancctbDiasEntre(isoA,isoB){ return Math.round((new Date(isoA+'T00:00:00Z')-new Date(isoB+'T00:00:00Z'))/86400000); }
 function _lancctbSubconjuntos(arr,min,max){ const out=[]; const n=arr.length; if(n>14) return out; for(let m=1;m<(1<<n);m++){ const sub=[]; for(let i=0;i<n;i++) if(m&(1<<i)) sub.push(arr[i]); if(sub.length>=min&&sub.length<=max) out.push(sub); } return out.sort((a,b)=>a.length-b.length); }
 function _lancctbAcharCombinacaoGuias(valor,dataPag,leituras,usados){
-  const tol=LANCCTB_MATCH_TOLERANCIA_VALOR, r2=x=>Math.round(x*100)/100;
-  const legiveis=leituras.filter(g=>g.extraido&&g.extraido.valor>0&&!usados.has(g.chave));
+  // Soma de VÁRIAS guias é EXATA (R$ 0,02): a folga de R$ 2,00 do casamento de guia única (ACCI) fazia 4 guias de ICMS ST somando 1.305,82 casarem com um pagamento de 1.307,24 (Peixoto, 14/10/2026)
+  // e ainda "consumirem" as guias dos outros pagamentos. E só entram guias com vencimento perto da data do pagamento (até 20 dias antes do vencimento... 15 depois), quando o vencimento é conhecido.
+  const tol=0.02, r2=x=>Math.round(x*100)/100;
+  const noPrazo=g=>{ if(!g.info||!g.info.vencimento) return true; const d=_lancctbDiasEntre(g.info.vencimento,dataPag); return d>=-20&&d<=15; };
+  const legiveis=leituras.filter(g=>g.extraido&&g.extraido.valor>0&&!usados.has(g.chave)&&noPrazo(g));
   // 1) soma exata de 2 a 4 guias legíveis
   for(const sub of _lancctbSubconjuntos(legiveis,2,4)){
     const soma=r2(sub.reduce((s,g)=>s+g.extraido.valor,0));
@@ -31089,6 +31142,7 @@ async function _lancctbProcessarTributos(){
         cacheLeituraPdf[chaveArquivo]=extraido;
       }
       if(!extraido) continue;
+      if(!_lancctbJurisdicaoCompativel(l.historico_bancario,f.nome,extraido)) continue; // esfera diferente (ex.: histórico "PREF MUN" × DAE de ICMS estadual): nunca casa
       // Bate exato (±2,00) OU o pagamento é MAIOR que o tributo por até 30%
       // — nesse 2º caso o lançamento é dividido: valor exato do tributo +
       // a diferença como pendência nova (pedido do usuário 10/09/2026, mesma
@@ -31132,7 +31186,7 @@ async function _lancctbProcessarTributos(){
         }
         leiturasPorMes[anoMes]=[...leitMes,...extrasLidos];
       }
-      const comb=_lancctbAcharCombinacaoGuias(valor,l.data_pagamento,leiturasPorMes[anoMes],arquivosUsados);
+      const comb=_lancctbAcharCombinacaoGuias(valor,l.data_pagamento,leiturasPorMes[anoMes].filter(g=>_lancctbJurisdicaoCompativel(l.historico_bancario,g.f.nome,g.extraido)),arquivosUsados);
       if(comb){
         comb.guias.forEach(g=>arquivosUsados.add(g.chave));
         const itens=_lancctbItensDaCombinacao(comb);
