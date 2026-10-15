@@ -44581,6 +44581,20 @@ async function _aplicfinParseBradescoPadrao(pdf){
     if(!ok) warnings.push('VALIDATION_FAILED: Resgates Bruto − IOF − IRRF ≠ Líquido.');
   }
   if(!Object.keys(totais).length) warnings.push('Nenhuma linha "Total" de seção encontrada — layout diferente do esperado.');
+  // Rendimento do mês pelo PRÓPRIO extrato (15/10/2026, Rufato CDB Fidelidade 09/2026): saldo final + resgates − saldo anterior − aplicações. Sem isso o "Rendimento do Mês"
+  // caía na diferença de saldo da tela e, com a coluna Aplicação mal ligada, a aplicação de R$ 15,5 milhões entrava DENTRO do rendimento. Conferido com a "Renda Bruta Período".
+  {
+    const A=totais.saldo_anterior||{}, P=totais.aplicacoes||{}, F=totais.saldo_final||{};
+    if(A.bruto!=null&&F.bruto!=null){
+      const rend=Math.round((F.bruto+(R.bruto||0)-A.bruto-(P.principal||0))*100)/100;
+      sources.push({ key:M+'.calc.rendimento_mes', label:'Calculado: Saldo em (Vlr. Bruto) + Resgates (Vlr. Bruto) − Saldo Anterior (Vlr. Bruto) − Aplicações (Vlr. Princ.)', section:'Calculado', product:produto, value:rend, calculationType:'CALCULATED' });
+      if(F.renda_bruta_periodo!=null){
+        const ok=Math.abs(rend-F.renda_bruta_periodo)<=1;
+        validations.push({name:'rendimento_confere_renda_bruta_periodo',ok,detail:`calculado ${rend.toFixed(2)} × Renda Bruta Período do extrato ${F.renda_bruta_periodo}`});
+        if(!ok) warnings.push('VALIDATION_FAILED: o rendimento calculado pelo saldo ('+rend.toFixed(2)+') não bate com a Renda Bruta Período do extrato ('+F.renda_bruta_periodo+').');
+      }
+    }
+  }
 
   return {
     bank:'BRADESCO', model:M, competence, account:null,
@@ -46065,6 +46079,7 @@ function _aplicfinSugestaoSourceKey(model,siteColId,parsed){
       resgatePrincipal:'itau_cdb_di.movements.redemption_principal',
     },
     bradesco_padrao:{
+      rendMes:'bradesco_padrao.calc.rendimento_mes',
       bruto:'bradesco_padrao.resgates.renda_bruta_periodo',
       iof:'bradesco_padrao.resgates.iof',
       irrf:'bradesco_padrao.resgates.irrf',
@@ -46225,7 +46240,7 @@ async function _aplicfinSalvarMapeamento(){
   }
   const ganhos=getGanhos(eid), ganho=ganhos[pid];
   ganho._eidFlag=eid;
-  const { faltando }=_aplicfinAplicar(ganho,parsed,registros);
+  const { faltando, alertas }=_aplicfinAplicar(ganho,parsed,registros);
   setGanhos(eid,ganhos);
   _aplicfinGravarAuditoria(eid,pid,parsed,registros,arquivo).catch(e=>console.error('auditoria:',e));
   _aplicfinParsedPendente=null;
@@ -46233,6 +46248,7 @@ async function _aplicfinSalvarMapeamento(){
   closeModal('mGanhoUploadIA');
   if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
   toast(`Mapeamento salvo — ${_aplicfinMk(parsed.competence)} aplicado. Próximos meses entram sozinhos.`+(faltando.length?` ⚠ ${faltando.length} sem valor.`:''),'ok');
+  if(alertas&&alertas.length) alert('⚠ CONFIRA ANTES DE SEGUIR — '+(ganho.nome||'aplicação')+' '+_aplicfinMk(parsed.competence)+'\n\n'+alertas.join('\n\n'));
 }
 // Aplica um conjunto de linhas de mapeamento (do Supabase ou recém-criadas) a
 // ganho.dados[mk]. Devolve {aplicados, faltando}.
@@ -46240,12 +46256,34 @@ function _aplicfinAcharSource(parsed,sourceKey,produtoFiltro){
   return parsed.sources.find(s=>s.key===sourceKey&&(!s.product||!produtoFiltro||s.product===produtoFiltro))
       || parsed.sources.find(s=>s.key===sourceKey);
 }
+// ── Conferências de segurança do que foi aplicado na tela (15/10/2026) ──
+// Erro grave real (Rufato, CDB Fidelidade Bradesco 09/2026): a coluna "Aplicação" estava ligada a "Resgates → Vlr Líquido" (R$ 0,00) em vez de "Aplicações → Vlr Princ."
+// (R$ 15.500.000,08); como o Rendimento do Mês sai da diferença de saldo, a aplicação inteira foi parar em "Rendimento do Mês" (R$ 17.010.356,98 em vez de 1.510.356,90).
+// Agora o site (a) usa o rendimento calculado pelo próprio extrato quando o leitor o fornece e (b) AVISA quando o extrato tem Aplicações e a coluna Aplicação não recebeu esse valor.
+const _aplicfinFmtBR=v=>'R$ '+(Math.round(Number(v)*100)/100).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+function _aplicfinRendimentoDoExtrato(parsed){
+  const s=(parsed&&parsed.sources||[]).find(x=>/\.calc\.rendimento_mes$/.test(x.key));
+  return s&&s.value!=null?s.value:null;
+}
+function _aplicfinAlertaAplicacaoNaoLigada(parsed,mapRows,d){
+  const prodFiltro=(mapRows[0]&&mapRows[0].produto_filtro)||'';
+  const cand=(parsed.sources||[]).filter(x=>/^aplica/i.test(String(x.section||''))&&(!x.product||!prodFiltro||x.product===prodFiltro)&&/princ/i.test(x.key+' '+x.label)&&x.value!=null&&Math.abs(x.value)>0.005);
+  if(!cand.length) return null;
+  const aplicTela=parseFloat(d.aplic)||0;
+  if(Math.abs(aplicTela)>0.005){
+    if(cand.some(x=>Math.abs(x.value-aplicTela)<=1)) return null;
+    return `A coluna "Aplicação" ficou com ${_aplicfinFmtBR(aplicTela)}, mas o extrato mostra Aplicações de ${cand.map(x=>_aplicfinFmtBR(x.value)).join(' / ')} no período. Confira a ligação da coluna.`;
+  }
+  const row=mapRows.find(r=>r.site_column==='aplic');
+  const src=row?_aplicfinAcharSource(parsed,row.source_key,row.produto_filtro):null;
+  return `O extrato mostra Aplicações no período (${cand.map(x=>_aplicfinFmtBR(x.value)).join(' / ')}), mas a coluna "Aplicação" ficou ZERADA — ela está ligada a ${src?'"'+src.label+'"':'nada ("Ignorar")'}. Ligue a coluna Aplicação à seção "Aplicações" do extrato; senão a aplicação entra dentro do "Rendimento do Mês".`;
+}
 function _aplicfinAplicar(ganho,parsed,mapRows){
   const mk=_aplicfinMk(parsed.competence);
   if(!ganho.dados) ganho.dados={};
   if(!ganho.dados[mk]) ganho.dados[mk]={};
   const idsDetalhe=new Set();
-  const aplicados=[], faltando=[];
+  const aplicados=[], faltando=[], alertas=[];
   // "Rendimento do Mês"/"Perda no Mês" (rendMes/rendLiq — rendLiq costuma
   // ser renomeado pra "Perda no Mês" nessas aplicações) vindos da MESMA
   // fonte do PDF representam um único valor com sinal, não dois valores
@@ -46305,13 +46343,26 @@ function _aplicfinAplicar(ganho,parsed,mapRows){
   if(d.saldoBrutoExtrato!=null && !rendMesMapeadoAgora){
     const conf=calcSaldosGanho(ganho).confer[mk];
     if(conf){
-      const diferenca=Math.round((conf.esperado-conf.calculado)*100)/100;
+      let diferenca=Math.round((conf.esperado-conf.calculado)*100)/100;
+      // Se o próprio extrato informa o rendimento (saldo final + resgates − saldo anterior − aplicações) e a diferença de saldo da tela não bate, a diferença está
+      // carregando aplicação/resgate que não foi lançado — grava o do extrato e avisa (nunca grava o valor inflado).
+      const rendExtr=_aplicfinRendimentoDoExtrato(parsed);
+      if(rendExtr!=null&&Math.abs(diferenca-rendExtr)>1){
+        alertas.push(`"Rendimento do Mês" pela diferença de saldo seria ${_aplicfinFmtBR(diferenca)}, mas o rendimento do PRÓPRIO extrato (saldo final + resgates − saldo anterior − aplicações) é ${_aplicfinFmtBR(rendExtr)}. Foi gravado o do extrato. A diferença de ${_aplicfinFmtBR(diferenca-rendExtr)} é aplicação/resgate que a tela não recebeu.`);
+        diferenca=rendExtr;
+      }
       d.rendMes=diferenca;
       aplicados.push({col:'rendMes',value:diferenca,calculado:true});
     }
+  } else if(rendMesMapeadoAgora){
+    // Rendimento mapeado de propósito: só confere com o rendimento do próprio extrato (quando o leitor fornece) — não troca o valor.
+    const rendExtr=_aplicfinRendimentoDoExtrato(parsed), rendTela=parseFloat(d.rendMes)||0;
+    if(rendExtr!=null&&Math.abs(rendTela-rendExtr)>1) alertas.push(`"Rendimento do Mês" ficou ${_aplicfinFmtBR(rendTela)}, mas o rendimento calculado pelo próprio extrato é ${_aplicfinFmtBR(rendExtr)}. Confira a ligação da coluna.`);
   }
+  const alertaAplic=_aplicfinAlertaAplicacaoNaoLigada(parsed,mapRows,d);
+  if(alertaAplic) alertas.push(alertaAplic);
   if(ganho.docVisaoGeralNome) _lancctbFlagVisaoGeral(ganho._eidFlag||null,ganho.docVisaoGeralNome,mk);
-  return {aplicados,faltando};
+  return {aplicados,faltando,alertas};
 }
 async function _aplicfinCarregarMapeamento(eid,modelo,aplicacaoId){
   try{
@@ -46349,7 +46400,7 @@ async function _ganhoAplicarParserSemIA(eid,pid,parsed,file,statusEl){
   ganho._eidFlag=eid;
   const mapRows=await _aplicfinCarregarMapeamento(eid,parsed.model,pid);
   if(mapRows&&mapRows.length){
-    const { faltando }=_aplicfinAplicar(ganho,parsed,mapRows);
+    const { faltando, alertas }=_aplicfinAplicar(ganho,parsed,mapRows);
     setGanhos(eid,ganhos);
     _aplicfinGravarAuditoria(eid,pid,parsed,mapRows,file.name).catch(e=>console.error('auditoria:',e));
     statusEl.textContent='';
@@ -46357,6 +46408,7 @@ async function _ganhoAplicarParserSemIA(eid,pid,parsed,file,statusEl){
     if(ganho.padrao==='anual') renderGanhoAnual(eid,pid,ganho); else renderGanhoTrimestral(eid,pid,ganho);
     const prodTxt=(mapRows[0].produto_filtro)?` [${mapRows[0].produto_filtro}]`:'';
     toast(`Extrato ${parsed.bank} (sem IA)${prodTxt} — ${_aplicfinMk(parsed.competence)} atualizado.`+(faltando.length?` ⚠ ${faltando.length} coluna(s) sem valor neste mês.`:''), faltando.length?'info':'ok');
+    if(alertas&&alertas.length) alert('⚠ CONFIRA ANTES DE SEGUIR — '+(ganho.nome||'aplicação')+' '+_aplicfinMk(parsed.competence)+'\n\n'+alertas.join('\n\n'));
     return 'PROCESSADO';
   }
   _aplicfinParsedPendente={eid,pid,parsed,produto:'',arquivo:file.name};
