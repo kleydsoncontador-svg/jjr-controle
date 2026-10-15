@@ -38756,10 +38756,16 @@ async function _lancctbParsearExtratoMercadoPagoPdf(pdf){
 }
 
 // ── ShopeePay — PDF "PERÍODO EXTRATO" ──
+// Colunas: Data (DD-MM-AAAA) | Hora | Tipo de Transação | Valor da Transação (R$ com sinal; negativo = saída). Sem coluna de saldo. A "Transferência Enviada" ocupa 3 linhas
+// (descrição acima e abaixo da linha com a data): mantém só o trecho da linha da data, igual aos meses já importados (jan–jul), pra histórico e hash de deduplicação não divergirem.
+// Reconhecimento (14/10/2026, MD 2): a partir de agosto/2026 o PDF sai com o emissor "MAREE INSTITUIÇÃO DE PAGAMENTO LTDA" e SEM a palavra Shopee — antes o leitor exigia
+// "SHPP/SHOPEE" e devolvia "layout não reconhecido". Agora vale o cabeçalho do layout (PERÍODO EXTRATO + Tipo de Transação + Valor da Transação) ou qualquer um dos emissores.
 async function _lancctbParsearExtratoShopeePayPdf(pdf){
   const t1=(await _lancctbExtrairItensPagina(await pdf.getPage(1))).map(i=>i.str).join(' ');
-  if(!/PER[ÍI]ODO EXTRATO/i.test(t1)||!/(SHPP|SHOPEE)/i.test(t1)) return null;
+  if(!/PER[ÍI]ODO EXTRATO/i.test(t1)) return null;
+  if(!(/(SHPP|SHOPEE|MAREE)/i.test(t1)||(/Tipo de Transa[çc][ãa]o/i.test(t1)&&/Valor da Transa[çc][ãa]o/i.test(t1)))) return null;
   const lancamentos=[];
+  let linhasComData=0; const semValor=[];
   for(let p=1;p<=pdf.numPages;p++){
     const itens=await _lancctbExtrairItensPagina(p===1?await pdf.getPage(1):await pdf.getPage(p));
     const linhas=_lancctbAgruparLinhasPorY(itens,3);
@@ -38767,14 +38773,27 @@ async function _lancctbParsearExtratoShopeePayPdf(pdf){
       const itData=L.itens.find(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str));
       if(!itData) continue;
       const dataIso=_lancctbDataIsoFlex(itData.str); if(!dataIso) continue;
+      linhasComData++;
       const itVal=L.itens.find(i=>/^-?R\$\s*[\d.]+,\d{2}$/.test(i.str)||/^-?R\$[\d.]+,\d{2}$/.test(i.str));
-      if(!itVal) continue;
+      if(!itVal){ semValor.push(itData.str); continue; }
       const v=_lancctbParseValorFlex(itVal.str); if(!v) continue;
       const tipo=L.itens.filter(i=>i.x>260&&i.x<450&&i.str!==itVal.str).map(i=>i.str).join(' ').trim();
       lancamentos.push({ data:dataIso, historico:tipo||'Transação ShopeePay', valor_entrada:v>0?v:0, valor_saida:v<0?-v:0, documento:null });
     }
   }
-  return lancamentos.length?{lancamentos,saldoAnteriorDoc:null,saldoFinalDoc:null,layout:'ShopeePay (PDF)'}:null;
+  if(!lancamentos.length) return null;
+  // Conferências (o PDF não traz saldo nem total): toda linha com data tem que virar lançamento, e as datas têm que estar dentro do "PERÍODO EXTRATO"
+  const avisos=[];
+  if(semValor.length) avisos.push(`${semValor.length} linha(s) com data mas SEM valor lido (${semValor.slice(0,3).join(', ')}…) — NÃO importadas, confira o PDF`);
+  const mPer=t1.match(/PER[ÍI]ODO EXTRATO\s*(\d{2})\/(\d{2})\/(\d{4})\s*a\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  if(mPer){
+    const ini=`${mPer[3]}-${mPer[2]}-${mPer[1]}`, fim=`${mPer[6]}-${mPer[5]}-${mPer[4]}`;
+    const fora=lancamentos.filter(l=>l.data<ini||l.data>fim).length;
+    if(fora) avisos.push(`${fora} lançamento(s) com data FORA do período ${mPer[1]}/${mPer[2]}/${mPer[3]} a ${mPer[4]}/${mPer[5]}/${mPer[6]}`);
+  }
+  const somaE=Math.round(lancamentos.reduce((a,l)=>a+l.valor_entrada,0)*100)/100, somaS=Math.round(lancamentos.reduce((a,l)=>a+l.valor_saida,0)*100)/100;
+  const observacao=`${linhasComData} linha(s) com data → ${lancamentos.length} lançamento(s) (Σ entradas R$ ${_fmt(somaE)} / Σ saídas R$ ${_fmt(somaS)}).`+(avisos.length?' ⚠ '+avisos.join('; ')+'.':' ✓ nenhuma linha descartada.');
+  return {lancamentos,saldoAnteriorDoc:null,saldoFinalDoc:null,layout:'ShopeePay (PDF)',observacao};
 }
 
 // "Extrato de conta corrente" do Banco do Brasil (Consultas do internet
