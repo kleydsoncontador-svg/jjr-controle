@@ -24117,6 +24117,26 @@ function _lancctbSubstituirCompetenciaTexto(texto,novaCompetencia){
   }
   return `${texto} ${novaCompetencia}`.trim();
 }
+// Parcela impressa na guia de parcelamento, pro histórico do lançamento (pedido do usuário 15/10/2026: "sempre que houver nº de parcela, coloque no histórico"):
+// " parcela 32/59" (ou " parcela 7" quando a guia não traz o total — DARE de SP). Vazio quando a guia não imprime a parcela.
+function _lancctbTextoParcela(parc){
+  if(!parc||!parc.parcela) return '';
+  return ` parcela ${parc.parcela}${parc.total?'/'+parc.total:''}`;
+}
+// Atualiza a PARCELA dentro de um histórico já pronto (Regra reaproveitada no mês seguinte: "parcela 32/59" vira "parcela 33/59", igual a competência).
+//  • "parcela 32/59" / "parcela 7"  → troca pelos números desta guia;  • "32ª Parcela" → troca só a ordem;
+//  • Regra antiga, sem parcela, com "Parcelamento nº <número>" → acrescenta " parcela X/Y" logo depois do número;
+//  • qualquer outro texto (redação própria do contador) fica como está.
+function _lancctbSubstituirParcelaTexto(texto,parc){
+  if(!texto||!parc||!parc.parcela) return texto;
+  const nova=`${parc.parcela}${parc.total?'/'+parc.total:''}`;
+  let achou=false;
+  let t=String(texto).replace(/(\bparcela\s+)\d{1,3}(?:\s*\/\s*\d{1,3})?(?!\d)(?![\/.\-]\d)/gi,(m,pre)=>{ achou=true; return pre+nova; });
+  t=t.replace(/\b\d{1,3}(\s*[ªº]\s*parcela)/gi,(m,suf)=>{ achou=true; return parc.parcela+suf; });
+  if(achou||/parcela(?!mento)/i.test(t)||!parc.numero) return t;
+  const num=String(parc.numero).replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+  return t.replace(new RegExp('(Parcelamento\\s+(?:n[º°o.]*\\s*)?'+num+')(?![\\w.\\-\\/])','i'),'$1'+_lancctbTextoParcela(parc));
+}
 // Sugestões de PDF pra regra que está sendo criada a partir de um
 // lançamento concreto (ver _lancctbRegraExtratoAlvo) — busca pelo mês do
 // próprio lançamento. Não bloqueia o resto do modal (roda em paralelo,
@@ -24302,7 +24322,7 @@ async function _lancctbUsarSugestaoTributo(idx){
   // legível em vez do nome do arquivo cru).
   const textoHist=darf&&darf.itens&&darf.itens.length===1
     ? textoHistoricoTributo(darf.itens[0].denominacao,darf.itens[0].codigo)
-    : (parcPdf?`Pagamento ref. Parcelamento nº ${parcPdf.numero}${competenciaPdf?' '+competenciaPdf:''}`:`Pagamento ref. ${nomeLegivel.nomeCompleto}${competenciaPdf?' '+competenciaPdf:''}`.trim());
+    : (parcPdf?`Pagamento ref. Parcelamento nº ${parcPdf.numero}${_lancctbTextoParcela(parcPdf)}${competenciaPdf?' '+competenciaPdf:''}`:`Pagamento ref. ${nomeLegivel.nomeCompleto}${competenciaPdf?' '+competenciaPdf:''}`.trim());
   if(_lancctbRateioAtivo&&_lancctbRateioRowIds.length){
     const rowIdVazia=_lancctbRateioRowIds.find(id=>!document.getElementById('lancctbRateioHistorico_'+id)?.value);
     const rowId=rowIdVazia!==undefined?rowIdVazia:_lancctbRateioRowIds[0];
@@ -31374,8 +31394,8 @@ async function _lancctbProcessarTributos(){
         const c0=(comp&&comp[0]&&comp[0].codigo&&comp[0].denominacao)?comp[0]:null;
         const nomeItem=c0?String(c0.denominacao).split(' - ')[0].trim():nomeGuia;
         const resumo1=c0?`${nomeItem} cód. ${c0.codigo}${compet1?' ref. '+compet1:''}`:`${nomeGuia}${compet1?' ref. '+compet1:''}`;
-        // Com nº do parcelamento: "Pagamento ref. Parcelamento nº 62.044499300.53 09/2026" (sem a ordem da parcela, que mudaria todo mês e ficaria velha numa Regra reaproveitada).
-        const histItem=parc1?`Pagamento ref. Parcelamento nº ${parc1.numero}${compet1?' '+compet1:''}`:(c0?`Pagamento ref. ${nomeItem} cód. ${c0.codigo}${compet1?' ref. '+compet1:''}`:`Pagamento ref. ${nomeGuia}${compet1?' '+compet1:''}`);
+        // Com nº do parcelamento: "Pagamento ref. Parcelamento nº 62.044499300.53 parcela 32/59 09/2026". A Regra reaproveitada nos meses seguintes atualiza a parcela sozinha (_lancctbSubstituirParcelaTexto).
+        const histItem=parc1?`Pagamento ref. Parcelamento nº ${parc1.numero}${_lancctbTextoParcela(parc1)}${compet1?' '+compet1:''}`:(c0?`Pagamento ref. ${nomeItem} cód. ${c0.codigo}${compet1?' ref. '+compet1:''}`:`Pagamento ref. ${nomeGuia}${compet1?' '+compet1:''}`);
         const item1={ codigo:c0?c0.codigo:null, denominacao:nomeItem, valor:Math.round(valor*100)/100, resumo:resumo1, competencia:compet1||null, gatilho:gatilhoGuia, historico:histItem };
         const { error: eU1 } = await _supaClient.from('lancamentos_extrato').update({
           historico_bancario: `[${resumo1}] ${semMarca1}`.trim(),
@@ -31394,7 +31414,8 @@ async function _lancctbProcessarTributos(){
     // salvo em historico_fixo, em vez de gravar o texto travado no mês da
     // criação da regra pra sempre.
     const competenciaEsteMes=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao);
-    const historicoFixoAtualizado=regra.historico_fixo?_lancctbSubstituirCompetenciaTexto(regra.historico_fixo,competenciaEsteMes):null;
+    let historicoFixoAtualizado=regra.historico_fixo?_lancctbSubstituirCompetenciaTexto(regra.historico_fixo,competenciaEsteMes):null;
+    if(historicoFixoAtualizado&&_parcG) historicoFixoAtualizado=_lancctbSubstituirParcelaTexto(historicoFixoAtualizado,_parcG); // guia de parcelamento: a parcela também muda todo mês
 
     const filhas=linhasRateioPorRegra[regra.id]||[];
     let linhas;
