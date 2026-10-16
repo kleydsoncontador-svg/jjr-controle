@@ -32140,6 +32140,16 @@ function _lancctbRegistroMudarMes(v){
 }
 
 let _lancctbRegistroCache=null; // {eid, html} — conteúdo anterior para exibição imediata
+// "Processar Fluxo" e "Dividir Parcelas via Fluxo" só fazem sentido pra empresa que TEM Fluxo de Caixa (pedido do usuário 16/10/2026): checa se há algum lançamento em
+// fluxo_caixa_lancamentos da empresa. Se a consulta falhar (rede), considera "tem" — nunca esconde o botão por causa de erro.
+const _lancctbTemFluxoCache={};
+async function _lancctbAtualizarTemFluxo(eid){
+  try{
+    const { count, error } = await _supaClient.from('fluxo_caixa_lancamentos').select('id',{count:'exact',head:true}).eq('empresa_eid',eid);
+    if(error) return;
+    _lancctbTemFluxoCache[String(eid)]=(count||0)>0;
+  }catch(e){}
+}
 async function renderLancctbRegistroContabil(){
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
@@ -32153,9 +32163,12 @@ async function renderLancctbRegistroContabil(){
     _lancctbCarregando(el);
   }
 
-  const { data: agencias } = await _supaClient.from('agencias_bancarias')
-    .select('id,banco_nome,agencia,conta_corrente,conta_contabil_id,plano_contas(numero_conta,classificacao,descricao)')
-    .eq('empresa_eid',eid).eq('ativo',true).order('banco_nome');
+  const [{ data: agencias }] = await Promise.all([
+    _supaClient.from('agencias_bancarias')
+      .select('id,banco_nome,agencia,conta_corrente,conta_contabil_id,plano_contas(numero_conta,classificacao,descricao)')
+      .eq('empresa_eid',eid).eq('ativo',true).order('banco_nome'),
+    _lancctbAtualizarTemFluxo(eid),
+  ]);
   if(!agencias||!agencias.length){
     el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:40px 20px">Cadastre uma conta em "Agência Bancária" antes de ver o registro contábil.</div>`;
     return;
@@ -32878,7 +32891,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <select class="si" data-filtro="registro-status" onchange="_lancctbRegistroStatus=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesStatus}</select>
   </div>
   <div class="action-bar-sticky">
-      <button class="btn bo bsm" id="lancctbProcessarFluxoBtn" onclick="_lancctbProcessarFluxo()" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo) e, quando o Fluxo indica NF + parcela e essa NF está importada, já amarra a NF (inclusive pagamento aglutinado aberto em vários pagamentos do Fluxo). Não aplica Regra — o resto fica pro FOPAG, Tributos e Pagamentos.">🔗 Processar Fluxo</button>
+      ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbProcessarFluxoBtn" onclick="_lancctbProcessarFluxo()" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo) e, quando o Fluxo indica NF + parcela e essa NF está importada, já amarra a NF (inclusive pagamento aglutinado aberto em vários pagamentos do Fluxo). Não aplica Regra — o resto fica pro FOPAG, Tributos e Pagamentos.">🔗 Processar Fluxo</button>`:''}
       <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal. Também aplica as Regras com gatilho de Fluxo de Caixa.">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
       ${LANCCTB_EIDS_RECEB_SO_REGRAS.includes(String(_lancctbEidAtual))?`<button class="btn bo bsm" id="lancctbProcessarRecebSoRegrasBtn" onclick="_lancctbProcessarFonteRegistro('recebimentos_so_regras')" title="Só pra esta empresa (pedido do usuário 15/09/2026): roda o matching pra pendências de RECEBIMENTO usando SÓ as Regras por histórico — nunca tenta amarrar com Comprovante nem Nota Fiscal.">🎯 Processar Recebimentos (só Regras)</button>`:''}
@@ -32886,7 +32899,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       ${String(_lancctbEidAtual)==='4'?`<button class="btn bo bsm" id="lancctbAcessoRufatoCteBtn" onclick="_lancctbConcederAcessoPastaRufatoCte()" title="Concede acesso 1x à pasta de CT-es da Rufato (fica salvo no navegador).">🔑 CT-es Rufato</button><button class="btn bo bsm" id="lancctbProcessarCtesBtn" onclick="_lancctbProcessarCtesRufato()" title="SÓ Rufato: busca na pasta 'Faturas com Relação de CTe' do mês o PDF da transportadora e abre 1 linha de débito (conta 10001) por CT-e, com o número do CT-e no histórico.">🚚 Processar CT-es</button>`:''}
       <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
-      <button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>
+      ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) no período filtrado — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis deste período, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
   </div>
