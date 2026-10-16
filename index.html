@@ -16289,13 +16289,28 @@ const _FLASH_MODELOS=[{
     return null;
   }
 }];
+// Modelo 2 (Adelpe jan–jun/2026): "Liquidação · Nome · CPF/CNPJ · Categoria · Número · Observações · Pago · [Tipo] · Portador". É exclusivo da Flash (sem coluna Banco → não filtra nada).
+// Lido POR POSIÇÃO (A–G): o cabeçalho de alguns meses está fora de ordem em relação aos dados (ex.: março). Portador, quando existe, só é informativo.
+_FLASH_MODELOS.push({
+  id:'flash_liquidacao', semBanco:true,
+  nome:'Flash exclusivo — Liquidação · Nome · CPF/CNPJ · Categoria · Número · Observações · Pago · Portador (sem coluna Banco)',
+  detectar(m){
+    for(let i=0;i<Math.min(m.length,25);i++){
+      const r=m[i]||[]; if(!/^liquid/.test(_flashChave(r[0]).toLowerCase())||!/^nome/.test(_flashChave(r[1]).toLowerCase())) continue;
+      const cols={data:0,fornecedor:1,cnpj:2,categoria:3,nota:4,historico:5,valor:6};
+      r.forEach((c,j)=>{ if(/^portador/.test(_flashChave(c).toLowerCase())) cols.banco=j; });
+      return {cab:i,cols};
+    }
+    return null;
+  }
+});
 function _flashExtrairLinhas(matriz,det){
   const c=det.cols, out=[];
   for(let i=det.cab+1;i<matriz.length;i++){
     const r=matriz[i]||[], txt=j=>(j==null||r[j]==null)?'':String(r[j]).replace(/\s+/g,' ').trim();
     const dataStr=_flashData(c.data!=null?r[c.data]:''), valor=_flashValor(c.valor!=null?r[c.valor]:'');
     if(!dataStr||!isFinite(valor)) continue; // cabeçalho repetido, total, rodapé
-    out.push({linha:i+1,dataStr,fornecedor:txt(c.fornecedor),cnpjCol:txt(c.cnpj),nota:txt(c.nota),categoria:txt(c.categoria),historico:txt(c.historico),valor:Math.round(valor*100)/100,banco:txt(c.banco)});
+    out.push({linha:i+1,dataStr,fornecedor:txt(c.fornecedor),cnpjCol:txt(c.cnpj),nota:txt(c.nota),categoria:txt(c.categoria).replace(/^[-–—.\s]+$/,''),historico:txt(c.historico),valor:Math.round(valor*100)/100,banco:txt(c.banco)});
   }
   return out;
 }
@@ -16305,7 +16320,7 @@ function _flashNumNf(x){ return String(x==null?'':x).replace(/\D/g,'').replace(/
 function _flashNfNumeros(t){
   const out=[], add=n=>{ n=_flashNumNf(n); if(n&&n.length<=9&&!out.includes(n)) out.push(n); };
   const seqs=String(t.nota||'').match(/\d+/g); if(seqs) add(seqs.reduce((a,b)=>b.length>a.length?b:a));
-  const h=String(t.historico||''), re=/(?:\bN\s*F\s*C\s*-?\s*e|\bN\s*F\s*S\s*-?\s*e|\bN\s*F\s*-?\s*e|\bNF|\bNOTA(?:\s+FISCAL)?)\b[^\d\n]{0,8}?(\d{1,9})(?!\d)/gi;
+  const h=String(t.historico||''), re=/(?:\bN\s*F\s*C\s*-?\s*e?|\bN\s*F\s*S\s*-?\s*e?|\bN\s*F\s*-?\s*e?|\bNOTA(?:\s+FISCAL)?)(?![A-Za-z])[^\d\n]{0,8}?(\d{1,9})(?!\d)/gi;
   let m; while((m=re.exec(h))) add(m[1]);
   return out;
 }
@@ -16523,22 +16538,24 @@ async function processarConvFlash(eid){
       toast('Modelo de relatório não reconhecido.','err'); _convFlashResetBotao(eid); return;
     }
     _convFlashBancosVistos[eid]=lido.bancos;
-    const selecionadas=_flashFiltrarPorBanco(lido.linhas,filtro);
-    const outros=Object.keys(lido.bancos).filter(b=>!_flashBancoCasa(b,filtro));
+    const semBanco=!!lido.modelo.semBanco; // modelo exclusivo da Flash: todas as linhas entram
+    const selecionadas=semBanco?lido.linhas:_flashFiltrarPorBanco(lido.linhas,filtro);
+    const outros=semBanco?[]:Object.keys(lido.bancos).filter(b=>!_flashBancoCasa(b,filtro));
     if(!selecionadas.length){
       const dl=document.getElementById('convFlashBancosList_'+eid); // sugere os bancos do arquivo no campo do filtro, sem refazer a tela (mantém o arquivo escolhido)
       if(dl) dl.innerHTML=Object.keys(lido.bancos).map(b=>'<option value="'+esc(b)+'">').join('');
       _convFlashSetStatus(eid,'Nenhuma linha com Banco contendo "'+filtro+'". Bancos encontrados no arquivo: '+Object.keys(lido.bancos).map(b=>b+' ('+lido.bancos[b]+')').join(', ')+'.','err');
       toast('Nenhuma linha do banco informado.','err'); _convFlashResetBotao(eid); return;
     }
-    if(filtro!==cfg.bancoFiltro){ setConvFlashConfig(eid,{...cfg,bancoFiltro:filtro}); } // "ficar como padrão"
+    if(!semBanco&&filtro!==cfg.bancoFiltro){ setConvFlashConfig(eid,{...cfg,bancoFiltro:filtro}); } // "ficar como padrão"
     const transacoes=_flashMontarTransacoes(selecionadas), mesFechamento=_convFlashMesFechamento(transacoes);
     await _convNfCarregar(eid);
     _flashNfSugerirTodas(eid,transacoes);
     const regras=getConvFlashRegras(eid), pend=[];
     transacoes.forEach(t=>{ if(!_flashClassificar(t,regras)) pend.push({desc:t.descricao,sinal:t.valor<0?'credito':'debito'}); });
     const total=Math.round(transacoes.reduce((s,t)=>s+t.valor,0)*100)/100, comNf=transacoes.filter(t=>t._nfSug).length;
-    const resumo=lido.modelo.id+': '+lido.linhas.length+' linha(s) no arquivo, '+transacoes.length+' da Flash (R$ '+_fmt(total)+')'+(outros.length?' — ignoradas: '+outros.map(b=>b+' ('+lido.bancos[b]+')').join(', '):'')+' — '+comNf+' com NF encontrada.';
+    const estranhos=semBanco?selecionadas.filter(l=>l.banco&&!/flash/i.test(l.banco)):[], contEst={}; estranhos.forEach(l=>{ contEst[l.banco]=(contEst[l.banco]||0)+1; });
+    const resumo=lido.modelo.id+': '+lido.linhas.length+' linha(s) no arquivo, '+transacoes.length+' da Flash (R$ '+_fmt(total)+')'+(outros.length?' — ignoradas: '+outros.map(b=>b+' ('+lido.bancos[b]+')').join(', '):'')+(estranhos.length?' — ATENÇÃO: '+estranhos.length+' linha(s) com Portador que não parece Flash ('+Object.keys(contEst).map(b=>b+' '+contEst[b]).join(', ')+') entraram mesmo assim':'')+' — '+comNf+' com NF encontrada.';
     if(pend.length){
       _convFlashPendentes[eid]={mesFechamento,transacoes,descricoes:pend};
       _convFlashRegrasSessao[eid]=[];
