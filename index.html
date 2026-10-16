@@ -7077,6 +7077,46 @@ function copiarCnpjVisaoGeral(td,cnpj){
   catch(e){ _copiarTextoFallback(cnpj); ok(); }
 }
 function _copiarTextoFallback(t){ const a=document.createElement('textarea'); a.value=t; a.style.cssText='position:fixed;opacity:0'; document.body.appendChild(a); a.select(); try{document.execCommand('copy');}catch(e){} a.remove(); }
+// Prazo do fechamento da empresa na competência — MESMA regra do Cronograma (Simples/Presumido/Isenta: último dia do mês seguinte; Lucro Real: dia 15; configurável).
+function _vgPrazoFech(e,compFech,cfg){
+  try{ const regra=cfg.regras.fech[_cronGrupo(_cronRegimeEm(e,compFech))]; return regra?_cronPrazo(compFech,regra):null; }catch(err){ return null; }
+}
+// Filtros FOPAG/Fiscal/Financeiro/Balancete da Visão geral ganham as DATAS DE VENCIMENTO das empresas ainda não publicadas (pedido do usuário 16/10/2026: "filtrar qual balancete
+// vence primeiro"): "Atrasadas" + uma opção por data (ordem crescente, com a quantidade de empresas). Montado a cada desenho da tabela, a partir das empresas do mês (sem os outros filtros).
+const _VG_CAMPOS_FECH=[['fopag','vgFopag'],['fiscal','vgFiscal'],['financeiro','vgFinanceiro'],['balancete','vgBalancete']];
+function _vgPopularFiltrosVencimento(fech,cfg,hoje){
+  const comp=String(fech||'').slice(0,7);
+  const visiveis=S.emps().filter(e=>{
+    if(e.entrada&&e.entrada.substring(0,7)>fech) return false;
+    if(e.dataSaida&&e.dataSaida<=fech&&e.dataSaida!=='') return false;
+    if(e.ultimoFechamento&&e.ultimoFechamento.substring(0,7)<fech) return false;
+    if(_empresaGlobal&&String(e.eid)!==String(_empresaGlobal)) return false;
+    return true;
+  });
+  const prazos=new Map(visiveis.map(e=>[e,_vgPrazoFech(e,comp,cfg)]));
+  _VG_CAMPOS_FECH.forEach(([campo,idMaster])=>{
+    const cont={}; let atrasadas=0;
+    visiveis.forEach(e=>{
+      if((((e.fechMes||{})[fech]||{})[campo]||'')!=='') return; // só quem ainda não publicou tem vencimento a cobrar
+      const pz=prazos.get(e); if(!pz) return;
+      cont[pz]=(cont[pz]||0)+1; if(pz<hoje) atrasadas++;
+    });
+    const datas=Object.keys(cont).sort();
+    let ops='';
+    if(datas.length){
+      ops='<optgroup label="Vencimento (não publicados)">'+(atrasadas?`<option value="atraso">Atrasadas · ${atrasadas}</option>`:'')
+        +datas.map(d=>{ const dd=_cronDias(hoje,d), br=_cronBRcurto(d); return `<option value="venc:${d}">${dd<0?br+' ⚠'+(-dd)+'d':dd===0?'hoje '+br:br} · ${cont[d]}</option>`; }).join('')+'</optgroup>';
+    }
+    [idMaster,idMaster+'Col'].forEach(id=>{
+      const sel=document.getElementById(id); if(!sel) return;
+      const atual=sel.value;
+      sel.querySelectorAll('optgroup').forEach(g=>g.remove());
+      if(ops) sel.insertAdjacentHTML('beforeend',ops);
+      sel.value=atual; // se a data escolhida deixou de existir (ex.: todos já publicaram), volta pra "Todos"
+      sel.title=ops?'Inclui as datas de vencimento das empresas ainda não publicadas (a 1ª data da lista é a que vence primeiro)':'';
+    });
+  });
+}
 function renderEmpsTable(){
   _vgSincronizarFiltrosColuna();
   const idFilt  = (document.getElementById('vgIdCol')?.value||'').trim();
@@ -7085,11 +7125,29 @@ function renderEmpsTable(){
   const respFilt= document.getElementById('vgResp')?.value||'';
   const stFilt  = document.getElementById('vgStatus')?.value||'';
   const tribFilt= document.getElementById('vgTrib')?.value||'';
+  const fech    = S.fechAtual();
+  // Regras de prazo do Cronograma (definidas no bloco do Cronograma, mais abaixo no arquivo) — se não estiverem disponíveis, a linha miúda/opções de vencimento simplesmente não aparecem
+  const _vgCronOk=(typeof _cronCfg==='function'&&typeof _cronPrazo==='function'&&typeof _cronGrupo==='function'&&typeof _cronRegimeEm==='function'&&typeof _cronDias==='function'&&typeof _cronDataLocal==='function');
+  const _vgCfgCron=_vgCronOk?_cronCfg():null, _vgHoje=_vgCronOk?_cronHoje():'', _vgCompFech=String(fech||'').slice(0,7);
+  if(_vgCronOk){ try{ _vgPopularFiltrosVencimento(fech,_vgCfgCron,_vgHoje); }catch(err){ console.warn('opções de vencimento dos filtros:',err); } }
+  // lidos DEPOIS de popular as opções de vencimento (o <select> pode ter sido recriado)
   const fopagFilt = document.getElementById('vgFopag')?.value||'';
   const fiscalFilt = document.getElementById('vgFiscal')?.value||'';
   const financeiroFilt = document.getElementById('vgFinanceiro')?.value||'';
   const balFilt = document.getElementById('vgBalancete')?.value||'';
-  const fech    = S.fechAtual();
+  // Passa no filtro da coluna? ok/na/sm/vazio como antes; 'atraso' = ainda não publicou e o prazo já passou; 'venc:AAAA-MM-DD' = ainda não publicou e vence nessa data
+  const passaFech=(e,campo,filt)=>{
+    if(!filt) return true;
+    const v=(((e.fechMes||{})[fech]||{})[campo])||'';
+    if(filt==='ok'||filt==='na'||filt==='sm') return v===filt;
+    if(filt==='vazio') return v==='';
+    if(filt==='atraso'||filt.startsWith('venc:')){
+      if(v!=='') return false;
+      const pz=_vgCronOk?_vgPrazoFech(e,_vgCompFech,_vgCfgCron):null; if(!pz) return false;
+      return filt==='atraso'?pz<_vgHoje:pz===filt.slice(5);
+    }
+    return true;
+  };
 
   let emps = S.emps().filter(e=>{
     // Hide companies that entered after current month
@@ -7118,34 +7176,7 @@ function renderEmpsTable(){
       const tribAtual=(e.tribMes&&e.tribMes[fech])||e.reg||'';
       if(tribAtual!==tribFilt) return false;
     }
-    if(fopagFilt){
-      const fp = (e.fechMes||{})[fech]?.fopag||'';
-      if(fopagFilt==='ok' && fp!=='ok') return false;
-      if(fopagFilt==='na' && fp!=='na') return false;
-      if(fopagFilt==='sm' && fp!=='sm') return false;
-      if(fopagFilt==='vazio' && fp!=='') return false;
-    }
-    if(fiscalFilt){
-      const fi = (e.fechMes||{})[fech]?.fiscal||'';
-      if(fiscalFilt==='ok' && fi!=='ok') return false;
-      if(fiscalFilt==='na' && fi!=='na') return false;
-      if(fiscalFilt==='sm' && fi!=='sm') return false;
-      if(fiscalFilt==='vazio' && fi!=='') return false;
-    }
-    if(financeiroFilt){
-      const fn = (e.fechMes||{})[fech]?.financeiro||'';
-      if(financeiroFilt==='ok' && fn!=='ok') return false;
-      if(financeiroFilt==='na' && fn!=='na') return false;
-      if(financeiroFilt==='sm' && fn!=='sm') return false;
-      if(financeiroFilt==='vazio' && fn!=='') return false;
-    }
-    if(balFilt){
-      const bal = (e.fechMes||{})[fech]?.balancete||'';
-      if(balFilt==='ok' && bal!=='ok') return false;
-      if(balFilt==='na' && bal!=='na') return false;
-      if(balFilt==='sm' && bal!=='sm') return false;
-      if(balFilt==='vazio' && bal!=='') return false;
-    }
+    if(!passaFech(e,'fopag',fopagFilt)||!passaFech(e,'fiscal',fiscalFilt)||!passaFech(e,'financeiro',financeiroFilt)||!passaFech(e,'balancete',balFilt)) return false;
     return true;
   }).sort((a,b)=>Number(a.eid||0)-Number(b.eid||0));
   if(_empresaGlobal)emps=emps.filter(e=>String(e.eid)===String(_empresaGlobal));
@@ -7154,10 +7185,6 @@ function renderEmpsTable(){
   const tbody = document.getElementById('vgBody');
   if(!tbody) return;
   tbody.innerHTML = '';
-
-  // Regras de prazo do Cronograma (definidas no bloco do Cronograma, mais abaixo no arquivo) — se não estiverem disponíveis, a linha miúda simplesmente não aparece
-  const _vgCronOk=(typeof _cronCfg==='function'&&typeof _cronPrazo==='function'&&typeof _cronGrupo==='function'&&typeof _cronRegimeEm==='function'&&typeof _cronDias==='function'&&typeof _cronDataLocal==='function');
-  const _vgCfgCron=_vgCronOk?_cronCfg():null, _vgHoje=_vgCronOk?_cronHoje():'', _vgCompFech=String(fech||'').slice(0,7);
 
   emps.forEach(e=>{
     const fs = e.fechamentoStatus||{tipo:'ativo'};
@@ -7186,8 +7213,7 @@ function renderEmpsTable(){
     const fechado  = bal==='ok'||bal==='na';
 
     // Prazo do fechamento desta empresa na competência (MESMA regra do Cronograma: Simples/Presumido/Isenta = último dia do mês seguinte, Lucro Real = dia 15)
-    let prazoFech=null;
-    if(_vgCronOk){ try{ const regraF=_vgCfgCron.regras.fech[_cronGrupo(_cronRegimeEm(e,_vgCompFech))]; if(regraF) prazoFech=_cronPrazo(_vgCompFech,regraF); }catch(err){} }
+    const prazoFech=_vgCronOk?_vgPrazoFech(e,_vgCompFech,_vgCfgCron):null;
     // Linha miúda sob o check: marcado → data em que foi marcado; vazio → quando vence e, se passou, há quantos dias; N/A → nada
     const infoFech = (val, campo) => {
       if(!_vgCronOk||val==='na') return '';
