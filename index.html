@@ -35806,6 +35806,29 @@ function _lancctbFluxoSelecionarConta(id){
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
+// Tira todos os filtros do Fluxo (menos o mês) — usado pelo botão da tela vazia
+function _lancctbFluxoMostrarTodos(){
+  _lancctbFluxoContaSel=''; _lancctbFluxoStatus=''; _lancctbFluxoPortNegocioFiltro='';
+  _lancctbFluxoFiltroDescricao=''; _lancctbFluxoFiltroCliente=''; _lancctbFluxoFiltroCnpj=''; _lancctbFluxoFiltroNumero='';
+  _lancctbFluxoFiltroUnidade=''; _lancctbFluxoFiltroDescconta=''; _lancctbFluxoFiltroData=''; _lancctbFluxoFiltroPortNomTxt=''; _lancctbFluxoFiltroValor='';
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
+}
+// Linhas que o botão antigo "Associar" deixou com status 'associado' SEM estarem ligadas a nenhuma linha do extrato (só tinham sido amarradas a um banco): voltam pra
+// 'nao_associado' mantendo o banco. Só mexe em status_associado; conta_bancaria_id e tudo o mais ficam como estão. Pedido do usuário 16/10/2026.
+async function _lancctbFluxoLiberarSoBanco(){
+  const eid=_lancctbEidAtual;
+  const { count, error } = await _supaClient.from('fluxo_caixa_lancamentos').select('id',{count:'exact',head:true})
+    .eq('empresa_eid',eid).eq('status_associado','associado').is('lancamento_extrato_id',null);
+  if(error){ toast('Erro ao conferir: '+error.message,'err'); return; }
+  if(!count){ toast('Nenhuma linha nessa situação — nada a liberar.','ok'); return; }
+  if(!confirm(count+' linha(s) do Fluxo estão marcadas como "associado" mas NÃO estão ligadas a nenhuma linha do extrato (foram só amarradas a um banco).\n\nVou voltar o status delas para "não associado". O banco em que foram amarradas continua o mesmo, e nenhuma linha é apagada.\n\nConfirmar?')) return;
+  const { error: e2 } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado'})
+    .eq('empresa_eid',eid).eq('status_associado','associado').is('lancamento_extrato_id',null);
+  if(e2){ toast('Erro ao liberar: '+e2.message,'err'); return; }
+  toast(count+' linha(s) liberada(s) — voltaram para "não associado", com o mesmo banco.','ok');
+  renderLancctbFluxoCaixa();
+}
 function _lancctbFluxoMudarMes(v){ _lancctbFluxoMes=v; _lancctbFluxoPagina=0; renderLancctbFluxoCaixa(); }
 let _lancctbFluxoFiltroTimer=null;
 function _lancctbFluxoFiltroDebounced(campo,v){
@@ -35920,6 +35943,7 @@ async function renderLancctbFluxoCaixa(){
     </div>
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbFluxoExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" title="Linhas que ficaram 'associado' só por terem sido amarradas a um banco (sem ligação com o extrato) voltam para 'não associado', mantendo o banco" onclick="_lancctbFluxoLiberarSoBanco()">🔓 Liberar só-banco</button>
       <button class="btn bo bsm" title="Corrige o número de documento/NF de lançamentos JÁ importados que vieram com letras/prefixo junto (ex: AG893503 → 893503) — não mexe em quem já está limpo" onclick="_lancctbFluxoLimparNumeros()">🧹 Corrigir números</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbFluxoConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes lançamentos</button>
       <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Excel</button>
@@ -35934,7 +35958,7 @@ async function renderLancctbFluxoCaixa(){
       <option value="">— Selecione a conta —</option>
       ${(agencias||[]).map(a=>`<option value="${a.id}">${esc(_lancctbNomeBancoExibicao(a.banco_nome))} Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('')}
     </select>
-    <button class="btn bp bsm" onclick="associarLancctbFluxoEmLote()">✓ Associar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'}</button>
+    <button class="btn bp bsm" title="Só diz que estas linhas devem ser casadas com ESTE banco. Nenhuma linha some da lista — a coluna Conta passa a mostrar o banco." onclick="associarLancctbFluxoEmLote()">✓ Amarrar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'} ao banco</button>
     <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="desassociarLancctbFluxoEmLote()">↩ Desassociar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'}</button>
     <button class="btn bp bsm" onclick="abrirLancctbFluxoNoExtrato()" title="Escolher 1 extrato pendente e dividir nas linhas do Fluxo selecionadas">🔗 Abrir no extrato</button>
     <button class="btn bo bsm" onclick="_lancctbFluxoSelecionarTodosMode=false;_lancctbFluxoSelecionados.clear();_lancctbFluxoSelValores.clear();renderLancctbFluxoCaixa()">✕ Limpar seleção</button>
@@ -35975,7 +35999,10 @@ async function renderLancctbFluxoCaixa(){
     </tr></thead>
     <tbody>`;
   if(!linhas||!linhas.length){
-    html+=`<tr><td colspan="13" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento de fluxo de caixa importado ainda.</td></tr>`;
+    const _fxTemFiltro=!!(_lancctbFluxoContaSel||_lancctbFluxoStatus||_lancctbFluxoPortNegocioFiltro||_lancctbFluxoMes||_lancctbFluxoFiltroDescricao||_lancctbFluxoFiltroCliente||_lancctbFluxoFiltroCnpj||_lancctbFluxoFiltroNumero||_lancctbFluxoFiltroUnidade||_lancctbFluxoFiltroDescconta||_lancctbFluxoFiltroData||_lancctbFluxoFiltroPortNomTxt||(_lancctbFluxoFiltroValor||'').trim());
+    html+=_fxTemFiltro
+      ?`<tr><td colspan="13" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento com os filtros atuais${_lancctbFluxoMes?' (mês '+esc(_lancctbFluxoMes.split('-').reverse().join('/'))+')':''}${_lancctbFluxoStatus?' (status: '+(_lancctbFluxoStatus==='associado'?'associados':'não associados')+')':''}${_lancctbFluxoContaSel?' (banco selecionado)':''}.<br><span style="font-size:12px">Os lançamentos continuam gravados — é só o filtro que está escondendo.</span><br><button class="btn bo bsm" style="margin-top:10px" onclick="_lancctbFluxoMostrarTodos()">Mostrar todos (tirar filtros de status, banco e texto)</button></td></tr>`
+      :`<tr><td colspan="13" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento de fluxo de caixa importado ainda.</td></tr>`;
   } else {
     linhas.forEach(l=>{
       const valor=l.valor_saida||l.valor_entrada;
@@ -36056,21 +36083,26 @@ async function associarLancctbFluxoEmLote(){
 
   if(ids.length===0){ toast('Nenhum lançamento para associar.','err'); return; }
 
+  // Pedido do usuário 16/10/2026 (Adelpe): "quando eu associo a um banco é apenas para dizer que só deve ser amarrado naquele banco, não é pra sumir nada".
+  // Amarrar a um banco SÓ grava a conta (restrição do casamento: a linha só vale pra essa conta). O status continua como estava — 'associado' significa "casada com uma linha
+  // do extrato" (quem grava é o casamento/Processar Fluxo, junto com lancamento_extrato_id). Antes este botão gravava status 'associado' também: a linha saía do filtro
+  // "Não associados" (tela vazia) e deixava de ser candidata nos motores que só olham 'nao_associado'.
   const { error } = await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('fluxo_caixa_lancamentos')
-    .update({conta_bancaria_id:contaId,status_associado:'associado'})
+    .update({conta_bancaria_id:contaId})
     .in('id',lote));
 
-  if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
+  if(error){ toast('Erro ao amarrar ao banco: '+error.message,'err'); return; }
+  const nomeBancoAmarrado=_lancctbNomeBancoExibicao(_lancctbUltimasAgencias?.find(a=>String(a.id)===String(contaId))?.banco_nome)||'banco';
 
   // Criar regra automática para esse PORT/NEGÓCIO
   if(primeiroLancamento?.port_nom){
     const nomeRegra=`PORT: ${primeiroLancamento.port_nom} → ${_lancctbUltimasAgencias?.find(a=>String(a.id)===String(contaId))?.banco_nome||''}`;
     const { error: erroRegra } = await _supaClient.from('fluxo_caixa_regras')
       .upsert({empresa_eid:_lancctbEidAtual,port_negocio:primeiroLancamento.port_nom,conta_bancaria_id:contaId,nome_regra:nomeRegra},{onConflict:'empresa_eid,port_negocio'});
-    if(!erroRegra) toast(`${ids.length} lançamento(s) associado(s) — regra criada para ${primeiroLancamento.port_nom}`,'ok');
-    else toast(`${ids.length} lançamento(s) associado(s)`,'ok');
+    if(!erroRegra) toast(`${ids.length} lançamento(s) amarrado(s) a ${nomeBancoAmarrado} — continuam na lista; regra criada para ${primeiroLancamento.port_nom}`,'ok');
+    else toast(`${ids.length} lançamento(s) amarrado(s) a ${nomeBancoAmarrado} — continuam na lista`,'ok');
   } else {
-    toast(`${ids.length} lançamento(s) associado(s)`,'ok');
+    toast(`${ids.length} lançamento(s) amarrado(s) a ${nomeBancoAmarrado} — continuam na lista`,'ok');
   }
 
   _lancctbFluxoSelecionarTodosMode=false;
