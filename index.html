@@ -40972,6 +40972,98 @@ async function _lancctbParsearExtratoCoraPdf(pdf){
     saldoAnteriorDoc:saldoInicialDoc, saldoFinalDoc,
     observacao:` Ag ${agencia||''} Cc ${conta||''} · período ${periodoIni.split('-').reverse().join('/')} a ${periodoFim.split('-').reverse().join('/')}.`+(avisos.length?' ⚠ '+avisos.join('; ')+'.':' ✓ totais de entradas/saídas impressos conferem com a soma dos lançamentos.') };
 }
+// ─── Caixa Econômica Federal — extrato de conta corrente (PDF com texto nativo; pedido do usuário 16/10/2026, Kajuna #238 ag 05070 cc 000578480177-1).
+// Colunas: Data de lançamento · Data de movimento · Documento · Histórico · Valor (R$) (com "-" pras saídas) · Saldo (R$). A linha "SALDO DIA" (valor 0,00) NUNCA é lançamento.
+// Confere a continuidade do saldo linha a linha: saldo anterior + valor = saldo impresso.
+async function _lancctbParsearExtratoCaixaEconomica(pdf){
+  const semAcento=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    paginas.push(_lancctbAgruparLinhasPorY(itens,3));
+  }
+  const txtDe=ls=>semAcento(ls.map(l=>l.itens.map(i=>i.str).join(' ')).join(' ')).toUpperCase();
+  const txtP1=txtDe(paginas[0]||[]), txtTudo=paginas.map(txtDe).join(' ');
+  if(!/DATA DE LANCAMENTO.*DATA DE MO\s*V\s*IMENTO.*DOCUMENTO.*HISTORICO.*VALOR/.test(txtP1)||!/SAC CAIXA|CAIXA ECONOMICA/.test(txtTudo)||!/PRODUTO:/.test(txtP1)) return null;
+  const parseBR=s=>{ const t=String(s).replace(/\s+/g,''); const neg=/^-/.test(t); const v=parseFloat(t.replace(/^-/,'').replace(/[^\d,]/g,'').replace(',','.'))||0; return neg?-v:v; };
+  const r2=v=>Math.round(v*100)/100;
+  let cnpj=null,agencia=null,conta=null,periodoIni=null,periodoFim=null;
+  (paginas[0]||[]).forEach(l=>{
+    const t=l.itens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim(); let m;
+    if(m=t.match(/CNPJ:\s*([\d.\/-]+)/i)) cnpj=m[1].replace(/\D/g,'');
+    if(m=t.match(/Ag[êe]ncia:\s*(\d+)/i)) agencia=m[1];
+    if(m=t.match(/Conta:\s*([\d-]+)/i)) conta=m[1];
+    if(m=t.match(/(\d{2})\/(\d{2})\/(\d{4})\s*[àa]\s*(\d{2})\/(\d{2})\/(\d{4})/)){ periodoIni=`${m[3]}-${m[2]}-${m[1]}`; periodoFim=`${m[6]}-${m[5]}-${m[4]}`; }
+  });
+  const re=/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2})\/(\d{2})\/(\d{4})\s+(\S+)\s+(.+?)\s+(-\s*)?([\d.]*\d,\d{2})\s+R\$\s*(-?\s*[\d.]*\d,\d{2})$/;
+  const movs=[]; let saldoPrev=null, saldoAnteriorDoc=null, saldoFinalDoc=null, quebras=0;
+  paginas.forEach(linhas=>linhas.forEach(l=>{
+    const t=l.itens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim(); const m=t.match(re); if(!m) return;
+    const valor=(m[9]?-1:1)*parseBR(m[10]), saldo=parseBR(m[11]);
+    let saldoReal=saldo;
+    if(saldoPrev===null) saldoAnteriorDoc=r2(saldo-valor);
+    else { const esp=r2(saldoPrev+valor); if(Math.abs(esp-saldo)>0.005){ if(Math.abs(Math.abs(esp)-Math.abs(saldo))<0.005) saldoReal=esp; /* saldo negativo sai sem o sinal no PDF */ else quebras++; } }
+    saldoPrev=saldoReal; saldoFinalDoc=saldoReal;
+    if(/^SALDO DIA$/i.test(m[8].trim())&&valor===0) return;
+    movs.push({ data:`${m[3]}-${m[2]}-${m[1]}`, doc:m[7], historico:m[8].trim(), valor });
+  }));
+  if(!movs.length) return null;
+  const lancamentos=movs.map(m=>({ data:m.data, historico:m.historico,
+    valor_entrada:m.valor>0?r2(m.valor):0, valor_saida:m.valor<0?r2(-m.valor):0,
+    informacao:(m.doc&&m.doc!=='0')?`Documento ${m.doc}`:'' }));
+  return { layout:'Caixa Econômica Federal (conta corrente)', model:'CEF_CONTA_CORRENTE', lancamentos,
+    saldoAnteriorDoc, saldoFinalDoc,
+    observacao:` Ag ${agencia||''} Cc ${conta||''}${periodoIni?` · período ${periodoIni.split('-').reverse().join('/')} a ${periodoFim.split('-').reverse().join('/')}`:''}.`+(quebras?` ⚠ ${quebras} linha(s) em que o saldo impresso não bate com o saldo anterior + valor.`:' ✓ saldo bate linha a linha.') };
+}
+// Caixa — extrato impresso do Internet Banking ("Extrato no período de…", saldo com C/D). Cada lançamento ocupa 3+ linhas: data (às vezes com o início do histórico em cima), linha do
+// documento/histórico/valor/saldo, linha "dd/mm hh:mm" com o complemento (favorecido). Texto solto logo ACIMA de uma data = começo do histórico do lançamento seguinte; abaixo = complemento.
+async function _lancctbParsearExtratoCaixaEconomicaIB(pdf){
+  const semAcento=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){ const itens=await _lancctbExtrairItensPagina(await pdf.getPage(p)); paginas.push(_lancctbAgruparLinhasPorY(itens,3)); }
+  const txtDe=ls=>semAcento(ls.map(l=>l.itens.map(i=>i.str).join(' ')).join(' ')).toUpperCase().replace(/\s+/g,' ');
+  const txtP1=txtDe(paginas[0]||[]), txtTudo=paginas.map(txtDe).join(' ');
+  if(!/EXTRATO NO PERIODO DE/.test(txtP1)||!/SALDO ANTERIOR AO PERIODO/.test(txtP1)||!/CAIXA/.test(txtTudo)||!/DATA EFETI/.test(txtP1.replace(/\s+/g,' '))) return null;
+  const r2=v=>Math.round(v*100)/100, num=s=>parseFloat(String(s).replace(/\./g,'').replace(',','.'))||0;
+  let agencia=null,conta=null,periodoIni=null,periodoFim=null,saldoAnteriorDoc=null,m;
+  (paginas[0]||[]).forEach(l=>{
+    const t=l.itens.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
+    if(m=t.match(/Ag[êe]ncia:\s*(\d+)\s*Conta:\s*([\d-]+)/i)){ agencia=m[1]; conta=m[2]; }
+    if(m=t.match(/Extrato no per[íi]odo de\s*(\d{2})\/(\d{2})\/(\d{4})\s*[àa]\s*(\d{2})\/(\d{2})\/(\d{4})/i)){ periodoIni=`${m[3]}-${m[2]}-${m[1]}`; periodoFim=`${m[6]}-${m[5]}-${m[4]}`; }
+    if(m=t.match(/Saldo anterior ao per[íi]odo solicitado.*?R\s*\$\s*([\d.]*\d,\d{2})\s*([CD])/i)) saldoAnteriorDoc=(m[2]==='D'?-1:1)*num(m[1]);
+  });
+  const reData=/^(\d{2})\/(\d{2})\/(\d{4})$/, reHora=/^\d{2}\/\d{2}\s+\d{2}:\d{2}$/;
+  const reAnc=/(-\s*)?R\s*\$\s*([\d.]*\d,\d{2})\s+R\s*\$\s*([\d.]*\d,\d{2})\s*([CD])\s*$/;
+  const movs=[]; let data=null, pre=[], atual=null, saldoPrev=saldoAnteriorDoc, saldoFinalDoc=null, quebras=0;
+  paginas.forEach(linhas=>linhas.forEach((l,i)=>{
+    const its=l.itens.filter(x=>x.str.trim()!==''), txt=its.map(x=>x.str.trim()).join(' ').replace(/\s+/g,' ');
+    if(!its.length||/^about:blank|^\d{2}\/\d{2}\/\d{4},\s*\d{2}:\d{2}|extrato_pdf|^SAC CAIXA|^0800|^Pessoas com|^Data\b|^Documento\b|Hist[óo]rico\s+Valor|^Saldo anterior/i.test(txt)) return;
+    const di=its.find(x=>x.x<80&&reData.test(x.str.trim()));
+    const lado=its.filter(x=>x.x>=200&&x.x<540&&!reData.test(x.str.trim())).map(x=>x.str.trim()).join(' ').replace(/\s+/g,' ').trim();
+    if(di){ const d=di.str.trim().match(reData); data=`${d[3]}-${d[2]}-${d[1]}`;
+      const ma=txt.match(reAnc);
+      if(/SALDO DIA/i.test(lado)){ pre=[]; atual=null; return; }       // "Saldo do dia" nunca é lançamento
+      if(!ma){ if(lado) pre.push(lado); return; }                       // data (+ início do histórico na mesma linha)
+    }
+    const ma=txt.match(reAnc);
+    if(ma){                                                             // linha do lançamento: documento · histórico · valor · saldo
+      const doc=(its.find(x=>x.x<200&&/^\d+$/.test(x.str.trim()))||{str:''}).str.trim();
+      const valor=(ma[1]?-1:1)*num(ma[2]), saldo=(ma[4]==='D'?-1:1)*num(ma[3]);
+      if(saldoPrev!==null&&Math.abs(r2(saldoPrev+valor)-saldo)>0.005) quebras++;
+      saldoPrev=saldo; saldoFinalDoc=saldo;
+      atual={data,doc,valor,partes:[...pre,lado].filter(Boolean)}; pre=[]; movs.push(atual); return;
+    }
+    if(its[0]&&reHora.test(its[0].str.trim())){ if(atual&&lado) atual.partes.push(lado); return; }   // complemento (favorecido)
+    // texto solto: se a próxima linha (da mesma página) é uma data logo abaixo, é o começo do histórico do próximo lançamento; senão é identificador do anterior
+    const prox=linhas[i+1], proxData=prox&&prox.itens.some(x=>x.x<80&&reData.test(x.str.trim()))&&(l.y-prox.y)<=12;
+    if(proxData) pre.push(lado||txt);
+  }));
+  if(!movs.length||!periodoIni) return null;
+  const lancamentos=movs.map(v=>({ data:v.data, historico:v.partes.join(' ').replace(/\s+/g,' ').trim(),
+    valor_entrada:v.valor>0?r2(v.valor):0, valor_saida:v.valor<0?r2(-v.valor):0, informacao:(v.doc&&!/^0+$/.test(v.doc))?`Documento ${v.doc}`:'' }));
+  return { layout:'Caixa Econômica Federal (Internet Banking)', model:'CEF_INTERNET_BANKING', lancamentos, saldoAnteriorDoc, saldoFinalDoc,
+    observacao:` Ag ${agencia||''} Cc ${conta||''} · período ${periodoIni.split('-').reverse().join('/')} a ${periodoFim.split('-').reverse().join('/')}.`+(quebras?` ⚠ ${quebras} linha(s) em que o saldo impresso não bate com o saldo anterior + valor.`:' ✓ saldo bate linha a linha.') };
+}
 // ─── Hotmart / Launch Pad (carteira digital) — mesmo pedido 29/09/2026. PDF com texto nativo. A
 // data do dia ("31 AGO." + "2026" em linhas separadas) precisa SOBREVIVER à troca de página — os
 // lançamentos de um mesmo dia continuam na página seguinte sem repetir o cabeçalho do dia.
@@ -41352,7 +41444,7 @@ async function processarLancctbUploadExtrato(forcarIA){
         return (await _lancctbParsearExtratoC6MultiMes(pdf))||(await _lancctbParsearExtratoBancoInter(pdf))||(await _lancctbParsearExtratoMisterContador(pdf))||(await _lancctbParsearExtratoBBMensal(pdf))||(await _lancctbParsearExtratoBBContaCorrente(pdf))||(await _lancctbParsearExtratoItauMensal(pdf))||(await _lancctbParsearExtratoItauModelosNovos(pdf))
           ||(await _lancctbParsearExtratoSafraContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoContaCorrente(pdf))||(await _lancctbParsearExtratoBradescoMensalLegado(pdf))||(await _lancctbParsearExtratoBTGPactualCC(pdf))||(await _lancctbParsearExtratoSicoobSisbr(pdf))
           ||(await _lancctbParsearExtratoMercadoPagoPdf(pdf))||(await _lancctbParsearExtratoShopeePayPdf(pdf))||(await _lancctbParsearExtratoNubankMensal(pdf))||(await _lancctbParsearExtratoCoraPdf(pdf))||(await _lancctbParsearExtratoHotmartLaunchpad(pdf))||(await _lancctbParsearExtratoXpXperformanceCC(pdf))||(await _lancctbParsearExtratoGenerico(pdf))
-          ||(await _lancctbParsearExtratoItauBBAOcr(pdf));
+          ||(await _lancctbParsearExtratoCaixaEconomica(pdf))||(await _lancctbParsearExtratoCaixaEconomicaIB(pdf))||(await _lancctbParsearExtratoItauBBAOcr(pdf));
       })();
       if(reconhecido&&reconhecido.meses){
         // PDF ≠ competência: pergunta quais meses importar (nada pré-marcado)
