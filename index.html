@@ -33442,6 +33442,26 @@ async function _lancctbRegistroAbrirInline(extratoId){
   _lancctbInlineExpandidoId=extratoId;
   renderLancctbRegistroContabil();
 }
+// Pedido do usuário 16/10/2026 (Kajuna, GA_ICMS lida errado): "não estou conseguindo desfazer esse erro". "Processar Tributos" grava NA LINHA DO EXTRATO uma marca "[PAGAMENTO DE N GUIAS · DÉBITOS: ...]" no histórico +
+// composicao_tributo + origem 'tributo_composicao' (e por isso a linha nunca mais volta a ser processada). Este botão desfaz só isso: histórico original, composição apagada, origem de volta ao normal
+// (a mesma de outras linhas da conta). Só pendente e sem lançamento contábil — não mexe em nada conciliado.
+async function _lancctbDesfazerMarcaTributo(extratoId){
+  const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId); if(!item) return;
+  const r=item.extrato;
+  if(item.ctb&&item.ctb.length){ toast('Este lançamento já está classificado — desclassifique primeiro.','err'); return; }
+  if(!confirm('Desfazer a marca de composição de guias deste pagamento (R$ '+_fmt(r.valor_saida||r.valor_entrada)+')?\n\nO histórico volta ao original do banco e a composição lida é apagada. Nada é lançado.')) return;
+  const limpo=String(r.historico_bancario||'').replace(/^\[(?:PAGAMENTO DE \d+ GUIAS|TRIBUTO COMPOSTO|[^\]]*cód\.[^\]]*)[^\]]*\]\s*/i,'').trim()||r.historico_bancario;
+  let origem='pdf_estruturado';
+  try{
+    const { data: irma } = await _supaClient.from('lancamentos_extrato').select('origem_importacao').eq('empresa_eid',_lancctbEidAtual).eq('conta_bancaria_id',r.conta_bancaria_id).neq('origem_importacao','tributo_composicao').not('origem_importacao','is',null).limit(1);
+    if(irma&&irma[0]&&irma[0].origem_importacao) origem=irma[0].origem_importacao;
+  }catch(e){}
+  const { error } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:limpo, origem_importacao:origem, composicao_tributo:null }).eq('id',extratoId).eq('status_conciliacao','pendente');
+  if(error){ toast('Não consegui desfazer: '+error.message,'err'); return; }
+  _lancctbInlineExpandidoId=null;
+  toast('Marca desfeita — o pagamento voltou ao histórico original do banco.','ok');
+  renderLancctbRegistroContabil();
+}
 function _lancctbRegistroFecharInline(){
   _lancctbInlineExpandidoId=null;
   renderLancctbRegistroContabil();
@@ -33589,7 +33609,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
     <td style="padding:7px 6px;color:var(--slate);font-size:10.5px">${!bancoEhD?esc(contaBancoDesc):''}</td>
     <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(valor)}</td>
     <td style="padding:7px 10px" title="${esc(r.historico_bancario||'')}">${esc(r.historico_bancario||'')}</td>
-    <td style="padding:7px 6px;text-align:center"><button class="btn bp bsm" id="lancctbInlineSalvarBtn_${r.id}" onclick="_lancctbRegistroSalvarInline(${r.id})">✓ Salvar</button></td>
+    <td style="padding:7px 6px;text-align:center;white-space:nowrap"><button class="btn bp bsm" id="lancctbInlineSalvarBtn_${r.id}" onclick="_lancctbRegistroSalvarInline(${r.id})">✓ Salvar</button> <button class="btn bo bsm" title="O sistema marcou este pagamento como 'composição de guias' e a leitura está errada: desfaz a marca, tira a composição e devolve o lançamento ao histórico original do banco (nada é lançado)" onclick="_lancctbDesfazerMarcaTributo(${r.id})">↩ Desfazer marca</button></td>
     <td colspan="8" style="padding:7px 10px;font-size:11.5px;color:var(--slate)" id="lancctbInlineTotal_${r.id}">Soma: <strong>R$ ${_fmt(comp.reduce((s,c)=>s+(c.valor||0),0))}</strong> / <strong>R$ ${_fmt(valor)}</strong> <span style="color:var(--teal)">✓ bate</span></td>
   </tr>`;
   const selectCell=`<td colspan="3" style="padding:4px 10px 4px 24px"><select class="si" id="lancctbInlineConta_${r.id}_@@IDX@@" style="width:100%;font-size:11.5px">${optsHtml}</select></td>`;
