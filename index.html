@@ -22503,7 +22503,71 @@ const LANCCTB_CONTAS_PADRAO_CAMPOS=[
   {k:'multas_pagas',label:'Despesas com multas (Despesas)'},
   {k:'descontos_concedidos',label:'Despesas de descontos com boletos (Despesas)'},
   {k:'multas_ativas',label:'Receitas de multas com boletos (Receitas)'},
+  {k:'transf_contas',label:'Transferência entre contas correntes (conta de passagem)'},
 ];
+
+// ─── Transferência entre contas correntes da MESMA empresa (pedido do usuário 16/10/2026) ───────────────────────────────────────────────
+// Entrada num banco que é a saída de OUTRO banco da empresa (mesmo valor, mesmo dia ±1, contas diferentes, os dois lados ainda pendentes) é classificada com a conta padrão
+// "Transferência entre contas correntes" (Contas padrão 🏷️): cada lado vira uma partida dobrada (entrada: D banco / C conta de passagem; saída: D conta de passagem / C banco) — a conta
+// de passagem zera sozinha. Só pareia quando o par é ÚNICO (1 entrada ↔ 1 saída) e o nome da empresa aparece no histórico de um dos lados; o resto fica pendente.
+function _lancctbTransfNomeChave(nome){
+  const ger=['LTDA','EIRELI','EPP','COMERCIO','COMERCIAL','SERVICOS','PECAS','DE','DA','DO','DAS','DOS','E','S/A','SA','ME','MEI','INDUSTRIA','EMPRESA'];
+  const t=_convNfNorm(nome).split(' ').filter(x=>x.length>=4&&!ger.includes(x));
+  return t[0]||'';
+}
+async function _lancctbProcessarTransferencias(){
+  const eid=_lancctbEidAtual, btn=document.getElementById('lancctbTransfBtn');
+  const numPad=(_lancctbContasPadraoGet(eid)||{}).transf_contas;
+  if(!numPad){ toast('Defina antes a conta padrão "Transferência entre contas correntes" (🏷️ Contas padrão).','err'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='Procurando…'; }
+  const fim=()=>{ if(btn){ btn.disabled=false; btn.textContent='🔁 Transferências entre contas'; } };
+  try{
+    const { data: cPad } = await _supaClient.from('plano_contas').select('id,classificacao,numero_conta,descricao').eq('empresa_eid',eid).eq('numero_conta',String(numPad)).maybeSingle();
+    if(!cPad){ toast('A conta padrão de transferência ('+numPad+') não existe no Plano de Contas desta empresa.','err'); fim(); return; }
+    const { data: ags } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,agencia,conta_corrente,conta_contabil_id,plano_contas(classificacao)').eq('empresa_eid',eid).eq('ativo',true);
+    const contas=new Map((ags||[]).filter(a=>a.conta_contabil_id&&a.plano_contas).map(a=>[a.id,a]));
+    if(contas.size<2){ toast('A empresa precisa de 2 ou mais contas bancárias com conta contábil vinculada.','err'); fim(); return; }
+    const { data: pend } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
+      .select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario')
+      .eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('conta_bancaria_id',[...contas.keys()]).order('data_pagamento',{ascending:true}),'data_pagamento'));
+    const L=(pend||[]).filter(x=>contas.has(x.conta_bancaria_id));
+    const entradas=L.filter(x=>Number(x.valor_entrada)>0), saidas=L.filter(x=>Number(x.valor_saida)>0);
+    const emp=S.emps().find(e=>String(e.eid)===String(eid)), chave=_lancctbTransfNomeChave(emp&&emp.nome);
+    const cent=v=>Math.round(Number(v)*100);
+    const candidatas=(a,lista,campo)=>lista.filter(b=>b.conta_bancaria_id!==a.conta_bancaria_id&&cent(b[campo])===cent(campo==='valor_saida'?a.valor_entrada:a.valor_saida)&&_lancctbDiffDias(a.data_pagamento,b.data_pagamento)<=1);
+    const pares=[]; let semConfirmacao=0, ambiguos=0;
+    entradas.forEach(e=>{
+      const cs=candidatas(e,saidas,'valor_saida'); if(!cs.length) return;
+      if(cs.length>1){ ambiguos++; return; }
+      const s=cs[0], volta=candidatas(s,entradas,'valor_entrada'); if(volta.length!==1){ ambiguos++; return; }
+      const nomeOk=chave&&(_convNfNorm(e.historico_bancario).includes(chave)||_convNfNorm(s.historico_bancario).includes(chave));
+      if(!nomeOk){ semConfirmacao++; return; }
+      pares.push({e,s});
+    });
+    if(!pares.length){ toast('Nenhuma transferência entre contas encontrada neste período'+(semConfirmacao||ambiguos?` (${semConfirmacao} par(es) sem o nome da empresa no histórico e ${ambiguos} ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
+    const total=pares.reduce((s,p)=>s+Number(p.e.valor_entrada),0);
+    if(!confirm(`Encontrei ${pares.length} transferência(s) entre contas correntes da empresa (R$ ${_fmt(total)} no total).\n\nCada lado será classificado com a conta ${cPad.numero_conta} - ${cPad.descricao}.\n${semConfirmacao||ambiguos?`\nFicam de fora: ${semConfirmacao} par(es) sem o nome da empresa no histórico e ${ambiguos} ambíguo(s).\n`:''}\nConfirmar?`)){ fim(); return; }
+    let ok=0; const erros=[];
+    for(const {e,s} of pares){
+      const bE=contas.get(e.conta_bancaria_id), bS=contas.get(s.conta_bancaria_id), v=Number(e.valor_entrada);
+      const nomeB=a=>`${_lancctbNomeBancoExibicao?_lancctbNomeBancoExibicao(a.banco_nome):a.banco_nome} Ag ${a.agencia} Cc ${a.conta_corrente}`;
+      const hE=`Transferência entre contas correntes - recebida de ${nomeB(bS)}`, hS=`Transferência entre contas correntes - enviada para ${nomeB(bE)}`;
+      const linE=[{ empresa_eid:eid, data:e.data_pagamento, classificacao:bE.plano_contas.classificacao, conta_contabil_id:bE.conta_contabil_id, tipo:'D', valor:v, historico:hE, lancamento_extrato_id:e.id, origem_match:'regra' },
+                  { empresa_eid:eid, data:e.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:'C', valor:v, historico:hE, lancamento_extrato_id:e.id, origem_match:'regra' }];
+      const linS=[{ empresa_eid:eid, data:s.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:'D', valor:v, historico:hS, lancamento_extrato_id:s.id, origem_match:'regra' },
+                  { empresa_eid:eid, data:s.data_pagamento, classificacao:bS.plano_contas.classificacao, conta_contabil_id:bS.conta_contabil_id, tipo:'C', valor:v, historico:hS, lancamento_extrato_id:s.id, origem_match:'regra' }];
+      const r1=await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linE });
+      if(r1.error){ erros.push(`${e.data_pagamento} R$ ${_fmt(v)}: ${r1.error.message}`); continue; }
+      const r2=await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linS });
+      if(r2.error){ await _supaClient.from('lancamentos_contabeis').delete().eq('lancamento_extrato_id',e.id); erros.push(`${s.data_pagamento} R$ ${_fmt(v)}: ${r2.error.message}`); continue; }
+      await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).in('id',[e.id,s.id]);
+      ok++;
+    }
+    toast(`${ok} transferência(s) entre contas classificada(s)${erros.length?` — ${erros.length} com erro: ${erros[0]}`:''}.`,erros.length?'err':'ok');
+    renderLancctbRegistroContabil();
+  }catch(err){ console.error(err); toast('Erro ao procurar transferências: '+(err.message||err),'err'); }
+  fim();
+}
 function _lancctbContasPadraoGet(eid){ return S.g('lancctb_contas_padrao_'+eid)||{}; }
 async function abrirLancctbContasPadraoModal(){
   const eid=_lancctbEidAtual;
@@ -34260,6 +34324,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbProcessarFopag()" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       ${String(_lancctbEidAtual)==='4'?`<button class="btn bo bsm" id="lancctbAcessoRufatoCteBtn" onclick="_lancctbConcederAcessoPastaRufatoCte()" title="Concede acesso 1x à pasta de CT-es da Rufato (fica salvo no navegador).">🔑 CT-es Rufato</button><button class="btn bo bsm" id="lancctbProcessarCtesBtn" onclick="_lancctbProcessarCtesRufato()" title="SÓ Rufato: busca na pasta 'Faturas com Relação de CTe' do mês o PDF da transportadora e abre 1 linha de débito (conta 10001) por CT-e, com o número do CT-e no histórico.">🚚 Processar CT-es</button>`:''}
+      <button class="btn bo bsm" id="lancctbTransfBtn" onclick="_lancctbProcessarTransferencias()" title="Acha a entrada de um banco que é a saída de outro banco da mesma empresa (mesmo valor, mesmo dia) e classifica os dois lados com a conta padrão 'Transferência entre contas correntes'">🔁 Transferências entre contas</button>
       <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
       ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
