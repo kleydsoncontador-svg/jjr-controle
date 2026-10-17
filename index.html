@@ -598,6 +598,7 @@ html.dark-mode .box-roxo{background:rgba(20,184,166,.14);border-color:rgba(20,18
 .fch-sm{background:#FEF3C7;border-color:#FCD34D;color:#B45309}
 .fch-vazio{background:var(--white);color:transparent}
 /* data do check / vencimento / atraso, miudinho embaixo de cada célula de fechamento (Visão geral — pedido do usuário 16/10/2026, mesmo prazo do Cronograma) */
+.action-bar-sticky[data-todas="1"] button:not(.action-btn-excel){pointer-events:none;opacity:.4}
 .btn-transf-cc{background:#111827;color:#fff;border:1px solid #111827;border-radius:6px;padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
 .btn-transf-cc:hover{opacity:.85}.btn-transf-cc:disabled{opacity:.5;cursor:default}
 html.dark-mode .btn-transf-cc{background:#fff;color:#111827;border-color:#fff}
@@ -33674,6 +33675,9 @@ let _lancctbRegistroDataAte='';
 // padrão de coluna dos outros.
 let _lancctbRegistroDataExata='';
 let _lancctbRegistroStatus='';
+// Pedido do usuário 17/10/2026: "permita que eu filtre todas as contas — pra visualizar tudo de todas as contas". Modo SÓ VISUALIZAÇÃO: lista o extrato de todas as contas juntas (cada linha com o banco da própria conta);
+// os botões de Processar (que trabalham numa conta por vez) ficam desligados até escolher uma conta. A conta escolhida antes (_lancctbExtratoContaSel) é preservada pra quando voltar.
+let _lancctbRegistroTodas=false;
 let _lancctbRegistroDirecao=''; // ''|'entrada'|'saida' — pedido do usuário 16/09/2026
 let _lancctbRegistroMesBate=''; // ''|'sim'|'nao' — mês da parcela da NF bate com o mês do pagamento
 // Pedido do usuário 09/09/2026: filtro pela coluna Fluxo de Caixa — como a
@@ -33740,6 +33744,9 @@ async function renderLancctbRegistroContabil(){
     return;
   }
   if(!_lancctbExtratoContaSel) _lancctbExtratoContaSel=String(agencias[0].id);
+  const _todasC=_lancctbRegistroTodas&&agencias.length>1; if(!_todasC) _lancctbRegistroTodas=false;
+  const _agPorId=new Map(agencias.map(a=>[Number(a.id),a]));
+  const _sohConta=qq=>_todasC?qq.in('conta_bancaria_id',agencias.map(a=>a.id)):qq.eq('conta_bancaria_id',_lancctbExtratoContaSel);
   let contaAtual=agencias.find(a=>String(a.id)===_lancctbExtratoContaSel);
   if(!contaAtual){ contaAtual=agencias[0]; _lancctbExtratoContaSel=String(contaAtual.id); }
 
@@ -33805,7 +33812,8 @@ async function renderLancctbRegistroContabil(){
   const to=from+LANCCTB_PAGE_SIZE-1;
   let q=_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao,conta_bancaria_id,origem_importacao,composicao_tributo',{count:'exact'})
-    .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel);
+    .eq('empresa_eid',eid);
+  q=_sohConta(q);
   // Pedido do usuário 09/09/2026: "quando eu ignorar não deve ser levado
   // pra tela de Registro Contábil" — lançamento "ignorado" (via 🚫 Ignorar
   // Sempre no Extrato Bancário) nunca aparece aqui, nem em "Todos os
@@ -33830,7 +33838,8 @@ async function renderLancctbRegistroContabil(){
   // Construtor da query base de totais (reutilizado para fetch paralelo)
   function _qSoma(){
     let qs=_supaClient.from('lancamentos_extrato').select('id,valor_saida,valor_entrada')
-      .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel);
+      .eq('empresa_eid',eid);
+    qs=_sohConta(qs);
     if(_lancctbRegistroStatus) qs=qs.eq('status_conciliacao',_lancctbRegistroStatus);
     else qs=qs.neq('status_conciliacao','ignorado');
     if(_lancctbRegistroDataDe) qs=qs.gte('data_pagamento',_lancctbRegistroDataDe);
@@ -33844,7 +33853,8 @@ async function renderLancctbRegistroContabil(){
     return qs;
   }
   let qPendencias=_supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true})
-    .eq('empresa_eid',eid).eq('conta_bancaria_id',_lancctbExtratoContaSel).eq('status_conciliacao','pendente');
+    .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
+  qPendencias=_sohConta(qPendencias);
   if(_lancctbRegistroDataDe) qPendencias=qPendencias.gte('data_pagamento',_lancctbRegistroDataDe);
   if(_lancctbRegistroDataAte) qPendencias=qPendencias.lte('data_pagamento',_lancctbRegistroDataAte);
   const _pPend=Promise.resolve(qPendencias); _pPend.catch(()=>{});
@@ -33930,7 +33940,7 @@ async function renderLancctbRegistroContabil(){
     const _datMaxLiv=_datasExtrato.length ? _addDias(_datasExtrato[_datasExtrato.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS) : null;
     const [{ data: _flxLig },{ data: _flxLiv }]=await Promise.all([
       idsExtrato.length ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).in('lancamento_extrato_id',idsExtrato)) : Promise.resolve({data:[]}),
-      contaAtual && _datMinLiv ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`).gte('data',_datMinLiv).lte('data',_datMaxLiv)) : Promise.resolve({data:[]}),
+      contaAtual && _datMinLiv ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(_todasC?`conta_bancaria_id.is.null,conta_bancaria_id.in.(${agencias.map(a=>a.id).join(',')})`:`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`).gte('data',_datMinLiv).lte('data',_datMaxLiv)) : Promise.resolve({data:[]}),
     ]);
     const fluxoAll=[...(_flxLig||[]),...(_flxLiv||[])];
     const fluxoPorExtrato={}, _ligPorExtC={};
@@ -34094,7 +34104,7 @@ async function renderLancctbRegistroContabil(){
           if(doc&&cnpjNf&&cnpjNf.length===doc.doc.length) return cnpjNf===doc.doc;
           return String(nomeNf).trim()&&_lancctbTokensNome(r.historico_bancario).length>0&&_lancctbNomeCompativel([r.historico_bancario],nomeNf);
         })());
-      if(nfMatch&&!_lancctbHistoricoSemNF(r.historico_bancario)&&!(!ehSaida&&_lancctbBancoSemNfRecebimento(eid,contaAtual))) item.parcelaSugerida=nfMatch;
+      if(nfMatch&&!_lancctbHistoricoSemNF(r.historico_bancario)&&!(!ehSaida&&_lancctbBancoSemNfRecebimento(eid,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual))) item.parcelaSugerida=nfMatch;
       // Pedido do usuário 09/09/2026 (caso real: histórico "GP TECNOLOGIA EM
       // SEGURANCA", sugestão veio "vivo- telefonica brasil" — só bateu por
       // valor+data, ignorando que havia outra linha do Fluxo do mesmo
@@ -34139,7 +34149,7 @@ async function renderLancctbRegistroContabil(){
   const { count: pendenciasTotaisConta } = await _pPend;
 
   _lancctbUltimoRegistro=linhas;
-  const _htmlRegistro=_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico});
+  const _htmlRegistro=_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico,todasContas:_todasC});
   _lancctbRegistroCache={eid,html:_htmlRegistro};
   _lancctbSetConteudo(el,_htmlRegistro);
   _lancctbAtivarScrollTopoRegistro();
@@ -34438,11 +34448,11 @@ async function _lancctbExecutarDesclassificarLote(){
 function _lancctbPercAutoHtml(percAutomatico){
   return `<span style="font-size:11.5px;color:var(--slate)" title="De todos os ${percAutomatico.total} lançamento(s) do filtro atual, ${percAutomatico.automatico} já foram resolvidos sozinhos pelos botões de processamento (matching automático ou Regra já existente) — sem você precisar escolher a conta na mão em 'Classificar'.">⚙️ <b style="color:${percAutomatico.pct>=80?'var(--teal)':percAutomatico.pct>=50?'var(--amber)':'var(--red)'}">${percAutomatico.pct}%</b> fechado só com os botões de processamento (${percAutomatico.automatico}/${percAutomatico.total})</span>`;
 }
-function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta,somaEntrada,somaSaida,percAutomatico}){
+function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta,somaEntrada,somaSaida,percAutomatico,todasContas}){
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
-  const opcoesConta=agencias.map(a=>`<option value="${a.id}" ${String(a.id)===_lancctbExtratoContaSel?'selected':''}>${esc(_lancctbNomeBancoExibicao(a.banco_nome))} — Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('');
+  const opcoesConta=(agencias.length>1?`<option value="__todas__" ${todasContas?'selected':''}>📚 Todas as contas (só visualizar)</option>`:'')+agencias.map(a=>`<option value="${a.id}" ${!todasContas&&String(a.id)===_lancctbExtratoContaSel?'selected':''}>${esc(_lancctbNomeBancoExibicao(a.banco_nome))} — Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('');
   const opcoesStatus=[
     {v:'',t:'Todos os status'},{v:'conciliado',t:'Conciliados'},{v:'pendente',t:'Não conciliados'},
   ].map(o=>`<option value="${o.v}" ${_lancctbRegistroStatus===o.v?'selected':''}>${o.t}</option>`).join('');
@@ -34451,13 +34461,14 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   ].map(o=>`<option value="${o.v}" ${_lancctbRegistroDirecao===o.v?'selected':''}>${o.t}</option>`).join('');
 
   let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-    <select class="si" data-filtro="registro-conta-sel" style="min-width:440px" onchange="_lancctbExtratoContaSel=this.value;_lancctbRegistroPagina=0;_lancctbRegistroSelecionados.clear();_lancctbRegistroSelecionadosDesclass.clear();renderLancctbRegistroContabil()">${opcoesConta}</select>
+    <select class="si" data-filtro="registro-conta-sel" style="min-width:440px" onchange="if(this.value==='__todas__'){_lancctbRegistroTodas=true;}else{_lancctbRegistroTodas=false;_lancctbExtratoContaSel=this.value;}_lancctbRegistroPagina=0;_lancctbRegistroSelecionados.clear();_lancctbRegistroSelecionadosDesclass.clear();renderLancctbRegistroContabil()">${opcoesConta}</select>
     <button class="btn-transf-cc" id="lancctbTransfBtn" onclick="_lancctbProcessarTransferencias()" title="Procura em TODAS as contas correntes da empresa uma entrada que é a saída de outra conta (mesmo valor, mesmo dia) e classifica os dois lados com a conta padrão 'Transferência entre contas correntes'">Transf. entre C/C</button>
     ${_lancctbMesPickerHtml(_lancctbRegistroMes,'_lancctbRegistroMudarMes')}
     <select class="si" data-filtro="registro-direcao" onchange="_lancctbRegistroDirecao=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesDirecao}</select>
     <select class="si" data-filtro="registro-status" onchange="_lancctbRegistroStatus=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesStatus}</select>
   </div>
-  <div class="action-bar-sticky">
+  ${todasContas?'<div style="margin:0 0 8px;padding:8px 12px;border:1px solid var(--teal);border-radius:8px;font-size:12.5px;color:var(--slate)">📚 Visualizando <b>todas as contas</b> juntas — os botões de processar ficam desligados aqui (cada um trabalha numa conta por vez). Escolha uma conta acima pra processar. <b>Transf. entre C/C</b> continua valendo: ele já olha todas as contas.</div>':''}
+  <div class="action-bar-sticky" ${todasContas?'data-todas="1"':''}>
       ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbProcessarFluxoBtn" onclick="_lancctbProcessarFluxo()" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo) e, quando o Fluxo indica NF + parcela e essa NF está importada, já amarra a NF (inclusive pagamento aglutinado aberto em vários pagamentos do Fluxo). Não aplica Regra — o resto fica pro FOPAG, Tributos e Pagamentos.">🔗 Processar Fluxo</button>`:''}
       <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal. Também aplica as Regras com gatilho de Fluxo de Caixa.">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
@@ -34572,7 +34583,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   if(!linhas.length){
     html+=`<tr><td colspan="18" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
   } else {
-    linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,contaAtual); });
+    linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,todasContas?(agencias.find(a=>Number(a.id)===Number(item.extrato.conta_bancaria_id))||contaAtual):contaAtual); });
   }
   html+=`</tbody></table></div>
     <div style="margin-top:14px">${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida)}</div>`;
