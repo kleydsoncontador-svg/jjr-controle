@@ -22545,7 +22545,22 @@ async function _lancctbProcessarTransferencias(){
       if(!g.E.length||!g.X.length) return;
       const usadas=new Set(), par=[];
       g.E.forEach(e=>{ const s=g.X.find(x=>!usadas.has(x.id)&&x.conta_bancaria_id!==e.conta_bancaria_id); if(s){ usadas.add(s.id); par.push({e,s}); } });
-      if(par.length===g.E.length&&par.length===g.X.length) pares.push(...par); else ambiguos+=Math.max(g.E.length,g.X.length);
+      if(par.length===g.E.length&&par.length===g.X.length){ pares.push(...par); return; }
+      // Desempate (pedido do usuário 17/10/2026, Kajuna: entrada "OP. CREDITO C/GARANTIA" Banrisul conta garantida × saída "OP CRED C GARANT" Banrisul c/c, mas havia também uma saída Itaú do mesmo valor
+      // no mesmo dia, e a quantidade não fechava): pontua cada saída candidata pelo MESMO BANCO (+10) e por palavras em comum no histórico (início de 4 letras: CRED, GARA...). Só pareia se a melhor
+      // for ÚNICA (estritamente acima das outras), com pontuação > 0, e se nenhuma outra entrada disputar a mesma saída. O que sobrar continua pendente.
+      const bancoDe=x=>String((contas.get(x.conta_bancaria_id)||{}).banco_nome||'').split(' - ')[0].trim();
+      const toks=h=>new Set(_convNfNorm(h||'').split(' ').filter(t=>t.length>=4).map(t=>t.slice(0,4)));
+      const pont=(e,x)=>{ const a=toks(e.historico_bancario), b=toks(x.historico_bancario); let n=0; a.forEach(t=>{ if(b.has(t)) n++; }); return (bancoDe(e)&&bancoDe(e)===bancoDe(x)?10:0)+n; };
+      const escolha=new Map(); // entrada.id -> saída
+      g.E.forEach(e=>{
+        const cand=g.X.filter(x=>x.conta_bancaria_id!==e.conta_bancaria_id).map(x=>({x,p:pont(e,x)})).sort((a,b)=>b.p-a.p);
+        if(cand.length&&cand[0].p>0&&(cand.length===1||cand[0].p>cand[1].p)) escolha.set(e.id,cand[0].x);
+      });
+      const usadasX=new Map(); escolha.forEach(x=>usadasX.set(x.id,(usadasX.get(x.id)||0)+1));
+      let resolvidas=0;
+      g.E.forEach(e=>{ const x=escolha.get(e.id); if(x&&usadasX.get(x.id)===1){ pares.push({e,s:x}); resolvidas++; } });
+      ambiguos+=Math.max(g.E.length,g.X.length)-resolvidas;
     });
     if(!pares.length){ toast('Nenhuma transferência entre contas encontrada neste período'+(ambiguos?` (${ambiguos} lançamento(s) ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
     const total=pares.reduce((s,p)=>s+Number(p.e.valor_entrada),0);
