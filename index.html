@@ -25588,6 +25588,19 @@ async function _lancctbExtrairValorPdfTributo(pdf,permitirIA,statusCb){
   if(r&&r.valor>0&&!r.parcelamento){ try{ const parc=await _lancctbExtrairParcelamentoPdf(pdf); if(parc) r.parcelamento=parc; }catch(e){} }
   return r;
 }
+// GA — Guia de Arrecadação da Secretaria da Fazenda do RS (ICMS; achado real 16/10/2026, Kajuna: GA_ICMS 07.2026, R$ 86.313,88, TEXTO nativo). O valor aparece 2x ("Valor" e "Total"): só vale
+// quando TODOS os "R$ x" da guia são o mesmo número; se aparecerem valores diferentes não adivinha (devolve null → fica pra leitura manual).
+async function _lancctbExtrairGuiaGaRs(pdf){
+  try{
+    const itens=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+    const texto=itens.map(it=>it.str).join(' ').replace(/\s+/g,' ');
+    if(!/GUIA DE ARRECADA[ÇC][ÃA]O\s*-\s*GA/i.test(texto)||!/SECRETARIA DA FAZENDA/i.test(texto)) return null;
+    const valores=[...new Set([...texto.matchAll(/R\$\s*([\d.]*\d,\d{2})/g)].map(m=>m[1]))];
+    if(valores.length!==1) return null;
+    const mComp=texto.match(/(\d{2})(20\d{2})\s*Parcela/)||texto.match(/\b0*(\d{2})(20\d{2})\b/);
+    return { valor:_lancctbParseValorBR2(valores[0]), composicao:null, competencia:null };
+  }catch(e){ return null; }
+}
 async function _lancctbExtrairValorPdfTributoBase(pdf,permitirIA,statusCb){
   const darf=await _lancctbExtrairComposicaoDarf(pdf);
   if(darf) return { valor:darf.valorTotal, composicao:darf.itens, competencia:darf.competencia };
@@ -25601,6 +25614,8 @@ async function _lancctbExtrairValorPdfTributoBase(pdf,permitirIA,statusCb){
   if(damsp) return { valor:damsp.valorTotal, composicao:damsp.itens.length>1?damsp.itens:null, competencia:damsp.competencia };
   const daeMg=await _lancctbExtrairGuiaDaeMg(pdf);
   if(daeMg) return daeMg;
+  const gaRs=await _lancctbExtrairGuiaGaRs(pdf);
+  if(gaRs) return gaRs;
   const generico=await _lancctbExtrairValorTotalGenerico(pdf);
   if(generico!=null) return { valor:generico, composicao:null };
   try{
@@ -32342,7 +32357,10 @@ function _lancctbAcharCombinacaoGuias(valor,dataPag,leituras,usados){
     if(Math.abs(soma-valor)<=tol) return { guias:sub.map(g=>({...g,valorUsado:r2(g.extraido.valor),inferido:false})), inferido:false };
   }
   // 2) legíveis + UMA guia só-imagem (valor = o que falta), com vencimento perto do pagamento
-  const semTexto=leituras.filter(g=>!g.extraido&&!usados.has(g.chave)&&g.info.vencimento&&Math.abs(_lancctbDiasEntre(g.info.vencimento,dataPag))<=15);
+  // Pedido do usuário 16/10/2026 (Kajuna, GA_ICMS): "aqui você viajou e muito, quase me levou ao erro" — o valor "o que falta" de uma guia que o sistema NÃO conseguiu ler era só um chute
+  // (R$ 86.313,88 − FGTS = R$ 74.758,49, quando a guia de verdade valia os R$ 86.313,88 inteiros). Desligado: guia ilegível nunca recebe valor inventado; o pagamento fica pendente pra conferência.
+  const LANCCTB_INFERIR_GUIA_SO_IMAGEM=false;
+  const semTexto=LANCCTB_INFERIR_GUIA_SO_IMAGEM?leituras.filter(g=>!g.extraido&&!usados.has(g.chave)&&g.info.vencimento&&Math.abs(_lancctbDiasEntre(g.info.vencimento,dataPag))<=15):[];
   if(semTexto.length===1){
     const ilegivel=semTexto[0];
     for(const sub of _lancctbSubconjuntos(legiveis,1,3)){
