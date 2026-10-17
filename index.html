@@ -31631,6 +31631,29 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     _bufLote.push(it);
     if(_bufLote.length>=LOTE_TAM) await _descarregarLote();
   }
+  // Pedido do usuário 16/10/2026 (Kajuna, Banrisul "APLICACAO AUTOMATICA CDB" R$ 62,42 amarrada a uma NF por ter o mesmo valor): Regra por histórico cuja conta é de APLICAÇÃO FINANCEIRA
+  // (aplicações e resgates) tem prioridade absoluta — NF, comprovante, Fluxo e lote nunca passam por cima. Conta de aplicação = a "Conta Contábil" de alguma Aplicação Financeira da empresa
+  // ou conta do plano em 1.1.1.03 (aplicações financeiras de liquidez imediata).
+  const _contasAplicIds=new Set();
+  try{
+    const { data: aps } = await _supaClient.from('aplicacoes_financeiras').select('conta_contabil_id').eq('empresa_eid',eid);
+    (aps||[]).forEach(a=>{ if(a.conta_contabil_id) _contasAplicIds.add(String(a.conta_contabil_id)); });
+    const idsRegras=[...new Set((regras||[]).map(r=>r.conta_contabil_id).filter(Boolean))];
+    if(idsRegras.length){ const { data: pcs } = await _supaClient.from('plano_contas').select('id,classificacao').in('id',idsRegras); (pcs||[]).forEach(c=>{ if(/^1\.1\.1\.03(\.|$)/.test(String(c.classificacao||''))) _contasAplicIds.add(String(c.id)); }); }
+  }catch(e){ console.warn('Contas de aplicação não carregadas (a prioridade da Regra de aplicação fica desligada):',e); }
+  const _regraDeAplicacao=(l,ehSaida)=>{
+    if(!_contasAplicIds.size) return null;
+    const contrapartidaTipo=ehSaida?'D':'C', valor=l.valor_saida||l.valor_entrada, txt=String(l.historico_bancario||'').toLowerCase();
+    return (regras||[]).find(r=>{
+      if(r.tipo_regra!=='historico'||!r.historico_gatilho||r.dc!==contrapartidaTipo||!_contasAplicIds.has(String(r.conta_contabil_id))) return false;
+      if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
+      if(r.valor_gatilho!=null&&Math.abs(valor-r.valor_gatilho)>LANCCTB_MATCH_TOLERANCIA_VALOR) return false;
+      if((linhasRateioPorRegra[r.id]||[]).length) return false;
+      const g=r.historico_gatilho.toLowerCase();
+      if(LANCCTB_GATILHOS_AMBIGUOS_PALAVRA_COMUM.has(g.replace(/[^a-z0-9]/g,''))&&!_lancctbHistoricoEhTributo(l.historico_bancario)) return false;
+      return txt.includes(g);
+    })||null;
+  };
   for(let i=0;i<lancamentos.length;i++){
     const _agora=Date.now();
     if(_agora-_ultimoYield>30){ await new Promise(r=>setTimeout(r,0)); _ultimoYield=Date.now(); }
@@ -31649,6 +31672,18 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const comprovantesUsados=ehSaida?comprovantesUsadosPag:comprovantesUsadosReceb;
     const tabelaComprovante=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
     let resolvido=false;
+    const _regraAplic=_regraDeAplicacao(l,ehSaida);
+    if(_regraAplic){
+      if(modo==='fluxo_nf'){ aindaPendente++; continue; } // o botão do Fluxo só mexe em NF; a linha de aplicação fica pra Regra
+      const histApl=_regraAplic.historico_fixo||l.historico_bancario||'';
+      const linhasApl=[
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:ehSaida?'C':'D', valor, historico:histApl, cliente_fornecedor_nome:null, cnpj_cpf:null, comprovante_id:null, lancamento_extrato_id:l.id, regra_matching_id:_regraAplic.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:_regraAplic.plano_contas.classificacao, conta_contabil_id:_regraAplic.conta_contabil_id, tipo:_regraAplic.dc, valor, historico:histApl, cliente_fornecedor_nome:null, cnpj_cpf:null, comprovante_id:null, lancamento_extrato_id:l.id, regra_matching_id:_regraAplic.id, origem_match:'regra' },
+      ];
+      resolvRegra++;
+      await _enfileirarRegra({ l, linhas:linhasApl, valor, comprovanteId:null, tabela:tabelaComprovante, fluxoId:null, historicoBanco:histApl, nomeParaLinha:null });
+      continue;
+    }
     // Recebimento (entrada) só amarra por VALOR EXATO (pedido do usuário 18/09/2026);
     // saída mantém as tolerâncias de sempre.
     const bloqueiaNf=(_lancctbContaSemNfVinculo(agenciaInfoNf))||(!ehSaida&&semNfReceb); // Mercado Pago/Shopee: sem NF em qualquer direção; Peixoto Safra/Sicoob: recebimento sem NF
