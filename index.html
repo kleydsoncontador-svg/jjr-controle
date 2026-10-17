@@ -598,7 +598,6 @@ html.dark-mode .box-roxo{background:rgba(20,184,166,.14);border-color:rgba(20,18
 .fch-sm{background:#FEF3C7;border-color:#FCD34D;color:#B45309}
 .fch-vazio{background:var(--white);color:transparent}
 /* data do check / vencimento / atraso, miudinho embaixo de cada célula de fechamento (Visão geral — pedido do usuário 16/10/2026, mesmo prazo do Cronograma) */
-.action-bar-sticky[data-todas="1"] button:not(.action-btn-excel){pointer-events:none;opacity:.4}
 .btn-transf-cc{background:#111827;color:#fff;border:1px solid #111827;border-radius:6px;padding:7px 14px;font-size:12.5px;font-weight:600;cursor:pointer;white-space:nowrap}
 .btn-transf-cc:hover{opacity:.85}.btn-transf-cc:disabled{opacity:.5;cursor:default}
 html.dark-mode .btn-transf-cc{background:#fff;color:#111827;border-color:#fff}
@@ -33678,6 +33677,33 @@ let _lancctbRegistroStatus='';
 // Pedido do usuário 17/10/2026: "permita que eu filtre todas as contas — pra visualizar tudo de todas as contas". Modo SÓ VISUALIZAÇÃO: lista o extrato de todas as contas juntas (cada linha com o banco da própria conta);
 // os botões de Processar (que trabalham numa conta por vez) ficam desligados até escolher uma conta. A conta escolhida antes (_lancctbExtratoContaSel) é preservada pra quando voltar.
 let _lancctbRegistroTodas=false;
+let _lancctbRegistroAgenciasCache=[];
+// Botões de Processar com "Todas as contas" (pedido do usuário 17/10/2026): cada conta é processada SOZINHA, uma depois da outra — o mesmo que escolher a conta e clicar no botão, só que automático.
+// Nunca roda misturando contas (o motor trabalha com 1 conta por vez: banco do lançamento, Fluxo, comprovantes e regras são da conta). Se uma conta falhar, segue pras outras e avisa no fim.
+let _lancctbRodandoTodas=false;
+async function _lancctbRodarBotao(nome,args){
+  const fn=window[nome];
+  if(typeof fn!=='function') return;
+  if(!_lancctbRegistroTodas) return fn.apply(null,args||[]);
+  if(_lancctbRodandoTodas){ toast('Já tem um processamento de todas as contas em andamento.','info'); return; }
+  const ags=(_lancctbRegistroAgenciasCache||[]).slice();
+  if(ags.length<2) return fn.apply(null,args||[]);
+  const nomeA=a=>`${_lancctbNomeBancoExibicao(a.banco_nome)} Cc ${a.conta_corrente}`;
+  if(!confirm(`Processar em TODAS as ${ags.length} contas, uma de cada vez?\n\n${ags.map(nomeA).join('\n')}\n\nCada conta é processada separada das outras (como se você escolhesse a conta e clicasse no botão). Cada uma pode pedir a sua confirmação.`)) return;
+  _lancctbRodandoTodas=true;
+  const selAntes=_lancctbExtratoContaSel, erros=[];
+  try{
+    for(let i=0;i<ags.length;i++){
+      _lancctbRegistroTodas=false; _lancctbExtratoContaSel=String(ags[i].id);
+      toast(`Conta ${i+1} de ${ags.length}: ${nomeA(ags[i])}…`,'info');
+      try{ await fn.apply(null,args||[]); }catch(e){ console.error(e); erros.push(`${nomeA(ags[i])}: ${e.message||e}`); }
+    }
+  } finally {
+    _lancctbRodandoTodas=false; _lancctbExtratoContaSel=selAntes; _lancctbRegistroTodas=true;
+    toast(erros.length?`Terminou com ${erros.length} erro(s): ${erros[0]}`:`Processou as ${ags.length} contas.`,erros.length?'err':'ok');
+    renderLancctbRegistroContabil();
+  }
+}
 let _lancctbRegistroDirecao=''; // ''|'entrada'|'saida' — pedido do usuário 16/09/2026
 let _lancctbRegistroMesBate=''; // ''|'sim'|'nao' — mês da parcela da NF bate com o mês do pagamento
 // Pedido do usuário 09/09/2026: filtro pela coluna Fluxo de Caixa — como a
@@ -33744,6 +33770,7 @@ async function renderLancctbRegistroContabil(){
     return;
   }
   if(!_lancctbExtratoContaSel) _lancctbExtratoContaSel=String(agencias[0].id);
+  _lancctbRegistroAgenciasCache=agencias;
   const _todasC=_lancctbRegistroTodas&&agencias.length>1; if(!_todasC) _lancctbRegistroTodas=false;
   const _agPorId=new Map(agencias.map(a=>[Number(a.id),a]));
   const _sohConta=qq=>_todasC?qq.in('conta_bancaria_id',agencias.map(a=>a.id)):qq.eq('conta_bancaria_id',_lancctbExtratoContaSel);
@@ -34467,17 +34494,17 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <select class="si" data-filtro="registro-direcao" onchange="_lancctbRegistroDirecao=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesDirecao}</select>
     <select class="si" data-filtro="registro-status" onchange="_lancctbRegistroStatus=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesStatus}</select>
   </div>
-  ${todasContas?'<div style="margin:0 0 8px;padding:8px 12px;border:1px solid var(--teal);border-radius:8px;font-size:12.5px;color:var(--slate)">📚 Visualizando <b>todas as contas</b> juntas — os botões de processar ficam desligados aqui (cada um trabalha numa conta por vez). Escolha uma conta acima pra processar. <b>Transf. entre C/C</b> continua valendo: ele já olha todas as contas.</div>':''}
+  ${todasContas?'<div style="margin:0 0 8px;padding:8px 12px;border:1px solid var(--teal);border-radius:8px;font-size:12.5px;color:var(--slate)">📚 Visualizando <b>todas as contas</b> juntas — os botões de processar rodam <b>uma conta de cada vez</b>, em sequência (nunca misturando contas) e pedem confirmação antes. <b>Transf. entre C/C</b> já olha todas as contas de uma vez.</div>':''}
   <div class="action-bar-sticky" ${todasContas?'data-todas="1"':''}>
-      ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbProcessarFluxoBtn" onclick="_lancctbProcessarFluxo()" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo) e, quando o Fluxo indica NF + parcela e essa NF está importada, já amarra a NF (inclusive pagamento aglutinado aberto em vários pagamentos do Fluxo). Não aplica Regra — o resto fica pro FOPAG, Tributos e Pagamentos.">🔗 Processar Fluxo</button>`:''}
-      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_pagamento')" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal. Também aplica as Regras com gatilho de Fluxo de Caixa.">🔄 Processar Pagamentos</button>
-      <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbProcessarFonteRegistro('comprovantes_recebimento')" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
-      ${LANCCTB_EIDS_RECEB_SO_REGRAS.includes(String(_lancctbEidAtual))?`<button class="btn bo bsm" id="lancctbProcessarRecebSoRegrasBtn" onclick="_lancctbProcessarFonteRegistro('recebimentos_so_regras')" title="Só pra esta empresa (pedido do usuário 15/09/2026): roda o matching pra pendências de RECEBIMENTO usando SÓ as Regras por histórico — nunca tenta amarrar com Comprovante nem Nota Fiscal.">🎯 Processar Recebimentos (só Regras)</button>`:''}
-      <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbProcessarFopag()" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
-      <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbProcessarTributos()" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
+      ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbProcessarFluxoBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFluxo',[])" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo) e, quando o Fluxo indica NF + parcela e essa NF está importada, já amarra a NF (inclusive pagamento aglutinado aberto em vários pagamentos do Fluxo). Não aplica Regra — o resto fica pro FOPAG, Tributos e Pagamentos.">🔗 Processar Fluxo</button>`:''}
+      <button class="btn bo bsm" id="lancctbProcessarComprovBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFonteRegistro',['comprovantes_pagamento'])" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal. Também aplica as Regras com gatilho de Fluxo de Caixa.">🔄 Processar Pagamentos</button>
+      <button class="btn bo bsm" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFonteRegistro',['comprovantes_recebimento'])" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
+      ${LANCCTB_EIDS_RECEB_SO_REGRAS.includes(String(_lancctbEidAtual))?`<button class="btn bo bsm" id="lancctbProcessarRecebSoRegrasBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFonteRegistro',['recebimentos_so_regras'])" title="Só pra esta empresa (pedido do usuário 15/09/2026): roda o matching pra pendências de RECEBIMENTO usando SÓ as Regras por histórico — nunca tenta amarrar com Comprovante nem Nota Fiscal.">🎯 Processar Recebimentos (só Regras)</button>`:''}
+      <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFopag',[])" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
+      <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbRodarBotao('_lancctbProcessarTributos',[])" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       ${String(_lancctbEidAtual)==='4'?`<button class="btn bo bsm" id="lancctbAcessoRufatoCteBtn" onclick="_lancctbConcederAcessoPastaRufatoCte()" title="Concede acesso 1x à pasta de CT-es da Rufato (fica salvo no navegador).">🔑 CT-es Rufato</button><button class="btn bo bsm" id="lancctbProcessarCtesBtn" onclick="_lancctbProcessarCtesRufato()" title="SÓ Rufato: busca na pasta 'Faturas com Relação de CTe' do mês o PDF da transportadora e abre 1 linha de débito (conta 10001) por CT-e, com o número do CT-e no histórico.">🚚 Processar CT-es</button>`:''}
-      <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbCorrigirDataParcelaExistente()" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
-      ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbCorrigirParcelasPorFluxo()" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>`:''}
+      <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbRodarBotao('_lancctbCorrigirDataParcelaExistente',[])" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
+      ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbRodarBotao('_lancctbCorrigirParcelasPorFluxo',[])" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) no período filtrado — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis deste período, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
   </div>
