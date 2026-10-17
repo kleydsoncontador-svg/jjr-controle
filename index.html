@@ -36797,17 +36797,19 @@ async function confirmarLancctbImportComprovantes(){
   const semTipoOp={}; // recebimentos já salvos SEM tipo de operação (chave → ids)
   if(datasLote.length){
     const { data: exist }=await _lancctbFetchTudo(()=>_supaClient.from(_lancctbComprovTabela(tipo))
-      .select(tipo==='recebimento'?'id,conta_bancaria_id,tipo_operacao,status_conciliacao,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf':'id,conta_bancaria_id,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf')
+      .select(tipo==='recebimento'?'id,conta_bancaria_id,tipo_operacao,status_conciliacao,nosso_numero,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf':'id,conta_bancaria_id,data_pagamento,valor_pago,cliente_fornecedor_nome,documento_numero,cnpj_cpf')
       .eq('empresa_eid',_lancctbEidAtual).gte('data_pagamento',datasLote[0]).lte('data_pagamento',datasLote[datasLote.length-1]));
-    // Leitura antiga errada (Itaú Cobrança, 17/10/2026, Kajuna: boleto com abatimento/'liquidação em cartório' gravava a liquidação com R$ 0,00): se o lote novo traz a liquidação CERTA (valor > 0)
-    // do mesmo boleto (data+pagador+documento), a linha antiga de R$ 0,00 ainda PENDENTE é só resto do erro — é apagada pra não ficar uma 2ª âncora de liquidação zerada no grupo.
+    // Leitura antiga errada (Itaú Cobrança, 17/10/2026, Kajuna): boleto 'liquidação em cartório'/'descontos' fazia o leitor grudar o pagador/documento de um boleto nos valores de outro (ex.: 'CC CENTRO CAR' com
+    // os valores da LISIANE) ou gravar a liquidação com R$ 0,00. Se o lote novo traz o MESMO boleto (data + nosso número) e a linha antiga PENDENTE não bate com nenhuma do lote novo (tipo+valor+pagador+documento),
+    // ela é resto do erro e é apagada — senão o dia soma duplicado. Só PENDENTE; conciliada nunca é tocada.
     if(tipo==='recebimento'){
-      const kb=r=>[r.data_pagamento||'',String(r.cliente_fornecedor_nome||'').trim().toUpperCase(),String(r.documento_numero||'').trim()].join('|');
-      const novosLiq=new Set(registros.filter(r=>r.tipo_operacao==='liquidacao'&&Number(r.valor_pago||0)>0).map(kb));
-      const velhasZero=(exist||[]).filter(r=>r.tipo_operacao==='liquidacao'&&Number(r.valor_pago||0)===0&&r.status_conciliacao==='pendente'&&novosLiq.has(kb(r))).map(r=>r.id);
-      if(velhasZero.length){
-        await _lancctbEmLotesDb(velhasZero,200,lote=>_supaClient.from('comprovantes_recebimento').delete().in('id',lote).eq('status_conciliacao','pendente').eq('valor_pago',0));
-        const apagadas=new Set(velhasZero); for(let i=(exist||[]).length-1;i>=0;i--) if(apagadas.has(exist[i].id)) exist.splice(i,1);
+      const kn=r=>(r.data_pagamento||'')+'|'+String(r.nosso_numero||'').trim();
+      const nossosNovos=new Set(registros.filter(r=>r.nosso_numero).map(kn));
+      const completosNovos=new Set(registros.map(r=>chaveComprov(r)+'|'+(r.tipo_operacao||'')));
+      const velhas=(exist||[]).filter(r=>r.nosso_numero&&r.tipo_operacao&&r.status_conciliacao==='pendente'&&nossosNovos.has(kn(r))&&!completosNovos.has(chaveComprov(r)+'|'+r.tipo_operacao)).map(r=>r.id);
+      if(velhas.length){
+        await _lancctbEmLotesDb(velhas,200,lote=>_supaClient.from('comprovantes_recebimento').delete().in('id',lote).eq('status_conciliacao','pendente'));
+        const apagadas=new Set(velhas); for(let i2=(exist||[]).length-1;i2>=0;i2--) if(apagadas.has(exist[i2].id)) exist.splice(i2,1);
       }
     }
     (exist||[]).forEach(r=>{ const k=chaveComprov(r); jaExistem.add(k); if(contaSel&&r.conta_bancaria_id==null) (orfasSemConta[k]=orfasSemConta[k]||[]).push(r.id); if(tipo==='recebimento'&&!r.tipo_operacao) (semTipoOp[k]=semTipoOp[k]||[]).push(r.id); });
