@@ -22532,21 +22532,21 @@ async function _lancctbProcessarTransferencias(){
       .eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('conta_bancaria_id',[...contas.keys()]).order('data_pagamento',{ascending:true}),'data_pagamento'));
     const L=(pend||[]).filter(x=>contas.has(x.conta_bancaria_id));
     const entradas=L.filter(x=>Number(x.valor_entrada)>0), saidas=L.filter(x=>Number(x.valor_saida)>0);
-    const emp=S.emps().find(e=>String(e.eid)===String(eid)), chave=_lancctbTransfNomeChave(emp&&emp.nome);
+    // Pedido do usuário 16/10/2026: bastou achar, em OUTRO banco da empresa, uma saída do MESMO valor no MESMO dia (não exige mais o nome da empresa no histórico). Pareia por dia+valor:
+    // quantidade de entradas = quantidade de saídas (em contas diferentes); se não bater (ex.: 1 entrada de R$ 300 e 2 saídas de R$ 300) é ambíguo e fica pendente.
     const cent=v=>Math.round(Number(v)*100);
-    const candidatas=(a,lista,campo)=>lista.filter(b=>b.conta_bancaria_id!==a.conta_bancaria_id&&cent(b[campo])===cent(campo==='valor_saida'?a.valor_entrada:a.valor_saida)&&_lancctbDiffDias(a.data_pagamento,b.data_pagamento)<=1);
-    const pares=[]; let semConfirmacao=0, ambiguos=0;
-    entradas.forEach(e=>{
-      const cs=candidatas(e,saidas,'valor_saida'); if(!cs.length) return;
-      if(cs.length>1){ ambiguos++; return; }
-      const s=cs[0], volta=candidatas(s,entradas,'valor_entrada'); if(volta.length!==1){ ambiguos++; return; }
-      const nomeOk=chave&&(_convNfNorm(e.historico_bancario).includes(chave)||_convNfNorm(s.historico_bancario).includes(chave));
-      if(!nomeOk){ semConfirmacao++; return; }
-      pares.push({e,s});
+    const balde=new Map(); const add=(x,lado,v)=>{ const k=x.data_pagamento+'|'+cent(v); if(!balde.has(k)) balde.set(k,{E:[],X:[]}); balde.get(k)[lado].push(x); };
+    entradas.forEach(x=>add(x,'E',x.valor_entrada)); saidas.forEach(x=>add(x,'X',x.valor_saida));
+    const pares=[]; let ambiguos=0;
+    balde.forEach(g=>{
+      if(!g.E.length||!g.X.length) return;
+      const usadas=new Set(), par=[];
+      g.E.forEach(e=>{ const s=g.X.find(x=>!usadas.has(x.id)&&x.conta_bancaria_id!==e.conta_bancaria_id); if(s){ usadas.add(s.id); par.push({e,s}); } });
+      if(par.length===g.E.length&&par.length===g.X.length) pares.push(...par); else ambiguos+=Math.max(g.E.length,g.X.length);
     });
-    if(!pares.length){ toast('Nenhuma transferência entre contas encontrada neste período'+(semConfirmacao||ambiguos?` (${semConfirmacao} par(es) sem o nome da empresa no histórico e ${ambiguos} ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
+    if(!pares.length){ toast('Nenhuma transferência entre contas encontrada neste período'+(ambiguos?` (${ambiguos} lançamento(s) ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
     const total=pares.reduce((s,p)=>s+Number(p.e.valor_entrada),0);
-    if(!confirm(`Encontrei ${pares.length} transferência(s) entre contas correntes da empresa (R$ ${_fmt(total)} no total).\n\nCada lado será classificado com a conta ${cPad.numero_conta} - ${cPad.descricao}.\n${semConfirmacao||ambiguos?`\nFicam de fora: ${semConfirmacao} par(es) sem o nome da empresa no histórico e ${ambiguos} ambíguo(s).\n`:''}\nConfirmar?`)){ fim(); return; }
+    if(!confirm(`Encontrei ${pares.length} transferência(s) entre contas correntes da empresa (R$ ${_fmt(total)} no total).\n\nCada lado será classificado com a conta ${cPad.numero_conta} - ${cPad.descricao}.\n${ambiguos?`\nFicam de fora ${ambiguos} lançamento(s) ambíguo(s): a quantidade de entradas e saídas do mesmo valor no mesmo dia não bate.\n`:''}\nConfirmar?`)){ fim(); return; }
     let ok=0; const erros=[];
     for(const {e,s} of pares){
       const bE=contas.get(e.conta_bancaria_id), bS=contas.get(s.conta_bancaria_id), v=Number(e.valor_entrada);
