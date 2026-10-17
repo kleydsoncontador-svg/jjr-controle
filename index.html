@@ -23240,7 +23240,11 @@ function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorEx
     return new Set(doNumero.map(x=>x.nf_id)).size===1; // sem nome no Fluxo: só se houver UMA NF com esse número
   });
   if(!compat.length) return null;
-  const okValor=p=>Math.abs(p.valor_parcela-valorExtrato)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005);
+  // Pedido do usuário 16/10/2026: o Fluxo tem o valor LÍQUIDO (o que sai do banco = Valor Líq.: bruto + juros + multa − abatimento) e é ele que acha a saída bancária; mas a NF/parcela só baixa pelo
+  // BRUTO. Aqui o valor do banco vira bruto usando Juros/Multa/Desconto da própria linha do Fluxo (sem eles, o bruto é o próprio valor, como era).
+  const ajusteLiq=ehSaida?(Number(f.valor_juros||0)+Number(f.valor_multa||0)-Number(f.valor_desconto||0)):0;
+  const valorBrutoRef=Math.round((valorExtrato-ajusteLiq)*100)/100;
+  const okValor=p=>Math.abs(p.valor_parcela-valorBrutoRef)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005);
   const parcInd=Number(f.parcela)||null;
   if(parcInd){
     const porParc=compat.filter(p=>p.numero_parcela===parcInd&&okValor(p));
@@ -23256,7 +23260,7 @@ function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorEx
     const nfIds=new Set(compat.map(p=>p.nf_id));
     if(nfIds.size===1&&compat.length===1){
       const p=compat[0], nf=p.notas_fiscais;
-      if(nf[campoCnpj]===cnpjF&&p.valor_parcela-valorExtrato>0.02) return Object.assign({},p,{_parcial:true,_origem:p});
+      if(nf[campoCnpj]===cnpjF&&p.valor_parcela-valorBrutoRef>0.02) return Object.assign({},p,{_parcial:true,_origem:p,_valorBruto:valorBrutoRef});
     }
   }
   return null;
@@ -31010,6 +31014,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // Queries independentes rodam em paralelo para reduzir latência total.
   const { data: agenciaInfoNf } = await _pAgInfoNf;
   const _pulaParcelasNf=_lancctbContaSemNfVinculo(agenciaInfoNf)&&(modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento'||modo==='recebimentos_so_regras');
+  const _temJFx=await _lancctbFluxoColunasJuros();
   const [
     { data: comprovantesPag },
     { data: comprovantesReceb },
@@ -31043,7 +31048,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       .eq('empresa_eid',eid).eq('ativo',true).is('fluxo_historico_gatilho',null).is('fluxo_cliente_gatilho',null).is('fluxo_numero_gatilho',null).is('fluxo_descconta_gatilho',null)),
     // fluxo ponte: inclui linhas já associadas a pendências desta conta
     _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,lancamento_extrato_id,numero,documento_numero,parcela')
+      .select('id,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,conta_bancaria_id,lancamento_extrato_id,numero,documento_numero,parcela'+(_temJFx?',valor_juros,valor_desconto,valor_multa':''))
       .eq('empresa_eid',eid);
       if(_mDmin) q=q.gte('data',_mDmin);
       if(_mDmax) q=q.lte('data',_mDmax);
@@ -31172,6 +31177,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         const mesmoLadoNf=contrapartidaTipo, ladoBanco=bancoTipo;
         let ex=[];
         let j=Number(comprovanteMatch?.juros||0), m=Number(comprovanteMatch?.multa||0), d=Number(comprovanteMatch?.desconto||0);
+        if(ehSaida&&!(j||m||d)&&l._fxJDM){ j=l._fxJDM.j; m=l._fxJDM.m; d=l._fxJDM.d; }
         if(ehSaida&&!(j||m||d)){
           // Sem detalhe no comprovante: o Fluxo de Caixa ligado a este lançamento do extrato pode trazer Juros / Desconto-Abatimento / Multa da parcela (pedido do usuário 16/10/2026).
           try{
@@ -31314,24 +31320,26 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       let desfazerParcial=null;
       if(par._parcial){
         // Divide a parcela: a atual passa a valer o que foi PAGO e nasce uma parcela com o SALDO (pendente, +30 dias — mesma regra do 'Dividir Parcelas via Fluxo').
-        const orig=par._origem, saldo=Math.round((orig.valor_parcela-valor)*100)/100;
+        const vBr=par._valorBruto!=null?par._valorBruto:valor;
+        const orig=par._origem, saldo=Math.round((orig.valor_parcela-vBr)*100)/100;
         const { data: cheia } = await _supaClient.from('notas_fiscais_parcelas').select('*').eq('id',orig.id).single();
         const { data: ultimas } = await _supaClient.from('notas_fiscais_parcelas').select('numero_parcela').eq('nf_id',orig.nf_id).order('numero_parcela',{ascending:false}).limit(1);
         if(!cheia){ continue; }
         const dSaldo=new Date(l.data_pagamento+'T00:00:00'); dSaldo.setDate(dSaldo.getDate()+30);
-        const { error: eUp } = await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:valor }).eq('id',orig.id);
+        const { error: eUp } = await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:vBr }).eq('id',orig.id);
         if(eUp){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${eUp.message}`); continue; }
         const novaLinha=Object.assign({},cheia); delete novaLinha.id; delete novaLinha.created_at; delete novaLinha.updated_at;
         Object.assign(novaLinha,{ numero_parcela:((ultimas&&ultimas[0]&&ultimas[0].numero_parcela)||orig.numero_parcela||1)+1, data_vencimento:dSaldo.toISOString().slice(0,10), valor_parcela:saldo, status_conciliacao:'pendente', lancamento_extrato_id:null });
         const { data: nova, error: eIns } = await _supaClient.from('notas_fiscais_parcelas').insert(novaLinha).select('id').single();
         if(eIns||!nova){ await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:orig.valor_parcela }).eq('id',orig.id); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): não consegui abrir o saldo da NF (${eIns?eIns.message:'sem retorno'})`); continue; }
         desfazerParcial=async()=>{ await _supaClient.from('notas_fiscais_parcelas').delete().eq('id',nova.id); await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:orig.valor_parcela }).eq('id',orig.id); };
-        orig.valor_parcela=valor; par=Object.assign({},orig,{ valor_parcela:valor, notas_fiscais:par.notas_fiscais });
+        orig.valor_parcela=vBr; par=Object.assign({},orig,{ valor_parcela:vBr, notas_fiscais:par.notas_fiscais });
         parcelas.push(Object.assign({},orig,{ id:nova.id, numero_parcela:novaLinha.numero_parcela, valor_parcela:saldo, data_vencimento:novaLinha.data_vencimento }));
       }
       const nf=par.notas_fiscais;
       const cnpjT=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeT=ehSaida?nf.nome_emitente:nf.nome_destinatario;
       const compUsa=comprovanteMatch&&(ehPonteL||!comprovanteMatch.cnpj_cpf||comprovanteMatch.cnpj_cpf===cnpjT)?comprovanteMatch:null;
+      l._fxJDM=ehSaida?{j:Number(f.valor_juros||0),m:Number(f.valor_multa||0),d:Number(f.valor_desconto||0)}:null;
       const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjT,nomeT,nf.numero?[nf.numero]:[],compUsa,par.numero_parcela,par.id,par.valor_parcela);
       if(error){ if(desfazerParcial) await desfazerParcial(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
       parcelasUsadas.add(par.id); fluxoPonteUsados.add(f.id);
