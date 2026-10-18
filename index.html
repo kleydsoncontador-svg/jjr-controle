@@ -22635,6 +22635,21 @@ function _lancctbTransfNomeChave(nome){
   const t=_convNfNorm(nome).split(' ').filter(x=>x.length>=4&&!ger.includes(x));
   return t[0]||'';
 }
+// Pedido do usuário 18/10/2026: lançamento com NOME, CNPJ ou CPF de fornecedor/cliente (ex.: "PGTO BOLETO F W DISTRIBUIDORA 08.897.417/0006-15", "Transferência Recebida|CLEDIO KONIG TIETBOHL") NUNCA é transferência entre contas
+// da empresa. Só entra no pareamento a linha que (a) traz o nome/CNPJ da PRÓPRIA empresa (ex.: "Magrao Auto Pecas KAJUNA…") ou (b) não identifica ninguém (só texto de banco: TED, transferência entre contas, resgate…).
+function _lancctbTransfLinhaPropria(hist,emp){
+  const h=_convNfNorm(hist||''); if(!h) return false;
+  const cnpjProprio=String((emp&&(emp.cnpjNum||emp.cnpj))||'').replace(/\D/g,'');
+  const dig=String(hist||'').replace(/\D/g,'');
+  if(cnpjProprio.length>=11&&dig.includes(cnpjProprio)) return true;
+  const ger=['LTDA','EIRELI','EPP','COMERCIO','COMERCIAL','SERVICOS','PECAS','DE','DA','DO','DAS','DOS','E','S/A','SA','ME','MEI','INDUSTRIA','EMPRESA','AUTO','MANUTENCOES','LEVES'];
+  const proprios=_convNfNorm((emp&&emp.nome)||'').split(' ').filter(t=>t.length>=4&&!ger.includes(t)).slice(0,2);
+  if(proprios.some(t=>h.includes(t))) return true;
+  if(/\b(BOLETO|PGTO|PAGTO|PAGO|TITULO|COBRANCA|TARIFA|FATURA|DARF|GPS|DAS|NF|NOTA)\b/.test(h)) return false;
+  if(dig.length>=11) return false; // CNPJ/CPF de terceiro (inteiro ou mascarado)
+  const limpa=h.replace(/\b(TRANSFERENCIA|TRANSF|ENVIADA|RECEBIDA|ENVIADO|RECEBIDO|PIX|TED|DOC|ENTRE|CONTAS|CONTA|CC|CORRENTES|CORRENTE|BANCO|RESGATE|RESG|APLICACAO|APLIC|AUTOMATICO|AUTOMATICA|MESMA|TITULARIDADE|DEBITO|CREDITO|CRED|DEB|C\/C|AUT|MAIS|APL|OP|GARANT|GARANTIA)\b/g,' ').replace(/[^A-Z ]/g,' ').split(' ').filter(t=>t.length>=3);
+  return limpa.length===0;
+}
 async function _lancctbProcessarTransferencias(){
   const eid=_lancctbEidAtual, btn=document.getElementById('lancctbTransfBtn');
   const numPad=(_lancctbContasPadraoGet(eid)||{}).transf_contas;
@@ -22652,7 +22667,8 @@ async function _lancctbProcessarTransferencias(){
       .eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('conta_bancaria_id',[...contas.keys()]).order('data_pagamento',{ascending:true}),'data_pagamento'));
     // Pedido do usuário 17/10/2026: "SISPAG SALARIOS nunca será transferência entre contas" — pagamento de folha (salário, pró-labore, férias, 13º, adiantamento) nunca entra no pareamento.
     const _ehFolhaTransf=h=>/SALARIO|PRO[ -]?LABORE|FOLHA|FERIAS|13[ºO°]? ?SAL|ADIANTAMENTO|RESCIS/.test(_convNfNorm(h||''));
-    const L=(pend||[]).filter(x=>contas.has(x.conta_bancaria_id)&&!_ehFolhaTransf(x.historico_bancario));
+    const _empTransf=(S.emps()||[]).find(e=>String(e.eid)===String(eid));
+    const L=(pend||[]).filter(x=>contas.has(x.conta_bancaria_id)&&!_ehFolhaTransf(x.historico_bancario)&&_lancctbTransfLinhaPropria(x.historico_bancario,_empTransf));
     const entradas=L.filter(x=>Number(x.valor_entrada)>0), saidas=L.filter(x=>Number(x.valor_saida)>0);
     // Pedido do usuário 16/10/2026: bastou achar, em OUTRO banco da empresa, uma saída do MESMO valor no MESMO dia (não exige mais o nome da empresa no histórico). Pareia por dia+valor:
     // quantidade de entradas = quantidade de saídas (em contas diferentes); se não bater (ex.: 1 entrada de R$ 300 e 2 saídas de R$ 300) é ambíguo e fica pendente.
