@@ -24436,6 +24436,8 @@ async function _lancctbParsearLiquidosDominio(pdf){
 const LIQ_TIPO_PARA_FOPAG={ MONTHLY_PAYROLL:'salario', SALARY_ADVANCE:'adiantamento', VACATION:'ferias', THIRTEENTH_ADVANCE:'decimo13', TERMINATION:'rescisao' };
 const LIQ_ROTULO_FOLHA={ salario:'salário', adiantamento:'adiantamento', ferias:'férias', decimo13:'13º salário', rescisao:'rescisão' };
 function _rotuloFolha(tipo){ return LIQ_ROTULO_FOLHA[tipo]||'salário'; }
+// Contribuinte do Relatório de Líquidos = sócio com pró-labore (pedido do usuário 18/10/2026: pró-labore dos sócios vai na conta 188).
+function _rotP(p,tipo){ return p&&p.tipo==='contribuinte'?'pró-labore':_rotuloFolha(tipo); }
 async function _lancctbSalvarHandleFopagMes(handle){
   const db=await _lancctbAbrirDbHandles();
   return new Promise((resolve,reject)=>{ const tx=db.transaction('handles','readwrite'); tx.objectStore('handles').put(handle,'raizFopagDoMes'); tx.oncomplete=()=>resolve(); tx.onerror=()=>reject(tx.error); });
@@ -24673,7 +24675,7 @@ async function _lancctbProcessarFopag(){
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
     if(!contaBancoInfo?.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada.','err'); return; }
     const { data: contasFixas } = await _supaClient.from('plano_contas')
-      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['187','724','567','647']);
+      .select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['187','724','567','647','188']);
     const contaSalario=(contasFixas||[]).find(c=>c.numero_conta==='187');
     const contaAdiantamento=(contasFixas||[]).find(c=>c.numero_conta==='724');
     const contaFerias=(contasFixas||[]).find(c=>c.numero_conta==='567'); // férias debita 567 (pedido do usuário 18/09/2026)
@@ -24700,6 +24702,9 @@ async function _lancctbProcessarFopag(){
     // Resolve a conta contábil (débito) de uma pessoa da folha.
     const contaDaPessoa=(p,tipoRelatorio)=>{
       if(p.tipo==='contribuinte'){
+        // Pró-labore dos sócios: conta 188 (pedido do usuário 18/10/2026); sem a 188 no plano, mantém a conta do sócio (1.2.9…) como antes.
+        const c188=(contasFixas||[]).find(c=>c.numero_conta==='188');
+        if(c188) return {id:c188.id,classificacao:c188.classificacao};
         const socio=_lancctbAcharSocioPorHistorico(socios,p.nome);
         const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
         return conta?{id:conta.id,classificacao:conta.classificacao}:null;
@@ -24750,6 +24755,7 @@ async function _lancctbProcessarFopag(){
 
     let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null;
     const comprovSociosCache={};
+    const indivSispagCache={};
     // Recibos de Férias (pasta "Relatórios FOPAG para Contábil"): casa a saída
     // com o TOTAL LÍQUIDO EXATO do recibo da MESMA empresa; se houver mais de
     // um recibo com o mesmo valor, desempata pelo início do gozo (pago poucos
@@ -24840,7 +24846,7 @@ async function _lancctbProcessarFopag(){
         achou.dados.pessoas.forEach(p=>{
           const c=contaDaPessoa(p,achou.tipo);
           if(!c){ ok=false; return; }
-          linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. ${_rotuloFolha(achou.tipo)} ${achou.dados.competencia||achou.competencia} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+          linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. ${_rotP(p,achou.tipo)} ${achou.dados.competencia||achou.competencia} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
         });
         if(!ok||linhas.length<2){ semAchado++; continue; }
         const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
@@ -24892,7 +24898,7 @@ async function _lancctbProcessarFopag(){
           if(mix.r) mix.r.dados.pessoas.forEach(p=>{
             const c=contaDaPessoa(p,mix.r.tipo);
             if(!c){ ok=false; return; }
-            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. ${_rotuloFolha(mix.r?mix.r.tipo:'salario')} ${compRef} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:p.valor, historico:`Pagamento ref. ${_rotP(p,mix.r?mix.r.tipo:'salario')} ${compRef} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' });
           });
           mix.itens.forEach(cp=>{
             const socio=_lancctbAcharSocioPorHistorico(socios,(cp.cliente_fornecedor_nome||'')+' '+(cp.cnpj_cpf||''));
@@ -24926,6 +24932,14 @@ async function _lancctbProcessarFopag(){
           }catch(e){ console.warn('Recibos de férias (Caminho 1c):',e); }
         }
         if(pessoasFolha.length){
+          // Quem já foi pago INDIVIDUALMENTE (PIX/TED com o nome no extrato, de qualquer conta da empresa, ±3 dias, mesmo valor) não está no Sispag — sai da lista de candidatos.
+          if(!indivSispagCache[l.id]){
+            const dI=new Date(l.data_pagamento+'T00:00:00'); dI.setDate(dI.getDate()-3); const dF=new Date(l.data_pagamento+'T00:00:00'); dF.setDate(dF.getDate()+3);
+            const { data: ind } = await _supaClient.from('lancamentos_extrato').select('id,valor_saida,historico_bancario').eq('empresa_eid',eid).gt('valor_saida',0)
+              .gte('data_pagamento',dI.toISOString().slice(0,10)).lte('data_pagamento',dF.toISOString().slice(0,10)).neq('id',l.id);
+            indivSispagCache[l.id]=(ind||[]).filter(x=>!/SISPAG/.test(_norm(x.historico_bancario)));
+          }
+          const pagoIndividual=(f,escolha)=>indivSispagCache[l.id].some(x=>Math.abs(x.valor_saida-f.valor_saida)<=0.01&&identificaPessoa(x.historico_bancario,[escolha.p]));
           const candFx=[];
           (fluxoTodo||[]).forEach(f=>{
             if(!(f.valor_saida>0)) return;
@@ -24935,26 +24949,30 @@ async function _lancctbProcessarFopag(){
             const txt=(f.cliente_fornecedor_nome||'')+' '+(f.descricao||'');
             const ms=pessoasFolha.filter(x=>identificaPessoa(txt,[x.p]));
             if(!ms.length) return;
-            const escolha=ms.find(x=>Math.abs(x.p.valor-f.valor_saida)<=0.01)||ms[0];
-            candFx.push({f,escolha});
+            const igual=ms.find(x=>Math.abs(x.p.valor-f.valor_saida)<=0.01);
+            const escolha=igual||ms[0];
+            if(pagoIndividual(f,escolha)) return;
+            candFx.push({f,escolha,igualLiq:!!igual});
           });
-          if(candFx.length>=2&&candFx.length<=24){
-            const vals=candFx.map(c=>Math.round(c.f.valor_saida*100));
-            const { sols, estourou } = _lancctbSubconjuntosSoma(vals,Math.round(l.valor_saida*100),0,6,400000);
-            let melhor=null;
-            if(!estourou&&sols.length){
-              const menor=Math.min(...sols.map(x=>x.length));
-              const mins=sols.filter(x=>x.length===menor);
-              if(mins.length===1) melhor=mins[0];
-            }
+          // 1º tenta SÓ as linhas cujo valor é exatamente o líquido da pessoa na folha (o salário); se não fechar numa combinação única, tenta todas as linhas das pessoas da folha.
+          const buscaUnica=(lista)=>{
+            if(lista.length<2||lista.length>30) return null;
+            const { sols, estourou } = _lancctbSubconjuntosSoma(lista.map(c=>Math.round(c.f.valor_saida*100)),Math.round(l.valor_saida*100),0,6,400000);
+            if(estourou||!sols.length) return null;
+            const menor=Math.min(...sols.map(x=>x.length)); const mins=sols.filter(x=>x.length===menor);
+            return mins.length===1?mins[0].map(ix=>lista[ix]):null;
+          };
+          const itensAchados=buscaUnica(candFx.filter(c=>c.igualLiq))||buscaUnica(candFx);
+          {
+            const melhor=!!itensAchados;
             if(melhor){
-              const itens=melhor.map(ix=>candFx[ix]);
+              const itens=itensAchados;
               const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'automatico_triangular' }];
               let ok=true;
               itens.forEach(({f,escolha})=>{
                 const c=contaDaPessoa(escolha.p,escolha.tipo);
                 if(!c){ ok=false; return; }
-                linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:Math.round(f.valor_saida*100)/100, historico:`Pagamento ref. ${_rotuloFolha(escolha.tipo)} ${escolha.comp||''} - ${escolha.p.nome}`.replace(/\s+-/,' -'), cliente_fornecedor_nome:escolha.p.nome, cnpj_cpf:escolha.p.cpf||null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
+                linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:Math.round(f.valor_saida*100)/100, historico:`Pagamento ref. ${_rotP(escolha.p,escolha.tipo)} ${escolha.comp||''} - ${escolha.p.nome}`.replace(/\s+-/,' -'), cliente_fornecedor_nome:escolha.p.nome, cnpj_cpf:escolha.p.cpf||null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
               });
               const somaD=Math.round(linhas.filter(x=>x.tipo==='D').reduce((a,x)=>a+x.valor,0)*100)/100;
               if(ok&&Math.abs(somaD-l.valor_saida)<=0.01){
@@ -25050,8 +25068,8 @@ async function _lancctbProcessarFopag(){
       }
 
       const linhas=[
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:liquido, historico:`Pagamento ref. ${_rotuloFolha(r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaP.classificacao, conta_contabil_id:contaP.id, tipo:'D', valor:liquido, historico:`Pagamento ref. ${_rotuloFolha(r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:liquido, historico:`Pagamento ref. ${_rotP(p,r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaP.classificacao, conta_contabil_id:contaP.id, tipo:'D', valor:liquido, historico:`Pagamento ref. ${_rotP(p,r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
       ];
       const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
       if(error){ console.error('Erro FOPAG (individual):',error); semAchado++; continue; }
