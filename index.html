@@ -11793,6 +11793,22 @@ async function bootstrap(){
         if(fn!=='criar_lancamento_partida_dobrada'||!args||!Array.isArray(args.linhas)) return origRpc(fn,args,opts);
         var extIds=[...new Set(args.linhas.map(function(l){return l.lancamento_extrato_id;}).filter(Boolean).map(String))];
         if(extIds.length!==1) return origRpc(fn,args,opts);
+        // REDE DE SEGURANÇA dos Parâmetros do Fluxo (pedido do usuário 18/10/2026, "é obrigatório"): qualquer lançamento que amarre uma NF de fornecedor que desrespeita o parâmetro do histórico bancário é barrado aqui,
+        // por QUALQUER caminho do sistema (soma de NFs, Fluxo→NF, aglutinado, manual...).
+        try{
+          var nfIdsP=args.linhas.map(function(l){return l.nf_parcela_id;}).filter(Boolean);
+          var eidP=args.linhas[0]&&args.linhas[0].empresa_eid;
+          var psP=(nfIdsP.length&&eidP!=null)?_lancctbFluxoParamGet(eidP):[];
+          if(psP.length){
+            var rExP=await _supaClient.from('lancamentos_extrato').select('historico_bancario').eq('id',extIds[0]).maybeSingle();
+            var histP=rExP&&rExP.data&&rExP.data.historico_bancario;
+            if(histP&&_lancctbFluxoParamsDaLinha(histP,psP).length){
+              var rPP=await _supaClient.from('notas_fiscais_parcelas').select('id,notas_fiscais(nome_emitente,nome_destinatario,direcao)').in('id',nfIdsP);
+              var ruimP=((rPP&&rPP.data)||[]).some(function(pp){ var nf=pp.notas_fiscais; return nf&&!_lancctbNfParamOk(histP,nf,nf.direcao==='compra',psP); });
+              if(ruimP) return {data:null,error:{message:'Bloqueado pelo parâmetro do Fluxo: o fornecedor da NF não respeita o que foi definido para este histórico bancário.'}};
+            }
+          }
+        }catch(eP){ console.warn('Rede de segurança dos parâmetros do Fluxo falhou:',eP); }
         var extId=extIds[0], chave=extId+'#'+assin(args.linhas), dupErr={data:null,error:{message:'Duplicidade evitada: este lançamento já foi gerado para este item do extrato'}};
         if(emVoo.has(chave)) return dupErr;
         emVoo.add(chave);
@@ -31782,7 +31798,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // Fluxo, TODAS resolvidas em NF, fechando o valor do extrato.
   const _fpListaEng=_lancctbFluxoParamGet(eid);
   async function tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch,usarComprovantes){
-    const base=(fluxoCaixaPonteBase||[]).filter(f=>!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
+    const base=(fluxoCaixaPonteBase||[]).filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaEng)&&!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
       &&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&(f.numero||f.documento_numero));
     const ehPonteL=/SECURITIZ|\bFIDC\b|FUNDO DE INVEST/.test(_convMpRemoverAcentos(String(l.historico_bancario||'').toUpperCase()));
     const temNome=_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
