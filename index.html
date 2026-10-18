@@ -30930,7 +30930,7 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
     }
     if(!falhou&&rBusca.resto>0.009){
       const { data: nr, error: eR } = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento, valor_saida:rBusca.resto, valor_entrada:0,
-        historico_bancario:`[SISPAG ABERTO - SEM IDENTIFICAR ${l.data_pagamento.split('-').reverse().join('/')}] ${l.historico_bancario||''}`.trim(), origem_importacao:'fopag_diferenca', hash_dedup:`sispag_resto_${l.id}_${Date.now()}` }).select('id').single();
+        historico_bancario:`[DIFERENÇA A IDENTIFICAR - FOPAG ${l.data_pagamento.split('-').reverse().join('/')}] ${l.historico_bancario||''}`.trim(), origem_importacao:'fopag_diferenca', hash_dedup:`sispag_resto_${l.id}_${Date.now()}` }).select('id').single();
       if(eR||!nr) falhou=true; else novos.push(nr.id);
     }
     if(falhou){
@@ -31024,6 +31024,9 @@ async function _lancctbProcessarFluxo(){
       if(!fluxoPend.includes(f)) fluxoPend.push(f);
     }
     const usados=new Set();
+    // SISPAG SALARIOS: abre em uma linha por pessoa da folha/sócio do Fluxo do dia (ver _lancctbAbrirSispagViaFluxo).
+    let sispagAbertos=0, sispagMotivos=[];
+    try{ const rs=await _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usados,hRaiz:_hRaizSispag,statusEl}); sispagAbertos=rs.abertos; sispagMotivos=rs.motivos; }catch(e){ console.error('Sispag via Fluxo:',e); sispagMotivos=['erro: '+(e.message||e)]; }
     // Resolve os pares (extrato → fluxo) localmente antes de gravar,
     // depois salva em lote paralelo (8 simultâneos) para evitar N round-trips.
     const pares=[];
@@ -31064,9 +31067,6 @@ async function _lancctbProcessarFluxo(){
         else associados++;
       }
     }
-    // SISPAG SALARIOS: abre em uma linha por pessoa da folha/sócio do Fluxo do dia (ver _lancctbAbrirSispagViaFluxo).
-    let sispagAbertos=0, sispagMotivos=[];
-    try{ const rs=await _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usados,hRaiz:_hRaizSispag,statusEl}); sispagAbertos=rs.abertos; sispagMotivos=rs.motivos; }catch(e){ console.error('Sispag via Fluxo:',e); sispagMotivos=['erro: '+(e.message||e)]; }
     // Pedido do usuário 18/09/2026: o Fluxo também indica a NF (número +
     // parcela) — depois de associar, amarra as NFs que ele indica.
     if(statusEl) statusEl.textContent='Amarrando NFs indicadas pelo Fluxo…';
@@ -34609,7 +34609,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px;text-align:right;color:${corValor}">R$ ${_fmt(valor)}</td>
       <td style="padding:7px 10px">${esc(r.historico_bancario||'')}</td>
       ${regraBtnHtml}
-      <td style="padding:7px 10px"><input class="si" style="width:100%;min-width:160px" value="${esc(d.historico||'')}" data-lote="${d.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+      <td style="padding:7px 10px"><input class="si" style="width:100%;min-width:160px" value="${esc(d.historico||'')}" data-orig="${esc(d.historico||'')}" data-lote="${d.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
       <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(d.cliente_fornecedor_nome||'')}">${esc(d.cliente_fornecedor_nome||'')}</td>
       <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(d.cnpj_cpf))}</td>
       ${parcelaCelsHtml(d.nf_parcela_id?d:(c.nf_parcela_id?c:null))}
@@ -34635,7 +34635,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px;text-align:right;color:${corValor}">R$ ${_fmt(l.valor)}</td>
         <td style="padding:7px 10px">${esc(r.historico_bancario||'')}</td>
         ${regraBtnHtml}
-        <td style="padding:7px 10px"><input class="si" style="width:100%;min-width:160px" value="${esc(l.historico||'')}" data-lote="${l.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
+        <td style="padding:7px 10px"><input class="si" style="width:100%;min-width:160px" value="${esc(l.historico||'')}" data-orig="${esc(l.historico||'')}" data-id="${l.id}" data-lote="${l.lote_id}" onblur="salvarLancctbHistoricoUtilizado(this)" onkeydown="if(event.key==='Enter')this.blur()"></td>
         <td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:170px" title="${esc(l.cliente_fornecedor_nome||'')}">${esc(l.cliente_fornecedor_nome||'')}</td>
         <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
         ${parcelaCelsHtml(l)}
@@ -35084,10 +35084,16 @@ async function salvarLancctbHistoricoUtilizado(inputEl){
   const loteId=inputEl.dataset.lote;
   if(!loteId) return;
   const novo=inputEl.value.trim();
-  const { error } = await _supaClient.from('lancamentos_contabeis').update({historico:novo}).eq('lote_id',loteId);
+  // Achado real 18/10/2026 (Kajuna, Sispag de 06/08): só clicar no campo e sair (blur) regravava o histórico em TODAS as linhas do lote — as 13 pessoas ficaram com o nome da 1ª. Agora só grava se o texto mudou e,
+  // quando a linha é uma das várias de um lote, grava só ela (data-id).
+  if(inputEl.dataset.orig!==undefined&&novo===inputEl.dataset.orig.trim()) return;
+  const linhaId=inputEl.dataset.id;
+  const q=_supaClient.from('lancamentos_contabeis').update({historico:novo});
+  const { error } = linhaId?await q.eq('id',linhaId):await q.eq('lote_id',loteId);
   if(error){ toast('Erro ao salvar histórico utilizado: '+error.message,'err'); return; }
   toast('Histórico utilizado atualizado.','ok');
-  _lancctbUltimoRegistro.forEach(item=>{ item.ctb.forEach(c=>{ if(c.lote_id===loteId) c.historico=novo; }); });
+  inputEl.dataset.orig=novo;
+  _lancctbUltimoRegistro.forEach(item=>{ item.ctb.forEach(c=>{ if(linhaId?String(c.id)===String(linhaId):c.lote_id===loteId) c.historico=novo; }); });
 }
 function exportarLancctbRegistroExcel(){
   if(!_lancctbUltimoRegistro.length){ toast('Nada para exportar nesta página.','err'); return; }
