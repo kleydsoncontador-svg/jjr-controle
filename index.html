@@ -34844,6 +34844,7 @@ async function renderLancctbRegistroContabil(){
   // 08/2026, mesmo os dois meses sendo períodos independentes de fechamento).
   const { count: pendenciasTotaisConta } = await _pPend;
 
+  window.__lancctbRegCount=count||0;
   _lancctbUltimoRegistro=linhas;
   const _htmlRegistro=_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico,todasContas:_todasC});
   _lancctbRegistroCache={eid,html:_htmlRegistro};
@@ -35478,32 +35479,69 @@ async function salvarLancctbHistoricoUtilizado(inputEl){
   inputEl.dataset.orig=novo;
   _lancctbUltimoRegistro.forEach(item=>{ item.ctb.forEach(c=>{ if(linhaId?String(c.id)===String(linhaId):c.lote_id===loteId) c.historico=novo; }); });
 }
-function exportarLancctbRegistroExcel(){
-  if(!_lancctbUltimoRegistro.length){ toast('Nada para exportar nesta página.','err'); return; }
-  const header=['Data','Conta D','Classificação D','Descrição conta D','Conta C','Classificação C','Descrição conta C','Valor','Histórico Bancário','Histórico Utilizado','Cliente/Fornecedor','CPF/CNPJ','Status'];
-  const rows=[];
-  _lancctbUltimoRegistro.forEach(item=>{
-    const r=item.extrato;
-    const dataFmt=r.data_pagamento?new Date(r.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):'';
-    const valor=r.valor_saida||r.valor_entrada;
-    const ds=item.ctb.filter(c=>c.tipo==='D'), cs=item.ctb.filter(c=>c.tipo==='C');
-    if(item.ctb.length&&ds.length===1&&cs.length===1){
-      const d=ds[0],c=cs[0];
-      rows.push([dataFmt,d.plano_contas?.numero_conta||'',d.classificacao||'',d.plano_contas?.descricao||'',c.plano_contas?.numero_conta||'',c.classificacao||'',c.plano_contas?.descricao||'',valor,r.historico_bancario||'',d.historico||'',d.cliente_fornecedor_nome||'',_fmtCnpjCpf(d.cnpj_cpf),r.status_conciliacao||'']);
-    } else if(item.ctb.length){
-      item.ctb.forEach(l=>{
-        const ehD=l.tipo==='D';
-        rows.push([dataFmt, ehD?(l.plano_contas?.numero_conta||''):'', ehD?(l.classificacao||''):'', ehD?(l.plano_contas?.descricao||''):'', !ehD?(l.plano_contas?.numero_conta||''):'', !ehD?(l.classificacao||''):'', !ehD?(l.plano_contas?.descricao||''):'', l.valor, r.historico_bancario||'', l.historico||'', l.cliente_fornecedor_nome||'', _fmtCnpjCpf(l.cnpj_cpf), r.status_conciliacao||'']);
-      });
-    } else {
-      rows.push([dataFmt,'','','','','','',valor,r.historico_bancario||'','','','',r.status_conciliacao||'']);
+// "Gerar Excel" do Registro Contábil (pedido do usuário 18/10/2026: "tem que gerar de todas as páginas em um único e com todas as colunas"): percorre TODAS as páginas do filtro atual (a mesma consulta e os mesmos
+// enriquecimentos da tela — Fluxo, parcela da NF, etc.), junta numa única planilha e traz as mesmas colunas da tela (+ a conta bancária, útil quando se vê todas as contas). A tela volta à página em que estava.
+let _lancctbExcelRegistroRodando=false;
+async function exportarLancctbRegistroExcel(){
+  if(_lancctbExcelRegistroRodando){ toast('A geração do Excel já está em andamento.','info'); return; }
+  _lancctbExcelRegistroRodando=true;
+  const paginaOrig=_lancctbRegistroPagina;
+  const fim=()=>{ _lancctbExcelRegistroRodando=false; };
+  try{
+    const totalReg=window.__lancctbRegCount||(_lancctbUltimoRegistro||[]).length;
+    const totalPag=Math.max(1,Math.ceil(totalReg/LANCCTB_PAGE_SIZE));
+    const todos=[];
+    for(let k=0;k<totalPag;k++){
+      toast(`Gerando Excel… página ${k+1} de ${totalPag}`,'info');
+      _lancctbRegistroPagina=k;
+      await renderLancctbRegistroContabil();
+      (_lancctbUltimoRegistro||[]).forEach(it=>todos.push(it));
     }
-  });
-  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
-  const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Registro Contábil');
-  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
-  XLSX.writeFile(wb,`RegistroContabil_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    if(!todos.length){ toast('Nada para exportar com esse filtro.','err'); return; }
+    const ags=Object.fromEntries((_lancctbRegistroAgenciasCache||[]).map(a=>[a.id,a]));
+    const nomeConta=id=>{ const a=ags[id]; return a?`${_lancctbNomeBancoExibicao(a.banco_nome)} Ag ${a.agencia} Cc ${a.conta_corrente}`:''; };
+    const header=['Conta bancária','Data','Conta D','Classificação D','Descrição conta D','Conta C','Classificação C','Descrição conta C','Valor','Histórico Bancário','Histórico Utilizado','Cliente/Fornecedor','CPF/CNPJ','Data Parcela','Mês bate?','Fluxo de Caixa','Parâm. Fluxo','Status','Explicação da IA'];
+    const fmtD=d=>d?new Date(d+'T00:00:00').toLocaleDateString('pt-BR'):'';
+    const rows=[];
+    todos.forEach(item=>{
+      const r=item.extrato;
+      const dataFmt=fmtD(r.data_pagamento);
+      const valor=r.valor_saida||r.valor_entrada;
+      const conta=nomeConta(r.conta_bancaria_id);
+      const fx=item.fluxoConciliado||item.fluxoSugerido||null;
+      const fluxoTxt=fx?`${fx.cliente_fornecedor_nome||fx.descricao||''}${fx.data?' ('+fmtD(fx.data)+')':''}${item.fluxoConciliado?'':' [sugestão]'}`:'';
+      const paramTxt=_lancctbFluxoParamsDaLinha(r.historico_bancario,_lancctbFluxoParamLista).map(pp=>`${pp.gatilho}: deve ${(pp.contem||[]).join('/')||'—'}; não ${(pp.naoContem||[]).join('/')||'—'}`).join(' | ');
+      const parcelaDe=l=>{ const dv=(l&&l.notas_fiscais_parcelas&&l.notas_fiscais_parcelas.data_vencimento)||(item.parcelaSugerida&&item.parcelaSugerida.data_vencimento)||''; if(!dv) return ['','']; return [fmtD(dv),dv.slice(0,7)===(r.data_pagamento||'').slice(0,7)?'Sim':'Não']; };
+      const ia=l=>(l&&l.origem_match==='ia'&&l.informacao_extra)?l.informacao_extra:'';
+      const ds=item.ctb.filter(c=>c.tipo==='D'), cs=item.ctb.filter(c=>c.tipo==='C');
+      if(item.ctb.length&&ds.length===1&&cs.length===1){
+        const d=ds[0],c=cs[0], pc=parcelaDe(d);
+        rows.push([conta,dataFmt,d.plano_contas?.numero_conta||'',d.classificacao||'',d.plano_contas?.descricao||'',c.plano_contas?.numero_conta||'',c.classificacao||'',c.plano_contas?.descricao||'',valor,r.historico_bancario||'',d.historico||'',d.cliente_fornecedor_nome||'',_fmtCnpjCpf(d.cnpj_cpf),pc[0],pc[1],fluxoTxt,paramTxt,r.status_conciliacao||'',ia(d)||ia(c)]);
+      } else if(item.ctb.length){
+        item.ctb.forEach(l=>{
+          const ehD=l.tipo==='D', pc=parcelaDe(l);
+          rows.push([conta,dataFmt, ehD?(l.plano_contas?.numero_conta||''):'', ehD?(l.classificacao||''):'', ehD?(l.plano_contas?.descricao||''):'', !ehD?(l.plano_contas?.numero_conta||''):'', !ehD?(l.classificacao||''):'', !ehD?(l.plano_contas?.descricao||''):'', l.valor, r.historico_bancario||'', l.historico||'', l.cliente_fornecedor_nome||'', _fmtCnpjCpf(l.cnpj_cpf), pc[0], pc[1], fluxoTxt, paramTxt, r.status_conciliacao||'', ia(l)]);
+        });
+      } else {
+        const pc=parcelaDe(null);
+        rows.push([conta,dataFmt,'','','','','','',valor,r.historico_bancario||'','','','',pc[0],pc[1]?pc[1]+'?':'',fluxoTxt,paramTxt,r.status_conciliacao||'','']);
+      }
+    });
+    const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+    const wb=XLSX.utils.book_new();
+    const ws=XLSX.utils.aoa_to_sheet([header,...rows]);
+    ws['!cols']=[28,11,8,16,30,8,16,30,12,46,46,30,18,11,9,34,28,12,40].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb,ws,'Registro Contábil');
+    const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+    XLSX.writeFile(wb,`RegistroContabil_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    toast(`Excel gerado: ${todos.length} lançamento(s) do extrato, ${rows.length} linha(s), de ${totalPag} página(s).`,'ok');
+  } catch(e){
+    console.error('Excel do Registro Contábil:',e); toast('Erro ao gerar o Excel: '+(e.message||e),'err');
+  } finally {
+    _lancctbRegistroPagina=paginaOrig;
+    fim();
+    try{ await renderLancctbRegistroContabil(); }catch(e){}
+  }
 }
 // Slug curto de banco pra nome de arquivo (reaproveita o mesmo mapeamento
 // nome→domínio já usado pro favicon do card da conta — ver LANCCTB_BANCO_DOMINIOS).
