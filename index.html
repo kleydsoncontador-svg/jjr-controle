@@ -23222,6 +23222,11 @@ function _lancctbFluxoEhPf(f){
   const n=_convMpRemoverAcentos(String(f.cliente_fornecedor_nome||'').toUpperCase());
   return !/\b(LTDA|ME|EPP|EIRELI|S\/?A|MEI|COMERCIO|COMERCIAL|INDUSTRIA|SERVICOS?|DISTRIBUIDORA|PECAS|CIA|ASSOCIACAO|BANCO|EMPRESA|TRANSPORTES?|LOCADORA|COOPERATIVA|CONDOMINIO|SINDICATO|AUTO|MECANICA|CENTER|MOTOS|PNEUS|SUPERMERCADOS?|ELETRO|SEGUROS|ENERGIA|TELECOM|ALIMENTOS|MATERIAIS|CONSTRUCAO|FARMACIA|POSTO|IGREJA|PREFEITURA)\b/.test(n);
 }
+// PIX/TED/transferência com o NOME da pessoa no histórico (Itaú "PIX ENVIADO VAGNER DUART…", Nubank "Transferência enviada|…"): vale a regra de pessoa física em qualquer banco.
+function _lancctbHistEhTransfNome(h){
+  const t=_convMpRemoverAcentos(String(h||'').toUpperCase()).trim();
+  return /^(PIX|TED|DOC|TRANSF)/.test(t)&&!/SISPAG/.test(t)&&_lancctbTokensNome(h).length>=2;
+}
 function _lancctbFluxoOutraPessoaFisica(l,f,ag,qualquerBanco){
   if(!qualquerBanco&&!_lancctbEhBancoNubank(ag)) return false;
   if(!_lancctbTokensNome(l.historico_bancario).length) return false;
@@ -24978,7 +24983,9 @@ async function _lancctbProcessarFopag(){
             const menor=Math.min(...sols.map(x=>x.length)); const mins=sols.filter(x=>x.length===menor);
             return mins.length===1?mins[0].map(ix=>lista[ix]):null;
           };
-          const itensAchados=buscaUnica(candFx.filter(c=>c.igualLiq))||buscaUnica(candFx);
+          // Pedido do usuário 18/10/2026: "o Processar FOPAG é quem tem certeza que é salário/adiantamento/férias — não deve definir o que é"; linha do Fluxo cujo valor NÃO é o líquido da folha fica de fora (o Processar Fluxo abre
+          // o Sispag em linhas por pessoa e o usuário cria a Regra). Aqui só fecha quando TODAS as linhas da combinação têm exatamente o líquido da pessoa na folha.
+          const itensAchados=buscaUnica(candFx.filter(c=>c.igualLiq));
           {
             const melhor=!!itensAchados;
             if(melhor){
@@ -30864,18 +30871,25 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
       const txt=(f.cliente_fornecedor_nome||'')+' '+(f.descricao||'');
       const ms=pessoas.filter(pp=>_lancctbPessoaNoTexto(pp,txt));
       if(!ms.length) return;
-      if(individuais.some(x=>Math.abs(x.valor_saida-f.valor_saida)<=0.01&&ms.some(pp=>_lancctbPessoaNoTexto(pp,x.historico_bancario)))) return;
+      // já pago por PIX/TED individual: no mesmo valor, ou várias transferências à mesma pessoa que SOMAM o valor da linha do Fluxo (ex.: Fluxo R$ 600 = PIX de 300 + 250 + 50)
+      if(ms.some(pp=>{ const dela=individuais.filter(x=>_lancctbPessoaNoTexto(pp,x.historico_bancario)); return dela.some(x=>Math.abs(x.valor_saida-f.valor_saida)<=0.01)||(dela.length>1&&Math.abs(dela.reduce((a2,x)=>a2+x.valor_saida,0)-f.valor_saida)<=0.01); })) return;
       cand.push({f,pessoa:ms.find(pp=>Math.abs(pp.valor-f.valor_saida)<=0.01)||ms[0],igualLiq:ms.some(pp=>Math.abs(pp.valor-f.valor_saida)<=0.01)});
     });
+    // Todas as combinações possíveis (até 200): as linhas que estão em TODAS são certas; se sobrar valor (ex.: 2 pessoas de R$ 1.100 e só uma delas entra), esse resto vira UMA linha pendente "sem identificar" — nunca amarra
+    // à pessoa errada. Com uma única combinação, abre tudo.
     const busca=(lista)=>{
       if(lista.length<2||lista.length>30) return null;
-      const { sols, estourou } = _lancctbSubconjuntosSoma(lista.map(c=>Math.round(c.f.valor_saida*100)),Math.round(l.valor_saida*100),0,6,400000);
-      if(estourou||!sols.length) return null;
-      const menor=Math.min(...sols.map(x=>x.length)); const mins=sols.filter(x=>x.length===menor);
-      return mins.length===1?mins[0].map(ix=>lista[ix]):null;
+      const { sols, estourou } = _lancctbSubconjuntosSoma(lista.map(c=>Math.round(c.f.valor_saida*100)),Math.round(l.valor_saida*100),0,200,600000);
+      if(estourou||!sols.length||sols.length>=200) return null;
+      const comuns=sols[0].filter(ix=>sols.every(sl=>sl.includes(ix)));
+      if(!comuns.length) return null;
+      const itensC=comuns.map(ix=>lista[ix]);
+      const somaC=Math.round(itensC.reduce((a,c)=>a+c.f.valor_saida,0)*100)/100;
+      return { itens:itensC, resto:Math.round((l.valor_saida-somaC)*100)/100 };
     };
-    const itens=busca(cand.filter(c=>c.igualLiq))||busca(cand);
-    if(!itens) continue;
+    const rBusca=busca(cand.filter(c=>c.igualLiq))||busca(cand);
+    if(!rBusca) continue;
+    const itens=rBusca.itens;
     // divide o extrato: a linha original passa a valer o 1º item; os demais viram linhas novas (pendentes), cada uma amarrada ao seu Fluxo
     const valorOrig=l.valor_saida, novos=[]; let falhou=false;
     const v0=Math.round(itens[0].f.valor_saida*100)/100;
@@ -30887,6 +30901,11 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
         historico_bancario:`[SISPAG ABERTO - ${itens[k].pessoa.nome}] ${l.historico_bancario||''}`.trim(), origem_importacao:'fopag_diferenca', hash_dedup:`sispag_ab_${l.id}_${k}_${Date.now()}` }).select('id').single();
       if(eIn||!ni){ falhou=true; break; }
       novos.push(ni.id); ids.push(ni.id);
+    }
+    if(!falhou&&rBusca.resto>0.009){
+      const { data: nr, error: eR } = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento, valor_saida:rBusca.resto, valor_entrada:0,
+        historico_bancario:`[SISPAG ABERTO - SEM IDENTIFICAR ${l.data_pagamento.split('-').reverse().join('/')}] ${l.historico_bancario||''}`.trim(), origem_importacao:'fopag_diferenca', hash_dedup:`sispag_resto_${l.id}_${Date.now()}` }).select('id').single();
+      if(eR||!nr) falhou=true; else novos.push(nr.id);
     }
     if(falhou){
       console.error('Sispag via Fluxo: falha ao dividir o extrato — desfazendo.');
@@ -30966,6 +30985,16 @@ async function _lancctbProcessarFluxo(){
         if(!fluxoPend.includes(f)) fluxoPend.push(f);
       }
     }
+    // Achado real 18/10/2026 (Kajuna, 07/08): o Fluxo de ISAIA (R$ 750) estava amarrado ao PIX do VAGNER (R$ 750) e o de JORDANA (R$ 300) ao PIX da SABRINA — só pelo valor. Se o extrato ainda está PENDENTE e o histórico é PIX/TED
+    // com o nome de uma pessoa diferente da pessoa física do Fluxo, solta a amarração (só o vínculo do Fluxo; nada contábil é mexido).
+    for(const f of fluxoTodo){
+      if(f.status_associado!=='associado'||!f.lancamento_extrato_id||!pendIds.has(f.lancamento_extrato_id)) continue;
+      const pend=pendencias.find(x=>x.id===f.lancamento_extrato_id);
+      if(!pend||!_lancctbHistEhTransfNome(pend.historico_bancario)||!_lancctbFluxoOutraPessoaFisica(pend,f,null,true)) continue;
+      await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('id',f.id);
+      f.status_associado='nao_associado'; f.lancamento_extrato_id=null;
+      if(!fluxoPend.includes(f)) fluxoPend.push(f);
+    }
     const usados=new Set();
     // Resolve os pares (extrato → fluxo) localmente antes de gravar,
     // depois salva em lote paralelo (8 simultâneos) para evitar N round-trips.
@@ -30978,7 +31007,7 @@ async function _lancctbProcessarFluxo(){
         const valor=l.valor_saida||l.valor_entrada;
         const cand=fluxoPend.filter(f=>!usados.has(f.id))
           .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
-          .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx))
+          .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
           .filter(f=>{
             const par=indicadaDe(f); if(!par) return true;
@@ -34376,7 +34405,7 @@ async function renderLancctbRegistroContabil(){
       if(!item.fluxoConfirmado){
         const candidatosFluxo=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
-          .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual))
+          .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual,_lancctbHistEhTransfNome(r.historico_bancario)))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO; });
         if(candidatosFluxo.length){
           candidatosFluxo.sort((a,b)=>{
