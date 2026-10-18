@@ -24756,6 +24756,7 @@ async function _lancctbProcessarFopag(){
     let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null;
     const comprovSociosCache={};
     const indivSispagCache={};
+    const relatoriosExtraCache={};
     // Recibos de Férias (pasta "Relatórios FOPAG para Contábil"): casa a saída
     // com o TOTAL LÍQUIDO EXATO do recibo da MESMA empresa; se houver mais de
     // um recibo com o mesmo valor, desempata pelo início do gozo (pago poucos
@@ -24927,9 +24928,24 @@ async function _lancctbProcessarFopag(){
         if(raizFopagContabil){
           try{
             const [anoS,mesS]=l.data_pagamento.slice(0,7).split('-').map(Number);
-            const mesesF=[l.data_pagamento.slice(0,7), mesS===12?`${anoS+1}-01`:`${anoS}-${String(mesS+1).padStart(2,'0')}`];
+            const mesesF=[l.data_pagamento.slice(0,7), mesS===12?`${anoS+1}-01`:`${anoS}-${String(mesS+1).padStart(2,'0')}`, mesS===1?`${anoS-1}-12`:`${anoS}-${String(mesS-1).padStart(2,'0')}`];
             for(const ym of mesesF){ const lista=await _lancctbLerRecibosFeriasMes(raizFopagContabil,ym); lista.forEach(rf=>{ if(_lancctbFirmaEhDaEmpresa(rf.firma,emp.nome)) pessoasFolha.push({p:{nome:rf.nome,cpf:'',valor:rf.liquido,tipo:'empregado'},tipo:'ferias',comp:ym.split('-').reverse().join('/')}); }); }
           }catch(e){ console.warn('Recibos de férias (Caminho 1c):',e); }
+        }
+        // Pedido do usuário 18/10/2026: o Sispag serve também pra saber QUEM procurar no Fluxo — qualquer pessoa que esteja em alguma folha do mês, do mês anterior ou do próximo (salário, adiantamento…).
+        // Pelo ConfiBackup só vinham os relatórios da regra de calendário; aqui completa com salário e adiantamento dos 3 meses (se existirem), só pra identificar as pessoas.
+        if(pastaEmpresa){
+          const cProx=(mmaaaa)=>{ let [mm,aaaa]=mmaaaa.split('-').map(Number); mm++; if(mm>12){mm=1;aaaa++;} return `${String(mm).padStart(2,'0')}-${aaaa}`; };
+          const jaTem=new Set(relatorios.map(r=>r.tipo+'|'+(r.competencia||r.dados.competencia)));
+          for(const tp of ['salario','adiantamento']) for(const cp of [cAnt,cMes,cProx(cMes)]){
+            const chave=tp+'|'+cp; if(jaTem.has(chave)) continue; jaTem.add(chave);
+            if(!(chave in relatoriosExtraCache)){
+              relatoriosExtraCache[chave]=null;
+              try{ const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,cp,tp); if(file){ const dd=await _lancctbParsearRelatorioLiquidos(file); if(dd) relatoriosExtraCache[chave]={tipo:tp,competencia:cp,dados:dd}; } }catch(e){ console.warn('Relatório extra (Caminho 1c):',e); }
+            }
+            const rx=relatoriosExtraCache[chave];
+            if(rx) (rx.dados.pessoas||[]).forEach(pp=>pessoasFolha.push({p:pp,tipo:rx.tipo,comp:rx.dados.competencia||rx.competencia}));
+          }
         }
         if(pessoasFolha.length){
           // Quem já foi pago INDIVIDUALMENTE (PIX/TED com o nome no extrato, de qualquer conta da empresa, ±3 dias, mesmo valor) não está no Sispag — sai da lista de candidatos.
