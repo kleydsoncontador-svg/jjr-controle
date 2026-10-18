@@ -34269,7 +34269,7 @@ function abrirLancctbFluxoParam(extratoId){
   openModal('mLancctbFluxoParam');
 }
 function _fpLista(txt){ return String(txt||'').split(/[,\n;]+/).map(x=>x.trim()).filter(Boolean); }
-function salvarLancctbFluxoParam(idExistente){
+async function salvarLancctbFluxoParam(idExistente){
   const eid=_lancctbEidAtual;
   const gatilho=(document.getElementById('lancctbFpGatilho').value||'').trim();
   const contem=_fpLista(document.getElementById('lancctbFpContem').value), naoContem=_fpLista(document.getElementById('lancctbFpNaoContem').value);
@@ -34279,8 +34279,26 @@ function salvarLancctbFluxoParam(idExistente){
   _lancctbFluxoParamSet(eid,lista);
   _lancctbFluxoParamLista=lista;
   closeModal('mLancctbFluxoParam');
-  toast((contem.length||naoContem.length)?'Parâmetro salvo — vale pra este e pros próximos lançamentos com esse histórico.':'Sem parâmetros — removido.','ok');
+  let soltos=0;
+  if(contem.length||naoContem.length){ try{ soltos=await _lancctbFluxoParamDesassociar(eid,gatilho,lista); }catch(e){ console.error('Parâmetro do Fluxo — soltar associações:',e); } }
+  toast((contem.length||naoContem.length)?`Parâmetro salvo — vale pra este e pros próximos lançamentos com esse histórico.${soltos?` ${soltos} linha(s) do Fluxo que desrespeitavam foram desassociadas.`:''}`:'Sem parâmetros — removido.','ok');
   renderLancctbRegistroContabil();
+}
+// Ao salvar um parâmetro, as linhas do Fluxo JÁ associadas a extratos com esse histórico e que desrespeitam o parâmetro são desassociadas na hora (inclusive de extrato já conciliado: só o vínculo do
+// Fluxo é solto — o lançamento contábil e a NF não são mexidos). Pedido do usuário 18/10/2026.
+async function _lancctbFluxoParamDesassociar(eid,gatilho,lista){
+  const pat='%'+String(gatilho).replace(/[%_,()]/g,' ').trim()+'%';
+  const { data: ext } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,historico_bancario').eq('empresa_eid',eid).ilike('historico_bancario',pat));
+  const mapa=new Map((ext||[]).filter(e=>_lancctbFluxoParamsDaLinha(e.historico_bancario,lista).length).map(e=>[e.id,e.historico_bancario]));
+  if(!mapa.size) return 0;
+  const ids=[...mapa.keys()], soltar=[];
+  for(let i=0;i<ids.length;i+=200){
+    const { data: fx } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,cliente_fornecedor_nome,lancamento_extrato_id').eq('empresa_eid',eid).in('lancamento_extrato_id',ids.slice(i,i+200)));
+    (fx||[]).forEach(f=>{ if(!_lancctbFluxoParamOk(mapa.get(f.lancamento_extrato_id),f,lista)) soltar.push(f.id); });
+  }
+  if(!soltar.length) return 0;
+  await _lancctbEmLotesDb(soltar,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
+  return soltar.length;
 }
 function excluirLancctbFluxoParam(id){
   if(!confirm('Excluir este parâmetro do Fluxo?')) return;
