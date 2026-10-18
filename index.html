@@ -23222,8 +23222,8 @@ function _lancctbFluxoEhPf(f){
   const n=_convMpRemoverAcentos(String(f.cliente_fornecedor_nome||'').toUpperCase());
   return !/\b(LTDA|ME|EPP|EIRELI|S\/?A|MEI|COMERCIO|COMERCIAL|INDUSTRIA|SERVICOS?|DISTRIBUIDORA|PECAS|CIA|ASSOCIACAO|BANCO|EMPRESA|TRANSPORTES?|LOCADORA|COOPERATIVA|CONDOMINIO|SINDICATO|AUTO|MECANICA|CENTER|MOTOS|PNEUS|SUPERMERCADOS?|ELETRO|SEGUROS|ENERGIA|TELECOM|ALIMENTOS|MATERIAIS|CONSTRUCAO|FARMACIA|POSTO|IGREJA|PREFEITURA)\b/.test(n);
 }
-function _lancctbFluxoOutraPessoaFisica(l,f,ag){
-  if(!_lancctbEhBancoNubank(ag)) return false;
+function _lancctbFluxoOutraPessoaFisica(l,f,ag,qualquerBanco){
+  if(!qualquerBanco&&!_lancctbEhBancoNubank(ag)) return false;
   if(!_lancctbTokensNome(l.historico_bancario).length) return false;
   if(!String(f.cliente_fornecedor_nome||'').trim()) return false;
   if(!_lancctbFluxoEhPf(f)) return false;
@@ -24737,11 +24737,16 @@ async function _lancctbProcessarFopag(){
     // "Livre" pra sugerir a uma pendência = não associado, ou sem vínculo, ou
     // vínculo com um lançamento que não é mais pendência (associação velha).
     const fluxoLivre=(fluxoTodo||[]).filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||!_pendIdsFopag.has(String(f.lancamento_extrato_id)));
+    // Achado real 18/10/2026 (Kajuna, Nubank): "Transferência enviada|DOUGLAS RODRIGUES RAMOS" foi amarrada a "LEONARDO WILLIAN ASSMANN DA SILVA" só porque o Fluxo dele tinha o mesmo valor (R$ 138,00) no mesmo dia, e o
+    // mesmo com PAULINE→VAGNER e DIOGO→WILLIAM. Quando o histórico traz o NOME da pessoa (transferência/PIX), o Fluxo de OUTRA pessoa física nunca identifica a folha (Fluxo de empresa ainda vale).
+    const histTemNomePessoa=h=>!/SISPAG/.test(_norm(h))&&_lancctbTokensNome(h).length>=2;
+    const fluxoDeOutraPessoa=(l,f)=>histTemNomePessoa(l.historico_bancario)&&_lancctbFluxoOutraPessoaFisica(l,f,null,true);
     const acharFluxoDaPendencia=(l)=>
-      (fluxoTodo||[]).find(f=>String(f.lancamento_extrato_id)===String(l.id)) ||
+      (fluxoTodo||[]).find(f=>String(f.lancamento_extrato_id)===String(l.id)&&!fluxoDeOutraPessoa(l,f)) ||
       (fluxoLivre||[]).find(f=>
         Math.abs((f.valor_saida||0)-l.valor_saida)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO &&
-        _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+        _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS &&
+        !fluxoDeOutraPessoa(l,f));
 
     let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null;
     const comprovSociosCache={};
@@ -24906,6 +24911,66 @@ async function _lancctbProcessarFopag(){
         }
       }
 
+      // ── Caminho 1c (pedido do usuário 18/10/2026, Kajuna: SISPAG SALARIOS de R$ 8.716,00 em 06/08): "SISPAG SALARIOS são pra pessoas que estão na folha — cruzar folha, fluxo e sispag". O Sispag paga só ALGUMAS
+      // pessoas da folha (nem o total da folha, nem só sócios), então: pega as linhas do FLUXO do mesmo dia (±1 dia) cujo nome é de pessoa que está na folha (Relatório de Líquidos de salário/adiantamento/etc., ou Recibo
+      // de Férias da empresa) e procura a combinação delas que soma EXATO o valor do banco. Só resolve se houver UMA combinação (com a menor quantidade de pessoas); ambígua/sem combinação/pessoa sem conta = nada é gravado.
+      // Cada pessoa vira um débito na conta do tipo de folha em que ela aparece (o relatório cujo líquido bate com o valor do Fluxo; senão o 1º na ordem de prioridade do calendário).
+      if(/SISPAG|SALARIO/.test(_norm(l.historico_bancario))){
+        const pessoasFolha=[];
+        relatorios.forEach(r=>(r.dados.pessoas||[]).forEach(pp=>pessoasFolha.push({p:pp,tipo:r.tipo,comp:r.dados.competencia||r.competencia})));
+        if(raizFopagContabil){
+          try{
+            const [anoS,mesS]=l.data_pagamento.slice(0,7).split('-').map(Number);
+            const mesesF=[l.data_pagamento.slice(0,7), mesS===12?`${anoS+1}-01`:`${anoS}-${String(mesS+1).padStart(2,'0')}`];
+            for(const ym of mesesF){ const lista=await _lancctbLerRecibosFeriasMes(raizFopagContabil,ym); lista.forEach(rf=>{ if(_lancctbFirmaEhDaEmpresa(rf.firma,emp.nome)) pessoasFolha.push({p:{nome:rf.nome,cpf:'',valor:rf.liquido,tipo:'empregado'},tipo:'ferias',comp:ym.split('-').reverse().join('/')}); }); }
+          }catch(e){ console.warn('Recibos de férias (Caminho 1c):',e); }
+        }
+        if(pessoasFolha.length){
+          const candFx=[];
+          (fluxoTodo||[]).forEach(f=>{
+            if(!(f.valor_saida>0)) return;
+            const livre=(f.status_associado==='nao_associado'||!f.lancamento_extrato_id)||String(f.lancamento_extrato_id)===String(l.id);
+            if(!livre||_lancctbDiffDias(f.data,l.data_pagamento)>1) return;
+            if(f.conta_bancaria_id&&String(f.conta_bancaria_id)!==String(contaId)) return;
+            const txt=(f.cliente_fornecedor_nome||'')+' '+(f.descricao||'');
+            const ms=pessoasFolha.filter(x=>identificaPessoa(txt,[x.p]));
+            if(!ms.length) return;
+            const escolha=ms.find(x=>Math.abs(x.p.valor-f.valor_saida)<=0.01)||ms[0];
+            candFx.push({f,escolha});
+          });
+          if(candFx.length>=2&&candFx.length<=24){
+            const vals=candFx.map(c=>Math.round(c.f.valor_saida*100));
+            const { sols, estourou } = _lancctbSubconjuntosSoma(vals,Math.round(l.valor_saida*100),0,6,400000);
+            let melhor=null;
+            if(!estourou&&sols.length){
+              const menor=Math.min(...sols.map(x=>x.length));
+              const mins=sols.filter(x=>x.length===menor);
+              if(mins.length===1) melhor=mins[0];
+            }
+            if(melhor){
+              const itens=melhor.map(ix=>candFx[ix]);
+              const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'automatico_triangular' }];
+              let ok=true;
+              itens.forEach(({f,escolha})=>{
+                const c=contaDaPessoa(escolha.p,escolha.tipo);
+                if(!c){ ok=false; return; }
+                linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:Math.round(f.valor_saida*100)/100, historico:`Pagamento ref. ${_rotuloFolha(escolha.tipo)} ${escolha.comp||''} - ${escolha.p.nome}`.replace(/\s+-/,' -'), cliente_fornecedor_nome:escolha.p.nome, cnpj_cpf:escolha.p.cpf||null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
+              });
+              const somaD=Math.round(linhas.filter(x=>x.tipo==='D').reduce((a,x)=>a+x.valor,0)*100)/100;
+              if(ok&&Math.abs(somaD-l.valor_saida)<=0.01){
+                const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+                if(error){ console.error('Erro FOPAG (Sispag via Fluxo):',error); semAchado++; continue; }
+                await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+                const idsFx=itens.map(x=>x.f.id);
+                await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).in('id',idsFx);
+                idsFx.forEach(id=>{ const ix=(fluxoLivre||[]).findIndex(ff=>ff.id===id); if(ix>=0) fluxoLivre.splice(ix,1); });
+                resolvidos++; continue;
+              }
+            }
+          }
+        }
+      }
+
       // ── Caminho 2: saída individual identificada pelo histórico (nome/CPF)
       // OU pelo Fluxo de Caixa (nome na coluna cliente/fornecedor ou
       // descrição). Se o valor pago > líquido dessa pessoa, abre em 2
@@ -24949,7 +25014,7 @@ async function _lancctbProcessarFopag(){
           }
         }
       }
-      if(!matchIndiv){
+      if(!matchIndiv&&!histTemNomePessoa(l.historico_bancario)){ // histórico COM nome de outra pessoa nunca casa só pelo valor (18/10/2026)
         for(const r of relatorios){
           const iguais=r.dados.pessoas.filter(pp=>Math.abs(pp.valor-l.valor_saida)<=0.01);
           if(iguais.length===1){ matchIndiv={r,p:iguais[0]}; break; }
