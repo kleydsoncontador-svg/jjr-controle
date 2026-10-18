@@ -24801,7 +24801,8 @@ async function _lancctbProcessarFopag(){
     // Achado real 18/10/2026 (Kajuna, Nubank): "Transferência enviada|DOUGLAS RODRIGUES RAMOS" foi amarrada a "LEONARDO WILLIAN ASSMANN DA SILVA" só porque o Fluxo dele tinha o mesmo valor (R$ 138,00) no mesmo dia, e o
     // mesmo com PAULINE→VAGNER e DIOGO→WILLIAM. Quando o histórico traz o NOME da pessoa (transferência/PIX), o Fluxo de OUTRA pessoa física nunca identifica a folha (Fluxo de empresa ainda vale).
     const histTemNomePessoa=h=>!/SISPAG/.test(_norm(h))&&_lancctbTokensNome(h).length>=2;
-    const fluxoDeOutraPessoa=(l,f)=>histTemNomePessoa(l.historico_bancario)&&_lancctbFluxoOutraPessoaFisica(l,f,null,true);
+    const _fpListaFopag=_lancctbFluxoParamGet(eid);
+    const fluxoDeOutraPessoa=(l,f)=>(histTemNomePessoa(l.historico_bancario)&&_lancctbFluxoOutraPessoaFisica(l,f,null,true))||!_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFopag);
     const acharFluxoDaPendencia=(l)=>
       (fluxoTodo||[]).find(f=>String(f.lancamento_extrato_id)===String(l.id)&&!fluxoDeOutraPessoa(l,f)) ||
       (fluxoLivre||[]).find(f=>
@@ -31068,6 +31069,7 @@ async function _lancctbProcessarFluxo(){
   // Pede a permissão de leitura do ConfiBackup já no clique (precisa do gesto do usuário) — serve pra saber quem está na folha ao abrir o Sispag Salários.
   let _hRaizSispag=null;
   try{ if(await _lancctbTemAcessoPastaConfiBackup()){ const hh=await _lancctbCarregarHandleConfiBackup(); if(hh&&(await hh.requestPermission({mode:'read'}))==='granted') _hRaizSispag=hh; } }catch(e){}
+  const _fpListaFluxo=_lancctbFluxoParamGet(eid);
   let _agNubFx=null; try{ const { data: _ag } = await _supaClient.from('agencias_bancarias').select('banco_nome').eq('id',contaId).maybeSingle(); _agNubFx=_ag; }catch(e){}
   const btn=document.getElementById('lancctbProcessarFluxoBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
@@ -31136,6 +31138,15 @@ async function _lancctbProcessarFluxo(){
       f.status_associado='nao_associado'; f.lancamento_extrato_id=null;
       if(!fluxoPend.includes(f)) fluxoPend.push(f);
     }
+    // Parâmetros do Fluxo (🎛): associação que desrespeita o que o usuário definiu pro histórico é solta (só se o extrato ainda está pendente; só o vínculo do Fluxo).
+    if(_fpListaFluxo.length) for(const f of fluxoTodo){
+      if(f.status_associado!=='associado'||!f.lancamento_extrato_id||!pendIds.has(f.lancamento_extrato_id)) continue;
+      const pend=pendencias.find(x=>x.id===f.lancamento_extrato_id);
+      if(!pend||_lancctbFluxoParamOk(pend.historico_bancario,f,_fpListaFluxo)) continue;
+      await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('id',f.id);
+      f.status_associado='nao_associado'; f.lancamento_extrato_id=null;
+      if(!fluxoPend.includes(f)) fluxoPend.push(f);
+    }
     const usados=new Set();
     // SISPAG SALARIOS: abre em uma linha por pessoa da folha/sócio do Fluxo do dia (ver _lancctbAbrirSispagViaFluxo).
     let sispagAbertos=0, sispagMotivos=[];
@@ -31152,6 +31163,7 @@ async function _lancctbProcessarFluxo(){
         const cand=fluxoPend.filter(f=>!usados.has(f.id))
           .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)))
+          .filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFluxo))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
           .filter(f=>{
             const par=indicadaDe(f); if(!par) return true;
@@ -31739,7 +31751,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const tabComp=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
     const comprovantesUsadosL=ehSaida?comprovantesUsadosPag:comprovantesUsadosReceb;
     // Etapa 1
-    const c1=base.filter(f=>perto(f)&&nomeOk(f)).sort((a,b)=>(b.lancamento_extrato_id===l.id)-(a.lancamento_extrato_id===l.id)||_lancctbDiffDias(a.data,l.data_pagamento)-_lancctbDiffDias(b.data,l.data_pagamento));
+    const c1=base.filter(f=>perto(f)&&nomeOk(f)&&_lancctbFluxoParamOk(l.historico_bancario,f,_lancctbFluxoParamGet(eid))).sort((a,b)=>(b.lancamento_extrato_id===l.id)-(a.lancamento_extrato_id===l.id)||_lancctbDiffDias(a.data,l.data_pagamento)-_lancctbDiffDias(b.data,l.data_pagamento));
     for(const f of c1){
       let par=_lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valor,true);
       if(!par) continue;
@@ -34040,7 +34052,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(valor)}</td>
     <td style="padding:7px 10px" title="${esc(r.historico_bancario||'')}">${esc(r.historico_bancario||'')}</td>
     <td style="padding:7px 6px;text-align:center;white-space:nowrap"><button class="btn bp bsm" id="lancctbInlineSalvarBtn_${r.id}" onclick="_lancctbRegistroSalvarInline(${r.id})">✓ Salvar</button> <button class="btn bo bsm" title="O sistema marcou este pagamento como 'composição de guias' e a leitura está errada: desfaz a marca, tira a composição e devolve o lançamento ao histórico original do banco (nada é lançado)" onclick="_lancctbDesfazerMarcaTributo(${r.id})">↩ Desfazer marca</button></td>
-    <td colspan="8" style="padding:7px 10px;font-size:11.5px;color:var(--slate)" id="lancctbInlineTotal_${r.id}">Soma: <strong>R$ ${_fmt(comp.reduce((s,c)=>s+(c.valor||0),0))}</strong> / <strong>R$ ${_fmt(valor)}</strong> <span style="color:var(--teal)">✓ bate</span></td>
+    <td colspan="9" style="padding:7px 10px;font-size:11.5px;color:var(--slate)" id="lancctbInlineTotal_${r.id}">Soma: <strong>R$ ${_fmt(comp.reduce((s,c)=>s+(c.valor||0),0))}</strong> / <strong>R$ ${_fmt(valor)}</strong> <span style="color:var(--teal)">✓ bate</span></td>
   </tr>`;
   const selectCell=`<td colspan="3" style="padding:4px 10px 4px 24px"><select class="si" id="lancctbInlineConta_${r.id}_@@IDX@@" style="width:100%;font-size:11.5px">${optsHtml}</select></td>`;
   const blankGroup='<td colspan="3"></td>';
@@ -34051,7 +34063,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
       ${(bancoEhD?selectCell:blankGroup).replace('@@IDX@@',idx)}
       <td style="padding:4px 10px;text-align:right"><input class="fi" id="lancctbInlineValor_${r.id}_${idx}" type="text" inputmode="decimal" value="${_fmt(c.valor||0)}" style="width:100px;text-align:right;font-size:11.5px" oninput="_lancctbInlineAtualizarTotal(${r.id},${valor})"></td>
       <td colspan="2" style="padding:4px 10px"><input class="fi" id="lancctbInlineHist_${r.id}_${idx}" value="${esc(c.historico||_lancctbPrefixarPagtoRef(c.resumo||c.denominacao||''))}" style="width:100%;font-size:11.5px"></td>
-      <td colspan="8"></td>
+      <td colspan="9"></td>
     </tr>`;
   });
   if(comp.length===1){
@@ -34064,7 +34076,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
       <td></td><td></td>
       <td colspan="7" style="padding:4px 10px;font-size:11.5px;color:var(--slate);text-align:right">Gatilho da Regra (trecho que identifica esta guia nos próximos meses):</td>
       <td colspan="3" style="padding:4px 10px"><input class="fi" id="lancctbInlineGatilho_${r.id}" value="${esc(gPadrao)}" style="width:100%;font-size:11.5px"></td>
-      <td colspan="7"></td>
+      <td colspan="8"></td>
     </tr>`;
   }
   return html;
@@ -34150,7 +34162,90 @@ async function _lancctbAtualizarTemFluxo(eid){
     _lancctbTemFluxoCache[String(eid)]=(count||0)>0;
   }catch(e){}
 }
+// ─── Parâmetros do Fluxo por histórico bancário (pedido do usuário 18/10/2026) ───────────────────────────────────────────────────────
+// Opcional. Na linha do Registro Contábil o usuário define, para um trecho do histórico bancário (o "gatilho"), o que o NOME DO FORNECEDOR do Fluxo de Caixa DEVE conter (qualquer um dos termos) e/ou o que NÃO pode conter.
+// Vale pra essa linha e pra TODAS as outras (de qualquer mês) cujo histórico bancário contenha o gatilho: a associação automática ao Fluxo (sugestão, Processar Fluxo, Fluxo→NF, FOPAG) só considera linhas do Fluxo que
+// respeitam os parâmetros; e, no Processar Fluxo, uma associação antiga que desrespeita é solta (só se o extrato ainda estiver pendente). Guardado por empresa (chave lancctb_fluxo_param_<eid>), sem tabela nova.
+function _lancctbFluxoParamGet(eid){ try{ return S.g('lancctb_fluxo_param_'+eid)||[]; }catch(e){ return []; } }
+function _lancctbFluxoParamSet(eid,lista){ S.s('lancctb_fluxo_param_'+eid,lista); }
+function _fpNorm(t){ return _convMpRemoverAcentos(String(t||'').toUpperCase()).replace(/\s+/g,' ').trim(); }
+function _lancctbFluxoParamsDaLinha(hist,lista){
+  const h=_fpNorm(hist); if(!h) return [];
+  return (lista||[]).filter(p=>p&&p.gatilho&&h.includes(_fpNorm(p.gatilho)));
+}
+function _lancctbFluxoParamOk(hist,f,lista){
+  const ps=_lancctbFluxoParamsDaLinha(hist,lista); if(!ps.length) return true;
+  const nome=_fpNorm(f&&f.cliente_fornecedor_nome);
+  for(const p of ps){
+    const dc=(p.contem||[]).map(_fpNorm).filter(Boolean), nc=(p.naoContem||[]).map(_fpNorm).filter(Boolean);
+    if(dc.length&&!dc.some(t=>nome.includes(t))) return false;
+    if(nc.some(t=>nome.includes(t))) return false;
+  }
+  return true;
+}
+let _lancctbFluxoParamLista=[]; // lista da empresa aberta (carregada a cada renderização do Registro)
+function _lancctbFluxoParamGatilhoSugerido(hist){
+  let t=_fpNorm(hist).replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g,' ').replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g,' ').replace(/[*\d]/g,' ');
+  t=t.replace(/\b(PGTO|PAGTO|PAGAMENTO|BOLETO|PAGO|PIX|ENVIADO|RECEBIDO|TED|DOC|TRANSF|TRANSFERENCIA|ENVIADA|COBRANCA|DEB|AUT)\b/g,' ').replace(/\s+/g,' ').trim();
+  return t.split(' ').slice(0,3).join(' ');
+}
+function _lancctbFluxoParamCelHtml(r){
+  const n=_lancctbFluxoParamsDaLinha(r.historico_bancario,_lancctbFluxoParamLista).length;
+  const tip=n?`${n} parâmetro(s) do Fluxo valem para este histórico — clique pra ver/alterar`:'Definir (opcional) o que o fornecedor do Fluxo deve ou não conter pra este histórico bancário';
+  return `<td style="padding:7px 6px;text-align:center"><button class="icon-btn" title="${esc(tip)}" onclick="abrirLancctbFluxoParam(${r.id})" style="${n?'color:var(--teal);font-weight:700':''}">🎛${n?' '+n:''}</button></td>`;
+}
+function abrirLancctbFluxoParam(extratoId){
+  const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); if(!item) return;
+  const r=item.extrato, eid=_lancctbEidAtual;
+  const lista=_lancctbFluxoParamGet(eid);
+  const existentes=_lancctbFluxoParamsDaLinha(r.historico_bancario,lista);
+  const base=existentes[0]||null;
+  let m=document.getElementById('mLancctbFluxoParam');
+  if(!m){
+    document.body.insertAdjacentHTML('beforeend',`<div class="mb" id="mLancctbFluxoParam" style="display:none"><div class="modal" style="max-width:560px">
+      <div class="mt"><h3>🎛 Parâmetros do Fluxo de Caixa</h3><button onclick="closeModal('mLancctbFluxoParam')">&#x2715;</button></div>
+      <div class="mc" id="lancctbFluxoParamBody"></div></div></div>`);
+    m=document.getElementById('mLancctbFluxoParam');
+  }
+  document.getElementById('lancctbFluxoParamBody').innerHTML=`
+    <div style="font-size:12px;margin-bottom:10px;padding:8px 10px;background:var(--bg);border-radius:6px">Histórico bancário: <b>${esc(r.historico_bancario||'')}</b></div>
+    <div class="fg" style="margin-bottom:10px"><div class="fl">Quando o histórico bancário contiver (gatilho)</div>
+      <input class="fi" id="lancctbFpGatilho" value="${esc(base?base.gatilho:_lancctbFluxoParamGatilhoSugerido(r.historico_bancario))}" style="width:100%">
+      <div style="font-size:11px;color:var(--slate);margin-top:3px">Vale pra este e pra todos os outros lançamentos (de qualquer mês) cujo histórico bancário contenha esse texto.</div></div>
+    <div class="fg" style="margin-bottom:10px"><div class="fl">O fornecedor do Fluxo DEVE conter (opcional — pode ser mais de um, separados por vírgula ou linha; basta bater um)</div>
+      <textarea class="fi" id="lancctbFpContem" rows="2" style="width:100%" placeholder="ex.: EMBREPAR, EMBREPAR DO BRASIL">${esc(((base&&base.contem)||[]).join(', '))}</textarea></div>
+    <div class="fg" style="margin-bottom:10px"><div class="fl">O fornecedor do Fluxo NÃO pode conter (opcional — pode ser mais de um)</div>
+      <textarea class="fi" id="lancctbFpNaoContem" rows="2" style="width:100%" placeholder="ex.: FORT LUB, REDE ANCORA">${esc(((base&&base.naoContem)||[]).join(', '))}</textarea></div>
+    <div style="font-size:11.5px;color:var(--slate);margin-bottom:12px">Sem nenhum parâmetro nada muda. Com parâmetro, o sistema <b>só</b> associa este histórico a linhas do Fluxo que respeitem o que você definiu.</div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
+      ${base?`<button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbFluxoParam('${esc(base.id)}')">Excluir parâmetro</button>`:''}
+      <button class="btn bo" onclick="closeModal('mLancctbFluxoParam')">Cancelar</button>
+      <button class="btn bp" onclick="salvarLancctbFluxoParam('${base?esc(base.id):''}')">✓ Salvar</button>
+    </div>`;
+  openModal('mLancctbFluxoParam');
+}
+function _fpLista(txt){ return String(txt||'').split(/[,\n;]+/).map(x=>x.trim()).filter(Boolean); }
+function salvarLancctbFluxoParam(idExistente){
+  const eid=_lancctbEidAtual;
+  const gatilho=(document.getElementById('lancctbFpGatilho').value||'').trim();
+  const contem=_fpLista(document.getElementById('lancctbFpContem').value), naoContem=_fpLista(document.getElementById('lancctbFpNaoContem').value);
+  if(!gatilho){ toast('Informe o trecho do histórico bancário (gatilho).','err'); return; }
+  let lista=_lancctbFluxoParamGet(eid).filter(p=>p.id!==idExistente);
+  if(contem.length||naoContem.length) lista.push({ id:idExistente||('fp'+Date.now()), gatilho, contem, naoContem });
+  _lancctbFluxoParamSet(eid,lista);
+  _lancctbFluxoParamLista=lista;
+  closeModal('mLancctbFluxoParam');
+  toast((contem.length||naoContem.length)?'Parâmetro salvo — vale pra este e pros próximos lançamentos com esse histórico.':'Sem parâmetros — removido.','ok');
+  renderLancctbRegistroContabil();
+}
+function excluirLancctbFluxoParam(id){
+  if(!confirm('Excluir este parâmetro do Fluxo?')) return;
+  const eid=_lancctbEidAtual; const lista=_lancctbFluxoParamGet(eid).filter(p=>p.id!==id);
+  _lancctbFluxoParamSet(eid,lista); _lancctbFluxoParamLista=lista;
+  closeModal('mLancctbFluxoParam'); toast('Parâmetro excluído.','ok'); renderLancctbRegistroContabil();
+}
 async function renderLancctbRegistroContabil(){
+  _lancctbFluxoParamLista=_lancctbFluxoParamGet(_lancctbEidAtual);
   const el=document.getElementById('lancctbConteudoAba');
   const eid=_lancctbEidAtual;
   window.__regSeq=(window.__regSeq||0)+1; const _mySeq=window.__regSeq;
@@ -34547,6 +34642,7 @@ async function renderLancctbRegistroContabil(){
         const candidatosFluxo=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual,_lancctbHistEhTransfNome(r.historico_bancario)))
+          .filter(f=>_lancctbFluxoParamOk(r.historico_bancario,f,_lancctbFluxoParamLista))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO; });
         if(candidatosFluxo.length){
           candidatosFluxo.sort((a,b)=>{
@@ -34727,6 +34823,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(d.cnpj_cpf))}</td>
       ${parcelaCelsHtml(d.nf_parcela_id?d:(c.nf_parcela_id?c:null))}
       ${fluxoConciliadoCelHtml()}
+      ${_lancctbFluxoParamCelHtml(r)}
       ${statusCelHtml}
       ${iaCelHtml(d.origem_match==='ia'?d:c)}
     </tr>`;
@@ -34753,6 +34850,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
         ${parcelaCelsHtml(l)}
         ${fluxoConciliadoCelHtml()}
+      ${_lancctbFluxoParamCelHtml(r)}
         ${statusCelHtml}
         ${iaCelHtml(l)}
       </tr>`;
@@ -34786,6 +34884,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);color:var(--slate);white-space:nowrap">${item.comprovanteSugerido?esc(_fmtCnpjCpf(item.comprovanteSugerido.cnpj_cpf)):'—'}</td>
     ${parcelaSugeridaCelsHtml(item.parcelaSugerida)}
     ${fluxoCelHtml()}
+    ${_lancctbFluxoParamCelHtml(r)}
     <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
     <td style="padding:7px 10px;color:var(--slate)">—</td>
   </tr>`;
@@ -34985,6 +35084,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Data da Parcela (da NF amarrada a este lançamento)">Data Parcela</th>
       <th style="padding:8px 10px;text-align:center;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Mês da Parcela bate com o mês do pagamento?">Mês Bate?</th>
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Linha do Fluxo de Caixa do cliente que bate valor+data com este lançamento — clique pra associar/criar Regra a partir dela">Fluxo de Caixa</th>
+      <th style="padding:8px 6px;text-align:center;font-size:11px;white-space:nowrap" title="Parâmetros opcionais: o que o fornecedor do Fluxo deve ou não conter para este histórico bancário">🎛 Parâm.</th>
       <th style="padding:8px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Status</th>
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="🤖 Explicação da IA">🤖 Explicação da IA</th>
     </tr>
@@ -35009,11 +35109,12 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       </select></th>
       <th style="padding:4px 6px"><input class="si" data-filtro="registro-fluxo" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbRegistroFiltroFluxo)}" oninput="_lancctbRegistroFiltroFluxoDebounced(this.value)"></th>
       <th style="padding:4px 6px"></th>
+      <th style="padding:4px 6px"></th>
       <th style="padding:4px 6px"><input class="si" data-filtro="registro-ia" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbRegistroIaBusca)}" oninput="_lancctbRegistroCampoDebounced('ia',this.value)"></th>
     </tr></thead>
     <tbody>`;
   if(!linhas.length){
-    html+=`<tr><td colspan="18" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
+    html+=`<tr><td colspan="19" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
   } else {
     linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,todasContas?(agencias.find(a=>Number(a.id)===Number(item.extrato.conta_bancaria_id))||contaAtual):contaAtual); });
   }
