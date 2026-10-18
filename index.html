@@ -32232,7 +32232,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     }
     // Recebimento (entrada) só amarra por VALOR EXATO (pedido do usuário 18/09/2026);
     // saída mantém as tolerâncias de sempre.
-    const bloqueiaNf=(_lancctbContaSemNfVinculo(agenciaInfoNf))||(!ehSaida&&semNfReceb); // Mercado Pago/Shopee: sem NF em qualquer direção; Peixoto Safra/Sicoob: recebimento sem NF
+    const bloqueiaNfGrupo=(_lancctbContaSemNfVinculo(agenciaInfoNf))||(!ehSaida&&semNfReceb); // Mercado Pago/Shopee: sem NF em qualquer direção; Peixoto Safra/Sicoob: recebimento sem NF
+    // Kajuna (238), pedido do usuário 18/10/2026: recebimento só amarra NF quando há COMPROVANTE DE RECEBIMENTO (boletos do Itaú — o grupo de liquidação usa bloqueiaNfGrupo) OU quando o histórico do extrato traz o
+    // CNPJ/CPF do cliente da NF OU o NOME do cliente inteiro (ou em grande parte) — _lancctbNfNomeForteOk. Um sobrenome ou palavra comum (PNEUS, FERNANDES) não basta.
+    const bloqueiaNf=bloqueiaNfGrupo;
+    const exigeNomeForte=(!ehSaida&&String(eid)==='238');
     const tolNF=ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005, tolComp=ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR:0.005;
     // Modo do botão "Processar Fluxo": SÓ amarra NF pelo que o Fluxo indica.
     if(modo==='fluxo_nf'){
@@ -32335,7 +32339,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // Tenta achar a NF real (empresa emitiu, direção=venda) pelo número —
       // não achando, segue mesmo assim com a conta fixa 10000 (usuário:
       // "eu não sei de qual mês é e se fiz upload" — não bloqueia o lançamento).
-      const parcelaNf=(nfNum&&!bloqueiaNf)?parcelas.find(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao==='venda'&&String(p.notas_fiscais?.numero)===String(nfNum)&&(!parcelaNum||String(p.numero_parcela)===String(parcelaNum))):null;
+      const parcelaNf=(nfNum&&!bloqueiaNfGrupo)?parcelas.find(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao==='venda'&&String(p.notas_fiscais?.numero)===String(nfNum)&&(!parcelaNum||String(p.numero_parcela)===String(parcelaNum))):null;
       const regraClienteNF=parcelaNf&&regras.find(r=>r.tipo_regra==='cliente_fornecedor'&&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(contaId))&&r.cnpj_cpf_gatilho===parcelaNf.notas_fiscais?.cnpj_destinatario);
       const contaNF=regraClienteNF?{id:regraClienteNF.conta_contabil_id,classificacao:regraClienteNF.plano_contas.classificacao}:{id:contaEntradaNF.id,classificacao:contaEntradaNF.classificacao};
       let todasResolvidas=true, motivoGrupo='';
@@ -32560,6 +32564,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_lancctbHistoricoSemNF(l.historico_bancario))?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
+      if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
       if(ehPonte){
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
         if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
@@ -32640,6 +32645,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
         if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
+        if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
         if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
@@ -34271,6 +34277,21 @@ function _lancctbFluxoParamOk(hist,f,lista){
 }
 // O mesmo parâmetro vale pra NOTA FISCAL (pedido do usuário 18/10/2026: "deve servir inclusive pra não amarrar NF de fornecedor errado"): o nome do fornecedor da NF (emitente nas compras, destinatário nas vendas)
 // segue o "deve conter / não pode conter" definido pro histórico bancário.
+function _lancctbNfNomeForteOk(hist,nf,ehSaida){
+  if(!nf) return false;
+  // CNPJ/CPF do cliente no histórico do extrato (inteiro, ou o miolo de 6 dígitos do CPF mascarado "***.165.400-**")
+  const doc=String((ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario)||'').replace(/\D/g,'');
+  const dh=String(hist||'').replace(/\D/g,'');
+  if((doc.length===14||doc.length===11)&&dh.includes(doc)) return true;
+  if(doc.length===11&&/\*{3}/.test(String(hist||''))&&dh.includes(doc.slice(3,9))) return true;
+  const nome=(ehSaida?nf.nome_emitente:nf.nome_destinatario)||''; if(!nome) return false;
+  const tn=[...new Set(_lancctbTokensNome(nome))].filter(t=>t.length>=3);
+  if(!tn.length) return false;
+  const th=new Set(_lancctbTokensNome(hist));
+  const casou=tn.filter(t=>th.has(t)||[...th].some(x=>x.length>=4&&t.length>=4&&(x.startsWith(t)||t.startsWith(x)))).length;
+  if(tn.length===1) return casou===1&&tn[0].length>=6;
+  return casou>=2&&casou/tn.length>=0.6;
+}
 function _lancctbNfParamOk(hist,nf,ehSaida,lista){
   if(!nf) return true;
   const ps=_lancctbFluxoParamsDaLinha(hist,lista); if(!ps.length) return true;
@@ -34774,7 +34795,7 @@ async function renderLancctbRegistroContabil(){
           if(doc&&cnpjNf&&cnpjNf.length===doc.doc.length) return cnpjNf===doc.doc;
           return String(nomeNf).trim()&&_lancctbTokensNome(r.historico_bancario).length>0&&_lancctbNomeCompativel([r.historico_bancario],nomeNf);
         })());
-      if(nfMatch&&!_lancctbHistoricoSemNF(r.historico_bancario)&&!(!ehSaida&&_lancctbBancoSemNfRecebimento(eid,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual))) item.parcelaSugerida=nfMatch;
+      if(nfMatch&&!_lancctbHistoricoSemNF(r.historico_bancario)&&!(!ehSaida&&_lancctbBancoSemNfRecebimento(eid,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual))&&!(!ehSaida&&String(eid)==='238'&&!_lancctbNfNomeForteOk(r.historico_bancario,nfMatch.notas_fiscais,ehSaida))) item.parcelaSugerida=nfMatch;
       // Pedido do usuário 09/09/2026 (caso real: histórico "GP TECNOLOGIA EM
       // SEGURANCA", sugestão veio "vivo- telefonica brasil" — só bateu por
       // valor+data, ignorando que havia outra linha do Fluxo do mesmo
