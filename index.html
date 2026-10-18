@@ -31780,6 +31780,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // PARCELA da NF tem que bater com o extrato em ±0,02). Etapa 2 — extrato
   // aglutinado (histórico genérico ou securitizadora): soma de N linhas do
   // Fluxo, TODAS resolvidas em NF, fechando o valor do extrato.
+  const _fpListaEng=_lancctbFluxoParamGet(eid);
   async function tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch,usarComprovantes){
     const base=(fluxoCaixaPonteBase||[]).filter(f=>!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
       &&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&(f.numero||f.documento_numero));
@@ -31798,6 +31799,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const c1=base.filter(f=>perto(f)&&nomeOk(f)&&_lancctbFluxoParamOk(l.historico_bancario,f,_lancctbFluxoParamGet(eid))).sort((a,b)=>(b.lancamento_extrato_id===l.id)-(a.lancamento_extrato_id===l.id)||_lancctbDiffDias(a.data,l.data_pagamento)-_lancctbDiffDias(b.data,l.data_pagamento));
     for(const f of c1){
       let par=_lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valor,true);
+      if(par&&!_lancctbNfParamOk(l.historico_bancario,par.notas_fiscais,ehSaida,_fpListaEng)) par=null;
       if(!par) continue;
       let desfazerParcial=null;
       if(par._parcial){
@@ -31889,7 +31891,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       let par=null;
       if(x.f&&(x.f.numero||x.f.documento_numero)) par=_lancctbAcharParcelaPeloFluxo({...x.f,cnpj_cpf:x.f.cnpj_cpf||x.cnpj},parcelas,ehSaida,parcelasUsadas,x.valor);
       if(!par&&x.cnpj){
-        const doCnpj=parcelas.filter(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao===(ehSaida?'compra':'venda')
+        const doCnpj=parcelas.filter(p=>!parcelasUsadas.has(p.id)&&_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)&&p.notas_fiscais?.direcao===(ehSaida?'compra':'venda')
           &&(ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario)===x.cnpj
           &&Math.abs(p.valor_parcela-x.valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)&&_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)&&_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento));
         if(doCnpj.length===1) par=doCnpj[0];
@@ -32519,6 +32521,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     }):[];
     const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_lancctbHistoricoSemNF(l.historico_bancario))?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
+      if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
       if(ehPonte){
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
         if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
@@ -32598,6 +32601,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     } else if(cnpjAncora&&!ehPonte&&!bloqueiaNf){
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
+        if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
         if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
@@ -34227,6 +34231,25 @@ function _lancctbFluxoParamOk(hist,f,lista){
   }
   return true;
 }
+// O mesmo parâmetro vale pra NOTA FISCAL (pedido do usuário 18/10/2026: "deve servir inclusive pra não amarrar NF de fornecedor errado"): o nome do fornecedor da NF (emitente nas compras, destinatário nas vendas)
+// segue o "deve conter / não pode conter" definido pro histórico bancário.
+function _lancctbNfParamOk(hist,nf,ehSaida,lista){
+  if(!nf) return true;
+  const ps=_lancctbFluxoParamsDaLinha(hist,lista); if(!ps.length) return true;
+  return _lancctbFluxoParamOk(hist,{cliente_fornecedor_nome:(ehSaida?nf.nome_emitente:nf.nome_destinatario)||''},lista);
+}
+// Desfaz um lançamento JÁ conciliado pelo id do extrato (sem depender da tela): estorna as linhas contábeis, solta NF/comprovante/Fluxo/aplicação e volta o extrato pra pendente — mesma regra do "Desconciliar".
+async function _lancctbDesconciliarPorId(extratoId,ehSaida){
+  const { data: linhas } = await _supaClient.from('lancamentos_contabeis').select('nf_parcela_id,comprovante_id').eq('lancamento_extrato_id',extratoId).eq('estornado',false);
+  const idsNf=[...new Set((linhas||[]).map(l=>l.nf_parcela_id).filter(Boolean))], idsComp=[...new Set((linhas||[]).map(l=>l.comprovante_id).filter(Boolean))];
+  if(idsNf.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsNf);
+  if(idsComp.length) await _supaClient.from(ehSaida?'comprovantes_bancarios':'comprovantes_recebimento').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComp);
+  await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+  await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+  const { error } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).eq('lancamento_extrato_id',extratoId).eq('estornado',false);
+  if(error) throw new Error(error.message);
+  await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).eq('id',extratoId);
+}
 let _lancctbFluxoParamLista=[]; // lista da empresa aberta (carregada a cada renderização do Registro)
 function _lancctbFluxoParamGatilhoSugerido(hist){
   let t=_fpNorm(hist).replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g,' ').replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g,' ').replace(/[*\d]/g,' ');
@@ -34296,9 +34319,20 @@ async function _lancctbFluxoParamDesassociar(eid,gatilho,lista){
     const { data: fx } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,cliente_fornecedor_nome,lancamento_extrato_id').eq('empresa_eid',eid).in('lancamento_extrato_id',ids.slice(i,i+200)));
     (fx||[]).forEach(f=>{ if(!_lancctbFluxoParamOk(mapa.get(f.lancamento_extrato_id),f,lista)) soltar.push(f.id); });
   }
-  if(!soltar.length) return 0;
-  await _lancctbEmLotesDb(soltar,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
-  return soltar.length;
+  if(soltar.length) await _lancctbEmLotesDb(soltar,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
+  // NF amarrada a extrato desse histórico com fornecedor que desrespeita o parâmetro: o lançamento é DESFEITO (volta pra pendente, NF/comprovante/Fluxo liberados) — "é obrigatório".
+  const extNfRuins=new Map();
+  for(let i=0;i<ids.length;i+=100){
+    const { data: cts } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id,nf_parcela_id,notas_fiscais_parcelas(notas_fiscais(nome_emitente,nome_destinatario,direcao))').eq('empresa_eid',eid).eq('estornado',false).not('nf_parcela_id','is',null).in('lancamento_extrato_id',ids.slice(i,i+100)));
+    (cts||[]).forEach(c=>{
+      const nf=c.notas_fiscais_parcelas&&c.notas_fiscais_parcelas.notas_fiscais; if(!nf) return;
+      const ehSaida=nf.direcao==='compra';
+      if(!_lancctbNfParamOk(mapa.get(c.lancamento_extrato_id),nf,ehSaida,lista)) extNfRuins.set(c.lancamento_extrato_id,ehSaida);
+    });
+  }
+  let desfeitos=0;
+  for(const [exId,ehSaida] of extNfRuins){ try{ await _lancctbDesconciliarPorId(exId,ehSaida); desfeitos++; }catch(e){ console.error('Parâmetro do Fluxo — desfazer NF errada:',exId,e); } }
+  return soltar.length+desfeitos;
 }
 function excluirLancctbFluxoParam(id){
   if(!confirm('Excluir este parâmetro do Fluxo?')) return;
@@ -34695,7 +34729,7 @@ async function renderLancctbRegistroContabil(){
       // O palpite também precisa combinar com QUEM é (CNPJ/CPF do histórico ou
       // nome compatível) — antes aparecia parcela de qualquer NF de mesmo valor.
       const nfProx=_idxRng(ehSaida?_idxNFC:_idxNFV,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS*3);
-      const nfMatch=nfProx.find(p=>Math.abs(p.valor_parcela-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)
+      const nfMatch=nfProx.find(p=>_lancctbNfParamOk(r.historico_bancario,p.notas_fiscais,ehSaida,_lancctbFluxoParamLista)&&Math.abs(p.valor_parcela-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)
         &&(()=>{
           const nf=p.notas_fiscais, cnpjNf=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeNf=(ehSaida?nf.nome_emitente:nf.nome_destinatario)||'';
           const doc=_lancctbExtrairDocDoHistorico(r.historico_bancario);
