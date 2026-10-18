@@ -23209,6 +23209,23 @@ function _lancctbTokensNome(txt){
   const semDoc=String(txt).replace(/\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}/g,' ').replace(/\d{3}\.\d{3}\.\d{3}-\d{2}/g,' ');
   return _convMpRemoverAcentos(semDoc.toUpperCase()).split(/[^A-Z]+/).filter(w=>w.length>=3&&!LANCCTB_PALAVRAS_GENERICAS_HISTORICO.has(w));
 }
+// Nubank (pedido do usuário 17/10/2026): na Nubank o histórico traz o NOME da pessoa ("Transferência enviada|SUELEN DOS SANTOS…"), então pagamento a PESSOA FÍSICA só amarra com Fluxo da MESMA pessoa — nunca de outra
+// pessoa física (Suelen × Lucas). Mas pagamento a pessoa física pode, sim, ser de verdade de uma EMPRESA (PIX pro dono) — isso acontece muito —, então Fluxo de PJ continua valendo mesmo com nome diferente.
+function _lancctbEhBancoNubank(ag){ return /nubank|nu pagamentos/i.test(String((ag&&ag.banco_nome)||'')); }
+function _lancctbFluxoEhPf(f){
+  const d=String(f.cnpj_cpf||'').replace(/\D/g,'');
+  if(d.length===11) return true;
+  if(d.length===14) return false;
+  const n=_convMpRemoverAcentos(String(f.cliente_fornecedor_nome||'').toUpperCase());
+  return !/\b(LTDA|ME|EPP|EIRELI|S\/?A|MEI|COMERCIO|COMERCIAL|INDUSTRIA|SERVICOS?|DISTRIBUIDORA|PECAS|CIA|ASSOCIACAO|BANCO|EMPRESA|TRANSPORTES?|LOCADORA|COOPERATIVA|CONDOMINIO|SINDICATO|AUTO|MECANICA|CENTER|MOTOS|PNEUS|SUPERMERCADOS?|ELETRO|SEGUROS|ENERGIA|TELECOM|ALIMENTOS|MATERIAIS|CONSTRUCAO|FARMACIA|POSTO|IGREJA|PREFEITURA)\b/.test(n);
+}
+function _lancctbFluxoOutraPessoaFisica(l,f,ag){
+  if(!_lancctbEhBancoNubank(ag)) return false;
+  if(!_lancctbTokensNome(l.historico_bancario).length) return false;
+  if(!String(f.cliente_fornecedor_nome||'').trim()) return false;
+  if(!_lancctbFluxoEhPf(f)) return false;
+  return !_lancctbNomeCompativel([l.historico_bancario],f.cliente_fornecedor_nome);
+}
 function _lancctbNomeCompativel(textosRef,nomeNf){
   const refs=[...new Set(textosRef.flatMap(_lancctbTokensNome))];
   if(!refs.length) return true; // sem nome de referência, esta trava não se aplica
@@ -30691,6 +30708,7 @@ async function _lancctbExtratosLigadosConciliados(fluxoLinhas,ignorarIds){
 async function _lancctbProcessarFluxo(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
+  let _agNubFx=null; try{ const { data: _ag } = await _supaClient.from('agencias_bancarias').select('banco_nome').eq('id',contaId).maybeSingle(); _agNubFx=_ag; }catch(e){}
   const btn=document.getElementById('lancctbProcessarFluxoBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn){ btn.disabled=true; }
@@ -30760,6 +30778,7 @@ async function _lancctbProcessarFluxo(){
         const valor=l.valor_saida||l.valor_entrada;
         const cand=fluxoPend.filter(f=>!usados.has(f.id))
           .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
+          .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
           .filter(f=>{
             const par=indicadaDe(f); if(!par) return true;
@@ -31343,7 +31362,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // do banco só traz o CNPJ (sem nome) e o teste de nome barrava a linha do Fluxo que indicava a NF certa. Vale se o CNPJ do histórico
     // é o mesmo do Fluxo, ou se o Fluxo já está associado a ESTE extrato (o usuário já confirmou a ligação).
     const cnpjsHist=_lancctbCnpjsDoTexto(l.historico_bancario);
-    const nomeOk=f=>ehPonteL||!temNome||f.lancamento_extrato_id===l.id||_lancctbCnpjsDoTexto((f.cnpj_cpf||'')+' '+(f.cliente_fornecedor_nome||'')).some(c=>cnpjsHist.includes(c))||_lancctbNomeCompativel([l.historico_bancario],f.cliente_fornecedor_nome||f.descricao||'');
+    const nomeOk=f=>ehPonteL||!temNome||f.lancamento_extrato_id===l.id||(_lancctbEhBancoNubank(agenciaInfoNf)&&!_lancctbFluxoEhPf(f))||_lancctbCnpjsDoTexto((f.cnpj_cpf||'')+' '+(f.cliente_fornecedor_nome||'')).some(c=>cnpjsHist.includes(c))||_lancctbNomeCompativel([l.historico_bancario],f.cliente_fornecedor_nome||f.descricao||'');
     const tabComp=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
     const comprovantesUsadosL=ehSaida?comprovantesUsadosPag:comprovantesUsadosReceb;
     // Etapa 1
@@ -34154,6 +34173,7 @@ async function renderLancctbRegistroContabil(){
       if(!item.fluxoConfirmado){
         const candidatosFluxo=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
+          .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO; });
         if(candidatosFluxo.length){
           candidatosFluxo.sort((a,b)=>{
