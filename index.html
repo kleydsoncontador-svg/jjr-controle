@@ -30831,6 +30831,27 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
   const motivos=[];
   if(!sispag.length) return { abertos:0, motivos:['nenhum SISPAG SALARIOS pendente sem Fluxo amarrado nesta conta/período'] };
   const pessoasPorMes={};
+  // Pessoas que JÁ foram lançadas como folha nesta empresa (débito em salário/adiantamento/férias/homologação/pró-labore — inclusive lançamentos desclassificados, que mantêm o nome): serve de plano B quando a pasta da
+  // folha não pode ser lida na hora (permissão do navegador) — "só pode usar o pessoal da folha".
+  let pessoasHistorico=null;
+  const carregarPessoasHistorico=async()=>{
+    if(pessoasHistorico) return pessoasHistorico;
+    pessoasHistorico=[];
+    try{
+      const { data: pcs } = await _supaClient.from('plano_contas').select('id').eq('empresa_eid',eid).in('numero_conta',['187','724','567','647','188']);
+      const idsC=(pcs||[]).map(x=>x.id);
+      if(idsC.length){
+        const vistos=new Set(); let from=0;
+        while(true){
+          const { data: q, error } = await _supaClient.from('lancamentos_contabeis').select('cliente_fornecedor_nome,cnpj_cpf').eq('empresa_eid',eid).in('conta_contabil_id',idsC).eq('tipo','D').not('cliente_fornecedor_nome','is',null).range(from,from+999);
+          if(error||!q) break;
+          q.forEach(x=>{ const k=String(x.cliente_fornecedor_nome).toUpperCase(); if(!vistos.has(k)){ vistos.add(k); pessoasHistorico.push({nome:x.cliente_fornecedor_nome,cpf:x.cnpj_cpf||'',valor:0,tipo:'empregado'}); } });
+          if(q.length<1000) break; from+=1000;
+        }
+      }
+    }catch(e){ console.warn('Pessoas já lançadas como folha:',e); }
+    return pessoasHistorico;
+  };
   const pessoasDoMes=async(dataPag)=>{
     const mes=dataPag.slice(0,7);
     if(pessoasPorMes[mes]) return pessoasPorMes[mes];
@@ -30850,6 +30871,7 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
         }
       }catch(e){ console.warn('Sispag via Fluxo (ConfiBackup):',e); }
     }
+    (await carregarPessoasHistorico()).forEach(pp=>{ if(!out.some(o=>String(o.nome).toUpperCase()===String(pp.nome).toUpperCase())) out.push(pp); });
     try{ (lucSocGet(eid)||[]).forEach(so=>{ const nome=so.nome||so.name; if(nome) out.push({nome,cpf:so.cpf||so.doc||'',valor:0,tipo:'contribuinte'}); }); }catch(e){}
     pessoasPorMes[mes]=out; return out;
   };
