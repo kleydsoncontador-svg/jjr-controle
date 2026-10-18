@@ -11811,6 +11811,49 @@ async function bootstrap(){
         } finally { emVoo.delete(chave); }
       };
     })();
+    // Trava anti-duplicidade do FLUXO DE CAIXA (pedido do usuário 18/10/2026: "como eu anexei mais de um fluxo de caixa em 08/2026, alguns foram duplicados, nunca permita isso"): TODA gravação em fluxo_caixa_lancamentos passa por aqui.
+    // Linha com o mesmo documento (DUP/NF), parcela, data, cliente, descrição e valor de uma que já existe — ou repetida dentro do próprio lote — é descartada antes de gravar. Só vale com documento preenchido
+    // (sem documento, dois lançamentos iguais podem ser legítimos) e não mexe nas linhas que o próprio sistema cria ao dividir/abrir (hash_dedup fluxo_split_/fluxo_abert_/fluxo_dif_).
+    (function(){
+      var origFrom=_supaClient.from.bind(_supaClient);
+      var nrm=function(t){ return String(t||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); };
+      var chaveFx=function(r){
+        var doc=String(r.documento_numero||r.numero||'').trim(); if(!doc) return null;
+        return [r.data,nrm(r.cliente_fornecedor_nome),nrm(r.descricao),doc,r.parcela||'',Math.round((Number(r.valor_saida)||0)*100),Math.round((Number(r.valor_entrada)||0)*100)].join('|');
+      };
+      _supaClient.from=function(tab){
+        var qb=origFrom(tab);
+        if(tab!=='fluxo_caixa_lancamentos'||typeof qb.insert!=='function') return qb;
+        var origIns=qb.insert.bind(qb);
+        qb.insert=function(rows,opts){
+          var arr=Array.isArray(rows)?rows:[rows];
+          if(!arr.length||arr.every(function(r){ return /^fluxo_(split|abert|dif)_/.test(String((r&&r.hash_dedup)||'')); })) return origIns(rows,opts);
+          return (async function(){
+            try{
+              var porEmp={}; arr.forEach(function(r){ if(r&&r.empresa_eid!=null&&chaveFx(r)) (porEmp[r.empresa_eid]=porEmp[r.empresa_eid]||[]).push(r); });
+              var vistos=new Set();
+              for(var eid in porEmp){
+                var datas=porEmp[eid].map(function(r){return r.data;}).filter(Boolean).sort();
+                if(!datas.length) continue;
+                var resp=await _lancctbFetchTudo(function(){ return origFrom('fluxo_caixa_lancamentos').select('data,descricao,cliente_fornecedor_nome,documento_numero,numero,parcela,valor_saida,valor_entrada').eq('empresa_eid',eid).gte('data',datas[0]).lte('data',datas[datas.length-1]); });
+                (resp.data||[]).forEach(function(e){ var k=chaveFx(e); if(k) vistos.add(eid+'#'+k); });
+              }
+              var novos=[], descartados=0;
+              arr.forEach(function(r){
+                var k=chaveFx(r); if(!k||r.empresa_eid==null){ novos.push(r); return; }
+                var kk=r.empresa_eid+'#'+k;
+                if(vistos.has(kk)){ descartados++; return; }
+                vistos.add(kk); novos.push(r);
+              });
+              if(descartados) setTimeout(function(){ try{ toast(descartados+' lançamento(s) do Fluxo de Caixa já existiam e foram ignorados (duplicados).','info'); }catch(e){} },0);
+              if(!novos.length) return { data:null, error:null, count:0, status:201 };
+              return await origIns(Array.isArray(rows)?novos:novos[0],opts);
+            }catch(e){ console.error('Trava anti-duplicidade do Fluxo falhou — gravando sem ela:',e); return await origIns(rows,opts); }
+          })();
+        };
+        return qb;
+      };
+    })();
     // Badge "Cloud" no header
     var hdr=document.querySelector('header .hright');
     if(hdr){
