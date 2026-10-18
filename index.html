@@ -24979,6 +24979,53 @@ async function _lancctbProcessarFopag(){
             return mins.length===1?mins[0].map(ix=>lista[ix]):null;
           };
           const itensAchados=buscaUnica(candFx.filter(c=>c.igualLiq))||buscaUnica(candFx);
+          // Plano B (pedido do usuário 18/10/2026: "se não der pra fechar, usar esse método pra pelo menos ABRIR esse pagamento em mais linhas, uma pra cada saída do Fluxo, só com o pessoal da folha"): sem uma combinação
+          // única que feche o valor, mas com linhas do Fluxo que são CERTAMENTE salário (pessoa da folha, valor = líquido dela, ninguém pago individualmente) e que somam MENOS que o Sispag, o lançamento é aberto em uma
+          // linha de extrato por pessoa (cada uma já classificada) + uma linha PENDENTE com o que sobrou ("[DIFERENÇA SISPAG]"). Se essas linhas somarem mais que o Sispag (não dá pra saber quais entraram), nada é feito.
+          if(!itensAchados){
+            const t1=candFx.filter(c=>c.igualLiq);
+            const soma1=Math.round(t1.reduce((a2,c)=>a2+c.f.valor_saida,0)*100)/100;
+            const resto=Math.round((l.valor_saida-soma1)*100)/100;
+            if(t1.length>=1&&resto>0.009&&t1.every(c=>contaDaPessoa(c.escolha.p,c.escolha.tipo))){
+              const novosIds=[]; let falhou=false;
+              const valorOrig=l.valor_saida;
+              const { error: eUp } = await _supaClient.from('lancamentos_extrato').update({ valor_saida: Math.round(t1[0].f.valor_saida*100)/100 }).eq('id',l.id);
+              if(eUp){ falhou=true; }
+              const idPorItem=[l.id];
+              if(!falhou){
+                for(let k=1;k<t1.length&&!falhou;k++){
+                  const { data: ni, error: eIn } = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento, valor_saida:Math.round(t1[k].f.valor_saida*100)/100, valor_entrada:0,
+                    historico_bancario:`[SISPAG ABERTO - ${t1[k].escolha.p.nome}] ${l.historico_bancario||''}`.trim(), origem_importacao:'fopag_diferenca', hash_dedup:`sispag_ab_${l.id}_${k}_${Date.now()}` }).select('id').single();
+                  if(eIn||!ni){ falhou=true; break; }
+                  novosIds.push(ni.id); idPorItem.push(ni.id);
+                }
+              }
+              if(!falhou){
+                const { data: nr, error: eR } = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento, valor_saida:resto, valor_entrada:0,
+                  historico_bancario:`[DIFERENÇA SISPAG ${l.data_pagamento.split('-').reverse().join('/')}] ${l.historico_bancario||''}`.trim(), origem_importacao:'fopag_diferenca', hash_dedup:`sispag_dif_${l.id}_${Date.now()}` }).select('id').single();
+                if(eR||!nr) falhou=true; else novosIds.push(nr.id);
+              }
+              if(falhou){
+                console.error('Sispag aberto: falha ao dividir o extrato — desfazendo.');
+                if(novosIds.length) await _supaClient.from('lancamentos_extrato').delete().in('id',novosIds).eq('status_conciliacao','pendente');
+                await _supaClient.from('lancamentos_extrato').update({ valor_saida: valorOrig }).eq('id',l.id);
+                semAchado++; continue;
+              }
+              for(let k=0;k<t1.length;k++){
+                const { f, escolha } = t1[k]; const v=Math.round(f.valor_saida*100)/100, c=contaDaPessoa(escolha.p,escolha.tipo), hist=`Pagamento ref. ${_rotP(escolha.p,escolha.tipo)} ${escolha.comp||''} - ${escolha.p.nome}`.replace(/\s+-/,' -');
+                const linhasK=[
+                  { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:v, historico:hist, cliente_fornecedor_nome:escolha.p.nome, cnpj_cpf:escolha.p.cpf||null, lancamento_extrato_id:idPorItem[k], origem_match:'automatico_triangular' },
+                  { empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:v, historico:hist, cliente_fornecedor_nome:escolha.p.nome, cnpj_cpf:escolha.p.cpf||null, lancamento_extrato_id:idPorItem[k], origem_match:'automatico_triangular' },
+                ];
+                const { error: eK } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasK });
+                if(eK){ console.error('Erro FOPAG (Sispag aberto):',eK); semAchado++; continue; }
+                await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',idPorItem[k]);
+                await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:idPorItem[k]}).eq('id',f.id);
+                const ix=(fluxoLivre||[]).findIndex(ff=>ff.id===f.id); if(ix>=0) fluxoLivre.splice(ix,1);
+              }
+              diferencasAbertas++; resolvidos++; continue;
+            }
+          }
           {
             const melhor=!!itensAchados;
             if(melhor){
