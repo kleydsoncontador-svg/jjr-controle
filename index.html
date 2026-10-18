@@ -11812,7 +11812,7 @@ async function bootstrap(){
       };
     })();
     // Trava anti-duplicidade do FLUXO DE CAIXA (pedido do usuário 18/10/2026: "como eu anexei mais de um fluxo de caixa em 08/2026, alguns foram duplicados, nunca permita isso"): TODA gravação em fluxo_caixa_lancamentos passa por aqui.
-    // Linha com o mesmo documento (DUP/NF), parcela, data, cliente, descrição e valor de uma que já existe — ou repetida dentro do próprio lote — é descartada antes de gravar. Só vale com documento preenchido
+    // Linha com o mesmo documento (DUP/NF), parcela, data, cliente, descrição e valor de uma que JÁ EXISTE no banco é descartada antes de gravar (contagem: se já existem 2 iguais e o arquivo traz 3, entra só 1). Só vale com documento preenchido
     // (sem documento, dois lançamentos iguais podem ser legítimos) e não mexe nas linhas que o próprio sistema cria ao dividir/abrir (hash_dedup fluxo_split_/fluxo_abert_/fluxo_dif_).
     (function(){
       var origFrom=_supaClient.from.bind(_supaClient);
@@ -11831,19 +11831,20 @@ async function bootstrap(){
           return (async function(){
             try{
               var porEmp={}; arr.forEach(function(r){ if(r&&r.empresa_eid!=null&&chaveFx(r)) (porEmp[r.empresa_eid]=porEmp[r.empresa_eid]||[]).push(r); });
-              var vistos=new Set();
+              var vistos=new Map(); // chave → quantas linhas IGUAIS já existem no banco (linhas legitimamente repetidas, ex.: 6 parcelas iguais no mesmo dia, continuam entrando; só descarta o que já existe)
               for(var eid in porEmp){
                 var datas=porEmp[eid].map(function(r){return r.data;}).filter(Boolean).sort();
                 if(!datas.length) continue;
                 var resp=await _lancctbFetchTudo(function(){ return origFrom('fluxo_caixa_lancamentos').select('data,descricao,cliente_fornecedor_nome,documento_numero,numero,parcela,valor_saida,valor_entrada').eq('empresa_eid',eid).gte('data',datas[0]).lte('data',datas[datas.length-1]); });
-                (resp.data||[]).forEach(function(e){ var k=chaveFx(e); if(k) vistos.add(eid+'#'+k); });
+                (resp.data||[]).forEach(function(e){ var k=chaveFx(e); if(k) vistos.set(eid+'#'+k,(vistos.get(eid+'#'+k)||0)+1); });
               }
               var novos=[], descartados=0;
               arr.forEach(function(r){
                 var k=chaveFx(r); if(!k||r.empresa_eid==null){ novos.push(r); return; }
                 var kk=r.empresa_eid+'#'+k;
-                if(vistos.has(kk)){ descartados++; return; }
-                vistos.add(kk); novos.push(r);
+                var restam=vistos.get(kk)||0;
+                if(restam>0){ vistos.set(kk,restam-1); descartados++; return; }
+                novos.push(r);
               });
               if(descartados) setTimeout(function(){ try{ toast(descartados+' lançamento(s) do Fluxo de Caixa já existiam e foram ignorados (duplicados).','info'); }catch(e){} },0);
               if(!novos.length) return { data:null, error:null, count:0, status:201 };
