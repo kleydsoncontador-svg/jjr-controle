@@ -30732,7 +30732,8 @@ async function salvarLancctbRegra(){
     const { error: erroLanc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
     if(erroLanc){ toast('Erro ao gerar lançamento: '+erroLanc.message,'err'); return; }
     await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',extrato.id);
-    if(ehFluxo) await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).eq('id',_lancctbFluxoAssociandoFluxoId);
+    if(ehFluxo){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).eq('id',_lancctbFluxoAssociandoFluxoId);
+      try{ const eidM=_lancctbEidAtual, at=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); at.add(_lancctbFluxoAssociandoFluxoId); S.s('lancctb_fluxo_manual_'+eidM,[...at]); }catch(e){} } // associação feita à mão não é desfeita pela revalidação de identidade
 
     // Pontos de Atenção — checa o banco e cada linha de contrapartida.
     if(contaBancoInfo.plano_contas.enviar_pontos_atencao) _lancctbEnviarAoPontosAtencao(_lancctbEidAtual,{numero_conta:contaBancoInfo.plano_contas.numero_conta,classificacao:contaBancoInfo.plano_contas.classificacao,descricao:contaBancoInfo.plano_contas.descricao},{ data:extrato.data_pagamento, valor:valorTotal, historico:historicoBanco });
@@ -34355,6 +34356,18 @@ function abrirLancctbSugestoesParam(){
     </div>`).join('');
   openModal('mLancctbSugParam');
 }
+// Revalida as associações JÁ existentes (extrato pendente): Fluxo de fornecedor/CNPJ/CPF incompatível com o histórico bancário é solto (só o vínculo do Fluxo). Associação feita à mão é preservada. Roda 1x por abertura da página.
+async function _lancctbFluxoRevalidarIdentidade(eid){
+  const { data: pend } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,historico_bancario').eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+  const m=new Map((pend||[]).map(p=>[p.id,p.historico_bancario])), ids=[...m.keys()]; if(!ids.length) return 0;
+  const manual=new Set((()=>{ try{ return S.g('lancctb_fluxo_manual_'+eid)||[]; }catch(e){ return []; } })()), alias=_lancctbFluxoAliasGet(eid), params=_lancctbFluxoParamGet(eid), soltar=[];
+  for(let i=0;i<ids.length;i+=200){
+    const { data: fx } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,cliente_fornecedor_nome,cnpj_cpf,lancamento_extrato_id').eq('empresa_eid',eid).in('lancamento_extrato_id',ids.slice(i,i+200)));
+    (fx||[]).forEach(f=>{ const h=m.get(f.lancamento_extrato_id); if(h==null) return; if(!_lancctbFluxoParamOk(h,f,params)||(!manual.has(f.id)&&_lancctbFluxoIdentidade(h,f,alias)==='rejeita')) soltar.push(f.id); });
+  }
+  if(soltar.length) await _lancctbEmLotesDb(soltar,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
+  return soltar.length;
+}
 // Relação (alias/intermediário) confirmada pelo usuário: vale nos próximos meses
 function confirmarLancctbFluxoAlias(extratoId){
   const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); if(!item||!item.fluxoPossivel) return;
@@ -34521,6 +34534,13 @@ function excluirLancctbFluxoParam(id){
 async function renderLancctbRegistroContabil(){
   _lancctbFluxoParamLista=_lancctbFluxoParamGet(_lancctbEidAtual);
   _lancctbFluxoAliasLista=_lancctbFluxoAliasGet(_lancctbEidAtual);
+  try{
+    window.__idRevalidado=window.__idRevalidado||new Set();
+    const _eidId=_lancctbEidAtual;
+    if(_eidId&&!window.__idRevalidado.has(_eidId)){ window.__idRevalidado.add(_eidId);
+      _lancctbFluxoRevalidarIdentidade(_eidId).then(n=>{ if(n){ toast(`Identidade: ${n} linha(s) do Fluxo associada(s) a fornecedor/CNPJ/CPF incompatível com o histórico foram desassociadas.`,'ok'); if(_lancctbEidAtual===_eidId) renderLancctbRegistroContabil(); } }).catch(e=>console.warn('Revalidação de identidade:',e));
+    }
+  }catch(e){}
   // Parâmetros do Fluxo são FORÇADOS: 1x por parâmetro a cada vez que a página é aberta, qualquer linha do Fluxo associada que desrespeite é desassociada (pedido do usuário 18/10/2026: "tem que forçar isso").
   try{
     window.__fpEnforcado=window.__fpEnforcado||new Set();
