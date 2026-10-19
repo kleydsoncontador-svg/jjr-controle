@@ -32532,7 +32532,10 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const soma=(t)=>doc.filter(x=>x.tipo_operacao===t).reduce((a,x)=>a+Number(x.valor_pago),0);
       const total=Math.round((Number(vb.valor_pago)+soma('juros')+soma('multa')-soma('desconto'))*100)/100;
       const dif=Math.round((total-c.valor_pago)*100)/100;
-      return (dif>0.004&&dif<=5)?total:c.valor_pago;
+      if(dif>0.004&&dif<=5) return total;
+      // Líquido ACIMA do boleto sem linha de juros (juros pago pelo cliente e não detalhado no relatório): a tarifa fixa do Itaú (R$ 1,50) também foi descontada da Liquidação — o crédito bruto a soma de volta.
+      if(dif<-0.004) return Math.round((c.valor_pago+1.5)*100)/100;
+      return c.valor_pago;
     };
     async function _lancctbMontarGrupoLiquidacao(ancoraLiquidacao, bruto){
       // Achado real 30/09/2026 (Kazangil): o mesmo "Seu número"+cliente pode se repetir
@@ -32594,6 +32597,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
           let outrosC=0, outrosD=0; linhasGrupoOp.forEach((x,i)=>{ if(i===0||i===iNf) return; if(x.tipo==='C') outrosC+=x.valor; else outrosD+=x.valor; });
           const plug=Math.round((linhasGrupoOp[0].valor-outrosC+outrosD)*100)/100, vbv=linhasGrupoOp[iNf].valor;
           if(plug>0.004&&plug<vbv-0.004){ linhasGrupoOp[iNf].valor=plug; linhasGrupoOp[iNf].historico+=' (pagamento parcial de R$ '+_fmt(vbv)+')'; parcial=true; }
+          // O banco creditou MAIS que boleto+juros+multa−desconto do relatório (juros pago e não detalhado, ex.: boleto 1.019,77 → crédito 1.023,17): a sobra pequena vira Receita de Juros (conta padrão) pra partida fechar.
+          else if(bruto&&plug>vbv+0.004&&(plug-vbv)<=Math.max(50,vbv*0.05)){ // só no lote do dia (crédito bruto consolidado)
+            const cJ=contaPad('juros_ativos');
+            if(cJ) linhasGrupoOp.push({ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:cJ.classificacao, conta_contabil_id:cJ.id, tipo:'C', valor:Math.round((plug-vbv)*100)/100, historico:`${HISTORICO_LABEL_OP.juros}${refTexto} (não detalhado no relatório)`, cliente_fornecedor_nome:ancoraLiquidacao.cliente_fornecedor_nome||null, cnpj_cpf:ancoraLiquidacao.cnpj_cpf||null, comprovante_id:null, lancamento_extrato_id:null, origem_match:'automatico_triangular' });
+          }
         } }
       return { ok:todasResolvidas, linhas:linhasGrupoOp, grupo, parcelaNf:parcial?null:parcelaNf, parcial, refTexto, motivo:motivoGrupo };
     }
