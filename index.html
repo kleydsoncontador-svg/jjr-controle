@@ -24892,6 +24892,8 @@ async function _lancctbProcessarFopag(){
     const contaDecimo13=unicaConta(/13\S*\s*sal\S*.*pagar|decimo.*pagar/i)||unicaConta(/13\S*\s*sal|decimo\s*terceiro/i);
     // Rescisão é SEMPRE a conta 647 (definição do usuário 26/09/2026) — mesma conta em qualquer empresa. Sem a 647 no plano, não classifica.
     const contaRescisao=(contasFixas||[]).find(c=>c.numero_conta==='647')||null;
+    // Empresa SEM folha de adiantamento (Kajuna — pedido do usuário 19/10/2026): empregado identificado cujo valor não é férias/rescisão/líquido do salário é ANTECIPAÇÃO (adiantamento) de salário.
+    const semFolhaAdiant=(()=>{ try{ return (S.g('lancctb_fopag_sem_adiantamento')||[]).map(String).includes(String(eid)); }catch(e){ return false; } })();
     const socios=lucSocGet(eid);
     const { data: contasSocios } = socios.length
       ? await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao')
@@ -24927,6 +24929,10 @@ async function _lancctbProcessarFopag(){
         const cpfDig=String(p.cpf||'').replace(/\D/g,'');
         if(cpfDig.length===11 && hDig.includes(cpfDig)) return p;
       }
+      { // CPF mascarado do Pix (***.994.216-**): o miolo de 6 dígitos, se bater com UMA só pessoa
+        const fr=String(historico||'').match(/\*{3}\.(\d{3})\.(\d{3})-\*{2}/);
+        if(fr){ const ms=candidatos.filter(p=>{ const c=String(p.cpf||'').replace(/\D/g,''); return c.length===11&&c.slice(3,9)===fr[1]+fr[2]; }); if(ms.length===1) return ms[0]; }
+      }
       for(const p of candidatos){
         const toks=_norm(p.nome).split(' ').filter(t=>t.length>=4);
         if(toks.length>=2 && toks.filter(t=>h.includes(t)).length>=2) return p;
@@ -24959,7 +24965,7 @@ async function _lancctbProcessarFopag(){
         _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS &&
         !fluxoDeOutraPessoa(l,f));
 
-    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null;
+    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null, antecipacoes=0;
     const comprovSociosCache={};
     const indivSispagCache={};
     const relatoriosExtraCache={};
@@ -25228,7 +25234,7 @@ async function _lancctbProcessarFopag(){
       }
       if(!matchIndiv) for(const r of relatorios){
         const p=identificaPessoa(textoIdent, r.dados.pessoas);
-        if(p && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
+        if(p && (!semFolhaAdiant||p.tipo==='contribuinte') && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
       }
       // Achado real 25/09/2026 (Metodo, adiantamento 669,84): o histórico do
       // Pix veio TRUNCADO sem o nome do favorecido ("@Adiantamento salarial 00…")
@@ -25265,6 +25271,24 @@ async function _lancctbProcessarFopag(){
         for(const r of relatorios){
           const iguais=r.dados.pessoas.filter(pp=>Math.abs(pp.valor-l.valor_saida)<=0.01);
           if(iguais.length===1){ matchIndiv={r,p:iguais[0]}; break; }
+        }
+      }
+      // ANTECIPAÇÃO: empregado (não contribuinte) identificado por nome/CPF, valor não bate com nenhum líquido → adiantamento de salário (conta 724) pelo valor total, sem linha de diferença.
+      if(!matchIndiv&&semFolhaAdiant&&contaAdiantamento){
+        const todasP=[]; relatorios.forEach(r=>(r.dados.pessoas||[]).forEach(pp=>todasP.push(pp)));
+        const pe=identificaPessoa(textoIdent,todasP);
+        if(pe&&pe.tipo!=='contribuinte'){
+          const histA=`Pagamento ref. adiantamento ${cMes} - ${pe.nome}`;
+          const linhasA=[
+            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:histA, cliente_fornecedor_nome:pe.nome, cnpj_cpf:pe.cpf||null, lancamento_extrato_id:l.id, origem_match:'regra' },
+            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaAdiantamento.classificacao, conta_contabil_id:contaAdiantamento.id, tipo:'D', valor:l.valor_saida, historico:histA, cliente_fornecedor_nome:pe.nome, cnpj_cpf:pe.cpf||null, lancamento_extrato_id:l.id, origem_match:'regra' },
+          ];
+          const { error: eA } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasA });
+          if(eA){ console.error('Erro FOPAG (antecipação):',eA); semAchado++; continue; }
+          await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+          if(fluxoDaPend){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxoDaPend.id); const ixA=(fluxoLivre||[]).findIndex(f=>f.id===fluxoDaPend.id); if(ixA>=0) fluxoLivre.splice(ixA,1); }
+          resolvidos++; antecipacoes++;
+          continue;
         }
       }
       if(!matchIndiv){ semAchado++; continue; }
@@ -25313,7 +25337,7 @@ async function _lancctbProcessarFopag(){
       }
       resolvidos++;
     }
-    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${feriasResolvidas?` (${feriasResolvidas} por recibo de férias)`:''}${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
+    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${feriasResolvidas?` (${feriasResolvidas} por recibo de férias)`:''}${antecipacoes?` (${antecipacoes} como antecipação de salário)`:''}${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
@@ -31115,8 +31139,21 @@ function _lancctbPessoaNoTexto(pessoa,texto){
   const h=n(texto), hDig=h.replace(/\D/g,'');
   const cpf=String(pessoa.cpf||'').replace(/\D/g,'');
   if(cpf.length===11&&hDig.includes(cpf)) return true;
+  const fr=String(texto||'').match(/\*{3}\.(\d{3})\.(\d{3})-\*{2}/);
+  if(fr&&cpf.length===11&&cpf.slice(3,9)===fr[1]+fr[2]) return true;
   const toks=n(pessoa.nome).split(' ').filter(t=>t.length>=4);
   return toks.length>=2&&toks.filter(t=>h.includes(t)).length>=2;
+}
+// Pessoas (empregados e contribuintes) das folhas da empresa nos meses das datas (FOPAG do Mês). Sem acesso à pasta devolve [] (nunca pede permissão).
+const _lancctbPessoasFolhaCache={};
+async function _lancctbPessoasFolhaEmpresa(eid,datas){
+  const meses=[...new Set((datas||[]).map(d=>String(d||'').slice(0,7)).filter(Boolean))], out=[];
+  for(const m of meses){
+    const k=eid+'|'+m;
+    if(!(k in _lancctbPessoasFolhaCache)){ const arr=[]; try{ (await _lancctbRelatoriosFopagDoMes(eid,m+'-15')).forEach(r=>((r.dados&&r.dados.pessoas)||[]).forEach(pp=>arr.push(pp))); }catch(e){} if(arr.length) _lancctbPessoasFolhaCache[k]=arr; }
+    if(_lancctbPessoasFolhaCache[k]) out.push(..._lancctbPessoasFolhaCache[k]);
+  }
+  return out;
 }
 async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usados,hRaiz,statusEl}){
   const nrm=t=>_convMpRemoverAcentos(String(t||'').toUpperCase());
@@ -34430,6 +34467,8 @@ function _lancctbFluxoIdentidade(hist,f,aliases){
   const nomeF=(f&&f.cliente_fornecedor_nome)||'';
   const hn=_fpNorm(hist), fn=_fpNorm(nomeF);
   if((aliases||[]).some(a=>a&&a.gatilho&&a.nome&&hn.includes(_fpNorm(a.gatilho))&&fn.includes(_fpNorm(a.nome)))) return 'ok';
+  // Pedido do usuário 19/10/2026 (Kajuna: "F W DISTRIBUIDORA" × "FURACAO FWDISTRIBUIDORA", "RGE SUL" × "RGE LOJA"): o Parâmetro já diz QUEM é — se o nome do Fluxo contém um dos termos do "deve conter", a identidade está confirmada.
+  { const lp=_lancctbFluxoParamGet(_lancctbEidAtual); const ps=_lancctbFluxoParamsDaLinha(hist,lp).filter(x=>(x.contem||[]).filter(Boolean).length); if(ps.length&&_lancctbFluxoParamOk(hist,f,lp)) return 'ok'; }
   const H=_lancctbIdentTokens(hist), F=_lancctbIdentTokens(nomeF);
   if(!H.length||!F.length) return 'neutro';
   const comum=H.filter(h=>F.some(x=>_lancctbIdentCasa(h,x)));
@@ -35137,6 +35176,7 @@ async function renderLancctbRegistroContabil(){
     const _idxFL=_idxPD(fluxoDisponivel,'data');
     // Loop com yield a cada 50 itens para liberar o event loop e evitar
     // "Página sem resposta" quando há muitos lançamentos (ex: Fast Lube).
+    let _pessoasFolhaReg=[]; try{ _pessoasFolhaReg=await _lancctbPessoasFolhaEmpresa(eid,pendentes.map(x=>x.extrato.data_pagamento)); }catch(e){}
     for(let _pI=0;_pI<pendentes.length;_pI++){
       if(_pI>0&&_pI%50===0) await new Promise(r=>setTimeout(r,0));
       const item=pendentes[_pI];
@@ -35168,7 +35208,8 @@ async function renderLancctbRegistroContabil(){
       // valor+data, desempata por semelhança de texto com o histórico
       // bancário — nunca escolhe uma descrição completamente diferente
       // se existir uma parecida também dentro da tolerância.
-      if(!item.fluxoConfirmado){
+      if(!item.fluxoConfirmado&&ehSaida&&_pessoasFolhaReg.length&&_lancctbHistEhTransfNome(r.historico_bancario)&&_pessoasFolhaReg.some(pp=>_lancctbPessoaNoTexto(pp,r.historico_bancario))){ item.rotaFopag=true; }
+      else if(!item.fluxoConfirmado){
         const candidatosFluxo=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual,_lancctbHistEhTransfNome(r.historico_bancario)))
