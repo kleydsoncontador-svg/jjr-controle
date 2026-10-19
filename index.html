@@ -534,6 +534,16 @@ html.dark-mode table:not(.chk):not(.nohover) tbody tr:hover > td,html.dark-mode 
 .mb > .modal > .mt{cursor:move;user-select:none}
 /* Linha da lista de Importações/Exportações: realce ao passar o mouse que acompanha o tema (antes era branco fixo no modo escuro) */
 .imp-linha:hover td{background:#F7FAFD}
+/* Nova Importação — linhas em destaque (FATURA DO FRETE MARITIMO, TOTAL…) e linha marcada "Contabiliza": no tema escuro eram pretas/azul-claro berrantes */
+tr.imp-dest{background:var(--ink2)}
+tr.imp-dest input[type="text"],tr.imp-dest input[type="date"]{background:rgba(255,255,255,.10)!important;color:#fff!important;border-color:rgba(255,255,255,.28)!important}
+tr.imp-dest input::placeholder{color:rgba(255,255,255,.55)}
+tr.imp-contab{background:#dbeafe}
+html.dark-mode tr.imp-dest{background:#2A3A55}
+html.dark-mode tr.imp-dest input[type="text"],html.dark-mode tr.imp-dest input[type="date"]{background:rgba(255,255,255,.08)!important;border-color:rgba(255,255,255,.22)!important}
+html.dark-mode tr.imp-contab{background:rgba(20,184,166,.15)}
+html.dark-mode [data-lancamento-section] tbody{background:transparent!important}
+html.dark-mode [data-lancamento-section] input[data-valor]{color:var(--ink)}
 html.dark-mode .imp-linha:hover td{background:#1B2230}
 .ma{padding:12px 20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px}
 /* Caixas de destaque coloridas (avisos/sugestões dentro de modais) — cor via
@@ -59816,6 +59826,60 @@ function excluirImportacao(eid){
   toast('Empresa removida','ok');
 }
 
+// ─── Rascunho automático da "Nova Importação" (pedido do usuário 19/10/2026: "sempre que eu começar a digitar uma nova importação e sair, ela fica salva pra eu continuar depois") ───────────────
+// Tudo que é digitado (dados da importação + linhas dos dois quadros) é guardado por empresa a cada pausa na digitação e ao sair da tela; ao abrir "Nova Importação" de novo o rascunho volta, com aviso e botão
+// pra descartar. Some quando a importação é salva.
+function _impRascunhoKey(){ return 'imp_rascunho_'+window._importacaoEidAtual; }
+function _impRascunhoSerializar(){
+  if(window._formImportacaoMode!=='novo'||!document.getElementById('formPI')) return null;
+  const campos={}; ['formPI','formFornecedor','formNF','formDataNF','formDI','formInvoice','formContaDuplicatas'].forEach(id=>{ const e=document.getElementById(id); if(e) campos[id]=e.value; });
+  const secoes={};
+  ['duplicatas','custos'].forEach(t=>{
+    const tb=document.querySelector(`[data-lancamento-section="${t}"] tbody`); if(!tb) return;
+    secoes[t]=[...tb.querySelectorAll('[data-lancamento-row]')].map(row=>{
+      const o={}; row.querySelectorAll('input').forEach(inp=>{ const k=[...inp.attributes].map(a=>a.name).find(n=>/^data-(?!lancamento)/.test(n)); if(!k) return; o[k]=inp.type==='checkbox'?inp.checked:inp.value; });
+      return o;
+    });
+  });
+  return { campos, secoes, ts:Date.now() };
+}
+function _impRascunhoTemConteudo(d){
+  if(!d) return false;
+  if(Object.values(d.campos||{}).some(v=>String(v||'').trim())) return true;
+  return Object.values(d.secoes||{}).some(rows=>rows.some(o=>Object.entries(o).some(([k,v])=>k!=='data-item'&&k!=='data-saldo'&&(v===true||String(v||'').trim()&&String(v).trim()!=='0,00'))));
+}
+function _impRascunhoSalvarAgora(){
+  try{
+    const d=_impRascunhoSerializar(); if(!d) return;
+    if(_impRascunhoTemConteudo(d)) S.s(_impRascunhoKey(),d); else S.s(_impRascunhoKey(),null);
+  }catch(e){ console.warn('Rascunho da importação:',e); }
+}
+function _impRascunhoLimpar(){ try{ S.s(_impRascunhoKey(),null); }catch(e){} }
+let _impRascunhoTimer=null;
+function _impRascunhoAgendar(){ clearTimeout(_impRascunhoTimer); _impRascunhoTimer=setTimeout(_impRascunhoSalvarAgora,600); }
+document.addEventListener('input',e=>{ if(window._formImportacaoMode==='novo'&&e.target.closest&&e.target.closest('#importacaoConteudo')) _impRascunhoAgendar(); },true);
+document.addEventListener('change',e=>{ if(window._formImportacaoMode==='novo'&&e.target.closest&&e.target.closest('#importacaoConteudo')) _impRascunhoAgendar(); },true);
+window.addEventListener('pagehide',()=>{ if(window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); });
+document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden'&&window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); });
+function _impRascunhoRestaurar(){
+  let d=null; try{ d=S.g(_impRascunhoKey()); }catch(e){}
+  if(!_impRascunhoTemConteudo(d)) return false;
+  Object.entries(d.campos||{}).forEach(([id,v])=>{ const e=document.getElementById(id); if(e) e.value=v; });
+  Object.entries(d.secoes||{}).forEach(([t,rows])=>{
+    const tb=document.querySelector(`[data-lancamento-section="${t}"] tbody`); if(!tb||!rows.length) return;
+    tb.innerHTML='';
+    rows.forEach(o=>{
+      const row=criarLinhaLancamento('',t); tb.appendChild(row);
+      Object.entries(o).forEach(([k,v])=>{ const inp=row.querySelector('['+k+']'); if(!inp) return; if(inp.type==='checkbox') inp.checked=!!v; else inp.value=v; });
+      atualizarCorLinha(row);
+    });
+  });
+  atualizarSaldo();
+  const quando=new Date(d.ts).toLocaleString('pt-BR');
+  const c=document.getElementById('importacaoConteudo');
+  if(c){ c.insertAdjacentHTML('afterbegin',`<div id="impRascunhoAviso" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:8px 12px;border:1px solid var(--teal);border-radius:8px;font-size:12.5px;color:var(--slate)">📝 <span style="flex:1">Rascunho recuperado (salvo em ${esc(quando)}) — continue de onde parou. Ele some quando você salvar a importação.</span><button class="btn bo bsm" onclick="if(confirm('Descartar o rascunho e começar uma importação em branco?')){_impRascunhoLimpar();novaImportacao();}">Descartar rascunho</button></div>`); }
+  return true;
+}
 function novaImportacao(){
   const eid=window._importacaoEidAtual;
   if(!eid){toast('Selecione uma empresa','warn');return;}
@@ -59948,6 +60012,7 @@ function novaImportacao(){
     preencherItenspadrao();
     aplicarDataNotaFiscalLinhas();
     atualizarSaldo();
+    const _rec=_impRascunhoRestaurar();
     document.getElementById('formPI').focus();
   },100);
 }
@@ -59987,6 +60052,7 @@ function salvarNovaImportacao(){
 
   setImportacoes(importacoes);
   salvarEstadoGlobalDebounced();
+  if(window._formImportacaoMode==='novo') _impRascunhoLimpar();
   renderImportacoesLista();
   toast('Importação salva com sucesso','ok');
 }
@@ -60030,7 +60096,7 @@ function sincronizarValor(row){
 
   if(!contabiliza){
     valorEl.value='';
-    valorEl.style.color='#1A1F2E';
+    valorEl.style.color='';
     return;
   }
 
@@ -60039,10 +60105,10 @@ function sincronizarValor(row){
     valorEl.style.color='#B91C1C';
   } else if(credito>0){
     valorEl.value=formatarNumero(credito);
-    valorEl.style.color='#1A1F2E';
+    valorEl.style.color='';
   } else {
     valorEl.value='0,00';
-    valorEl.style.color='#1A1F2E';
+    valorEl.style.color='';
   }
 }
 
@@ -60065,7 +60131,7 @@ function criarLinhaLancamento(item='',sectionType='duplicatas'){
     <td style="padding:8px"><input type="text" data-datafatura class="fi" placeholder="dd/mm/aaaa" style="width:100%;min-width:100px;padding:4px 8px;font-size:12px" oninput="gerarHistorico(this.closest('tr'))"></td>
     <td style="padding:8px"><input type="text" data-ctadebito class="fi" placeholder="Cta D" style="width:100%;padding:4px 8px;font-size:12px;width:70px"></td>
     <td style="padding:8px"><input type="text" data-ctacredito class="fi" placeholder="Cta C" style="width:100%;padding:4px 8px;font-size:12px;width:70px"></td>
-    <td style="padding:8px"><input type="text" data-valor class="fi" placeholder="0,00" style="width:100%;padding:4px 8px;font-size:12px;color:#1A1F2E;text-align:right" readonly></td>
+    <td style="padding:8px"><input type="text" data-valor class="fi" placeholder="0,00" style="width:100%;padding:4px 8px;font-size:12px;color:var(--ink);text-align:right" readonly></td>
     <td style="padding:8px"><input type="text" data-historico class="fi" placeholder="Histórico" style="width:100%;padding:4px 8px;font-size:12px;min-width:200px"></td>
     <td style="padding:8px;text-align:center"><button style="background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem" onclick="this.closest('tr').remove();atualizarSaldo()">🗑️</button></td>
   `;
@@ -60085,20 +60151,16 @@ function atualizarCorLinha(row){
   const item=(row.querySelector('[data-item]')?.value||'').trim();
   const destaque=ITENS_DESTAQUE_LANCAMENTO.includes(item);
 
-  row.querySelectorAll('input[type="text"],input[type="date"]').forEach(inp=>{
-    inp.style.background=destaque?'var(--ink2)':'';
-    inp.style.color=destaque?'#fff':'';
-  });
+  // as cores agora vêm de classes CSS (tr.imp-dest / tr.imp-contab), que têm versão pro tema escuro
+  row.querySelectorAll('input[type="text"],input[type="date"]').forEach(inp=>{ inp.style.background=''; inp.style.color=''; });
   const saldoTd=row.querySelector('[data-saldo]');
   if(saldoTd) saldoTd.style.color=destaque?'#fff':'';
-
-  if(destaque){
-    row.style.background='var(--ink2)';
-    return;
-  }
+  row.style.background='';
+  row.classList.toggle('imp-dest',destaque);
+  if(destaque){ row.classList.remove('imp-contab'); return; }
 
   const contabiliza=row.querySelector('[data-contabiliza]')?.checked||false;
-  row.style.background=contabiliza?'#dbeafe':'';
+  row.classList.toggle('imp-contab',contabiliza);
 }
 
 function aplicarDataNotaFiscalLinhas(){
@@ -60508,7 +60570,7 @@ function preencherLancamentosSalvos(lancamentos){
         <td style="padding:8px"><input type="text" data-datafatura class="fi" value="${esc(lanc.dataFatura)}" placeholder="dd/mm/aaaa" style="width:100%;min-width:100px;padding:4px 8px;font-size:12px" oninput="gerarHistorico(this.closest('tr'))"></td>
         <td style="padding:8px"><input type="text" data-ctadebito class="fi" value="${esc(lanc.ctadebito)}" placeholder="Cta D" style="width:100%;padding:4px 8px;font-size:12px;width:70px"></td>
         <td style="padding:8px"><input type="text" data-ctacredito class="fi" value="${esc(lanc.ctacredito)}" placeholder="Cta C" style="width:100%;padding:4px 8px;font-size:12px;width:70px"></td>
-        <td style="padding:8px"><input type="text" data-valor class="fi" placeholder="0,00" style="width:100%;padding:4px 8px;font-size:12px;color:#1A1F2E;text-align:right" readonly></td>
+        <td style="padding:8px"><input type="text" data-valor class="fi" placeholder="0,00" style="width:100%;padding:4px 8px;font-size:12px;color:var(--ink);text-align:right" readonly></td>
         <td style="padding:8px"><input type="text" data-historico class="fi" value="${esc(lanc.historico)}" placeholder="Histórico" style="width:100%;padding:4px 8px;font-size:12px;min-width:200px"></td>
         <td style="padding:8px;text-align:center"><button style="background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem" onclick="this.closest('tr').remove();atualizarSaldo()">🗑️</button></td>
       `;
@@ -60540,6 +60602,7 @@ function preencherLancamentosSalvos(lancamentos){
 }
 
 function voltarDetalhesImportacao(){
+  if(window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); // sair da tela guarda o que foi digitado
   renderImportacoesLista();
 }
 
