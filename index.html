@@ -35532,8 +35532,6 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <button class="btn bo bsm" id="lancctbProcessarFopagBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFopag',[])" title="Busca o Relatório de Líquidos (salário/adiantamento) no ConfiBackup e resolve sozinho quando a soma bater exato — 1 linha por funcionário/sócio, sócio vai pra conta 1.2.9.x dele. O acesso à pasta ConfiBackup é concedido na tela de listagem de empresas.">📋 Processar FOPAG</button>
       <button class="btn bo bsm" id="lancctbProcessarTributosBtn" onclick="_lancctbRodarBotao('_lancctbProcessarTributos',[])" title="Busca na pasta Tributos do Mês um PDF de imposto que bata o valor com a pendência — resolve sozinho se já existir Regra pra ele">🔄 Processar Tributos</button>
       ${String(_lancctbEidAtual)==='4'?`<button class="btn bo bsm" id="lancctbAcessoRufatoCteBtn" onclick="_lancctbConcederAcessoPastaRufatoCte()" title="Concede acesso 1x à pasta de CT-es da Rufato (fica salvo no navegador).">🔑 CT-es Rufato</button><button class="btn bo bsm" id="lancctbProcessarCtesBtn" onclick="_lancctbProcessarCtesRufato()" title="SÓ Rufato: busca na pasta 'Faturas com Relação de CTe' do mês o PDF da transportadora e abre 1 linha de débito (conta 10001) por CT-e, com o número do CT-e no histórico.">🚚 Processar CT-es</button>`:''}
-      <button class="btn bo bsm" id="lancctbCorrigirParcelaBtn" onclick="_lancctbRodarBotao('_lancctbCorrigirDataParcelaExistente',[])" title="Conserta lançamentos JÁ conciliados por NF que ficaram sem 'Data Parcela'/'Mês Bate?' preenchido (bug corrigido 09/09/2026) — não muda nada além dessas 2 colunas">🔧 Corrigir Data Parcela</button>
-      ${_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false?`<button class="btn bo bsm" id="lancctbDividirParcelasFluxoBtn" onclick="_lancctbRodarBotao('_lancctbCorrigirParcelasPorFluxo',[])" title="Pra NF que veio do XML sem abertura de parcela: usa o número NF/parcela já indicado no Fluxo de Caixa do cliente pra dividir sozinho (inclusive saldo residual +30 dias) — só em NF ainda pendente">🔀 Dividir Parcelas via Fluxo</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbRegistroExcel()">📊 Gerar Excel</button>
       <button class="action-btn action-btn-txt" onclick="exportarLancctbRegistroContabilTxt()" ${pendenciasTotaisConta?'disabled style="opacity:.5;cursor:not-allowed"':''} title="${pendenciasTotaisConta?`Ainda faltam ${pendenciasTotaisConta} pendência(s) no período filtrado — só libera com 100% conciliado`:'Gera o TXT de lançamentos contábeis deste período, no formato do Mister Contador'}">📝 Gerar TXT${pendenciasTotaisConta?` (faltam ${pendenciasTotaisConta})`:''}</button>
   </div>
@@ -39403,6 +39401,22 @@ function _cpfpToggleTodos(marcar){
   _cpfpResultados.forEach(r=>r.registros.forEach(reg=>{reg._incluir=marcar;}));
   document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_cpfpPreviewHtml(_cpfpResultados);
 }
+// Pedido do usuário (19/10/2026): "Corrigir Data Parcela" e "Dividir Parcelas via Fluxo" saem da tela e passam a rodar SOZINHOS assim que o Fluxo de Caixa é importado
+// ("sem precisar processar… sem intervenção humana"). Roda só sobre o período do que acabou de entrar, direto nas funções (sem pergunta nem escolha de conta) e nunca derruba a importação se algo falhar.
+let _lancctbFluxoAutoRodando=false;
+async function _lancctbFluxoAposImportar(datas){
+  if(_lancctbFluxoAutoRodando) return; _lancctbFluxoAutoRodando=true;
+  const de0=_lancctbRegistroDataDe, ate0=_lancctbRegistroDataAte, toast0=window.toast;
+  window.toast=function(m,t){ if(/Nenhuma referência de parcela|Nada pra corrigir/i.test(String(m))) return; return toast0.apply(this,arguments); }; // modo silencioso: só avisa quando de fato fez algo
+  try{
+    const ds=(datas||[]).filter(d=>/^\d{4}-\d{2}-\d{2}/.test(String(d||''))).map(d=>String(d).slice(0,10)).sort();
+    if(ds.length){ _lancctbRegistroDataDe=ds[0]; _lancctbRegistroDataAte=ds[ds.length-1]; }
+    try{ await _lancctbCorrigirParcelasPorFluxo(); }catch(e){ console.warn('Dividir parcelas via Fluxo (automático):',e); }
+    try{ await _lancctbCorrigirDataParcelaExistente(); }catch(e){ console.warn('Corrigir Data Parcela (automático):',e); }
+  } finally {
+    _lancctbRegistroDataDe=de0; _lancctbRegistroDataAte=ate0; _lancctbFluxoAutoRodando=false; window.toast=toast0;
+  }
+}
 async function _cpfpConfirmar(){
   const contaSel=document.getElementById('lancctbFluxoImportConta')?.value||null;
   const selecionados=_cpfpResultados.flatMap(r=>r.registros.filter(reg=>reg._incluir));
@@ -39441,6 +39455,7 @@ async function _cpfpConfirmar(){
   localStorage.setItem(lsKey,JSON.stringify(hashes));
   toast(novos.length+' lançamento(s) importado(s)'+(pulados?' · '+pulados+' já existiam':'')+(completadas?' · Juros/Desconto completados em '+completadas+' existentes':''),'ok');
   closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar((novos||[]).map(r=>r.data)); }catch(e){}
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
@@ -39618,6 +39633,7 @@ async function confirmarLancctbFluxoImportRr(){
   if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
   toast(`${novos.length} lançamento(s) importado(s)${puladas?` — ${puladas} já existiam e foram ignorados`:''}`,'ok');
   closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar((novos||[]).map(r=>r.data)); }catch(e){}
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
@@ -39811,6 +39827,7 @@ async function confirmarLancctbFluxoImportBling(){
   if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
   toast(`${registros.length} lançamento(s) do Bling importado(s)${puladas?` — ${puladas} já existiam e foram ignorados`:''}`,'ok');
   closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar((registros||[]).map(r=>r.data)); }catch(e){}
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
@@ -39957,6 +39974,7 @@ async function confirmarLancctbFluxoImportPdf(){
     }
   }
   closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar((registros||[]).map(r=>r.data)); }catch(e){}
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
@@ -40101,6 +40119,7 @@ async function confirmarLancctbFluxoImport(){
     }
   }
   closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar((registros||[]).map(r=>r.data)); }catch(e){}
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
