@@ -32307,7 +32307,8 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   lancamentos.forEach(o=>{ if(o.valor_entrada>0) creditosPendentesPorDia[o.data_pagamento]=(creditosPendentesPorDia[o.data_pagamento]||0)+1; });
   // Pedido do usuário 16/10/2026 (Kajuna, Itaú 13/08: "BOLETOS RECEBIDOS" R$ 631,13 = 2 liquidações de R$ 466,90 + R$ 164,23): o lote do dia travava porque o MESMO dia tinha dezenas de
   // outros créditos (PIX, resgates…) que nada têm a ver com boleto. Pra crédito com histórico de boleto/cobrança, a ambiguidade só conta os OUTROS créditos de boleto/cobrança do dia.
-  const _ehCreditoBoleto=o=>/BOLETO|COBRAN|TIT\s*COB|LIQUID|RECEBIDOS/i.test(String(o.historico_bancario||''));
+  // Sem acento: o Itaú da Fast Lube vem "Mov Tít Cob Disp" (com acento no í) e o TIT\s*COB antigo não casava — o crédito caía na regra "vários créditos no dia" e o lote nunca rodava (19/10/2026).
+  const _ehCreditoBoleto=o=>/BOLETO|COBRAN|TIT\s*COB|LIQUID|RECEBIDOS/i.test(_convMpRemoverAcentos(String(o.historico_bancario||'')));
   const creditosBoletoPendentesPorDia={};
   lancamentos.forEach(o=>{ if(o.valor_entrada>0&&_ehCreditoBoleto(o)) creditosBoletoPendentesPorDia[o.data_pagamento]=(creditosBoletoPendentesPorDia[o.data_pagamento]||0)+1; });
 
@@ -32572,7 +32573,16 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         if(!regraOp){ todasResolvidas=false; motivoGrupo=`operação "${c.tipo_operacao}" sem Regra nem Conta padrão`; break; }
         linhasGrupoOp.push({ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:regraOp.plano_contas.classificacao, conta_contabil_id:regraOp.conta_contabil_id, tipo:regraOp.dc, valor:Math.abs(c.valor_pago), historico:`${rotulo}${refTexto}`, cliente_fornecedor_nome:c.cliente_fornecedor_nome||null, cnpj_cpf:c.cnpj_cpf||null, comprovante_id:c.id, lancamento_extrato_id:null, regra_matching_id:regraOp.id, origem_match:'regra' });
       }
-      return { ok:todasResolvidas, linhas:linhasGrupoOp, grupo, parcelaNf, refTexto, motivo:motivoGrupo };
+      // PAGAMENTO PARCIAL (Fast Lube 29/09/2026, boleto MDM: valor do boleto 2.474,46 mas liquidação 1.698,58): o crédito do banco é menor que o valor do boleto. O crédito da NF passa a ser o que de fato entrou
+      // (banco − juros/multa + descontos), a partida fecha, a parcela da NF NÃO é baixada (fica o saldo em aberto) e o histórico avisa. Só vale quando o ajuste é MENOR que o boleto; se for maior (leitura incompleta), segue como estava e a partida barra.
+      let parcial=false;
+      { const iNf=linhasGrupoOp.findIndex((x,i)=>i>0&&x.tipo==='C'&&grupo.some(c=>c.tipo_operacao==='valor_boleto'&&c.id===x.comprovante_id));
+        if(iNf>0){
+          let outrosC=0, outrosD=0; linhasGrupoOp.forEach((x,i)=>{ if(i===0||i===iNf) return; if(x.tipo==='C') outrosC+=x.valor; else outrosD+=x.valor; });
+          const plug=Math.round((linhasGrupoOp[0].valor-outrosC+outrosD)*100)/100, vbv=linhasGrupoOp[iNf].valor;
+          if(plug>0.004&&plug<vbv-0.004){ linhasGrupoOp[iNf].valor=plug; linhasGrupoOp[iNf].historico+=' (pagamento parcial de R$ '+_fmt(vbv)+')'; parcial=true; }
+        } }
+      return { ok:todasResolvidas, linhas:linhasGrupoOp, grupo, parcelaNf:parcial?null:parcelaNf, parcial, refTexto, motivo:motivoGrupo };
     }
     if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')){
       const ancoraLiquidacao=comprovantesReceb.find(c=>
