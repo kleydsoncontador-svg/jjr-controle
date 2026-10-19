@@ -34395,19 +34395,41 @@ function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
     if(visto.has(k)) return; visto.add(k);
     cand.push({f,v});
   });
-  if(cand.length<2||cand.length>40) return null;
-  cand.sort((x,y)=>_lancctbFluxoOrdemCmp(x.f,y.f)); // pool em ordem do Fluxo
-  const { sols, estourou } = _lancctbSubconjuntosSoma(cand.map(c=>c.v),alvo,1,400,300000);
-  if(!sols.length) return null;
-  // Várias combinações possíveis do MESMO fornecedor: escolhe sempre a mesma — 1º diferença de centavo menor, 2º datas mais próximas do banco, 3º linhas mais antigas/primeiras do Fluxo, 4º menores documentos.
-  const info=sols.map(ix=>{
-    const soma=ix.reduce((a,i)=>a+cand[i].v,0), fs=ix.map(i=>cand[i].f).sort(_lancctbFluxoOrdemCmp);
-    return { ix, itens:fs, soma, ad:Math.abs(soma-alvo), dist:fs.reduce((a,f)=>a+_lancctbDiffDias(f.data,dataPag),0), chave:fs.map(f=>(f.data||'')+'#'+String(Number(f.id)||0).padStart(12,'0')), docs:fs.map(_lancctbFluxoDocNum) };
-  });
-  const cmpArr=(A,B)=>{ for(let i=0;i<Math.min(A.length,B.length);i++){ if(A[i]<B[i]) return -1; if(A[i]>B[i]) return 1; } return A.length-B.length; };
-  info.sort((a,b)=>a.ad-b.ad||a.dist-b.dist||cmpArr(a.chave,b.chave)||cmpArr(a.docs,b.docs));
-  const m=info[0];
-  return { itens:m.itens, soma:m.soma/100, delta:Math.round(m.soma-alvo)/100, alternativas:info.length-1, incompleta:!!estourou };
+  if(cand.length<2) return null;
+  // Prioridade FIXA (pedido do usuário 19/10/2026): data mais próxima do banco → ordem do Fluxo → menor documento. A combinação escolhida é a que inclui, nessa ordem, o primeiro título que ainda deixa o resto fechar.
+  cand.sort((x,y)=>(_lancctbDiffDias(x.f,dataPag)-_lancctbDiffDias(y.f,dataPag))||_lancctbFluxoOrdemCmp(x.f,y.f));
+  const lim=cand.slice(0,120);
+  for(const dlt of [0,-1,1]){ // exata primeiro; depois 1 centavo a menos / a mais
+    const ix=_lancctbSomaPrioridade(lim.map(c=>c.v),alvo+dlt);
+    if(ix&&ix.length>=2){ const itens=ix.map(k=>lim[k].f); return { itens, soma:(alvo+dlt)/100, delta:dlt/100 }; }
+  }
+  return null;
+}
+// Subconjunto de soma EXATA (em centavos) respeitando a prioridade dos itens (índice menor = prioridade maior). Programação dinâmica em bitsets: alcançabilidade do "resto" (itens i..n-1) e reconstrução gulosa
+// que sempre tenta incluir o item de maior prioridade. Devolve a lista de índices ou null. Limite: alvo até R$ 50.000,00 e 120 itens (senão, null).
+function _lancctbSomaPrioridade(vals,alvo){
+  const n=vals.length; if(!n||alvo<=0||alvo>5000000||n>120) return null;
+  const W=((alvo+1)+31)>>>5, alc=new Array(n+1);
+  alc[n]=new Uint32Array(W); alc[n][0]=1;
+  for(let i=n-1;i>=0;i--){
+    const prev=alc[i+1], cur=new Uint32Array(prev), v=vals[i];
+    if(v>0&&v<=alvo){
+      const ws=v>>>5, bs=v&31;
+      for(let w=W-1;w>=ws;w--){
+        let x=prev[w-ws]<<bs; if(bs&&w-ws-1>=0) x|=prev[w-ws-1]>>>(32-bs);
+        cur[w]|=x;
+      }
+    }
+    alc[i]=cur;
+  }
+  const bit=(arr,s)=>(arr[s>>>5]>>>(s&31))&1;
+  if(!bit(alc[0],alvo)) return null;
+  const out=[]; let s=alvo;
+  for(let i=0;i<n&&s>0;i++){
+    const v=vals[i];
+    if(v>0&&v<=s&&bit(alc[i+1],s-v)){ out.push(i); s-=v; }
+  }
+  return s===0?out:null;
 }
 // Sugestão de PARÂMETRO (nunca salva sozinha): só termo realmente distintivo do fornecedor identificado no histórico
 function _lancctbFluxoParamSugestaoDoHistorico(hist){
