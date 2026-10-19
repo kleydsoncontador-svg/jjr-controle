@@ -30889,6 +30889,14 @@ async function excluirLancctbRegra(id){
 const LANCCTB_MATCH_TOLERANCIA_VALOR=2.00;
 // Pedido do usuário 16/10/2026 (Kajuna: extrato R$ 300,00 sugerido com Fluxo de R$ 299,20): Fluxo de Caixa NUNCA casa com o extrato por valor aproximado, em nenhuma empresa — só valor exato (centavo).
 const LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO=0.005;
+// Pedido do usuário 19/10/2026: com o FORNECEDOR CONFIRMADO (identidade 'ok'/parâmetro) aceita diferença de até 1 centavo (arredondamento) — preferindo sempre a exata. Só é usada no Processar Fluxo e na composição.
+const LANCCTB_FLUXO_TOL_CENTAVO=0.0101;
+function _lancctbFluxoDocNum(f){ const n=parseInt(String((f&&(f.documento_numero||f.numero))||'').replace(/\D/g,''),10); return isNaN(n)?Infinity:n; }
+function _lancctbFluxoOrdemCmp(a,b){
+  const da=String(a.data||''), db=String(b.data||''); if(da!==db) return da<db?-1:1;
+  const ia=Number(a.id)||0, ib=Number(b.id)||0; if(ia!==ib) return ia-ib;
+  return _lancctbFluxoDocNum(a)-_lancctbFluxoDocNum(b);
+}
 const LANCCTB_MATCH_TOLERANCIA_DIAS=3;
 // Tolerância ESPECÍFICA do passo "Notas Fiscais" (mais rígida que a geral
 // acima, usada por Comprovante/Fluxo de Caixa) — pedido do usuário
@@ -31230,7 +31238,8 @@ async function _lancctbProcessarFluxo(){
   try{
     const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
-      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')));
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
+      .order('data_pagamento',{ascending:true}).order('id',{ascending:true})));
     if(!pendencias||!pendencias.length){ toast('Nenhuma pendência no período filtrado nesta conta.','ok'); return; }
     // Limita o fluxo pela faixa de datas das pendências ±tolerância (mesmo
     // padrão do matching; evita varrer 9k+ linhas sem filtro — Fast Lube).
@@ -31250,6 +31259,7 @@ async function _lancctbProcessarFluxo(){
     // lançamento que não é mais uma pendência desta conta (associação velha).
     const _extConcPF=await _lancctbExtratosLigadosConciliados(fluxoTodo,pendIds); // ligada a lançamento JÁ conciliado = ocupada (não é "associação velha")
     const fluxoPend=fluxoTodo.filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||(!pendIds.has(f.lancamento_extrato_id)&&!_extConcPF.has(f.lancamento_extrato_id)));
+    fluxoPend.sort(_lancctbFluxoOrdemCmp); // ordem do Fluxo: data, depois id (determinístico)
     // O Fluxo é quem manda (pedido do usuário 18/09/2026): a NF+parcela que
     // ele indica decide a que extrato a linha pertence. Carrega as parcelas
     // (qualquer status) das NFs citadas no Fluxo.
@@ -31307,7 +31317,7 @@ async function _lancctbProcessarFluxo(){
     try{ const rs=await _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usados,hRaiz:_hRaizSispag,statusEl}); sispagAbertos=rs.abertos; sispagMotivos=rs.motivos; }catch(e){ console.error('Sispag via Fluxo:',e); sispagMotivos=['erro: '+(e.message||e)]; }
     // Resolve os pares (extrato → fluxo) localmente antes de gravar,
     // depois salva em lote paralelo (8 simultâneos) para evitar N round-trips.
-    const pares=[]; let compostos=0, ambiguosComp=0;
+    const pares=[]; let compostos=0, ambiguosComp=0, centavosAceitos=0;
     if(fluxoPend.length){
       for(let i=0;i<pendencias.length;i++){
         if(statusEl&&i%200===0){ statusEl.textContent=`Comparando com o Fluxo ${i}/${pendencias.length}…`; await new Promise(r=>setTimeout(r,0)); }
@@ -31318,7 +31328,7 @@ async function _lancctbProcessarFluxo(){
           .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFluxo))
-          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
+          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_FLUXO_TOL_CENTAVO:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
           .filter(f=>{
             const par=indicadaDe(f); if(!par) return true;
             if(par.status_conciliacao==='conciliado') return par.lancamento_extrato_id===l.id;
@@ -31330,12 +31340,15 @@ async function _lancctbProcessarFluxo(){
         if(!cand.length){
           // sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco, até R$ 0,02 de diferença; combinação única)
           const comp=_lancctbFluxoComposicao(l.historico_bancario,valor,l.data_pagamento,fluxoPend.filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId)),{lista:_fpListaFluxo,aliases:_aliasFluxo,usados,ehSaida});
-          if(comp&&comp.itens&&Math.abs(comp.delta)<=0.02){ comp.itens.forEach(f=>{ usados.add(f.id); pares.push({fId:f.id,lId:l.id}); }); compostos++; }
+          if(comp&&comp.itens&&Math.abs(comp.delta)<=LANCCTB_FLUXO_TOL_CENTAVO){ comp.itens.forEach(f=>{ usados.add(f.id); pares.push({fId:f.id,lId:l.id}); }); compostos++; if(Math.abs(comp.delta)>0.001) centavosAceitos++; }
           else if(comp&&comp.ambiguo) ambiguosComp++;
           continue;
         }
         const vDe=f=>ehSaida?f.valor_saida:f.valor_entrada;
+        // Pedido do usuário 19/10/2026 ("não me pergunte qual das duas"): valor exato primeiro → data mais próxima → primeira linha do Fluxo → menor documento (nome/descrição só depois, como desempate final).
         cand.sort((a,b)=>(Math.abs(vDe(a)-valor)<0.005?0:1)-(Math.abs(vDe(b)-valor)<0.005?0:1)
+          ||_lancctbDiffDias(a.data,l.data_pagamento)-_lancctbDiffDias(b.data,l.data_pagamento)
+          ||_lancctbFluxoOrdemCmp(a,b)
           ||(_lancctbNomeCompativel([l.historico_bancario],b.cliente_fornecedor_nome)?1:0)-(_lancctbNomeCompativel([l.historico_bancario],a.cliente_fornecedor_nome)?1:0)
           ||_lancctbTextoScoreSimilaridade(l.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(l.historico_bancario,a.descricao));
         const f=cand[0];
@@ -31367,7 +31380,7 @@ async function _lancctbProcessarFluxo(){
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
     const diag=(resNf&&resNf.diagAglutinado)||[];
     if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
-    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
+    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de R$ 0,01 aceita]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
     renderLancctbRegistroContabil();
     if(_lancctbFluxoSugParam.length) setTimeout(abrirLancctbSugestoesParam,900);
   } finally {
@@ -34383,11 +34396,18 @@ function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
     cand.push({f,v});
   });
   if(cand.length<2||cand.length>40) return null;
-  const { sols, estourou } = _lancctbSubconjuntosSoma(cand.map(c=>c.v),alvo,2,3,300000);
-  if(estourou||!sols.length) return null;
-  if(sols.length>1) return { ambiguo:true, qtd:sols.length };
-  const itens=sols[0].map(ix=>cand[ix].f), soma=sols[0].reduce((a,ix)=>a+cand[ix].v,0);
-  return { itens, soma:soma/100, delta:Math.round((soma-alvo))/100 };
+  cand.sort((x,y)=>_lancctbFluxoOrdemCmp(x.f,y.f)); // pool em ordem do Fluxo
+  const { sols, estourou } = _lancctbSubconjuntosSoma(cand.map(c=>c.v),alvo,1,400,300000);
+  if(!sols.length) return null;
+  // Várias combinações possíveis do MESMO fornecedor: escolhe sempre a mesma — 1º diferença de centavo menor, 2º datas mais próximas do banco, 3º linhas mais antigas/primeiras do Fluxo, 4º menores documentos.
+  const info=sols.map(ix=>{
+    const soma=ix.reduce((a,i)=>a+cand[i].v,0), fs=ix.map(i=>cand[i].f).sort(_lancctbFluxoOrdemCmp);
+    return { ix, itens:fs, soma, ad:Math.abs(soma-alvo), dist:fs.reduce((a,f)=>a+_lancctbDiffDias(f.data,dataPag),0), chave:fs.map(f=>(f.data||'')+'#'+String(Number(f.id)||0).padStart(12,'0')), docs:fs.map(_lancctbFluxoDocNum) };
+  });
+  const cmpArr=(A,B)=>{ for(let i=0;i<Math.min(A.length,B.length);i++){ if(A[i]<B[i]) return -1; if(A[i]>B[i]) return 1; } return A.length-B.length; };
+  info.sort((a,b)=>a.ad-b.ad||a.dist-b.dist||cmpArr(a.chave,b.chave)||cmpArr(a.docs,b.docs));
+  const m=info[0];
+  return { itens:m.itens, soma:m.soma/100, delta:Math.round(m.soma-alvo)/100, alternativas:info.length-1, incompleta:!!estourou };
 }
 // Sugestão de PARÂMETRO (nunca salva sozinha): só termo realmente distintivo do fornecedor identificado no histórico
 function _lancctbFluxoParamSugestaoDoHistorico(hist){
