@@ -31356,6 +31356,32 @@ async function _lancctbProcessarFluxo(){
         pares.push({fId:f.id,lId:l.id});
       }
     }
+    // 2ª passada — partição conjunta: pagamentos do MESMO fornecedor (mesmo Parâmetro com "deve conter") que a 1ª passada não resolveu todos.
+    let particoes=0;
+    try{
+      const grupos=new Map();
+      pendencias.forEach(l=>{
+        if(!(l.valor_saida>0)) return;
+        const ps=_lancctbFluxoParamsDaLinha(l.historico_bancario,_fpListaFluxo).filter(p=>(p.contem||[]).filter(Boolean).length); if(!ps.length) return;
+        const k=ps.map(p=>_fpNorm(p.gatilho)).sort().join('|'); if(!grupos.has(k)) grupos.set(k,[]); grupos.get(k).push(l);
+      });
+      for(const G of grupos.values()){
+        if(G.length<2) continue;
+        const idsG=new Set(G.map(l=>l.id)), temPar=new Set(pares.filter(x=>idsG.has(x.lId)).map(x=>x.lId));
+        const sem=G.filter(l=>!temPar.has(l.id)); if(!sem.length) continue;
+        const usadasFora=new Set(pares.filter(x=>!idsG.has(x.lId)).map(x=>x.fId));
+        const poolG=fluxoPend.filter(f=>!usadasFora.has(f.id)&&f.valor_saida>0&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))).map(f=>({f,v:Math.round(f.valor_saida*100)}));
+        const mk=l=>({ id:l.id, alvo:Math.round((l.valor_saida||0)*100), data:l.data_pagamento,
+          aceita:f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFluxo)&&_lancctbFluxoIdentConfirmada(l.historico_bancario,f,_aliasFluxo,_fpListaFluxo)&&!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)) });
+        let r=_lancctbFluxoParticao(G.map(mk),poolG,0,300000);
+        if(r.n<G.length){ const r1=_lancctbFluxoParticao(G.map(mk),poolG,1,300000); if(r1.n>r.n) r=r1; }
+        if(r.n>temPar.size){
+          for(let k=pares.length-1;k>=0;k--){ if(idsG.has(pares[k].lId)){ usados.delete(pares[k].fId); pares.splice(k,1); } }
+          r.asg.forEach((fs,lId)=>{ fs.forEach(f=>{ usados.add(f.id); pares.push({fId:f.id,lId}); }); if(fs.length>1) compostos++; });
+          particoes++;
+        }
+      }
+    }catch(e){ console.warn('Partição conjunta do Fluxo:',e); }
     // Grava em ondas de 8 updates simultâneos
     let associados=0;
     if(statusEl) statusEl.textContent=`Associando ao Fluxo 0/${pares.length}…`;
@@ -31380,7 +31406,7 @@ async function _lancctbProcessarFluxo(){
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
     const diag=(resNf&&resNf.diagAglutinado)||[];
     if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
-    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de R$ 0,01 aceita]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
+    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de R$ 0,01 aceita]`:''}${particoes?` [${particoes} grupo(s) de pagamentos do mesmo fornecedor resolvidos em conjunto]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
     renderLancctbRegistroContabil();
     if(_lancctbFluxoSugParam.length) setTimeout(abrirLancctbSugestoesParam,900);
   } finally {
@@ -32020,7 +32046,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       comps.push({f,c:c||null});
     });
     cp.filter(c=>!cpUsadosMerge.has(c.id)).forEach(c=>comps.push({f:null,c}));
-    if(comps.length<2||comps.length>25){ if(comps.length>25||fl.length) diagAglutinado.push(`${rotuloL}: ${comps.length} linha(s) de Fluxo candidata(s) (precisa de 2 a 25, data ±${LANCCTB_MATCH_TOLERANCIA_DIAS} dias)`); return false; }
+    if(comps.length<2||comps.length>(_fixoAssoc?60:25)){ if(comps.length>25||fl.length) diagAglutinado.push(`${rotuloL}: ${comps.length} linha(s) de Fluxo candidata(s) (precisa de 2 a 25, data ±${LANCCTB_MATCH_TOLERANCIA_DIAS} dias)`); return false; }
     // Resolve cada componente
     comps.forEach(x=>{
       x.valor=x.c?x.c.valor_pago:vFluxo(x.f);
@@ -34395,6 +34421,51 @@ function _lancctbFluxoIdentConfirmada(hist,f,aliases,lista){
   return ps.some(p=>(p.contem||[]).filter(Boolean).length)&&_lancctbFluxoParamOk(hist,f,lista);
 }
 // Composição: vários títulos do MESMO fornecedor (identidade 'ok') cujo VALOR LÍQUIDO soma o valor do banco (centavos inteiros, tolerância de 2 centavos). Só devolve se a combinação for ÚNICA.
+// ── Partição conjunta (pedido do usuário 19/10/2026) ───────────────────────────────────────────────────────────────────────────────────────────────
+// Vários pagamentos do MESMO fornecedor no mesmo dia (ex.: FOCUS 08/09 pagando os boletos de 05, 06 e 07) disputam as mesmas linhas do Fluxo; escolher um por vez pode gastar uma linha que outro pagamento precisava.
+// Aqui os pagamentos do grupo são resolvidos JUNTOS: busca (com orçamento de nós) a distribuição que associa o MAIOR número de pagamentos, sempre na prioridade fixa
+// (linha única exata → data mais próxima → ordem do Fluxo → documento). Valores em centavos inteiros; tolerância de 0 (e, na 2ª tentativa, de 1 centavo).
+function _lancctbFluxoEnumerarSolucoes(linhas,alvo,max,orc){
+  const n=linhas.length, suf=new Array(n+1).fill(0); for(let i=n-1;i>=0;i--) suf[i]=suf[i+1]+linhas[i].v;
+  const out=[]; const unicas=[]; for(let i=0;i<n;i++){ if(linhas[i].v===alvo) unicas.push([i]); }
+  unicas.slice(0,max).forEach(x=>out.push(x));
+  const multi=[];
+  (function dfs(i,soma,atual){
+    if(multi.length>=max||orc.n<=0) return; orc.n--;
+    if(soma===alvo){ if(atual.length>=2) multi.push(atual.slice()); return; }
+    if(i>=n||soma>alvo||soma+suf[i]<alvo) return;
+    atual.push(i); dfs(i+1,soma+linhas[i].v,atual); atual.pop();
+    dfs(i+1,soma,atual);
+  })(0,0,[]);
+  multi.forEach(x=>{ if(out.length<max*2) out.push(x); });
+  return out;
+}
+function _lancctbFluxoParticao(pays,pool,tolCent,orcamentoNos){
+  // pays: [{id,alvo(cent),data,aceita(f)}] ; pool: [{f,v}] ; devolve {n,asg:Map(payId→[linhas])}
+  const orc={n:orcamentoNos||400000}; let melhor={n:-1,asg:null};
+  const ord=pays.slice().sort((a,b)=>b.alvo-a.alvo||a.id-b.id);
+  const usadas=new Set(), asg=new Map();
+  (function rec(pi,n){
+    if(orc.n<=0||melhor.n===ord.length) return; orc.n--;
+    if(pi===ord.length){ if(n>melhor.n) melhor={n,asg:new Map(asg)}; return; }
+    const pay=ord[pi];
+    const cand=pool.filter(c=>!usadas.has(c.f.id)&&_lancctbDiffDias(c.f.data,pay.data)<=LANCCTB_MATCH_TOLERANCIA_DIAS&&pay.aceita(c.f))
+      .sort((x,y)=>(_lancctbDiffDias(x.f.data,pay.data)-_lancctbDiffDias(y.f.data,pay.data))||_lancctbFluxoOrdemCmp(x.f,y.f));
+    const alvos=tolCent?[pay.alvo,pay.alvo-1,pay.alvo+1]:[pay.alvo]; const vistas=new Set();
+    for(const al of alvos){
+      const candAl=cand.filter(c=>c.v<=al);
+      for(const ix of _lancctbFluxoEnumerarSolucoes(candAl,al,20,orc)){
+        const itens=ix.map(k=>candAl[k]); const key=itens.map(c=>c.f.id).sort().join(','); if(vistas.has(key)) continue; vistas.add(key);
+        itens.forEach(c=>usadas.add(c.f.id)); asg.set(pay.id,itens.map(c=>c.f));
+        rec(pi+1,n+1);
+        asg.delete(pay.id); itens.forEach(c=>usadas.delete(c.f.id));
+        if(melhor.n===ord.length||orc.n<=0) return;
+      }
+    }
+    rec(pi+1,n); // este pagamento fica sem composição
+  })(0,0);
+  return melhor.asg?{n:melhor.n,asg:melhor.asg}:{n:0,asg:new Map()};
+}
 function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
   const alvo=Math.round(valor*100), usados=ctx.usados||new Set(), ehSaida=ctx.ehSaida!==false;
   const visto=new Set(); const cand=[];
