@@ -30414,6 +30414,7 @@ async function _lancctbAssociarFluxoMarcadasDoModal(){
   if(!confirm(`Associar ${ids.length} linha(s) do Fluxo de Caixa (soma R$ ${_fmt(soma)}) a este lançamento de R$ ${_fmt(alvo)}?${Math.abs(dif)>0.01?`\n\nATENÇÃO: a soma difere do lançamento em R$ ${_fmt(dif)}.`:''}\n\nIsso só liga o Fluxo ao lançamento — a classificação continua pendente.`)) return;
   const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:r.id}).in('id',ids);
   if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
+  try{ const eidM=_lancctbEidAtual, atuais=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); ids.forEach(i=>atuais.add(i)); S.s('lancctb_fluxo_manual_'+eidM,[...atuais]); }catch(e){} // associação feita à mão não é desfeita pela revalidação de identidade
   toast(`${ids.length} linha(s) do Fluxo associada(s) ao lançamento.`,'ok');
   _lancctbFluxoMultiSel=new Map();
   _lancctbBuscarFluxoProLancamento();
@@ -31155,6 +31156,8 @@ async function _lancctbProcessarFluxo(){
   let _hRaizSispag=null;
   try{ if(await _lancctbTemAcessoPastaConfiBackup()){ const hh=await _lancctbCarregarHandleConfiBackup(); if(hh&&(await hh.requestPermission({mode:'read'}))==='granted') _hRaizSispag=hh; } }catch(e){}
   const _fpListaFluxo=_lancctbFluxoParamGet(eid);
+  const _aliasFluxo=_lancctbFluxoAliasGet(eid); _lancctbFluxoAliasLista=_aliasFluxo; _lancctbFluxoSugParam=[];
+  const _manuaisFluxo=new Set((()=>{ try{ return S.g('lancctb_fluxo_manual_'+eid)||[]; }catch(e){ return []; } })());
   let _agNubFx=null; try{ const { data: _ag } = await _supaClient.from('agencias_bancarias').select('banco_nome').eq('id',contaId).maybeSingle(); _agNubFx=_ag; }catch(e){}
   const btn=document.getElementById('lancctbProcessarFluxoBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
@@ -31171,7 +31174,7 @@ async function _lancctbProcessarFluxo(){
     const _pfDmin=_pfDatas.length?_pfAddD(_pfDatas[0],-LANCCTB_MATCH_TOLERANCIA_DIAS):null;
     const _pfDmax=_pfDatas.length?_pfAddD(_pfDatas[_pfDatas.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS):null;
     const { data: fluxoTodo } = await _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,status_associado,lancamento_extrato_id')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,status_associado,lancamento_extrato_id')
       .eq('empresa_eid',eid);
       if(_pfDmin) q=q.gte('data',_pfDmin);
       if(_pfDmax) q=q.lte('data',_pfDmax);
@@ -31224,10 +31227,11 @@ async function _lancctbProcessarFluxo(){
       if(!fluxoPend.includes(f)) fluxoPend.push(f);
     }
     // Parâmetros do Fluxo (🎛): associação que desrespeita o que o usuário definiu pro histórico é solta (só se o extrato ainda está pendente; só o vínculo do Fluxo).
-    if(_fpListaFluxo.length) for(const f of fluxoTodo){
+    // IDENTIDADE também é revalidada: associação ligada a fornecedor/CNPJ/CPF incompatível com o histórico (e não confirmada à mão) é solta (só o vínculo do Fluxo; extrato ainda pendente).
+    for(const f of fluxoTodo){
       if(f.status_associado!=='associado'||!f.lancamento_extrato_id||!pendIds.has(f.lancamento_extrato_id)) continue;
       const pend=pendencias.find(x=>x.id===f.lancamento_extrato_id);
-      if(!pend||_lancctbFluxoParamOk(pend.historico_bancario,f,_fpListaFluxo)) continue;
+      if(!pend||(_lancctbFluxoParamOk(pend.historico_bancario,f,_fpListaFluxo)&&(_manuaisFluxo.has(f.id)||_lancctbFluxoIdentOk(pend.historico_bancario,f)))) continue;
       await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('id',f.id);
       f.status_associado='nao_associado'; f.lancamento_extrato_id=null;
       if(!fluxoPend.includes(f)) fluxoPend.push(f);
@@ -31238,14 +31242,14 @@ async function _lancctbProcessarFluxo(){
     try{ const rs=await _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usados,hRaiz:_hRaizSispag,statusEl}); sispagAbertos=rs.abertos; sispagMotivos=rs.motivos; }catch(e){ console.error('Sispag via Fluxo:',e); sispagMotivos=['erro: '+(e.message||e)]; }
     // Resolve os pares (extrato → fluxo) localmente antes de gravar,
     // depois salva em lote paralelo (8 simultâneos) para evitar N round-trips.
-    const pares=[];
+    const pares=[]; let compostos=0, ambiguosComp=0;
     if(fluxoPend.length){
       for(let i=0;i<pendencias.length;i++){
         if(statusEl&&i%200===0){ statusEl.textContent=`Comparando com o Fluxo ${i}/${pendencias.length}…`; await new Promise(r=>setTimeout(r,0)); }
         const l=pendencias[i];
         const ehSaida=l.valor_saida>0;
         const valor=l.valor_saida||l.valor_entrada;
-        const cand=fluxoPend.filter(f=>!usados.has(f.id))
+        const candBase=fluxoPend.filter(f=>!usados.has(f.id))
           .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFluxo))
@@ -31255,7 +31259,16 @@ async function _lancctbProcessarFluxo(){
             if(par.status_conciliacao==='conciliado') return par.lancamento_extrato_id===l.id;
             return Math.abs(par.valor_parcela-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005);
           });
-        if(!cand.length) continue;
+        // Ordem: identidade (CNPJ/CPF/nome) → [parâmetros já aplicados acima] → data/valor (acima). Identidade é FILTRO ELIMINATÓRIO; só então vale o valor.
+        const cand=candBase.filter(f=>_lancctbFluxoIdentOk(l.historico_bancario,f));
+        if(!cand.length&&candBase.length) _lancctbFluxoSugParamAdd(l.historico_bancario,`candidato de outro fornecedor apareceu (${candBase[0].cliente_fornecedor_nome||'sem nome'})`);
+        if(!cand.length){
+          // sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco, até R$ 0,02 de diferença; combinação única)
+          const comp=_lancctbFluxoComposicao(l.historico_bancario,valor,l.data_pagamento,fluxoPend.filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId)),{lista:_fpListaFluxo,aliases:_aliasFluxo,usados,ehSaida});
+          if(comp&&comp.itens&&Math.abs(comp.delta)<=0.02){ comp.itens.forEach(f=>{ usados.add(f.id); pares.push({fId:f.id,lId:l.id}); }); compostos++; }
+          else if(comp&&comp.ambiguo) ambiguosComp++;
+          continue;
+        }
         const vDe=f=>ehSaida?f.valor_saida:f.valor_entrada;
         cand.sort((a,b)=>(Math.abs(vDe(a)-valor)<0.005?0:1)-(Math.abs(vDe(b)-valor)<0.005?0:1)
           ||(_lancctbNomeCompativel([l.historico_bancario],b.cliente_fornecedor_nome)?1:0)-(_lancctbNomeCompativel([l.historico_bancario],a.cliente_fornecedor_nome)?1:0)
@@ -31289,8 +31302,9 @@ async function _lancctbProcessarFluxo(){
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
     const diag=(resNf&&resNf.diagAglutinado)||[];
     if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
-    toast(`Fluxo: ${associados} linha(s) associada(s)${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
+    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
     renderLancctbRegistroContabil();
+    if(_lancctbFluxoSugParam.length) setTimeout(abrirLancctbSugestoesParam,900);
   } finally {
     if(btn) btn.disabled=false;
     if(statusEl) statusEl.textContent='';
@@ -31822,8 +31836,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // aglutinado (histórico genérico ou securitizadora): soma de N linhas do
   // Fluxo, TODAS resolvidas em NF, fechando o valor do extrato.
   const _fpListaEng=_lancctbFluxoParamGet(eid);
+  _lancctbFluxoAliasLista=_lancctbFluxoAliasGet(eid);
   async function tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch,usarComprovantes){
-    const base=(fluxoCaixaPonteBase||[]).filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaEng)&&!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
+    const base=(fluxoCaixaPonteBase||[]).filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaEng)&&_lancctbFluxoIdentOk(l.historico_bancario,f)&&!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
       &&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&(f.numero||f.documento_numero));
     const ehPonteL=/SECURITIZ|\bFIDC\b|FUNDO DE INVEST/.test(_convMpRemoverAcentos(String(l.historico_bancario||'').toUpperCase()));
     const temNome=_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
@@ -34257,6 +34272,101 @@ async function _lancctbAtualizarTemFluxo(eid){
     _lancctbTemFluxoCache[String(eid)]=(count||0)>0;
   }catch(e){}
 }
+// ─── IDENTIDADE (Fluxo × histórico bancário) — pedido do usuário 19/10/2026 ("ajuste cirúrgico") ────────────────────────────────────────────────
+// Quando o histórico do banco já diz QUEM recebeu (CNPJ/CPF, nome de pessoa ou de empresa), a identidade é FILTRO ELIMINATÓRIO (valor/data só são vistos depois): CPF/CNPJ diferente → rejeita; pessoa física
+// × pessoa física diferente → rejeita; empresa sem nenhuma palavra DISTINTIVA em comum → rejeita. Palavras genéricas (AUTO, PECAS, COMERCIO, LTDA, DISTRIBUIDORA, BRASIL…) nunca provam compatibilidade.
+// Relação já CONFIRMADA pelo usuário (alias/intermediário, guardada por empresa) vale; sem ela nada é assumido sozinho.
+const LANCCTB_IDENT_GENERICAS=new Set(('AUTO,PECAS,PCS,PECA,COMERCIO,COMERCIAL,COM,DIST,DISTR,DISTRDE,DISTRIBUIDORA,DISTRIBUIDOR,BRASIL,BRASILEIRA,BRASILEIRO,LTDA,EIRELI,EPP,MEI,INDUSTRIA,IND,IMPORTADORA,EXPORTADORA,IMPORTACAO,EXPORTACAO,SERVICOS,SERVICO,AUTOMOTIVA,AUTOMOTIVAS,AUTOMOTIVO,AUTOMOTIVOS,AUTOMOTIV,PRODUTOS,PRODUTO,MATERIAIS,EMPRESA,GRUPO,CIA,COMPANHIA,SECURITIZADORA,SECU,SECURITIZADOR,FUNDO,ELETRO,MOTORES,MOTOR,PARA,TITULO,FATURA,NOTA,FISCAL,PAGO,PAGAR,PAGAMENTO,PAGTO,PGTO,BOLETO,PIX,TED,DOC,TRANSFERENCIA,TRANSF,ENVIADA,RECEBIDA,ENVIADO,RECEBIDO,SOCIEDADE,ANONIMA,COOPERATIVA,ASSOCIACAO,REPRESENTACOES,REPRESENTACAO,MAQUINAS,PNEUS,ACESSORIOS,MANUTENCAO,MANUTENCOES,OFICINA,MECANICA,CENTER,TRANSPORTES,TRANSPORTE,LOGISTICA,PRODUCOES,PARTICIPACOES,EMPREENDIMENTOS,INVESTIMENTOS,MATRIZ,FILIAL,CONTA,CONTAS,CORRENTE,OUTRA,IMPORTADORAS,ANDRE').split(',').filter(x=>x!=='ANDRE'));
+const LANCCTB_IDENT_SOBRENOMES=new Set('SILVA,SANTOS,OLIVEIRA,SOUZA,SOUSA,PEREIRA,COSTA,RODRIGUES,ALVES,LIMA,GOMES,RIBEIRO,MARTINS,CARVALHO,ALMEIDA,LOPES,SOARES,FERNANDES,VIEIRA,BARBOSA,ROCHA,DIAS,NASCIMENTO,ANDRADE,MOREIRA,NUNES,MARQUES,MACHADO,MENDES,FREITAS,CARDOSO,RAMOS,GONCALVES,SANTANA,TEIXEIRA,JUNIOR,FILHO,NETO,SOBRINHO,ROSA,PINTO,CUNHA,MORAES,CAMPOS,BORGES,REIS,MELO,ARAUJO,BATISTA,FARIAS,CORREA,CORREIA,MIRANDA,FREIRE,BARROS,DUARTE'.split(','));
+function _lancctbIdentTokens(txt){ return [...new Set(_lancctbTokensNome(txt).filter(t=>t.length>=3&&!LANCCTB_IDENT_GENERICAS.has(t)))]; }
+function _lancctbIdentCasa(a,b){ return a===b||(a.length>=4&&b.length>=4&&(a.startsWith(b)||b.startsWith(a))); }
+function _lancctbFluxoAliasGet(eid){ try{ return S.g('lancctb_fluxo_alias_'+eid)||[]; }catch(e){ return []; } }
+let _lancctbFluxoAliasLista=[];
+// 'ok' (identidade confirmada) | 'neutro' (histórico/Fluxo sem como julgar) | 'rejeita'
+function _lancctbFluxoIdentidade(hist,f,aliases){
+  if(_lancctbHistoricoEhTributo(hist)||_lancctbHistoricoEhFolha(hist)) return 'neutro';
+  const docF=String((f&&f.cnpj_cpf)||'').replace(/\D/g,'');
+  const docsH=_lancctbCnpjsDoTexto(hist);
+  if(docF.length===14&&docsH.length){ return docsH.some(d=>d.slice(0,8)===docF.slice(0,8))?'ok':'rejeita'; }
+  const cpfsH=(String(hist||'').match(/(?<!\d)\d{3}\.?\d{3}\.?\d{3}-?\d{2}(?!\d)/g)||[]).map(x=>x.replace(/\D/g,'')).filter(x=>x.length===11);
+  if(docF.length===11&&cpfsH.length){ return cpfsH.includes(docF)?'ok':'rejeita'; }
+  const nomeF=(f&&f.cliente_fornecedor_nome)||'';
+  const hn=_fpNorm(hist), fn=_fpNorm(nomeF);
+  if((aliases||[]).some(a=>a&&a.gatilho&&a.nome&&hn.includes(_fpNorm(a.gatilho))&&fn.includes(_fpNorm(a.nome)))) return 'ok';
+  const H=_lancctbIdentTokens(hist), F=_lancctbIdentTokens(nomeF);
+  if(!H.length||!F.length) return 'neutro';
+  const comum=H.filter(h=>F.some(x=>_lancctbIdentCasa(h,x)));
+  const histPF=_lancctbHistEhTransfNome(hist);
+  if(histPF){
+    if(!_lancctbFluxoEhPf(f)) return 'neutro'; // pagamento a pessoa física pode ser, de fato, de uma empresa
+    // pessoa física × pessoa física: precisa de 2+ palavras em comum e ao menos uma que NÃO seja sobrenome comum (SILVA sozinho não prova nada)
+    return (comum.length>=2&&comum.some(t=>!LANCCTB_IDENT_SOBRENOMES.has(t)))?'ok':'rejeita';
+  }
+  return comum.length>=1?'ok':'rejeita';
+}
+function _lancctbFluxoIdentOk(hist,f){ return _lancctbFluxoIdentidade(hist,f,_lancctbFluxoAliasLista)!=='rejeita'; }
+// Composição: vários títulos do MESMO fornecedor (identidade 'ok') cujo VALOR LÍQUIDO soma o valor do banco (centavos inteiros, tolerância de 2 centavos). Só devolve se a combinação for ÚNICA.
+function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
+  const alvo=Math.round(valor*100), usados=ctx.usados||new Set(), ehSaida=ctx.ehSaida!==false;
+  const visto=new Set(); const cand=[];
+  (pool||[]).forEach(f=>{
+    if(usados.has(f.id)||_lancctbDiffDias(f.data,dataPag)>LANCCTB_MATCH_TOLERANCIA_DIAS) return;
+    if(!_lancctbFluxoParamOk(hist,f,ctx.lista)||_lancctbFluxoIdentidade(hist,f,ctx.aliases)!=='ok') return;
+    const v=Math.round(((ehSaida?f.valor_saida:f.valor_entrada)||0)*100); if(v<=0||v>alvo+2) return;
+    const k=[f.documento_numero||f.numero||'',f.parcela||'',f.data,v,_fpNorm(f.cliente_fornecedor_nome)].join('|'); // duplicata repetida nunca entra duas vezes
+    if(visto.has(k)) return; visto.add(k);
+    cand.push({f,v});
+  });
+  if(cand.length<2||cand.length>40) return null;
+  const { sols, estourou } = _lancctbSubconjuntosSoma(cand.map(c=>c.v),alvo,2,3,300000);
+  if(estourou||!sols.length) return null;
+  if(sols.length>1) return { ambiguo:true, qtd:sols.length };
+  const itens=sols[0].map(ix=>cand[ix].f), soma=sols[0].reduce((a,ix)=>a+cand[ix].v,0);
+  return { itens, soma:soma/100, delta:Math.round((soma-alvo))/100 };
+}
+// Sugestão de PARÂMETRO (nunca salva sozinha): só termo realmente distintivo do fornecedor identificado no histórico
+function _lancctbFluxoParamSugestaoDoHistorico(hist){
+  if(_lancctbHistEhTransfNome(hist)||_lancctbHistoricoEhTributo(hist)||_lancctbHistoricoEhFolha(hist)) return null;
+  const toks=_lancctbTokensNome(hist), unicos=[];
+  toks.forEach(t=>{ if(t.length<3||LANCCTB_IDENT_GENERICAS.has(t)) return; if(unicos.some(u=>_lancctbIdentCasa(u,t))){ const i=unicos.findIndex(u=>_lancctbIdentCasa(u,t)); if(t.length>unicos[i].length) unicos[i]=t; return; } unicos.push(t); });
+  if(!unicos.length) return null;
+  let termo=unicos[0];
+  // 2 palavras seguidas distintivas formam um nome melhor (ex.: REDE ANCORA); uma só (ex.: FOCUS) basta
+  const iA=toks.findIndex(t=>_lancctbIdentCasa(t,unicos[0])), prox=toks[iA+1];
+  if(prox&&prox.length>=4&&!LANCCTB_IDENT_GENERICAS.has(prox)&&!_lancctbIdentCasa(prox,unicos[0])) termo=unicos[0]+' '+prox;
+  return termo;
+}
+let _lancctbFluxoSugParam=[];
+function _lancctbFluxoSugParamAdd(hist,motivo){
+  const termo=_lancctbFluxoParamSugestaoDoHistorico(hist); if(!termo) return;
+  if(_lancctbFluxoParamsDaLinha(hist,_lancctbFluxoParamGet(_lancctbEidAtual)).length) return; // já existe parâmetro pra esse histórico
+  if(_lancctbFluxoSugParam.some(x=>x.gatilho===termo)) return;
+  _lancctbFluxoSugParam.push({gatilho:termo,contem:termo,motivo,hist});
+}
+function abrirLancctbSugestoesParam(){
+  const l=_lancctbFluxoSugParam; if(!l.length) return;
+  let m=document.getElementById('mLancctbSugParam');
+  if(!m){ document.body.insertAdjacentHTML('beforeend',`<div class="mb" id="mLancctbSugParam" style="display:none"><div class="modal" style="max-width:640px"><div class="mt"><h3>🎛 Sugestões de parâmetros</h3><button onclick="closeModal('mLancctbSugParam')">&#x2715;</button></div><div class="mc" id="lancctbSugParamBody"></div></div></div>`); m=document.getElementById('mLancctbSugParam'); }
+  document.getElementById('lancctbSugParamBody').innerHTML=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Nada foi salvo. Revise e crie só os que fizerem sentido — cada um passa a valer para este e para todos os próximos lançamentos com o gatilho.</div>`+l.map((x,i)=>`
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12.5px">
+      <div><b>Histórico/gatilho:</b> ${esc(x.gatilho)}</div><div><b>Sugestão:</b> DEVE CONTER = ${esc(x.contem)}</div>
+      <div style="color:var(--slate);margin:4px 0 8px">Motivo: ${esc(x.motivo)}</div>
+      <button class="btn bp bsm" onclick="closeModal('mLancctbSugParam');abrirLancctbFluxoParam(null,${i})">Revisar e criar</button>
+    </div>`).join('');
+  openModal('mLancctbSugParam');
+}
+// Relação (alias/intermediário) confirmada pelo usuário: vale nos próximos meses
+function confirmarLancctbFluxoAlias(extratoId){
+  const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); if(!item||!item.fluxoPossivel) return;
+  const f=item.fluxoPossivel.f, hist=item.extrato.historico_bancario||'';
+  const gat=_lancctbFluxoParamSugestaoDoHistorico(hist)||_lancctbFluxoParamGatilhoSugerido(hist);
+  const nomeF=_lancctbIdentTokens(f.cliente_fornecedor_nome||'').sort((a,b)=>b.length-a.length)[0]||(f.cliente_fornecedor_nome||'');
+  if(!gat||!nomeF){ toast('Não consegui montar a relação — use a busca manual.','err'); return; }
+  if(!confirm(`Confirmar que "${gat}" (no banco) é o mesmo que "${f.cliente_fornecedor_nome}" (no Fluxo)?\n\nDepois de confirmado, essa relação vale também para os próximos meses.`)) return;
+  const eid=_lancctbEidAtual, lista=_lancctbFluxoAliasGet(eid).filter(a=>!(a.gatilho===gat&&a.nome===nomeF)); lista.push({gatilho:gat,nome:nomeF});
+  S.s('lancctb_fluxo_alias_'+eid,lista); _lancctbFluxoAliasLista=lista;
+  toast('Relação confirmada — vale para este e para os próximos meses.','ok'); renderLancctbRegistroContabil();
+}
 // ─── Parâmetros do Fluxo por histórico bancário (pedido do usuário 18/10/2026) ───────────────────────────────────────────────────────
 // Opcional. Na linha do Registro Contábil o usuário define, para um trecho do histórico bancário (o "gatilho"), o que o NOME DO FORNECEDOR do Fluxo de Caixa DEVE conter (qualquer um dos termos) e/ou o que NÃO pode conter.
 // Vale pra essa linha e pra TODAS as outras (de qualquer mês) cujo histórico bancário contenha o gatilho: a associação automática ao Fluxo (sugestão, Processar Fluxo, Fluxo→NF, FOPAG) só considera linhas do Fluxo que
@@ -34317,6 +34427,7 @@ async function _lancctbDesconciliarPorId(extratoId,ehSaida){
 }
 let _lancctbFluxoParamLista=[]; // lista da empresa aberta (carregada a cada renderização do Registro)
 function _lancctbFluxoParamGatilhoSugerido(hist){
+  const dist=_lancctbFluxoParamSugestaoDoHistorico(hist); if(dist) return dist;
   let t=_fpNorm(hist).replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g,' ').replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g,' ').replace(/[*\d]/g,' ');
   t=t.replace(/\b(PGTO|PAGTO|PAGAMENTO|BOLETO|PAGO|PIX|ENVIADO|RECEBIDO|TED|DOC|TRANSF|TRANSFERENCIA|ENVIADA|COBRANCA|DEB|AUT)\b/g,' ').replace(/\s+/g,' ').trim();
   return t.split(' ').slice(0,3).join(' ');
@@ -34326,12 +34437,14 @@ function _lancctbFluxoParamCelHtml(r){
   const tip=n?`${n} parâmetro(s) do Fluxo valem para este histórico — clique pra ver/alterar`:'Definir (opcional) o que o fornecedor do Fluxo deve ou não conter pra este histórico bancário';
   return `<td style="padding:7px 6px;text-align:center"><button class="icon-btn" title="${esc(tip)}" onclick="abrirLancctbFluxoParam(${r.id})" style="${n?'color:var(--teal);font-weight:700':''}">🎛${n?' '+n:''}</button></td>`;
 }
-function abrirLancctbFluxoParam(extratoId){
-  const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); if(!item) return;
+function abrirLancctbFluxoParam(extratoId,sugIdx){
+  const sug=(sugIdx!=null)?_lancctbFluxoSugParam[sugIdx]:null;
+  const item=sug?{extrato:{id:0,historico_bancario:sug.hist}}:(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); if(!item) return;
   const r=item.extrato, eid=_lancctbEidAtual;
   const lista=_lancctbFluxoParamGet(eid);
   const existentes=_lancctbFluxoParamsDaLinha(r.historico_bancario,lista);
   const base=existentes[0]||null;
+  const gatPre=sug?sug.gatilho:(base?base.gatilho:_lancctbFluxoParamGatilhoSugerido(r.historico_bancario));
   let m=document.getElementById('mLancctbFluxoParam');
   if(!m){
     document.body.insertAdjacentHTML('beforeend',`<div class="mb" id="mLancctbFluxoParam" style="display:none"><div class="modal" style="max-width:560px">
@@ -34342,10 +34455,10 @@ function abrirLancctbFluxoParam(extratoId){
   document.getElementById('lancctbFluxoParamBody').innerHTML=`
     <div style="font-size:12px;margin-bottom:10px;padding:8px 10px;background:var(--bg);border-radius:6px">Histórico bancário: <b>${esc(r.historico_bancario||'')}</b></div>
     <div class="fg" style="margin-bottom:10px"><div class="fl">Quando o histórico bancário contiver (gatilho)</div>
-      <input class="fi" id="lancctbFpGatilho" value="${esc(base?base.gatilho:_lancctbFluxoParamGatilhoSugerido(r.historico_bancario))}" style="width:100%">
+      <input class="fi" id="lancctbFpGatilho" value="${esc(gatPre)}" style="width:100%">
       <div style="font-size:11px;color:var(--slate);margin-top:3px">Vale pra este e pra todos os outros lançamentos (de qualquer mês) cujo histórico bancário contenha esse texto.</div></div>
     <div class="fg" style="margin-bottom:10px"><div class="fl">O fornecedor do Fluxo DEVE conter (opcional — pode ser mais de um, separados por vírgula ou linha; basta bater um)</div>
-      <textarea class="fi" id="lancctbFpContem" rows="2" style="width:100%" placeholder="ex.: EMBREPAR, EMBREPAR DO BRASIL">${esc(((base&&base.contem)||[]).join(', '))}</textarea></div>
+      <textarea class="fi" id="lancctbFpContem" rows="2" style="width:100%" placeholder="ex.: EMBREPAR, EMBREPAR DO BRASIL">${esc(base?((base.contem)||[]).join(', '):(sug?sug.contem:(_lancctbFluxoParamSugestaoDoHistorico(r.historico_bancario)||'')))}</textarea></div>
     <div class="fg" style="margin-bottom:10px"><div class="fl">O fornecedor do Fluxo NÃO pode conter (opcional — pode ser mais de um)</div>
       <textarea class="fi" id="lancctbFpNaoContem" rows="2" style="width:100%" placeholder="ex.: FORT LUB, REDE ANCORA">${esc(((base&&base.naoContem)||[]).join(', '))}</textarea></div>
     <div style="font-size:11.5px;color:var(--slate);margin-bottom:12px">Sem nenhum parâmetro nada muda. Com parâmetro, o sistema <b>só</b> associa este histórico a linhas do Fluxo que respeitem o que você definiu.</div>
@@ -34407,6 +34520,7 @@ function excluirLancctbFluxoParam(id){
 }
 async function renderLancctbRegistroContabil(){
   _lancctbFluxoParamLista=_lancctbFluxoParamGet(_lancctbEidAtual);
+  _lancctbFluxoAliasLista=_lancctbFluxoAliasGet(_lancctbEidAtual);
   // Parâmetros do Fluxo são FORÇADOS: 1x por parâmetro a cada vez que a página é aberta, qualquer linha do Fluxo associada que desrespeite é desassociada (pedido do usuário 18/10/2026: "tem que forçar isso").
   try{
     window.__fpEnforcado=window.__fpEnforcado||new Set();
@@ -34627,7 +34741,7 @@ async function renderLancctbRegistroContabil(){
   if(conciliadosItens.length){
     // Antes: varredura total da tabela fluxo_caixa_lancamentos da empresa (maior gargalo).
     // Agora: 2 queries direcionadas em paralelo — vinculadas à página + livres da mesma conta.
-    const _FLUXO_SEL='id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,numero,parcela,status_associado,lancamento_extrato_id';
+    const _FLUXO_SEL='id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,status_associado,lancamento_extrato_id';
     // Para palpites livres: restringir ao range de datas da página ±3 dias para
     // evitar buscar toda a tabela em empresas com muitos lançamentos (ex: Fast Lube
     // tem 9k+ livres — sem filtro de data faz 10 requests de 1000 linhas cada).
@@ -34814,6 +34928,7 @@ async function renderLancctbRegistroContabil(){
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual,_lancctbHistEhTransfNome(r.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(r.historico_bancario,f,_lancctbFluxoParamLista))
+          .filter(f=>_lancctbFluxoIdentOk(r.historico_bancario,f))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO; });
         if(candidatosFluxo.length){
           candidatosFluxo.sort((a,b)=>{
@@ -34829,6 +34944,20 @@ async function renderLancctbRegistroContabil(){
           });
           item.fluxoSugerido=candidatosFluxo[0];
           fluxoUsadoSugestao.add(candidatosFluxo[0].id);
+        } else {
+          // Sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco); depois, "possível alias/intermediário" (só mostra, nunca associa sozinho)
+          const poolC=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id));
+          const comp=_lancctbFluxoComposicao(r.historico_bancario,valor,r.data_pagamento,poolC,{lista:_lancctbFluxoParamLista,aliases:_lancctbFluxoAliasLista,usados:fluxoUsadoSugestao,ehSaida});
+          if(comp&&comp.itens){ item.fluxoComposicao=comp; comp.itens.forEach(f=>fluxoUsadoSugestao.add(f.id)); }
+          else if(comp&&comp.ambiguo){ item.fluxoComposicaoAmbigua=comp.qtd; }
+          else {
+            const hp=_lancctbHistEhTransfNome(r.historico_bancario);
+            const pos=poolC.filter(f=>!fluxoUsadoSugestao.has(f.id)&&_lancctbFluxoParamOk(r.historico_bancario,f,_lancctbFluxoParamLista)&&_lancctbFluxoIdentidade(r.historico_bancario,f,_lancctbFluxoAliasLista)==='rejeita'
+              &&!hp&&!_lancctbHistoricoEhTributo(r.historico_bancario)&&!_lancctbHistoricoEhFolha(r.historico_bancario)&&_lancctbIdentTokens(r.historico_bancario).length
+              &&Math.abs((ehSaida?f.valor_saida:f.valor_entrada)-valor)<=0.005&&_lancctbDiffDias(f.data,r.data_pagamento)<=1
+              &&!(String(f.cnpj_cpf||'').replace(/\D/g,'').length===14&&_lancctbCnpjsDoTexto(r.historico_bancario).length));
+            if(pos.length===1){ item.fluxoPossivel={f:pos[0],tipo:/SECURITIZ|FIDC|FACTOR|GATEWAY|COBRANCA|PAGAMENTOS|FUNDO/.test(_fpNorm(r.historico_bancario))?'intermediario':'alias'}; }
+          }
         }
       }
     }
@@ -34952,6 +35081,15 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   // coluna Fluxo de Caixa, pois posso criar regra por ela, tentando
   // associar ao fluxo, pra aqueles que ainda não estão conciliados".
   const fluxoCelHtml=()=>{
+    if(item.fluxoComposicao){
+      const c=item.fluxoComposicao, nomeC=(c.itens[0]&&c.itens[0].cliente_fornecedor_nome)||'', tipC=c.itens.map(x=>`${x.documento_numero||x.descricao||''} R$ ${_fmt(x.valor_saida||x.valor_entrada)}`).join(' | ');
+      return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;cursor:pointer;color:#b45309" title="Composição de ${c.itens.length} títulos — Fluxo R$ ${_fmt(c.soma)} × Banco R$ ${_fmt(valor)} (Δ R$ ${_fmt(c.delta)}): ${esc(tipC)}. O Processar Fluxo associa quando a diferença é de até R$ 0,02." onclick="event.stopPropagation();abrirLancctbRegraModalDeExtratoId(${r.id})">🧩 ${esc(nomeC)} — Composição: ${c.itens.length} títulos | Δ R$ ${_fmt(c.delta)}</td>`;
+    }
+    if(item.fluxoPossivel){
+      const pf=item.fluxoPossivel, rotPos=pf.tipo==='intermediario'?'possível intermediário':'possível alias';
+      return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;cursor:pointer;color:#b45309" title="${esc(rotPos)}: o Fluxo tem ${esc(pf.f.cliente_fornecedor_nome||'')} com o mesmo valor e data, mas o nome não bate com o histórico. Clique pra confirmar a relação (vale pros próximos meses)." onclick="event.stopPropagation();confirmarLancctbFluxoAlias(${r.id})">⚠ ${rotPos} — ${esc(pf.f.cliente_fornecedor_nome||'')} — confirmar</td>`;
+    }
+    if(item.fluxoComposicaoAmbigua) return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;cursor:pointer;color:var(--slate)" title="Há ${item.fluxoComposicaoAmbigua} combinações de títulos do Fluxo que fecham o valor — ambíguo, nada é escolhido sozinho." onclick="event.stopPropagation();abrirLancctbRegraModalDeExtratoId(${r.id})">≈ composição ambígua (${item.fluxoComposicaoAmbigua}) — 🔎 escolher</td>`;
     // Pedido do usuário 18/10/2026: "mesmo que não tenha encontrado algo no fluxo como sugestão, deixe que eu entre pra tentar amarrar algo por lá" — sem sugestão, a célula abre a tela de busca manual no Fluxo (a mesma do botão de Regra).
     if(!item.fluxoSugerido) return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;cursor:pointer;color:var(--slate)" title="Nenhuma sugestão — clique pra procurar no Fluxo de Caixa e amarrar manualmente" onclick="event.stopPropagation();abrirLancctbRegraModalDeExtratoId(${r.id})"><span style="border-bottom:1px dashed var(--slate)">🔎 buscar no Fluxo</span></td>`;
     const f=item.fluxoSugerido;
@@ -34962,7 +35100,9 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     // o nome de quem recebeu/pagou, mais direto pra reconhecer de olho.
     const rotulo=f.cliente_fornecedor_nome||f.descricao||'';
     const confirmado=!!item.fluxoConfirmado;
-    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(_lancctbFluxoIndicaTxt(f))}${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})</span></td>`;
+    const idnF=_lancctbFluxoIdentidade(r.historico_bancario,f,_lancctbFluxoAliasLista);
+    const explF=` <span style="color:var(--slate);font-weight:400;font-style:normal">· ${idnF==='ok'?'nome+data+valor':'data+valor'}</span>`;
+    return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(_lancctbFluxoIndicaTxt(f))}${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})${explF}</span></td>`;
   };
   // Fluxo de Caixa de um lançamento JÁ conciliado — só conferência (18/09/2026).
   const fluxoConciliadoCelHtml=()=>{
