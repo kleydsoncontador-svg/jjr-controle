@@ -59838,6 +59838,584 @@ function excluirImportacao(eid){
   toast('Empresa removida','ok');
 }
 
+// ─── Leitura automática dos documentos da Importação (SEM IA) ──────────────────────────────────────────────
+// Cada documento é lido por regras fixas (texto nativo do PDF; se for imagem/escaneado, OCR local do Tesseract).
+// O que não for possível ler/definir vira item no quadro "Leitura dos documentos" — nunca é chutado.
+function _impNum(s){ if(s==null) return NaN; s=String(s).replace(/\s/g,''); if(!s) return NaN; return parseFloat(s.replace(/\./g,'').replace(',','.')); }
+function _impNumUS(s){ if(s==null) return NaN; return parseFloat(String(s).replace(/\s/g,'').replace(/,/g,'')); }
+function _impSemAcento(s){ return String(s||'').normalize('NFKD').replace(/[̀-ͯ]/g,''); }
+function _impArred(v){ return Math.round((v+Number.EPSILON)*100)/100; }
+var _IMP_BR='(\\d{1,3}(?:\\.\\d{3})*,\\d{2})';
+var _IMP_MESES={JAN:1,FEB:2,FEV:2,MAR:3,APR:4,ABR:4,MAY:5,MAI:5,JUN:6,JUL:7,AUG:8,AGO:8,SEP:9,SET:9,OCT:10,OUT:10,NOV:11,DEC:12,DEZ:12};
+function _impDataBR(s){ // aceita 06/07/2026 | 06-jul-26 | 06/JUL/2026 → dd/mm/aaaa
+  s=_impSemAcento(s).toUpperCase().trim(); let m;
+  if((m=s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/))) return m[1].padStart(2,'0')+'/'+m[2].padStart(2,'0')+'/'+m[3];
+  if((m=s.match(/(\d{1,2})[\/\- ]([A-Z]{3})[\/\- ](\d{2,4})/)) && _IMP_MESES[m[2]]){ const a=m[3].length===2?'20'+m[3]:m[3]; return m[1].padStart(2,'0')+'/'+String(_IMP_MESES[m[2]]).padStart(2,'0')+'/'+a; }
+  return '';
+}
+function _impFmtBR(v){ if(v==null||isNaN(v)) return ''; return Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+
+// ── classificação (pelo CONTEÚDO, nunca só pelo nome do arquivo) ──
+function _impDocClassificar(textoLinhas,nomeArq){
+  const N=_impSemAcento((textoLinhas||[]).join('\n')).toUpperCase(); const nome=_impSemAcento(nomeArq||'').toUpperCase();
+  if(!N.trim()) return 'vazio';
+  if(/EXTRATO DA DUIMP/.test(N)) return 'duimp';
+  if(/DANFE/.test(N)&&/CHAVE DE ACESSO/.test(N)&&/NATUREZA DA OPERA/.test(N)) return 'danfe';
+  if(/TELA DE PAGAMENTO/.test(N)&&/DESEMBARACO/.test(N)) return 'pagamento_duimp';
+  if(/DACTE/.test(N)||/CONHECIMENTO DE TRANSPORTE ELETR/.test(N)) return 'cte';
+  if(/DARE-?\s?SP|ARRECADACAO DE RECEITAS ESTADUAIS/.test(N)) return /COMPLEMENTAR/.test(nome)||/COMPLEMENTAR/.test(N)?'dare_comp':'dare';
+  if(/MARINHA MERCANTE/.test(N)&&/AFRMM/.test(N)) return 'marinha';
+  if(/DESPESAS A SEREM DEBITADAS/.test(N)||(/HONORARIO/.test(N)&&/\bSDA\b/.test(N))) return 'numerario';
+  if(/VALOR EM MOEDA ESTRANGEIRA CONTRATADA/.test(N)||(/TIPO DE OPERACAO/.test(N)&&/BENEFICIARIO NO EXTERIOR/.test(N))) return 'cambio';
+  if(/INTERNATIONAL FREIGHT|OCEAN FREIGHT/.test(N)||/INVOICE N.{0,3}:?\s*WIND-?INV/.test(N)) return 'frete_mar';
+  if(/INTERX LOGISTICS|ASIA SHIPPING|WINDLOG/.test(N)&&/FATURA|INVOICE/.test(N)&&!/WIND-?INV/.test(N)) return 'frete_mar_outro';
+  if(/DEMONSTRATIVO DE CALCULO/.test(N)||(/TRANSBRASA/.test(N)&&/ARMAZENAGEM/.test(N))) return 'armazenagem';
+  if(/DOMINIO EXPRESS/.test(N)&&/REFERENCIA/.test(N)&&/(D E S C R|DESCRI)/.test(N)) return 'fatura_rodov';
+  if(/FICHA DE COMPENSACAO|RECIBO DO PAGADOR/.test(N)) return 'boleto';
+  if(/BILL OF LADING/.test(N)) return 'bl';
+  return 'desconhecido';
+}
+var _IMP_TIPO_NOME={duimp:'DUIMP (extrato)',danfe:'Nota Fiscal (DANFE)',pagamento_duimp:'Tela de pagamento da DUIMP',cte:'Frete rodoviário (DACTE)',fatura_rodov:'Fatura do frete rodoviário',dare:'ICMS (DARE-SP)',dare_comp:'ICMS complementar',marinha:'Marinha Mercante (AFRMM)',numerario:'Numerário (despachante)',cambio:'Câmbio',frete_mar:'Frete marítimo (invoice)',armazenagem:'Armazenagem (Transbrasa)',frete_mar_outro:'Frete marítimo (outro agente)',boleto:'Boleto',bl:'Conhecimento de embarque (BL)',desconhecido:'Tipo não reconhecido',vazio:'Sem texto'};
+
+function _impAcha(re,txt,g){ const m=txt.match(re); return m?m[g==null?1:g]:null; }
+// 1ª ocorrência de valor em R$ depois de um rótulo
+function _impValorApos(N,rotuloRe,janela){ const m=N.match(new RegExp(rotuloRe.source+'[^\\d\\n]{0,'+(janela||40)+'}?'+_IMP_BR,rotuloRe.flags.replace('g',''))); return m?_impNum(m[m.length-1]):null; }
+
+// ── leitores por tipo ──
+function _impLerDuimp(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  r.di=_impAcha(/EXTRATO DA DUIMP\s+(\d{2}BR\d{10}-?\d)/i,N)||_impAcha(/(\d{2}BR\d{10}-\d)/,N);
+  const pi=_impAcha(/N\/\s*REF[.\s]*:\s*PI-?\s*(\d{3,5}\s*\/\s*\d{2})/i,N); if(pi) r.pi=pi.replace(/\s/g,'');
+  const fob=N.match(/TOTAL FOB[.\s]*:\s*R\s*\$\s*([\d.,]+)\s*\/\s*USD\s*([\d.,]+)/i); if(fob){ r.fob=_impNum(fob[1]); r.fobUsd=_impNum(fob[2]); }
+  const fr=N.match(/TOTAL FRETE[.\s]*:\s*R\s*\$\s*([\d.,]+)\s*\/\s*USD\s*([\d.,]+)/i); if(fr){ r.frete=_impNum(fr[1]); r.freteUsd=_impNum(fr[2]); }
+  const sg=N.match(/TOTAL SEGURO[.\s]*:\s*R\s*\$\s*([\d.,]+)/i); if(sg) r.seguro=_impNum(sg[1]);
+  const adu=N.match(/VALOR ADUANEIRO[.\s]*:\s*R\s*\$\s*([\d.,]+)/i); if(adu) r.cif=_impNum(adu[1]);
+  const tx=N.match(/TAXA[.\s]*:\s*\d+\s+DOLAR[^\d]*([\d.,]+)/i); if(tx) r.taxa=_impNum(tx[1]);
+  const trib=(cod)=>{ const m=N.match(new RegExp('\\('+cod+'\\)[.\\s]*:\\s*R\\s*\\$\\s*([\\d.,]+)','i')); return m?_impNum(m[1]):null; };
+  r.ii=trib('0086'); r.ipi=trib('1038'); r.pis=trib('5602'); r.cofins=trib('5629'); r.tus=trib('7811');
+  const ic=N.match(/TOTAL ICMS[.\s]*:\s*R\s*\$\s*([\d.,]+)/i); if(ic) r.icms=_impNum(ic[1]);
+  const af=N.match(/AFRMM RECOLHIDO[.\s]*:\s*([\d.,]+)/i); if(af) r.afrmm=_impNum(af[1]);
+  r.bl=_impAcha(/BL\s*\/\s*AWB HOUSE[.\s]*:\s*([A-Z0-9]+)/i,N);
+  r.invoice=_impAcha(/FATURA COMERCIAL[.\s]*:\s*NUMERO\s*:\s*([^\n]+)/i,N); if(r.invoice) r.invoice=r.invoice.trim();
+  r.container=_impAcha(/CONTAINER[.\s]*:\s*([A-Z]{4}\d{7})/i,N);
+  r.comissaria=_impAcha(/COMISSARIA\s*:\s*([^\n]+)/i,N); if(r.comissaria) r.comissaria=r.comissaria.trim();
+  r.chegada=_impDataBR(_impAcha(/Data\/\s*hora de chegada:\s*[\s\S]{0,80}?(\d{2}\/\d{2}\/\d{4})/i,N)||'');
+  return r;
+}
+function _impLerDanfe(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  const nf=_impAcha(/N\S{0,2}\s*:\s*(\d{3}\.\d{3}\.\d{3})/,N); if(nf) r.nf=String(parseInt(nf.replace(/\./g,''),10));
+  r.chave=(N.match(/(\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4})/)||[])[1]||null;
+  const iNome=L.findIndex(l=>/NOME\s*\/\s*RAZ.O SOCIAL\s+CNPJ\s*\/\s*CPF\s+DATA DE EMISS/i.test(_impSemAcento(l)));
+  if(iNome>=0){ const lin=_impSemAcento(L[iNome+1]||'').trim(); const m=lin.match(/^(.*?)\s+(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{3}\.\d{3}\.\d{3}-\d{2})\s+(\d{2}\/\d{2}\/\d{4})/); if(m){ r.fornecedor=m[1].trim(); r.cnpjForn=m[2]; r.data=m[3]; } }
+  const iTot=L.findIndex(l=>/VL TOTAL DA NOTA/i.test(_impSemAcento(l)));
+  if(iTot>=0){ const nums=(_impSemAcento(L[iTot+1]||'').match(new RegExp(_IMP_BR,'g'))||[]).map(_impNum); if(nums.length>=8) r.total=nums[nums.length-1]; if(nums.length>=8){ r.impImport=nums[5]; r.ipi=nums[6]; r.cofins=nums[2]; r.outrasDesp=nums[4]; } }
+  const iIc=L.findIndex(l=>/BASE DE C.LC DO ICMS\s+VL DO ICMS\s+VL PIS/i.test(_impSemAcento(l)));
+  if(iIc>=0){ const nums=(_impSemAcento(L[iIc+1]||'').match(new RegExp(_IMP_BR,'g'))||[]).map(_impNum); if(nums.length>=3){ r.baseIcms=nums[0]; r.icms=nums[1]; r.pis=nums[2]; } }
+  const ad=N.replace(/\n/g,' ');
+  const inv=ad.match(/INVOICES?\s*:\s*(.+?)\s*,?\s*NUMERO DA DI/i); if(inv) r.invoice=inv[1].replace(/[\s,]+$/,'').trim();
+  const di=ad.match(/NUMERO DA DI\s*:\s*(\d{2}BR\d{10,11})/i); if(di) r.di=di[1];
+  const fob=ad.match(/FOB\s*:\s*R\$\s*([\d.]+(?:,\d+)?)/i); if(fob) r.fobR=parseFloat(String(fob[1]).replace(',','.'));
+  const fre=ad.match(/FRETE\s*:\s*R\$\s*([\d.]+(?:,\d+)?)\s*SEGURO/i); if(fre) r.freteR=parseFloat(String(fre[1]).replace(',','.'));
+  const mm=ad.match(/MARINHA\s+MERCANTE\s*:\s*([\d.]+(?:,\d+)?)/i); if(mm) r.afrmm=parseFloat(String(mm[1]).replace(',','.'));
+  return r;
+}
+function _impLerPagtoDuimp(L){
+  const N=_impSemAcento(L.join('\n')); const r={itens:{}};
+  const re=/(\d{2})\s+(0086|1038|5602|5629|7811)\s+([\d.]+,\d{2})/g; let m; while((m=re.exec(N))) r.itens[m[2]]=_impNum(m[3]);
+  const t=N.match(/Total:\s*([\d.]+,\d{2})/i); if(t) r.total=_impNum(t[1]);
+  r.di=_impAcha(/(\d{2}BR\d{10}-?\d)/,N);
+  return r;
+}
+function _impLerNumerario(L){
+  const N=_impSemAcento(L.join('\n')).toUpperCase(); const r={};
+  r.emissao=_impDataBR(_impAcha(/EMITIDO EM\s*:?\s*(\d{2}\/\d{2}\/\d{4})/,N)||'');
+  const v=(rot)=>{ const m=N.match(new RegExp(rot+'[^\\d\\n]{0,25}?R\\s*\\$\\s*'+_IMP_BR)); return m?_impNum(m[1]):null; };
+  r.ii=v('IMPOSTO IMPORTACAO'); r.ipi=v('IMPOSTO PRODUTO INDUSTRIALIZADO'); r.pis=v('PIS\\/PASEP'); r.cofins=v('COFINS'); r.tus=v('TAXA DE UTILIZACAO DO SISCOMEX');
+  r.icms=v('ICMS'); r.afrmm=v('AFRMM'); r.honorario=v('HONORARIO'); r.sda=v('\\bSDA');
+  const usd=(rot)=>{ const m=N.match(new RegExp('\\n'+rot+'\\s+US[DB]\\s+([\\d.,]+)\\s+R\\s*\\$\\s*'+_IMP_BR+'\\s+([\\d.,]+)')); return m?{usd:_impNum(m[1]),brl:_impNum(m[2]),taxa:_impNum(m[3])}:null; };
+  r.fob=usd('FOB'); r.freteL=usd('FRETE'); r.cifL=usd('VALOR CIF');
+  r.ref=_impAcha(/N\/\s*REFERENCIA\s+PI-?\s*(\d{3,5}\s*\/\s*\d{2})/,N); if(r.ref) r.ref=r.ref.replace(/\s/g,'');
+  r.invoice=_impAcha(/INVOICE\s+([A-Z0-9][A-Z0-9\-\/ ]+?)\s*\n/,N);
+  return r;
+}
+function _impNumAuto(s){ // "11,335.52" (EUA) ou "19.398,52" (BR) ou "97 458,16" (OCR com espaço)
+  s=String(s||'').trim().replace(/(\d)\s+(?=\d{3}\b)/g,'$1'); if(!s) return NaN;
+  const ult=Math.max(s.lastIndexOf(','),s.lastIndexOf('.'));
+  if(ult<0) return parseFloat(s);
+  const inteiro=s.slice(0,ult).replace(/[.,]/g,''); const frac=s.slice(ult+1);
+  return parseFloat(inteiro+'.'+frac);
+}
+function _impLerCambio(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  let m;
+  if((m=N.match(/moeda estrangeira contratada\s*:\s*(?:USD|US\$)?\s*([\d.,]+)/i))){ // layout A (tela "detalhes da operação")
+    r.usd=_impNumAuto(m[1]);
+    const brl=N.match(/valor em reais contratado\s*:\s*R\s*\$?\s*([\d.,]+)/i); if(brl) r.brl=_impNumAuto(brl[1]);
+    const tx=N.match(/taxa de c.mbio\s*:\s*([\d.,]+)/i); if(tx) r.taxa=_impNumAuto(tx[1]);
+    r.data=_impDataBR(_impAcha(/data da contrata..o da taxa\s*:\s*(\d{2}\/\d{2}\/\d{4})/i,N)||'');
+    r.beneficiario=(_impAcha(/benefici.rio\s*:\s*([^\n]+)/i,N)||'').trim(); r.layout='A';
+  } else if(/Valor em moeda estrangeira/i.test(N)){ // layout B ("Resumo das operações")
+    const u=N.match(/Valor em moeda estrangeira[\s\S]{0,60}?USD\s*([\d., ]+[.,]\d{2})/i); if(u) r.usd=_impNumAuto(u[1]);
+    const b=N.match(/Valor em reais[\s\S]{0,60}?BRL\s*([\d., ]+[.,]\d{2})\s+BRL\s*([\d.,]+)/i); if(b){ r.brl=_impNumAuto(b[1]); r.taxa=_impNumAuto(b[2]); }
+    const t=N.match(/Tarifa\s*\n?\s*BRL\s*([\d., ]+[.,]\d{2})/i); if(t) r.tarifa=_impNumAuto(t[1]);
+    r.data=_impDataBR(_impAcha(/Data da contrata..o da taxa\s+Data do d.bito\s*\n\s*(\d{2}\/\d{2}\/\d{4})/i,N)||'');
+    r.beneficiario=(_impAcha(/Benefici.rio\s+Banco do benefici.rio\s*\n\s*(.+?)\s*\|/i,N)||'').trim(); r.layout='B';
+  }
+  return r;
+}
+function _impLerFreteMar(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  const inv=N.match(/INVOICE\s*N\S{0,3}\s*:?\s*([A-Z]{2,5}-?INV\d{6,})/i); if(inv) r.invoice=inv[1].toUpperCase();
+  r.emissao=_impDataBR(_impAcha(/Data de Emiss.o\s*:\s*(\d{1,2}\/[A-Za-z]{3}\/\d{4})/i,N)||'');
+  r.venc=_impDataBR(_impAcha(/Vencimento\s*:\s*(\d{1,2}\/[A-Za-z]{3}\/\d{4})/i,N)||'');
+  r.cnpj=_impAcha(/CNPJ\s*(07\.010\.092\/0001-30)/,N);
+  const tot=N.match(/Total da Fatura\s*:\s*BRL\s*([\d.]+,\d{2})/i)||N.match(/\n\s*\S{0,3}\s*Total\s+([\d.]+,\d{2})\s*\n/i); if(tot) r.total=_impNum(tot[1]);
+  const linhas=L.map(_impSemAcento);
+  for(const l of linhas){
+    let m;
+    if(/^\s*International Freight/i.test(l)&&(m=l.match(/International Freight\s+[\d.,]+\s+[\d.,]+\s+([\d.]+,\d{2})\s+USD\s+([\d.,\/]+)\s+([\d.]+,\d{2})/i))){ r.fretUsd=_impNum(m[1]); r.fretTaxa=_impNum(String(m[2]).replace('/',',')); r.fretBrl=_impNum(m[3]); }
+    else if(/^\s*Desconsolida/i.test(l)&&(m=l.match(/([\d.]+,\d{2})\s*$/))) r.descons=_impNum(m[1]);
+    else if(/^\s*[IL1l|][.\s]?[S58B§$][.\s]?[S58B§$]\.?\s+5,00\s/i.test(l)&&(m=l.match(/([\d.]+,\d{2})\s+BRL/i))) r.iss=_impNum(m[1]);
+  }
+  return r;
+}
+function _impLerArmazenagem(L){
+  const Ln=L.map(_impSemAcento); const N=Ln.join('\n'); const r={itens:[]};
+  r.demonstrativo=_impAcha(/Demonstrativo de C.lculo\s*n\s*\S{0,2}\s*(\d{5,8})/i,N);
+  r.entrada=_impDataBR(_impAcha(/ENTRADA\s*:\s*(\d{2}\/\d{2}\/\d{4})/i,N)||'');
+  r.doc=_impAcha(/N\S{0,2}\s*DOC\.?\s*:\s*(\d{2}BR\d{10,11})/i,N);
+  const tg=N.match(/Total Geral\s*:?\s*\n?\s*([\d.]+[.,]\d{2})/i); if(tg) r.total=_impNumAuto(tg[1]);
+  let arm=0, achouArm=false;
+  Ln.forEach((l,i)=>{
+    let m;
+    if((m=l.match(/ARMAZENAGEM\s*\([^)]*\)\s*([\d.]+[.,]\d{2})\s*$/i))){ arm+=_impNumAuto(m[1]); achouArm=true; return; }
+    if((m=l.match(/^\S{0,5}\s*\d{1,3}(?:\.\d+)*\s+([A-Za-z].+?)\s+([\d.]+[.,]\d{2})\s*$/))){
+      const desc=m[1].trim(), v=_impNumAuto(m[2]);
+      if(/PEDAGIO/i.test(desc)) r.pedagio=(r.pedagio||0)+v;
+      else if(!/ARMAZENAGEM/i.test(desc)) r.itens.push({desc:desc,valor:v});
+    }
+  });
+  if(achouArm) r.armazenagem=_impArred(arm);
+  const iss=N.match(/^\s*[IL1l|][.\s]?[S58B§$][.\s]?[S58B§$]\.?\s+([\d.]+[.,]\d{2})\s*$/mi); if(iss) r.iss=_impNumAuto(iss[1]);
+  const pc=N.match(/PIS\/COFINS[^\n]*?([\d.]+[.,]\d{2})\s*$/mi); if(pc) r.pisCofins=_impNumAuto(pc[1]);
+  if(r.iss!=null||r.pisCofins!=null) r.tributos=_impArred((r.iss||0)+(r.pisCofins||0));
+  // o subtotal impresso abaixo de "Impostos / Outros" é mais confiável que somar ISS + PIS/COFINS lidos por OCR
+  const iImp=Ln.findIndex(l=>/IMPOSTOS\s*\/\s*OUTROS/i.test(l));
+  if(iImp>=0){ for(let k=iImp+1;k<Ln.length&&!/TOTAL GERAL|IVA DUAL/i.test(Ln[k]);k++){ const m=Ln[k].match(/^\s*([\d.]+[.,]\d{2})\s*$/); if(m) r.tributos=_impNumAuto(m[1]); } }
+  return r;
+}
+function _impLerMarinha(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  const a=N.match(/Valor do AFRMM\s*R\s*\$\s*([\d.]+,\d{2})/i); if(a) r.afrmm=_impNum(a[1]);
+  const t=N.match(/Valor Total do D.bito\s*R\s*\$\s*([\d.]+,\d{2})/i); if(t) r.total=_impNum(t[1]);
+  const x=N.match(/Taxa de Utiliza..o\s*\n?\s*R\s*\$\s*([\d.]+,\d{2})/i)||N.match(/Utiliza..o[\s\S]{0,40}?R\s*\$\s*([\d.]+,\d{2})/i); if(x) r.taxa=_impNum(x[1]);
+  r.ce=_impAcha(/CE-MERCANTE\s*\n?\s*(\d{15})/i,N);
+  return r;
+}
+function _impLerDare(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  const cont={}; const re=/R\s*\$\s*([\d.]+[,.]\d{2})/g; let m; while((m=re.exec(N))){ const v=_impNum(m[1].replace(/\.(\d{2})$/,',$1')); if(v>0){ cont[v]=(cont[v]||0)+1; } }
+  let best=null,bn=0; Object.keys(cont).forEach(k=>{ if(cont[k]>bn){ bn=cont[k]; best=parseFloat(k); } });
+  if(best!=null&&bn>=2) r.valor=best; else if(best!=null) r.valor=best, r.fraco=true;
+  r.duimp=_impAcha(/(\d{2}BR\d{10,11})/,N);
+  r.venc=_impDataBR(_impAcha(/Data de Vencimento\s*\n?[\s\S]{0,60}?(\d{2}\/\d{2}\/\d{4})/i,N)||'');
+  return r;
+}
+function _impLerCte(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  const n=N.match(/\b57\s+\d{3}\s+(\d{3}\.\d{3}\.\d{3})\b/); if(n) r.numero=String(parseInt(n[1].replace(/\./g,''),10));
+  r.emissao=_impDataBR(_impAcha(/(\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}:\d{2}/,N)||'');
+  const v=N.match(/VALOR A RECEBER\s*\n?\s*([\d.]+,\d{2})/i)||N.match(/VALOR TOTAL DO SERVICO[\s\S]{0,200}?\n\s*([\d.]+,\d{2})\s*\n/i); if(v) r.valor=_impNum(v[1]);
+  r.nfe=_impAcha(/NF-e\s+0*(\d{3,9})\b/,N);
+  r.di=_impAcha(/DUIMP N\s*:\s*(\d{2}BR\d{10}-?\d)/i,N);
+  r.emitente=(_impAcha(/^\s*(DOMINIO EXPRESS LOGISTICA E TRANSPORTE LTDA)/mi,N)||'').trim();
+  r.chave=(N.match(/(\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4})/)||[])[1]||null;
+  r.motorista=null;
+  return r;
+}
+function _impLerFaturaRodov(L){
+  const Ln=L.map(_impSemAcento); const N=Ln.join('\n'); const r={itens:[]};
+  const h=N.match(/(\d{3,5}(?:\s*-\s*\d{3,5})*)\s+R\s*\$\s*([\d.]+,\d{2})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{1,2}[-\/ ][A-Za-z]{3}[-\/ ]\d{2,4})/);
+  if(h){ r.ref=h[1].replace(/\s/g,''); r.total=_impNum(h[2]); r.emissao=h[3]; r.venc=_impDataBR(h[4]); }
+  const RX=/^\s*([A-Za-z][^\d]*?)\s+R\s*\$\s*([\d.]+,\d{2})\s+R\s*\$\s*([\d.]+,\d{2})\s*$/;
+  Ln.forEach((l,i)=>{ const m=l.match(RX); if(m&&!/^T\s?O\s?T\s?A\s?L/i.test(m[1])){ const mo=String(L[i]||'').match(RX); r.itens.push({desc:(mo?mo[1]:m[1]).trim(),valor:_impNum(m[3])}); } });
+  const t=N.match(/T\s?O\s?T\s?A\s?L\s+R\s*\$\s*([\d.]+,\d{2})\s+R\s*\$\s*([\d.]+,\d{2})/i); if(t) r.totalLinha=_impNum(t[2]);
+  r.di=_impAcha(/DI\s*N\W*\s*:?\s*(\d{2}BR\d{10,12}-?\d)/i,N);
+  return r;
+}
+function _impLerBoleto(L){
+  const N=_impSemAcento(L.join('\n')); const r={};
+  const cont={}; const re=/R\s*\$\s*([\d.]+,\d{2})/g; let m; while((m=re.exec(N))){ const v=_impNum(m[1]); if(v>0) cont[v]=(cont[v]||0)+1; }
+  let best=null,bn=0; Object.keys(cont).forEach(k=>{ if(cont[k]>bn){ bn=cont[k]; best=parseFloat(k); } });
+  if(best!=null) r.valor=best;
+  r.venc=_impDataBR(_impAcha(/Vencimento\s*\n?[\s\S]{0,140}?(\d{2}\/\d{2}\/\d{4})/i,N)||_impAcha(/(\d{2}\/\d{2}\/\d{4})\s*\n\s*Benefici/i,N)||'');
+  r.benef=(_impAcha(/(DOMINIO EXPRESS[^\n]*?)(?:\s+CNPJ|\s+CPF|\n)/i,N)||'').trim();
+  return r;
+}
+function _impLerBl(L){
+  const N=_impSemAcento(L.join('\n')).toUpperCase(); const r={}; r.texto=N; return r;
+}
+var _IMP_LEITORES={duimp:_impLerDuimp,danfe:_impLerDanfe,pagamento_duimp:_impLerPagtoDuimp,numerario:_impLerNumerario,cambio:_impLerCambio,frete_mar:_impLerFreteMar,armazenagem:_impLerArmazenagem,marinha:_impLerMarinha,dare:_impLerDare,dare_comp:_impLerDare,cte:_impLerCte,fatura_rodov:_impLerFaturaRodov,boleto:_impLerBoleto,bl:_impLerBl};
+// ─── Consolidação: junta o que foi lido de cada documento e decide o que vai em cada linha do formulário ───
+// Contas = padrão das importações finalizadas em jun/2026 (Fast Lube). Se a contabilidade mudar, é só ajustar aqui.
+var _IMP_CFG={
+  ctaDif:'2016', ctaCambio:'2023', ctaVarPassiva:'370', ctaVarAtiva:'438', ctaFornec:'576', ctaCusto:'682',
+  ctaArmaz:'50008', ctaHonor:'50009', ctaSDA:'50010', ctaFreteRod:'10001', ctaRound:'2016', contaDupPadrao:'640',
+  fornBrazilWind:'BRAZIL WIND LOGISTICS AGENC INTERN DE CARGAS LTDA', fornTransbrasa:'TRANSBRASA',
+  fornDominio:'DOMINIO EXPRESS LOGISTICA E TRANSPORTE LTDA', fornAduacomex:'ADUACOMEX COMISSARIA DE DESPACHOS LTDA'
+};
+// campos que cada documento precisa ter para ser considerado "lido por inteiro"
+var _IMP_OBRIG={
+  duimp:['di','pi','fob','frete','ii','ipi','pis','cofins','tus','icms'],
+  danfe:['nf','data','total','fornecedor','icms'],
+  cambio:['usd','brl'],
+  frete_mar:['invoice','emissao','total','fretBrl','descons','iss'],
+  armazenagem:['demonstrativo','entrada','armazenagem','tributos'],
+  numerario:['emissao','honorario','sda'],
+  marinha:['total'],
+  cte:['numero','emissao','valor','nfe'],
+  fatura_rodov:['ref','total','emissao'],
+  dare:['valor'], dare_comp:['valor'],
+  boleto:['valor','venc'],
+  pagamento_duimp:['total']
+};
+var _IMP_ROTULO_CAMPO={di:'nº da DUIMP',pi:'nº do PI',fob:'valor FOB',frete:'frete',ii:'Imposto de Importação',ipi:'IPI',pis:'PIS',cofins:'COFINS',tus:'Taxa Siscomex',icms:'ICMS',nf:'nº da NF',data:'data de emissão',total:'valor total',fornecedor:'fornecedor',usd:'valor em dólar',brl:'valor em reais',invoice:'nº da invoice',emissao:'data de emissão',fretBrl:'International Freight (R$)',descons:'Desconsolidação',iss:'ISS',demonstrativo:'nº do demonstrativo',entrada:'data de entrada',armazenagem:'valor da armazenagem',tributos:'tributos (ISS + PIS/COFINS)',honorario:'honorário',sda:'S.D.A',numero:'nº do CT-e',valor:'valor',nfe:'NF vinculada',ref:'referência',venc:'vencimento'};
+
+function _impDocStatus(d){ // → {nivel:'ok'|'parcial'|'falha'|'info', faltas:[]}
+  if(d.erro) return {nivel:'falha',faltas:[d.erro]};
+  if(d.tipo==='vazio') return {nivel:'falha',faltas:['não consegui ler o texto do arquivo (nem por OCR)']};
+  if(d.tipo==='desconhecido') return {nivel:'falha',faltas:['tipo de documento não reconhecido — não é nenhum dos que aprendi']};
+  if(d.tipo==='frete_mar_outro') return {nivel:'falha',faltas:['fatura de frete marítimo de outro agente (não é a Brazil Wind) — esse layout ainda não aprendi; preencher à mão']};
+  const obr=_IMP_OBRIG[d.tipo]||[]; const faltas=[];
+  obr.forEach(c=>{ const v=d.dados?d.dados[c]:null; if(v==null||v===''||(typeof v==='number'&&isNaN(v))) faltas.push(_IMP_ROTULO_CAMPO[c]||c); });
+  if(d.tipo==='fatura_rodov'&&!(d.dados.itens||[]).length) faltas.push('itens da fatura');
+  if(d.tipo==='pagamento_duimp'&&Object.keys(d.dados.itens||{}).length<5) faltas.push('pagamentos por receita (II/IPI/PIS/COFINS/Siscomex)');
+  return {nivel:faltas.length?'parcial':'ok',faltas};
+}
+function _impTitulo(desc){ return String(desc||'').toLowerCase().replace(/(^|\s)(\S)/g,(m,a,b)=>a+b.toUpperCase()).replace(/\b(Cc|Na|Da|De|Do|Em|E)\b/g,w=>w.length<=2?(w==='Cc'?'CC':w.toLowerCase()):w.toLowerCase()); }
+
+function _impDocConsolidar(docs,contaDupForm){
+  const R={cab:{},dup:[],custos:[],pend:[],aviso:[],contaDup:(contaDupForm||_IMP_CFG.contaDupPadrao)};
+  const C=_IMP_CFG; const conta=R.contaDup;
+  const por=t=>docs.filter(d=>d.tipo===t&&d.dados&&!d.erro).map(d=>d.dados);
+  const um=t=>por(t)[0]||null;
+  const D=um('duimp'), NF=um('danfe'), NU=um('numerario'), MM=um('marinha'), FM=um('frete_mar'), AR=um('armazenagem'), PG=um('pagamento_duimp');
+  const CAMBIOS=por('cambio').filter(c=>c.usd!=null&&c.brl!=null), CTES=por('cte').filter(c=>c.valor!=null), FATS=por('fatura_rodov'), BOLS=por('boleto');
+  const av=(nivel,msg)=>R.aviso.push({nivel,msg}); const pend=(campo,motivo)=>R.pend.push({campo,motivo});
+  const nz=(...a)=>{ for(const x of a) if(x!=null&&!(typeof x==='number'&&isNaN(x))) return x; return null; };
+  const perto=(a,b,tol)=>Math.abs(a-b)<=(tol==null?0.05:tol);
+
+  // ── 0) documentos que deveriam estar anexados ──
+  [['duimp','DUIMP'],['danfe','Nota Fiscal'],['numerario','Numerário'],['marinha','Marinha Mercante'],['frete_mar','Frete marítimo'],['armazenagem','Armazenagem']].forEach(t=>{ const n=docs.filter(d=>d.tipo===t[0]&&d.dados&&!d.erro); if(n.length>1) av('warn','Há '+n.length+' documentos do tipo '+t[1]+' ('+n.map(d=>d.nome).join(', ')+') — usei só o primeiro.'); });
+  [[D,'DUIMP (extrato)'],[NF,'Nota Fiscal (DANFE)'],[NU,'Numerário da Aduacomex'],[MM,'Marinha Mercante (AFRMM)'],[FM,'Frete marítimo (invoice da Brazil Wind)'],[AR,'Armazenagem da Transbrasa']].forEach(p=>{ if(!p[0]) pend(p[1],'não encontrei esse documento entre os anexados (ou não consegui lê-lo)'); });
+  if(!CAMBIOS.length) pend('Câmbio','não encontrei o comprovante de câmbio entre os anexados (ou não consegui lê-lo)');
+  if(!CTES.length) pend('Frete rodoviário (DACTE)','não encontrei nenhum DACTE entre os anexados (ou não consegui lê-lo)');
+
+  // ── 1) cabeçalho ──
+  R.cab.pi=nz(D&&D.pi,NU&&NU.ref); R.cab.fornecedor=NF&&NF.fornecedor; R.cab.nf=NF&&NF.nf; R.cab.dataNF=NF&&NF.data;
+  R.cab.di=nz(D&&D.di,NF&&NF.di); R.cab.invoice=nz(NF&&NF.invoice,D&&D.invoice,NU&&NU.invoice);
+  ['pi','fornecedor','nf','dataNF','di','invoice'].forEach(k=>{ if(!R.cab[k]) pend('Dados da Importação: '+({pi:'PI',fornecedor:'Fornecedor',nf:'Nota Fiscal',dataNF:'Data da Nota Fiscal',di:'DI',invoice:'Invoice'}[k]),'não consta nos documentos lidos'); });
+
+  // ── 2) valores consolidados (DUIMP manda; numerário/NF só servem de reserva e de conferência) ──
+  const v={};
+  v.fob=nz(D&&D.fob,NF&&NF.fobR,NU&&NU.fob&&NU.fob.brl); v.frete=nz(D&&D.frete,NF&&NF.freteR,NU&&NU.freteL&&NU.freteL.brl);
+  ['ii','ipi','pis','cofins'].forEach(k=>{ v[k]=nz(D&&D[k],NU&&NU[k],(k==='ii'&&NF&&NF.impImport),(k!=='ii'&&NF&&NF[k])); });
+  v.tus=nz(D&&D.tus,NU&&NU.tus,NF&&NF.outrasDesp); v.icms=nz(D&&D.icms,NU&&NU.icms,NF&&NF.icms); v.afrmm=nz(D&&D.afrmm,MM&&MM.total,NU&&NU.afrmm,NF&&NF.afrmm);
+
+  // ── 3) conferências cruzadas (só avisam; nunca trocam valor sozinhas) ──
+  const confere=(rot,lista)=>{ const val=lista.filter(x=>x[1]!=null&&!isNaN(x[1])); if(val.length<2) return; const base=val[0][1]; const dif=val.filter(x=>!perto(x[1],base,0.05)); if(dif.length) av('warn',rot+' diverge entre os documentos: '+val.map(x=>x[0]+' R$ '+_impFmtBR(x[1])).join(' · ')); };
+  confere('Valor FOB',[['DUIMP',D&&D.fob],['NF',NF&&NF.fobR],['Numerário',NU&&NU.fob&&NU.fob.brl]]);
+  confere('Frete internacional',[['DUIMP',D&&D.frete],['NF',NF&&NF.freteR],['Numerário',NU&&NU.freteL&&NU.freteL.brl]]);
+  [['ii','Imposto de Importação','0086',NF&&NF.impImport],['ipi','IPI','1038',NF&&NF.ipi],['pis','PIS','5602',NF&&NF.pis],['cofins','COFINS','5629',NF&&NF.cofins],['tus','Taxa Siscomex','7811',NF&&NF.outrasDesp]].forEach(t=>{
+    confere(t[1],[['DUIMP',D&&D[t[0]]],['Numerário',NU&&NU[t[0]]],['Tela de pagamento',PG&&PG.itens&&PG.itens[t[2]]],['NF',t[3]]]); });
+  confere('ICMS',[['DUIMP',D&&D.icms],['Numerário',NU&&NU.icms],['NF',NF&&NF.icms]]);
+  confere('AFRMM',[['DUIMP',D&&D.afrmm],['Marinha Mercante',MM&&MM.total],['Numerário',NU&&NU.afrmm],['NF',NF&&NF.afrmm]]);
+  const dare=um('dare'); if(dare&&v.icms!=null&&dare.valor!=null&&!perto(dare.valor,v.icms,0.05)) av('info','DARE de ICMS (R$ '+_impFmtBR(dare.valor)+') é diferente do ICMS da DUIMP (R$ '+_impFmtBR(v.icms)+') — pode ter sido pago em parte/complementar; conferir.');
+  const dcomp=por('dare_comp'); dcomp.forEach(x=>av('info','DARE de ICMS com a palavra COMPLEMENTAR lido (R$ '+_impFmtBR(x.valor)+') — conferência manual; não tem linha própria no formulário.'));
+  if(D&&NF&&D.di&&NF.di&&D.di.replace(/\D/g,'')!==NF.di.replace(/\D/g,'')) av('warn','Nº da DI diferente: DUIMP '+D.di+' × NF '+NF.di);
+  if(D&&NU&&D.pi&&NU.ref&&D.pi!==NU.ref) av('warn','PI diferente: DUIMP '+D.pi+' × Numerário '+NU.ref);
+  CAMBIOS.forEach(c=>{ if(c.taxa&&c.usd&&c.brl&&Math.abs(c.usd*c.taxa-c.brl)/c.brl>0.002) av('warn','Câmbio de USD '+_impFmtBR(c.usd)+': dólar × taxa não bate com o valor em reais — conferir a leitura.'); });
+  if(D&&CAMBIOS.length){ const s=_impArred(CAMBIOS.reduce((a,c)=>a+c.usd,0)); if(!perto(s,D.fobUsd,0.05)) av('warn','Soma dos câmbios (USD '+_impFmtBR(s)+') não é igual ao FOB da DUIMP (USD '+_impFmtBR(D.fobUsd)+').'); }
+  if(D&&FM&&FM.fretUsd!=null&&D.freteUsd!=null&&!perto(FM.fretUsd,D.freteUsd,0.05)) av('warn','Frete em dólar da invoice (USD '+_impFmtBR(FM.fretUsd)+') diferente do da DUIMP (USD '+_impFmtBR(D.freteUsd)+').');
+  CTES.forEach(c=>{ if(NF&&c.nfe&&c.nfe!==NF.nf) av('warn','DACTE '+c.numero+' aponta a NF '+c.nfe+', mas a NF lida é a '+NF.nf+'.'); if(D&&c.di&&D.di&&c.di.replace(/\D/g,'')!==D.di.replace(/\D/g,'')) av('warn','DACTE '+c.numero+' cita outra DUIMP ('+c.di+').'); });
+  FATS.forEach(f=>{ const s=_impArred((f.itens||[]).reduce((a,i)=>a+i.valor,0)); if(f.total!=null&&!perto(s,f.total,0.02)) av('warn','Fatura do frete rodoviário '+f.ref+': soma dos itens (R$ '+_impFmtBR(s)+') ≠ total (R$ '+_impFmtBR(f.total)+').'); });
+  if(AR&&AR.total!=null){ const s=_impArred((AR.armazenagem||0)+(AR.pedagio||0)+(AR.tributos||0)+(AR.itens||[]).reduce((a,i)=>a+i.valor,0)); if(!perto(s,AR.total,0.02)) av('warn','Armazenagem Transbrasa: itens somam R$ '+_impFmtBR(s)+', mas o Total Geral é R$ '+_impFmtBR(AR.total)+' — algum item não foi lido.'); }
+  if(BOLS.length){ const alvo=[]; CTES.forEach(c=>alvo.push(c.valor)); if(CTES.length>1) alvo.push(_impArred(CTES.reduce((a,c)=>a+c.valor,0))); FATS.forEach(f=>{ if(f.total!=null) alvo.push(f.total); });
+    const todos=[...alvo]; if(CTES.length&&FATS.length) FATS.forEach(f=>todos.push(_impArred(CTES.reduce((a,c)=>a+c.valor,0)+f.total)));
+    BOLS.forEach(b=>{ if(b.valor!=null&&!todos.some(x=>perto(x,b.valor,0.02))) av('warn','Boleto de R$ '+_impFmtBR(b.valor)+' não bate com nenhum DACTE/fatura lidos.'); }); }
+  const bl=docs.find(d=>d.tipo==='bl'); if(bl&&D&&D.bl){ const dig=D.bl.replace(/\D/g,'').slice(-8); if(dig&&!bl.dados.texto.replace(/\s/g,'').includes(dig)) av('warn','O BL anexado não contém o nº do BL da DUIMP ('+D.bl+') — conferir se é o BL certo.'); }
+
+  // ── 4) linhas de "Duplicatas a Pagar no Exterior" ──
+  const dup=(chave,o)=>{ o.chave=chave; R.dup.push(o); };
+  if(NF&&NF.total!=null) dup('Valor Total da NF no PDF',{credito:NF.total});
+  pend('Valor Total da NF Integrada','é o valor da NF escriturado no Domínio (fiscal) — não consta em nenhum documento anexado. Informe à mão; a Diferença é calculada em seguida.');
+  dup('Diferença',{k:1,b:1,ctaD:C.ctaDif,ctaC:conta});
+  if(v.fob!=null) dup('VMLE cfe. DI',{debito:v.fob});
+  let totCamb=0; const cambLinhas=[];
+  CAMBIOS.slice(0,4).forEach((c,i)=>{ totCamb+=c.brl; cambLinhas.push(c); dup('Câmbio#'+i,{label:'Câmbio USD '+_impFmtBR(c.usd),debito:c.brl,k:1,b:1,ctaD:conta,ctaC:C.ctaCambio,dtFat:c.data||''}); if(!c.data) pend('Câmbio USD '+_impFmtBR(c.usd)+' — data da contratação','não consegui ler a data no comprovante'); });
+  if(CAMBIOS.length>4) pend('Câmbio','há mais de 4 comprovantes de câmbio; o formulário só tem 4 linhas — lance os demais à mão');
+  let varCamb=null; if(v.fob!=null&&CAMBIOS.length){ varCamb=_impArred(totCamb-v.fob); if(varCamb>0.004) dup('Variação Cambial Passiva s/ Câmbio',{credito:varCamb,k:1,b:1,ctaD:C.ctaVarPassiva,ctaC:conta}); else if(varCamb<-0.004) dup('Variação Cambial Ativa s/ Câmbio',{debito:-varCamb,k:1,b:1,ctaD:conta,ctaC:C.ctaVarAtiva}); }
+  const fornBW=(FM&&FM.cnpj==='07.010.092/0001-30')?C.fornBrazilWind:(FM?'BRAZIL WIND LOGISTICS':'');
+  let varFrete=null;
+  if(FM){
+    const ref={fatura:FM.invoice||'',dtFat:FM.emissao||'',forn:fornBW};
+    if(FM.fretUsd!=null) dup('Valor Total Pago',{label:'Valor Total Pago USD '+_impFmtBR(FM.fretUsd),debito:FM.total});
+    else dup('Valor Total Pago',{debito:FM.total});
+    if(FM.descons!=null){ dup('Desconsolidação',Object.assign({debito:FM.descons,k:1,ctaD:C.ctaFreteRod,ctaC:C.ctaFornec},ref)); pend('Nº da NFS-e da Desconsolidação (campo Nota Fiscal das linhas Desconsolidação e ISS)','o número da nota de serviço emitida pela agência não consta na invoice; informe à mão'); }
+    let iss=FM.iss; if(iss==null&&FM.descons!=null){ iss=_impArred(FM.descons*0.05); av('warn','ISS da Desconsolidação não foi lido na invoice — usei 5% da Desconsolidação (R$ '+_impFmtBR(iss)+'). Conferir.'); }
+    if(iss!=null) dup('ISS s/ Desconsolidação',Object.assign({debito:iss,k:1,ctaD:C.ctaFreteRod,ctaC:C.ctaFornec},ref));
+    if(FM.fretBrl!=null) dup('Frete Maritimo (Identificado na Fatura)',Object.assign({debito:FM.fretBrl},ref));
+    dup('Demais Custos',Object.assign({k:1,ctaD:C.ctaCusto,ctaC:C.ctaFornec},ref));
+    if(v.frete!=null) dup('Frete Maritimo cfe. DI',Object.assign({debito:v.frete,k:1,b:1,ctaD:conta,ctaC:C.ctaFornec},ref));
+    if(v.frete!=null&&FM.fretBrl!=null){ varFrete=_impArred(FM.fretBrl-v.frete); if(varFrete>0.004) dup('Variação Cambial Passiva s/ Frete',Object.assign({debito:varFrete,k:1,ctaD:C.ctaVarPassiva,ctaC:C.ctaFornec},ref)); else if(varFrete<-0.004) dup('Variação Cambial Ativa s/ Frete',Object.assign({credito:-varFrete,k:1,ctaD:C.ctaFornec,ctaC:C.ctaVarAtiva},ref)); }
+    if(FM.total!=null&&FM.fretBrl!=null&&FM.descons!=null&&iss!=null){ const dem=_impArred(FM.total-FM.fretBrl-FM.descons-iss); if(dem<0) av('warn','Demais Custos da invoice deu negativo (R$ '+_impFmtBR(dem)+') — conferir a leitura da invoice.'); }
+  }
+  [['I.I. cfe. DI','ii'],['I.P.I. cfe. DI','ipi'],['PIS/PASEP cfe. DI','pis'],['COFINS cfe. DI','cofins'],['Taxa Siscomex cfe. DI','tus'],['AFRMM cfe. DI','afrmm'],['ICMS cfe. DI','icms']].forEach(p=>{ if(v[p[1]]!=null) dup(p[0],{debito:v[p[1]],k:1,b:1,ctaD:conta,ctaC:C.ctaFornec}); });
+  // Arredondamento: faz a soma das linhas "base" fechar em zero (a Integrada + Diferença sempre somam o total da NF)
+  if(NF&&NF.total!=null&&v.fob!=null){
+    let cred=NF.total, deb=0; R.dup.forEach(r=>{ if(r.b&&r.chave!=='Diferença'){ cred+=(r.credito||0); deb+=(r.debito||0); } });
+    const res=_impArred(cred-deb); R.saldoBase=res;
+    if(Math.abs(res)>=0.005){ if(Math.abs(res)<=0.05){ if(res>0) dup('Arredondamento',{debito:res,k:1,b:1,ctaD:conta,ctaC:C.ctaRound}); else dup('Arredondamento',{credito:-res,k:1,b:1,ctaD:C.ctaRound,ctaC:conta}); } else av('warn','As linhas "base" não fecham: sobra R$ '+_impFmtBR(res)+' entre a NF (R$ '+_impFmtBR(NF.total)+') e o que foi lido (câmbio, frete, tributos). Algum valor foi lido errado ou falta um documento.'); }
+  }
+
+  // ── 5) custos complementares ──
+  const cus=(chave,o)=>{ o.chave=chave; R.custos.push(o); };
+  if(AR){
+    const ref={fatura:AR.demonstrativo||'',dtFat:AR.entrada||'',forn:C.fornTransbrasa};
+    if(AR.armazenagem!=null) cus('Armazenagem',Object.assign({debito:AR.armazenagem,k:1,b:1,ctaD:C.ctaArmaz,ctaC:C.ctaFornec},ref));
+    if(AR.tributos!=null) cus('Tributos',Object.assign({debito:AR.tributos,k:1,b:1,ctaD:C.ctaCusto,ctaC:C.ctaFornec},ref));
+    if(AR.pedagio!=null) cus('Pedágio',Object.assign({debito:AR.pedagio,k:1,ctaD:C.ctaCusto,ctaC:C.ctaFornec},ref));
+    (AR.itens||[]).forEach(it=>cus('NOVO:'+_impTitulo(it.desc),Object.assign({label:_impTitulo(it.desc),debito:it.valor,k:1,ctaD:C.ctaCusto,ctaC:C.ctaFornec},ref)));
+    if(!AR.demonstrativo) pend('Armazenagem — nº do demonstrativo (campo Fatura)','não consegui ler o número do Demonstrativo de Cálculo');
+    if(!AR.entrada) pend('Armazenagem — data de entrada (Data Fatura)','não consegui ler a data de ENTRADA');
+  }
+  CTES.forEach((c,i)=>cus(i===0?'Frete Rodoviário':'NOVO:Frete Rodoviário',{label:'Frete Rodoviário',debito:c.valor,k:1,ctaD:C.ctaFreteRod,ctaC:C.ctaFornec,nf:c.numero||'',dtFat:c.emissao||'',forn:C.fornDominio,aposFrete:1}));
+  FATS.forEach(f=>(f.itens||[]).forEach(it=>cus('NOVO:'+it.desc,{label:it.desc,debito:it.valor,k:1,ctaD:C.ctaCusto,ctaC:C.ctaFornec,nf:f.ref||'',dtFat:f.emissao||'',forn:C.fornDominio,aposFrete:1})));
+  if(NU){
+    const forn=(D&&D.comissaria)||C.fornAduacomex;
+    if(NU.sda!=null) cus('S.D.A',{debito:NU.sda,k:1,ctaD:C.ctaSDA,ctaC:C.ctaFornec,dtFat:NU.emissao||'',forn});
+    if(NU.honorario!=null) cus('Honorários',{debito:NU.honorario,k:1,ctaD:C.ctaHonor,ctaC:C.ctaFornec,dtFat:NU.emissao||'',forn});
+    if(!NU.emissao) pend('Numerário — data (Data Fatura de S.D.A e Honorários)','não consegui ler a data "EMITIDO EM" do numerário');
+  }
+  return R;
+}
+// ─── Importação: anexar os documentos, ler sozinho e mostrar o quadro "Leitura dos documentos" ──────────────
+var _impDocs=[];            // documentos já lidos nesta tela [{nome,tipo,dados,erro,via}]
+var _impLendo={};           // arquivos em leitura agora {nome:mensagem}
+var _impPainelMin=false;    // quadro minimizado?
+var _impUltimo=null;        // último resultado da consolidação + o que foi preenchido
+var _impOcrWorkerP=null;
+function _impOcrWorker(){
+  if(typeof Tesseract==='undefined') throw new Error('Biblioteca de OCR (Tesseract.js) não carregou — recarregue a página.');
+  if(!_impOcrWorkerP) _impOcrWorkerP=Tesseract.createWorker('por+eng');
+  return _impOcrWorkerP;
+}
+// PDF com fonte quebrada devolve "texto" que não é texto (símbolos soltos) — mede a proporção de palavras de verdade
+function _impTextoQualidade(linhas){
+  const tk=linhas.join(' ').split(/\s+/).filter(Boolean); if(!tk.length) return 0;
+  return tk.filter(x=>/^[A-Za-zÀ-ÿ0-9.,\/\-:$()%º°]{3,}$/.test(x)).length/tk.length;
+}
+async function _impExtrairNativo(pdf,maxPag){
+  const out=[];
+  for(let n=1;n<=Math.min(pdf.numPages,maxPag);n++){
+    const pg=await pdf.getPage(n); const tc=await pg.getTextContent(); const L={};
+    tc.items.forEach(it=>{ if(!it.str||!it.str.trim()) return; const y=Math.round(it.transform[5]/3)*3; (L[y]=L[y]||[]).push([it.transform[4],it.str]); });
+    Object.keys(L).map(Number).sort((a,b)=>b-a).forEach(y=>out.push(L[y].sort((a,b)=>a[0]-b[0]).map(x=>x[1]).join(' ').replace(/\s+/g,' ').trim()));
+  }
+  return out;
+}
+async function _impExtrairOcr(pdf,maxPag,statusCb){
+  const worker=await _impOcrWorker(); const out=[];
+  for(let n=1;n<=Math.min(pdf.numPages,maxPag);n++){
+    if(statusCb) statusCb('lendo por OCR (página '+n+'/'+Math.min(pdf.numPages,maxPag)+')…');
+    const pg=await pdf.getPage(n); const canvas=await _ganhoItauFundoRenderizarPagina(pg,0,2.4);
+    const {data}=await worker.recognize(canvas);
+    String(data.text||'').split('\n').map(t=>t.trim()).filter(Boolean).forEach(t=>out.push(t));
+  }
+  return out;
+}
+async function _impLerArquivo(file,statusCb){
+  if(/\.pdf$/i.test(file.name)||file.type==='application/pdf'){
+    _convItauGarantirWorker();
+    const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+    let linhas=await _impExtrairNativo(pdf,3); let via='texto';
+    const tipoNat=_impDocClassificar(linhas,file.name);
+    const ruim=linhas.join(' ').length<40||_impTextoQualidade(linhas)<0.35||tipoNat==='desconhecido'||tipoNat==='vazio';
+    if(ruim){
+      if(statusCb) statusCb('sem texto aproveitável — lendo por OCR (pode levar alguns segundos)…');
+      const lo=await _impExtrairOcr(pdf,2,statusCb); const tipoOcr=_impDocClassificar(lo,file.name);
+      if(tipoNat==='vazio'||tipoNat==='desconhecido'||(tipoOcr!=='vazio'&&tipoOcr!=='desconhecido')){ if(lo.length){ linhas=lo; via='ocr'; } }
+    }
+    return {linhas,via};
+  }
+  if(statusCb) statusCb('lendo imagem por OCR…');
+  const worker=await _impOcrWorker(); const {data}=await worker.recognize(file);
+  return {linhas:String(data.text||'').split('\n').map(t=>t.trim()).filter(Boolean),via:'ocr'};
+}
+
+// ── localizar / preencher linhas do formulário ──
+function _impDomLinhas(sec){ const tb=document.querySelector('[data-lancamento-section="'+sec+'"] tbody'); return tb?Array.from(tb.querySelectorAll('[data-lancamento-row]')):[]; }
+function _impItemTxt(row){ return (row.querySelector('[data-item]')?.value||'').trim(); }
+function _impNorm(s){ return _impSemAcento(s).toUpperCase().replace(/\s+/g,' ').trim(); }
+function _impAcharDup(chave){
+  const rows=_impDomLinhas('duplicatas'); let m;
+  if((m=chave.match(/^Câmbio#(\d)$/))) return rows.filter(r=>_impItemTxt(r).startsWith('Câmbio'))[+m[1]]||null;
+  if((m=chave.match(/^Variação Cambial (Passiva|Ativa) s\/ (Câmbio|Frete)$/))){ const pref='Variação Cambial '+m[1]; return rows.filter(r=>_impItemTxt(r).startsWith(pref))[m[2]==='Câmbio'?0:1]||null; }
+  return rows.find(r=>_impItemTxt(r).startsWith(chave))||null;
+}
+function _impAcharCusto(o,usados,ptr){
+  const rows=_impDomLinhas('custos'); const label=o.label||String(o.chave).replace(/^NOVO:/,''); const alvo=_impNorm(label);
+  const cand=rows.filter(r=>_impNorm(_impItemTxt(r))===alvo&&!usados.has(r));
+  const nfDe=r=>(r.querySelector('[data-notafiscal]')?.value||'').trim();
+  if(o.nf){ const igual=cand.find(r=>nfDe(r)===o.nf); if(igual) return igual; }
+  const vazia=cand.find(r=>desformatarNumero(r.querySelector('[data-debito]')?.value||'0')<0.005&&!nfDe(r)); if(vazia) return vazia;
+  if(!o.nf&&cand.length) return cand[0];
+  const nova=criarLinhaLancamento(label,'custos'); const tb=document.querySelector('[data-lancamento-section="custos"] tbody');
+  let ref=ptr.ultimo;
+  if(!ref){ const frs=rows.filter(r=>/^Frete Rodovi/i.test(_impItemTxt(r))); ref=frs[frs.length-1]||null; }
+  if(ref&&ref.parentNode===tb) tb.insertBefore(nova,ref.nextSibling); else tb.appendChild(nova);
+  if(o.aposFrete) ptr.ultimo=nova;
+  return nova;
+}
+function _impAplicarLinha(row,o,ctx,rotulo){
+  const conf=(campo,atual,novo)=>ctx.conflitos.push('Linha "'+rotulo+'" — '+campo+': já havia '+atual+' e o documento diz '+novo+' (mantive o que estava).');
+  const setNum=(attr,val,nomeCampo)=>{ const el=row.querySelector('['+attr+']'); if(!el||val==null) return;
+    const atual=desformatarNumero(el.value||'0');
+    if(Math.abs(atual-val)<0.005){ el.dataset.auto='1'; return; }
+    if(atual>0.004&&el.dataset.auto!=='1'){ conf(nomeCampo,formatarNumero(atual),formatarNumero(val)); return; }
+    el.value=formatarNumero(val); el.dataset.auto='1'; ctx.n++; };
+  const setTxt=(attr,val,nomeCampo)=>{ const el=row.querySelector('['+attr+']'); if(!el||val==null||val==='') return;
+    const atual=(el.value||'').trim();
+    if(atual===String(val)){ el.dataset.auto='1'; return; }
+    if(atual&&el.dataset.auto!=='1'){ conf(nomeCampo,'"'+atual+'"','"'+val+'"'); return; }
+    el.value=val; el.dataset.auto='1'; ctx.n++; };
+  if(o.label){ const it=row.querySelector('[data-item]'); if(it&&it.value.trim()!==o.label){ it.value=o.label; ctx.n++; } }
+  if(o.debito!=null){ setNum('data-debito',o.debito,'Débito'); const c=row.querySelector('[data-credito]'); if(c&&!c.value) c.value='0,00'; }
+  if(o.credito!=null){ setNum('data-credito',o.credito,'Crédito'); const d=row.querySelector('[data-debito]'); if(d&&!d.value) d.value='0,00'; }
+  if(o.k){ const el=row.querySelector('[data-contabiliza]'); if(el&&!el.checked){ el.checked=true; ctx.n++; } }
+  if(o.b){ const el=row.querySelector('[data-base]'); if(el&&!el.checked){ el.checked=true; ctx.n++; } }
+  setTxt('data-ctadebito',o.ctaD,'Cta Débito'); setTxt('data-ctacredito',o.ctaC,'Cta Crédito');
+  setTxt('data-notafiscal',o.nf,'Nota Fiscal'); setTxt('data-fatura',o.fatura,'Fatura'); setTxt('data-fornecedor',o.forn,'Fornecedor'); setTxt('data-datafatura',o.dtFat,'Data Fatura');
+}
+function _impAplicarForm(R){
+  const ctx={n:0,conflitos:[],semLinha:[]};
+  // cabeçalho
+  const campos=[['formPI','pi','PI'],['formFornecedor','fornecedor','Fornecedor'],['formNF','nf','Nota Fiscal'],['formDataNF','dataNF','Data da NF'],['formDI','di','DI'],['formInvoice','invoice','Invoice']];
+  campos.forEach(c=>{ const el=document.getElementById(c[0]); const val=R.cab[c[1]]; if(!el||!val) return; const atual=(el.value||'').trim();
+    if(atual===val){ return; }
+    if(atual&&el.dataset.auto!=='1'){ ctx.conflitos.push('Campo '+c[2]+': já havia "'+atual+'" e o documento diz "'+val+'" (mantive o que estava).'); return; }
+    el.value=val; el.dataset.auto='1'; ctx.n++; });
+  const cd=document.getElementById('formContaDuplicatas'); if(cd&&!cd.value.trim()){ cd.value=R.contaDup; ctx.n++; ctx.contaPadrao=true; }
+  const conta=(cd&&cd.value.trim())||R.contaDup;
+  // linhas
+  R.dup.forEach(o=>{ const row=_impAcharDup(o.chave); if(!row){ ctx.semLinha.push(o.chave); return; } _impAplicarLinha(row,o,ctx,o.label||o.chave); });
+  const usados=new Set(), ptr={ultimo:null};
+  R.custos.forEach(o=>{ const row=_impAcharCusto(o,usados,ptr); usados.add(row); _impAplicarLinha(row,o,ctx,o.label||String(o.chave).replace(/^NOVO:/,'')); });
+  if(typeof aplicarDataNotaFiscalLinhas==='function') aplicarDataNotaFiscalLinhas();
+  atualizarSaldo();
+  ['duplicatas','custos'].forEach(sec=>_impDomLinhas(sec).forEach(r=>{ try{ sincronizarValor(r); gerarHistorico(r); }catch(e){} }));
+  if(window._formImportacaoMode==='novo'&&typeof _impRascunhoAgendar==='function') _impRascunhoAgendar();
+  return ctx;
+}
+// saldo das linhas "base" direto do formulário (tem que dar zero)
+function _impSaldoBaseDom(){ let s=0; _impDomLinhas('duplicatas').forEach(r=>{ if(r.querySelector('[data-base]')?.checked){ s=s-desformatarNumero(r.querySelector('[data-debito]')?.value||'0')+desformatarNumero(r.querySelector('[data-credito]')?.value||'0'); } }); return Math.round(s*100)/100; }
+function _impPendResolvida(p){
+  const rows=_impDomLinhas('duplicatas'); const lin=pref=>rows.find(r=>_impItemTxt(r).startsWith(pref));
+  if(p.campo.indexOf('Valor Total da NF Integrada')===0){ const r=lin('Valor Total da NF Integrada'); return !!r&&desformatarNumero(r.querySelector('[data-credito]')?.value||'0')>0.004; }
+  if(p.campo.indexOf('Nº da NFS-e da Desconsolidação')===0){ const r=lin('Desconsolidação'); return !!r&&!!(r.querySelector('[data-notafiscal]')?.value||'').trim(); }
+  const m=p.campo.match(/^Dados da Importação: (.+)$/); if(m){ const id={'PI':'formPI','Fornecedor':'formFornecedor','Nota Fiscal':'formNF','Data da Nota Fiscal':'formDataNF','DI':'formDI','Invoice':'formInvoice'}[m[1]]; const el=id&&document.getElementById(id); return !!el&&!!el.value.trim(); }
+  return false;
+}
+
+// ── quadro fixo ──
+function _impDocPainelFechar(){ const p=document.getElementById('impDocPainel'); if(p) p.remove(); _impDocs=[]; _impLendo={}; _impUltimo=null; }
+function _impDocLimpar(){ if(!confirm('Tirar os documentos anexados da leitura? (O que já foi preenchido no formulário continua lá.)')) return; _impDocs=[]; _impUltimo=null; _impDocPainelRender(); }
+function _impDocToggleMin(){ _impPainelMin=!_impPainelMin; _impDocPainelRender(); }
+function _impDocPainelRender(){
+  if(!document.getElementById('importacaoConteudo')) return;
+  let p=document.getElementById('impDocPainel');
+  if(!p){ p=document.createElement('div'); p.id='impDocPainel'; document.body.appendChild(p); }
+  p.style.cssText='position:fixed;right:14px;top:84px;width:min(420px,94vw);max-height:calc(100vh - 100px);display:flex;flex-direction:column;background:var(--white);color:var(--ink);border:1px solid var(--border);border-radius:10px;box-shadow:0 10px 30px rgba(0,0,0,.28);z-index:950;font-size:12.5px;overflow:hidden';
+  const R=_impUltimo&&_impUltimo.R, ctx=_impUltimo&&_impUltimo.ctx;
+  const lendo=Object.keys(_impLendo);
+  const pend=R?R.pend.filter(x=>!_impPendResolvida(x)):[];
+  const saldo=R?_impSaldoBaseDom():0;
+  const avisos=R?R.aviso.slice():[];
+  if(R&&Math.abs(saldo)>0.05) avisos.push({nivel:'warn',msg:'As linhas "base" do formulário não fecham agora: sobra R$ '+_impFmtBR(saldo)+'.'});
+  const warns=avisos.filter(a=>a.nivel==='warn'), infos=avisos.filter(a=>a.nivel!=='warn');
+  const conflitos=ctx?ctx.conflitos:[];
+  const nProb=_impDocs.filter(d=>_impDocStatus(d).nivel!=='ok').length+pend.length+warns.length+conflitos.length;
+  const badge=lendo.length?'lendo '+lendo.length+'…':(!_impDocs.length?'nenhum documento':(nProb?nProb+' ponto(s) pra olhar':'tudo lido ✔'));
+  let h='<div style="display:flex;align-items:center;gap:8px;padding:9px 12px;background:var(--ink2);color:#fff"><b style="font-size:13px;flex:1">📎 Leitura dos documentos</b><span style="font-size:11px;opacity:.85">'+esc(badge)+'</span><button onclick="_impDocToggleMin()" title="'+(_impPainelMin?'Expandir':'Minimizar')+'" style="background:none;border:none;color:#fff;cursor:pointer;font-size:15px;line-height:1">'+(_impPainelMin?'▴':'▾')+'</button></div>';
+  if(!_impPainelMin){
+    h+='<div style="overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:10px">';
+    h+='<div style="font-size:11px;color:var(--slate)">Lido por regras do site (texto do PDF; se for imagem, OCR no seu navegador) — sem IA. O que não consegui ler ou definir fica listado aqui.</div>';
+    // documentos
+    if(_impDocs.length||lendo.length){
+      h+='<div><div style="font-weight:700;margin-bottom:4px">Documentos ('+(_impDocs.length)+')</div>';
+      lendo.forEach(n=>{ h+='<div style="padding:3px 0;border-top:1px solid var(--border)">⏳ <b>'+esc(n)+'</b><div style="color:var(--slate);font-size:11.5px;margin-left:20px">'+esc(_impLendo[n])+'</div></div>'; });
+      _impDocs.forEach(d=>{ const st=_impDocStatus(d); const ic=st.nivel==='ok'?'✅':(st.nivel==='parcial'?'⚠️':'❌'); const tn=_IMP_TIPO_NOME[d.tipo]||d.tipo;
+        h+='<div style="padding:3px 0;border-top:1px solid var(--border)">'+ic+' <b style="word-break:break-all">'+esc(d.nome)+'</b> <span style="color:var(--slate)">— '+esc(tn)+(d.via==='ocr'?' · OCR':'')+'</span>'
+          +(st.nivel==='ok'?'':'<div style="margin-left:20px;font-size:11.5px;color:'+(st.nivel==='falha'?'var(--red)':'var(--slate)')+'">'+(st.nivel==='falha'?'Não consegui ler: ':'Li, mas faltou: ')+esc(st.faltas.join('; '))+'</div>')+'</div>'; });
+      h+='</div>';
+    } else h+='<div style="padding:8px 0;color:var(--slate)">Anexe todos os documentos recebidos da importação (NF, DUIMP, câmbio, frete, armazenagem, numerário, Marinha Mercante, ICMS, DACTE, boletos…). Pode selecionar vários de uma vez ou arrastar pra tela.</div>';
+    if(R){
+      h+='<div><div style="font-weight:700;margin-bottom:4px;color:'+(pend.length?'var(--red)':'var(--ink)')+'">❗ Não consegui definir ('+pend.length+')</div>';
+      if(!pend.length) h+='<div style="color:var(--slate)">Nada pendente.</div>';
+      pend.forEach(x=>{ h+='<div style="padding:3px 0;border-top:1px solid var(--border)"><b>'+esc(x.campo)+'</b><div style="color:var(--slate);font-size:11.5px">'+esc(x.motivo)+'</div></div>'; });
+      h+='</div>';
+      if(warns.length||conflitos.length){ h+='<div><div style="font-weight:700;margin-bottom:4px">⚠️ Conferir ('+(warns.length+conflitos.length)+')</div>'; warns.forEach(a=>{ h+='<div style="padding:3px 0;border-top:1px solid var(--border);font-size:12px">'+esc(a.msg)+'</div>'; }); conflitos.forEach(c=>{ h+='<div style="padding:3px 0;border-top:1px solid var(--border);font-size:12px">'+esc(c)+'</div>'; }); h+='</div>'; }
+      if(infos.length){ h+='<div><div style="font-weight:700;margin-bottom:4px">ℹ️ Informações</div>'; infos.forEach(a=>{ h+='<div style="padding:3px 0;border-top:1px solid var(--border);font-size:12px;color:var(--slate)">'+esc(a.msg)+'</div>'; }); h+='</div>'; }
+      h+='<div style="font-size:11.5px;color:var(--slate);border-top:1px solid var(--border);padding-top:6px">✅ Campos preenchidos/alterados nesta leitura: '+(ctx?ctx.n:0)+(ctx&&ctx.contaPadrao?' (inclusive a Conta Duplicatas = '+esc(R.contaDup)+', padrão)':'')+'. Contas usadas: as das importações finalizadas em jun/2026 (50008 armazenagem, 50009 honorários, 50010 S.D.A, 682 demais custos, 10001 frete rodoviário, 576 fornecedores, 2016/2023/370/438). <b>Nada foi salvo</b> — confira e clique em Salvar Importação.'+(ctx&&ctx.semLinha.length?'<br>Linhas que não achei no formulário: '+esc(ctx.semLinha.join(', ')):'')+'</div>';
+    }
+    h+='<div style="display:flex;gap:6px;flex-wrap:wrap"><button class="btn bo bsm" onclick="document.getElementById(\'impDocInput\').click()">📎 Anexar mais</button>'+(_impDocs.length?'<button class="btn bo bsm" onclick="_impDocRefazer()">🔄 Refazer leitura</button><button class="btn bo bsm" onclick="_impDocLimpar()">🗑 Limpar</button>':'')+'</div>';
+    h+='</div>';
+  }
+  p.innerHTML=h;
+}
+function _impDocRefazer(){
+  if(!document.getElementById('formPI')) return;
+  const conta=((document.getElementById('formContaDuplicatas')||{}).value||'').trim();
+  let R, ctx;
+  // relê o texto já extraído (sem repetir o OCR) — assim melhorias nas regras de leitura valem na hora
+  _impDocs.forEach(d=>{ if(!d.linhas) return; try{ d.tipo=_impDocClassificar(d.linhas,d.nome); const lt=_IMP_LEITORES[d.tipo]; d.dados=lt?(lt(d.linhas)||{}):{}; d.erro=null; }catch(e){ d.erro='erro ao interpretar o documento ('+e.message+')'; } });
+  try{ R=_impDocConsolidar(_impDocs,conta); ctx=_impAplicarForm(R); }
+  catch(e){ console.error('Importação — leitura automática:',e); toast('Erro ao preencher a partir dos documentos: '+e.message,'warn'); R={cab:{},dup:[],custos:[],pend:[],aviso:[{nivel:'warn',msg:'Erro ao preencher: '+e.message}],contaDup:conta||'640'}; ctx={n:0,conflitos:[],semLinha:[]}; }
+  _impUltimo={R,ctx}; _impDocPainelRender();
+}
+async function _impDocAnexar(fileList){
+  const arqs=Array.from(fileList||[]); if(!arqs.length||!document.getElementById('formPI')) return;
+  _impPainelMin=false; _impDocPainelRender();
+  for(const f of arqs){
+    const idx=()=>_impDocs.findIndex(d=>d.nome===f.name);
+    const guarda=d=>{ const i=idx(); if(i>=0) _impDocs[i]=d; else _impDocs.push(d); };
+    if(!/\.(pdf|png|jpe?g|webp|bmp|tiff?)$/i.test(f.name)){ guarda({nome:f.name,tipo:'desconhecido',erro:'tipo de arquivo não suportado (use PDF ou imagem)'}); continue; }
+    if(f.size>30*1024*1024){ guarda({nome:f.name,tipo:'desconhecido',erro:'arquivo grande demais (mais de 30 MB)'}); continue; }
+    _impLendo[f.name]='abrindo…'; _impDocPainelRender();
+    try{
+      const {linhas,via}=await _impLerArquivo(f,msg=>{ _impLendo[f.name]=msg; _impDocPainelRender(); });
+      const tipo=_impDocClassificar(linhas,f.name); const leitor=_IMP_LEITORES[tipo]; let dados={}, erro=null;
+      if(leitor){ try{ dados=leitor(linhas)||{}; }catch(e){ erro='erro ao interpretar o documento ('+e.message+')'; } }
+      guarda({nome:f.name,tipo,dados,erro,via,linhas});
+    }catch(e){ console.error('Importação — ler',f.name,e); guarda({nome:f.name,tipo:'desconhecido',erro:String(e&&e.message||e)}); }
+    delete _impLendo[f.name];
+  }
+  _impDocRefazer();
+}
+function _impDocBotaoHTML(){
+  return '<input type="file" id="impDocInput" multiple accept=".pdf,.png,.jpg,.jpeg,.webp,.bmp,.tif,.tiff,application/pdf,image/*" style="display:none" onchange="_impDocAnexar(this.files);this.value=\'\'">'
+    +'<button class="btn" style="background:var(--teal);color:#fff;margin-left:auto" onclick="document.getElementById(\'impDocInput\').click()" title="Anexe tudo que recebeu desta importação: o site lê sozinho e preenche o formulário">📎 Anexar documentos da importação</button>';
+}
+// arrastar e soltar os arquivos na tela de importação + atualizar o quadro quando o usuário digita
+(function(){
+  if(window._impDocListeners) return; window._impDocListeners=true;
+  document.addEventListener('dragover',e=>{ if(document.getElementById('formPI')&&e.dataTransfer&&Array.from(e.dataTransfer.types||[]).indexOf('Files')>=0) e.preventDefault(); });
+  document.addEventListener('drop',e=>{ if(document.getElementById('formPI')&&e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files.length){ e.preventDefault(); _impDocAnexar(e.dataTransfer.files); } });
+  let t=null; const quando=e=>{ if(!document.getElementById('impDocPainel')||!_impUltimo) return; if(e.target.closest&&e.target.closest('#impDocPainel')) return; clearTimeout(t); t=setTimeout(_impDocPainelRender,500); };
+  document.addEventListener('input',quando,true); document.addEventListener('change',quando,true);
+})();
+
 // ─── Rascunho automático da "Nova Importação" (pedido do usuário 19/10/2026: "sempre que eu começar a digitar uma nova importação e sair, ela fica salva pra eu continuar depois") ───────────────
 // Tudo que é digitado (dados da importação + linhas dos dois quadros) é guardado por empresa a cada pausa na digitação e ao sair da tela; ao abrir "Nova Importação" de novo o rascunho volta, com aviso e botão
 // pra descartar. Some quando a importação é salva.
@@ -59893,6 +60471,7 @@ function _impRascunhoRestaurar(){
   return true;
 }
 function novaImportacao(){
+  _impDocPainelFechar();
   const eid=window._importacaoEidAtual;
   if(!eid){toast('Selecione uma empresa','warn');return;}
 
@@ -59905,7 +60484,8 @@ function novaImportacao(){
   let html=`
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
       <h3 style="color:#1E3558;margin:0">Nova Importação</h3>
-      <div style="display:flex;gap:8px">
+      <div style="display:flex;gap:8px;align-items:center">
+        ${_impDocBotaoHTML()}
         <button class="btn bp" onclick="salvarNovaImportacao()">✓ Salvar Importação</button>
         <button class="btn bo bsm" onclick="voltarDetalhesImportacao()">← Voltar à Lista de Importações</button>
       </div>
@@ -60630,6 +61210,7 @@ function mudarStatusImportacao(idx,novoStatus){
 }
 
 function renderImportacoesLista(){
+  _impDocPainelFechar();
   const eid=window._importacaoEidAtual;
   const conteudo=document.getElementById('importacaoConteudo');
   const importacoes=getImportacoes();
@@ -60716,6 +61297,7 @@ function renderImportacoesLista(){
 }
 
 function editarImportacao(idx){
+  _impDocPainelFechar();
   const eid=window._importacaoEidAtual;
   const importacoes=getImportacoes();
   const item=importacoes[eid]?.dados[idx];
@@ -60734,6 +61316,7 @@ function editarImportacao(idx){
       <button class="action-btn action-btn-txt" onclick="gerarTXTLancamentos()">📝 Gerar TXT</button>
       <button class="btn bo bsm" onclick="corrigirDatasInvalidasImportacao()">🔧 Corrigir Datas com Ano Inválido</button>
       <button class="btn bo bsm" onclick="voltarDetalhesImportacao()">← Voltar à Lista de Importações</button>
+      ${_impDocBotaoHTML()}
     </div>
 
     <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
