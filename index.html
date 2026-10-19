@@ -32524,6 +32524,16 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // em dia vem SÓ com "Valor boleto" (ex.: 366,71, 443,85, 490,91) — esse documento é a própria liquidação. Sem isso, o lote do dia somava só os boletos com juros e nunca fechava.
     const _ehAncoraLiq=c=>!!c.documento_numero&&(c.tipo_operacao==='liquidacao'||(c.tipo_operacao==='valor_boleto'&&!comprovantesReceb.some(x=>x.tipo_operacao==='liquidacao'&&x.documento_numero===c.documento_numero&&x.cliente_fornecedor_nome===c.cliente_fornecedor_nome&&x.data_pagamento===c.data_pagamento)));
     const HISTORICO_LABEL_OP={liquidacao:'Recebimento',valor_boleto:'Liquidação',tarifa_cobranca:'Tarifa de Cobrança',juros:'Receita de Juros',multa:'Receita de Multa',desconto:'Desconto Concedido'};
+    // Título SEM linha de tarifa no relatório (Fast Lube 30/09/2026): o Itaú já descontou a tarifa na "Liquidação" (liq = boleto + juros + multa − desconto − tarifa), mas o crédito do banco vem BRUTO. Quando o líquido é
+    // menor que boleto+juros+multa−desconto por até R$ 5,00 (valor de tarifa, não pagamento parcial), o bruto é esse total.
+    const _valorBrutoSemTarifa=c=>{
+      const doc=comprovantesReceb.filter(x=>x.documento_numero===c.documento_numero&&x.cliente_fornecedor_nome===c.cliente_fornecedor_nome&&x.data_pagamento===c.data_pagamento);
+      const vb=doc.find(x=>x.tipo_operacao==='valor_boleto'); if(!vb) return c.valor_pago;
+      const soma=(t)=>doc.filter(x=>x.tipo_operacao===t).reduce((a,x)=>a+Number(x.valor_pago),0);
+      const total=Math.round((Number(vb.valor_pago)+soma('juros')+soma('multa')-soma('desconto'))*100)/100;
+      const dif=Math.round((total-c.valor_pago)*100)/100;
+      return (dif>0.004&&dif<=5)?total:c.valor_pago;
+    };
     async function _lancctbMontarGrupoLiquidacao(ancoraLiquidacao, bruto){
       // Achado real 30/09/2026 (Kazangil): o mesmo "Seu número"+cliente pode se repetir
       // em COMPETÊNCIAS diferentes (boleto recorrente mensal — ex.: doc "9140" da MD
@@ -32539,7 +32549,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // aqui) — fica pendente, pra conciliar depois com seu próprio débito no extrato.
       const tarifaItem=bruto?grupoCompleto.find(c=>c.tipo_operacao==='tarifa_cobranca'):null;
       const grupo=tarifaItem?grupoCompleto.filter(c=>c.id!==tarifaItem.id):grupoCompleto;
-      const valorBanco=tarifaItem?Math.round((ancoraLiquidacao.valor_pago-tarifaItem.valor_pago)*100)/100:ancoraLiquidacao.valor_pago;
+      const valorBanco=tarifaItem?Math.round((ancoraLiquidacao.valor_pago-tarifaItem.valor_pago)*100)/100:(bruto?_valorBrutoSemTarifa(ancoraLiquidacao):ancoraLiquidacao.valor_pago);
       const [nfNum,parcelaDoc]=String(ancoraLiquidacao.documento_numero).split('-');
       // Banco do Brasil: o documento é só a NF e a parcela real fica em numero_parcela, igual em TODAS as linhas do boleto.
       // (No Itaú numero_parcela é só a sequência da operação — linhas diferentes têm números diferentes — e a parcela vem no "NF-parcela".)
@@ -32623,7 +32633,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // tarifa. Ver "CORREÇÃO DA CONCILIAÇÃO DOS RECEBIMENTOS ITAÚ" (usuário 29/09/2026).
       const valorBrutoCandidata=c=>{
         const tarifa=comprovantesReceb.find(t=>t.tipo_operacao==='tarifa_cobranca'&&!/cobrada à parte/i.test(t.observacao||'')&&t.documento_numero===c.documento_numero&&t.cliente_fornecedor_nome===c.cliente_fornecedor_nome);
-        return tarifa?c.valor_pago-tarifa.valor_pago:c.valor_pago;
+        return tarifa?c.valor_pago-tarifa.valor_pago:_valorBrutoSemTarifa(c);
       };
       const somaCent=Math.round(candidatas.reduce((s,c)=>s+valorBrutoCandidata(c),0)*100);
       if(_ehCreditoBoleto(l)&&!(candidatas.length>=2&&Math.abs(somaCent-Math.round(valor*100))<=1)) (window.__diagRecebimentos=window.__diagRecebimentos||[]).push({data:l.data_pagamento,valor,motivo:`lote não fecha: ${candidatas.length} boleto(s) do dia somam ${(somaCent/100).toFixed(2)}`});
