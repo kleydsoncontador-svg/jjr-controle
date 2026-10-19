@@ -50009,6 +50009,49 @@ function calcSaldosGanho(ganho){
   });
   return{ants,ats,ants_r2,ats_r2,mks,confer};
 }
+// ── Variação Cambial ATIVA por Regime de Caixa → Ganhos/Rendimentos (pedido do usuário 19/10/2026) ──────────────────────────────────────
+// O produto "Variação Cambial Ativa - Regime de Caixa" é preenchido SOZINHO com a soma das linhas "Variação Cambial Ativa s/ Câmbio" e
+// "Variação Cambial Ativa s/ Frete" de todas as Importações da empresa, no mês da DATA DE EMISSÃO DA NF. Só ATIVA (passiva não entra).
+// Mês com importação cuja ativa soma zero também entra, como 0,00 explícito (precisa ser 0,00 pra finalizar o mês). Mês sem nenhuma importação
+// fica como está (o usuário digita o 0,00 à mão quando não houve nada). O que o usuário tinha digitado e foi trocado fica guardado em _manualAntes.
+function _ehGanhoVarCambAtivaCaixa(g){ return /varia[cç][aã]o cambial ativa[\s\S]*caixa/i.test(String((g&&g.nome)||'')); }
+function _ganhosSomaVarCambAtivaPorMes(eid){
+  const out={};
+  const imps=((getImportacoes()[String(eid)]||{}).dados)||[];
+  imps.forEach(imp=>{
+    const m=String(imp.dataNF||'').match(/(\d{2})\/(\d{2})\/(\d{4})/); if(!m||+m[3]<1000) return;
+    const mk=m[2]+'/'+m[3]; if(out[mk]===undefined) out[mk]=0;
+    (((imp.lancamentos||{}).duplicatas)||[]).forEach(r=>{
+      if(/^varia[cç][aã]o cambial ativa/i.test(r.item||'')) out[mk]+=Math.max(parseFloat(r.debito)||0,parseFloat(r.credito)||0);
+    });
+  });
+  Object.keys(out).forEach(k=>{ out[k]=Math.round(out[k]*100)/100; });
+  return out;
+}
+function _ganhoSincVarCambAtivaCaixa(eid,id,ganho){
+  if(!_ehGanhoVarCambAtivaCaixa(ganho)) return false;
+  const soma=_ganhosSomaVarCambAtivaPorMes(eid);
+  ganho.dados=ganho.dados||{};
+  const antes=new Set(ganho._autoMeses||[]); let mudou=false;
+  Object.keys(soma).forEach(mk=>{
+    const v=soma[mk], d=ganho.dados[mk]=ganho.dados[mk]||{};
+    const atual=parseFloat(d.rendMes);
+    const igual=!isNaN(atual)&&Math.abs(atual-v)<0.005&&(v===0?d['_z_rendMes']===true:!d['_z_rendMes']);
+    if(igual) return;
+    if(!antes.has(mk)&&!isNaN(atual)&&atual!==0&&Math.abs(atual-v)>=0.005){ ganho._manualAntes=ganho._manualAntes||{}; ganho._manualAntes[mk]=atual; }
+    d.rendMes=v; if(v===0) d['_z_rendMes']=true; else delete d['_z_rendMes'];
+    mudou=true;
+  });
+  antes.forEach(mk=>{ if(!(mk in soma)){ const d=ganho.dados[mk]; if(d&&(d.rendMes!==undefined||d['_z_rendMes'])){ delete d.rendMes; delete d['_z_rendMes']; mudou=true; } } });
+  const lista=Object.keys(soma).sort();
+  if(JSON.stringify(lista)!==JSON.stringify(ganho._autoMeses||[])){ ganho._autoMeses=lista; mudou=true; }
+  if(mudou){ const gm=getGanhos(eid); gm[id]=ganho; setGanhos(eid,gm); }
+  return mudou;
+}
+function _ganhosSincVarCambAtivaCaixaTodos(eid){
+  try{ const gm=getGanhos(eid); Object.keys(gm).forEach(id=>{ const g=gm[id]; if(g&&typeof g==='object'&&_ehGanhoVarCambAtivaCaixa(g)) _ganhoSincVarCambAtivaCaixa(eid,id,g); }); }
+  catch(e){ console.warn('Variação cambial ativa (caixa) → Ganhos:',e); }
+}
 function renderGanhoTrimestral(eid,id,ganho){
   // Migração: se 'codigo' ainda está nas colunas, move para campo do cabeçalho
   if((ganho.cols||[]).some(c=>c.id==='codigo')){
@@ -50018,6 +50061,7 @@ function renderGanhoTrimestral(eid,id,ganho){
   }
   if(!ganho.cols||!ganho.cols.length){ganho.cols=JSON.parse(JSON.stringify(COLS_RF_DEFAULT));const _gm=getGanhos(eid);_gm[id]=ganho;setGanhos(eid,_gm);}
   _lancctbSincronizarVisaoGeralGanho(eid,ganho);
+  try{ _ganhoSincVarCambAtivaCaixa(eid,id,ganho); }catch(e){ console.warn(e); }
   const dados=ganho.dados||{};
   const isDemais=_isSimpleLayout(ganho);
   const cols=isDemais?COLS_DEMAIS_DEFAULT:ganho.cols;
@@ -50128,7 +50172,7 @@ function renderGanhoTrimestral(eid,id,ganho){
             } else {
               disp=c.tipo==='num'?(v?_fmt(v):(d['_z_'+c.id+colIdSuffix]?'0,00':'')):(esc(v));
             }
-            const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial);
+            const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial)&&!(c.id==='rendMes'&&_ehGanhoVarCambAtivaCaixa(ganho));
             h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id+colIdSuffix}" ${!isEditable?'disabled':''} oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','${c.id+colIdSuffix}',_parseInput(this.value))" onblur="var z=this.value.trim()!==''&&!_parseInput(this.value);var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id+colIdSuffix}',n,z);${c.tipo==='num'?`this.value=n?_fmt(n):(z?'0,00':'')`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:0" placeholder="0"></td>`;});
           h+=`<td ${r===1?`id="grf-${pid}-s-${mKey}"`:''} style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}${(r===1&&confer[mk]&&!confer[mk].ok)?`<span title="Conferência do extrato: deveria fechar em R$ ${_fmt(confer[mk].esperado)} (calculado aqui: R$ ${_fmt(sal)})" style="color:#b45309;margin-left:4px;cursor:help">⚠️</span>`:''}</td>
             <td style="padding:2px;border:1px solid var(--border)">
@@ -50164,6 +50208,7 @@ function renderGanhoAnual(eid,id,ganho){
   }
   if(!ganho.cols||!ganho.cols.length){ganho.cols=JSON.parse(JSON.stringify(COLS_RF_DEFAULT));const _gm=getGanhos(eid);_gm[id]=ganho;setGanhos(eid,_gm);}
   _lancctbSincronizarVisaoGeralGanho(eid,ganho);
+  try{ _ganhoSincVarCambAtivaCaixa(eid,id,ganho); }catch(e){ console.warn(e); }
   const dados=ganho.dados||{};
   const isDemaisA=_isSimpleLayout(ganho);
   const cols=isDemaisA?COLS_DEMAIS_DEFAULT:ganho.cols;
@@ -50261,7 +50306,7 @@ function renderGanhoAnual(eid,id,ganho){
         } else {
           disp=c.tipo==='num'?(v?_fmt(v):(d['_z_'+c.id]?'0,00':'')):(esc(v));
         }
-        const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial);
+        const isEditable=c.id!=='trib'&&c.id!=='aliq'&&!(c.id==='bruto'&&isCDBEspecial)&&!(c.id==='rendMes'&&_ehGanhoVarCambAtivaCaixa(ganho));
         h+=`<td style="padding:2px;border:1px solid var(--border);${c.hl?'background:#f0f7ff':''}"><input type="text" value="${disp}" data-mk="${mk}" data-col="${c.id}" ${!isEditable?'disabled':''} oninput="salvarGanhoCellSilencioso('${eid2}','${pid}','${mk}','${c.id}',_parseInput(this.value))" onblur="var z=this.value.trim()!==''&&!_parseInput(this.value);var n=_parseInput(this.value);atualizarGanhoCell('${eid2}','${pid}','${mk}','${c.id}',n,z);${c.tipo==='num'?`this.value=n?_fmt(n):(z?'0,00':'')`:''}" style="width:100%;border:none;text-align:right;padding:4px 5px;font-size:11px;background:${!isEditable?'#f5f5f5':'transparent'};min-width:0" placeholder="0"></td>`;});
       h+=`<td id="grf-${pid}-s-${mKey}" style="padding:5px 7px;border:1px solid var(--border);text-align:right;font-weight:700;background:#f0fdf4;color:${sal<0?'#dc2626':'#166534'}">${_fmt(sal)}${confer[mk]&&!confer[mk].ok?`<span title="Conferência do extrato: deveria fechar em R$ ${_fmt(confer[mk].esperado)} (calculado aqui: R$ ${_fmt(sal)})" style="color:#b45309;margin-left:4px;cursor:help">⚠️</span>`:''}</td>
         <td style="padding:2px;border:1px solid var(--border)">
@@ -60497,25 +60542,33 @@ function _impRascunhoTemConteudo(d){
   if(Object.values(d.campos||{}).some(v=>String(v||'').trim())) return true;
   return Object.values(d.secoes||{}).some(rows=>rows.some(o=>Object.entries(o).some(([k,v])=>k!=='data-item'&&k!=='data-saldo'&&(v===true||String(v||'').trim()&&String(v).trim()!=='0,00'))));
 }
-function _impRascunhoSalvarAgora(){
+// Pedido do usuário (19/10/2026): "só deve salvar como rascunho quando eu apertar o botão Salvar como rascunho" — NADA é salvo sozinho.
+// Botão "📝 Salvar como rascunho" (Nova Importação) → grava; o rascunho aparece na LISTA de importações com Continuar / Excluir.
+function _impRascunhoSalvarBotao(){
   try{
-    const d=_impRascunhoSerializar(); if(!d) return;
-    if(_impRascunhoTemConteudo(d)) S.s(_impRascunhoKey(),d); else if(_impRascunhoDaLista()) S.s(_impRascunhoKey(),{}); // nunca grava null: a coluna "value" do Supabase é NOT NULL e dava "Não foi possível salvar na nuvem" (19/10/2026)
-  }catch(e){ console.warn('Rascunho da importação:',e); }
+    const d=_impRascunhoSerializar();
+    if(!d||!_impRascunhoTemConteudo(d)){ toast('Nada digitado ainda para salvar como rascunho.','warn'); return; }
+    S.s(_impRascunhoKey(),d); // nunca grava null: a coluna "value" do Supabase é NOT NULL (19/10/2026)
+    toast('Rascunho salvo — ele aparece na lista de importações (▶ Continuar / 🗑 Excluir).','ok');
+  }catch(e){ console.warn('Rascunho da importação:',e); toast('Não consegui salvar o rascunho: '+e.message,'err'); }
 }
-function _impRascunhoLimpar(){ try{ if(_impRascunhoDaLista()) S.s(_impRascunhoKey(),{}); }catch(e){} } // {} = "sem rascunho" (null violaria o NOT NULL do Supabase)
-// Pedido do usuário (19/10/2026): o rascunho aparece na LISTA de importações, com opção de continuar ou excluir quando quiser
-function _impRascunhoDaLista(){ let d=null; try{ d=S.g(_impRascunhoKey()); }catch(e){} return _impRascunhoTemConteudo(d)?d:null; }
+function _impRascunhoLerBruto(){ let d=null; try{ d=S.g(_impRascunhoKey()); }catch(e){} return _impRascunhoTemConteudo(d)?d:null; }
+function _impRascunhoLimpar(){ try{ if(_impRascunhoLerBruto()) S.s(_impRascunhoKey(),{}); }catch(e){} } // {} = "sem rascunho" (null violaria o NOT NULL do Supabase)
+function _impRascunhoDaLista(){
+  const d=_impRascunhoLerBruto(); if(!d) return null;
+  // rascunho de uma importação que JÁ foi salva (mesmo PI) é lixo: some sozinho
+  try{
+    const pi=String((d.campos||{}).formPI||'').replace(/\s/g,'');
+    const salvas=((getImportacoes()[window._importacaoEidAtual]||{}).dados)||[];
+    if(pi&&salvas.some(x=>String(x.pi||'').replace(/\s/g,'')===pi)){ _impRascunhoLimpar(); return null; }
+  }catch(e){}
+  return d;
+}
 function _impRascunhoExcluirLista(){
   if(!confirm('Excluir o rascunho desta importação? O que foi digitado/lido e ainda não foi salvo será perdido.')) return;
   _impRascunhoLimpar(); renderImportacoesLista(); toast('Rascunho excluído','ok');
 }
-let _impRascunhoTimer=null;
-function _impRascunhoAgendar(){ clearTimeout(_impRascunhoTimer); _impRascunhoTimer=setTimeout(_impRascunhoSalvarAgora,600); }
-document.addEventListener('input',e=>{ if(window._formImportacaoMode==='novo'&&e.target.closest&&e.target.closest('#importacaoConteudo')) _impRascunhoAgendar(); },true);
-document.addEventListener('change',e=>{ if(window._formImportacaoMode==='novo'&&e.target.closest&&e.target.closest('#importacaoConteudo')) _impRascunhoAgendar(); },true);
-window.addEventListener('pagehide',()=>{ if(window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); });
-document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden'&&window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); });
+function _impRascunhoAgendar(){} // (sem efeito: o rascunho só é salvo pelo botão)
 function _impRascunhoRestaurar(){
   try{ return _impRascunhoRestaurarInterno(); }
   catch(e){ console.error('Rascunho da importação com problema — descartado:',e); _impRascunhoLimpar(); try{ toast('O rascunho estava com problema e foi descartado. Recomece a importação.','warn'); }catch(_){} return false; }
@@ -60536,10 +60589,11 @@ function _impRascunhoRestaurarInterno(){
   atualizarSaldo();
   const quando=new Date(d.ts).toLocaleString('pt-BR');
   const c=document.getElementById('importacaoConteudo');
-  if(c){ c.insertAdjacentHTML('afterbegin',`<div id="impRascunhoAviso" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:8px 12px;border:1px solid var(--teal);border-radius:8px;font-size:12.5px;color:var(--slate)">📝 <span style="flex:1">Rascunho recuperado (salvo em ${esc(quando)}) — continue de onde parou. Ele some quando você salvar a importação.</span><button class="btn bo bsm" onclick="if(confirm('Descartar o rascunho e começar uma importação em branco?')){_impRascunhoLimpar();novaImportacao();}">Descartar rascunho</button></div>`); }
+  if(c){ c.insertAdjacentHTML('afterbegin',`<div id="impRascunhoAviso" style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:12px;padding:8px 12px;border:1px solid var(--teal);border-radius:8px;font-size:12.5px;color:var(--slate)">📝 <span style="flex:1">Rascunho aberto (salvo em ${esc(quando)}) — continue de onde parou. Ele some quando você salvar a importação.</span><button class="btn bo bsm" onclick="if(confirm('Descartar o rascunho e começar uma importação em branco?')){_impRascunhoLimpar();novaImportacao();}">Descartar rascunho</button></div>`); }
   return true;
 }
-function novaImportacao(){
+function novaImportacao(usarRascunho){
+  window._impEditandoRascunho=false;
   _impDocPainelFechar();
   const eid=window._importacaoEidAtual;
   if(!eid){toast('Selecione uma empresa','warn');return;}
@@ -60555,6 +60609,7 @@ function novaImportacao(){
       <h3 style="color:#1E3558;margin:0">Nova Importação</h3>
       <div style="display:flex;gap:8px;align-items:center">
         ${_impDocBotaoHTML()}
+        <button class="btn bo" onclick="_impRascunhoSalvarBotao()" title="Guarda o que você já preencheu para continuar depois; fica na lista de importações">📝 Salvar como rascunho</button>
         <button class="btn bp" onclick="salvarNovaImportacao()">✓ Salvar Importação</button>
         <button class="btn bo bsm" onclick="voltarDetalhesImportacao()">← Voltar à Lista de Importações</button>
       </div>
@@ -60673,7 +60728,7 @@ function novaImportacao(){
     preencherItenspadrao();
     aplicarDataNotaFiscalLinhas();
     atualizarSaldo();
-    const _rec=_impRascunhoRestaurar();
+    if(usarRascunho===true) window._impEditandoRascunho=!!_impRascunhoRestaurar();
     document.getElementById('formPI').focus();
   },100);
 }
@@ -60712,8 +60767,9 @@ function salvarNovaImportacao(){
   });
 
   setImportacoes(importacoes);
+  _ganhosSincVarCambAtivaCaixaTodos(eid);
   salvarEstadoGlobalDebounced();
-  if(window._formImportacaoMode==='novo') _impRascunhoLimpar();
+  if(window._formImportacaoMode==='novo'&&window._impEditandoRascunho){ _impRascunhoLimpar(); window._impEditandoRascunho=false; } // salvou a importação que veio de um rascunho → o rascunho sai da lista
   renderImportacoesLista();
   toast('Importação salva com sucesso','ok');
 }
@@ -61263,7 +61319,6 @@ function preencherLancamentosSalvos(lancamentos){
 }
 
 function voltarDetalhesImportacao(){
-  if(window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); // sair da tela guarda o que foi digitado
   renderImportacoesLista();
 }
 
@@ -61329,15 +61384,15 @@ function renderImportacoesLista(){
       const c=rasc.campos||{}; const quando=new Date(rasc.ts).toLocaleString('pt-BR');
       html+=`
         <tr class="imp-linha" style="border-bottom:2px solid var(--teal);background:rgba(20,184,166,.10)">
-          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formPI||'(sem PI)')}</td>
-          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formFornecedor||'—')}</td>
-          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formNF||'-')}</td>
-          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formDataNF||'-')}</td>
-          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formDI||'-')}</td>
-          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formInvoice||'-')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao(true)">${esc(c.formPI||'(sem PI)')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao(true)">${esc(c.formFornecedor||'—')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao(true)">${esc(c.formNF||'-')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao(true)">${esc(c.formDataNF||'-')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao(true)">${esc(c.formDI||'-')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao(true)">${esc(c.formInvoice||'-')}</td>
           <td style="padding:12px 16px;font-size:12px"><b>📝 Rascunho</b><div style="color:var(--slate);font-size:11px">não salvo · ${esc(quando)}</div></td>
           <td style="padding:12px 16px;text-align:center;white-space:nowrap">
-            <button class="btn bp bsm" onclick="event.stopPropagation();novaImportacao()" title="Continuar de onde parou" style="padding:4px 10px">▶ Continuar</button>
+            <button class="btn bp bsm" onclick="event.stopPropagation();novaImportacao(true)" title="Continuar de onde parou" style="padding:4px 10px">▶ Continuar</button>
             <button class="icon-btn" onclick="event.stopPropagation();_impRascunhoExcluirLista()" title="Excluir rascunho" style="padding:4px 8px;background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem">🗑️</button>
           </td>
         </tr>
@@ -61540,6 +61595,7 @@ function excluirImportacao_item(idx){
   if(!importacoes[eid]) return;
   importacoes[eid].dados.splice(idx,1);
   setImportacoes(importacoes);
+  _ganhosSincVarCambAtivaCaixaTodos(eid);
   salvarEstadoGlobalDebounced();
   renderImportacoesLista();
   toast('Importação removida','ok');
