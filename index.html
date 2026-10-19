@@ -59850,7 +59850,7 @@ var _IMP_MESES={JAN:1,FEB:2,FEV:2,MAR:3,APR:4,ABR:4,MAY:5,MAI:5,JUN:6,JUL:7,AUG:
 function _impDataBR(s){ // aceita 06/07/2026 | 06-jul-26 | 06/JUL/2026 → dd/mm/aaaa
   s=_impSemAcento(s).toUpperCase().trim(); let m;
   if((m=s.match(/(\d{1,2})\/(\d{1,2})\/(\d{4})/))) return m[1].padStart(2,'0')+'/'+m[2].padStart(2,'0')+'/'+m[3];
-  if((m=s.match(/(\d{1,2})[\/\- ]([A-Z]{3})[\/\- ](\d{2,4})/)) && _IMP_MESES[m[2]]){ const a=m[3].length===2?'20'+m[3]:m[3]; return m[1].padStart(2,'0')+'/'+String(_IMP_MESES[m[2]]).padStart(2,'0')+'/'+a; }
+  if((m=s.match(/(\d{1,2})[\/\- ]([A-Z0-9]{3})[\/\- ](\d{2,4})/)) && (m[2]=m[2].replace(/0/g,'O')) && _IMP_MESES[m[2]]){ const a=m[3].length===2?'20'+m[3]:m[3]; return m[1].padStart(2,'0')+'/'+String(_IMP_MESES[m[2]]).padStart(2,'0')+'/'+a; }
   return '';
 }
 function _impFmtBR(v){ if(v==null||isNaN(v)) return ''; return Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
@@ -59866,7 +59866,7 @@ function _impDocClassificar(textoLinhas,nomeArq){
   if(/DARE-?\s?SP|ARRECADACAO DE RECEITAS ESTADUAIS/.test(N)) return /COMPLEMENTAR/.test(nome)||/COMPLEMENTAR/.test(N)?'dare_comp':'dare';
   if(/MARINHA MERCANTE/.test(N)&&/AFRMM/.test(N)) return 'marinha';
   if(/DESPESAS A SEREM DEBITADAS/.test(N)||(/HONORARIO/.test(N)&&/\bSDA\b/.test(N))) return 'numerario';
-  if(/VALOR EM MOEDA ESTRANGEIRA CONTRATADA/.test(N)||(/TIPO DE OPERACAO/.test(N)&&/BENEFICIARIO NO EXTERIOR/.test(N))) return 'cambio';
+  if(/VALOR EM MOEDA ESTRANGEIRA CONTRATADA/.test(N)||/COMPROVANTE DE OPERACAO DE CAMBIO/.test(N)||(/TIPO DE OPERACAO/.test(N)&&/BENEFICIARIO NO EXTERIOR/.test(N))) return 'cambio';
   if(/INTERNATIONAL FREIGHT|OCEAN FREIGHT/.test(N)||/INVOICE N.{0,3}:?\s*WIND-?INV/.test(N)) return 'frete_mar';
   if(/INTERX LOGISTICS|ASIA SHIPPING|WINDLOG/.test(N)&&/FATURA|INVOICE/.test(N)&&!/WIND-?INV/.test(N)) return 'frete_mar_outro';
   if(/DEMONSTRATIVO DE CALCULO/.test(N)||(/TRANSBRASA/.test(N)&&/ARMAZENAGEM/.test(N))) return 'armazenagem';
@@ -59903,17 +59903,27 @@ function _impLerDuimp(L){
   return r;
 }
 function _impLerDanfe(L){
-  const N=_impSemAcento(L.join('\n')); const r={};
-  const nf=_impAcha(/N\S{0,2}\s*:\s*(\d{3}\.\d{3}\.\d{3})/,N); if(nf) r.nf=String(parseInt(nf.replace(/\./g,''),10));
+  const Ln=L.map(_impSemAcento); const N=Ln.join('\n'); const r={};
+  const nf=_impAcha(/N\S{0,3}\s*:?\s*(\d{3}\.\d{3}\.\d{3})/,N); if(nf) r.nf=String(parseInt(nf.replace(/\./g,''),10));
   r.chave=(N.match(/(\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4})/)||[])[1]||null;
-  const iNome=L.findIndex(l=>/NOME\s*\/\s*RAZ.O SOCIAL\s+CNPJ\s*\/\s*CPF\s+DATA DE EMISS/i.test(_impSemAcento(l)));
-  if(iNome>=0){ const lin=_impSemAcento(L[iNome+1]||'').trim(); const m=lin.match(/^(.*?)\s+(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{3}\.\d{3}\.\d{3}-\d{2})\s+(\d{2}\/\d{2}\/\d{4})/); if(m){ r.fornecedor=m[1].trim(); r.cnpjForn=m[2]; r.data=m[3]; } }
-  const iTot=L.findIndex(l=>/VL TOTAL DA NOTA/i.test(_impSemAcento(l)));
-  if(iTot>=0){ const nums=(_impSemAcento(L[iTot+1]||'').match(new RegExp(_IMP_BR,'g'))||[]).map(_impNum); if(nums.length>=8) r.total=nums[nums.length-1]; if(nums.length>=8){ r.impImport=nums[5]; r.ipi=nums[6]; r.cofins=nums[2]; r.outrasDesp=nums[4]; } }
-  const iIc=L.findIndex(l=>/BASE DE C.LC DO ICMS\s+VL DO ICMS\s+VL PIS/i.test(_impSemAcento(l)));
-  if(iIc>=0){ const nums=(_impSemAcento(L[iIc+1]||'').match(new RegExp(_IMP_BR,'g'))||[]).map(_impNum); if(nums.length>=3){ r.baseIcms=nums[0]; r.icms=nums[1]; r.pis=nums[2]; } }
+  // fornecedor (destinatário/remetente) e data de emissão — dois modelos de DANFE (o 2º vem com o CNPJ do exterior ilegível)
+  const iNome=Ln.findIndex(l=>/NOME\s*\/\s*RAZ.O SOCIAL\s+CNPJ\s*\/\s*CPF\s+DATA D[AE]\s+EMISS/i.test(l));
+  if(iNome>=0){
+    const lin=(Ln[iNome+1]||'').trim();
+    const m=lin.match(/^(.*?)\s+(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}|\d{3}\.\d{3}\.\d{3}-\d{2})\s+(\d{2}\/\d{2}\/\d{4})/);
+    if(m){ r.fornecedor=m[1].trim(); r.cnpjForn=m[2]; r.data=m[3]; }
+    else { const d=lin.match(/(\d{2}\/\d{2}\/\d{4})\s*$/); if(d){ r.data=d[1]; r.fornecedor=lin.slice(0,lin.length-d[0].length).replace(/(\s+[.\/\-])+\s*$/,'').trim(); } }
+  }
+  // os dois quadros de totais: o nº de colunas diz o modelo (8 = Signus; 7 = outro emissor)
+  const numeros=l=>(l.match(new RegExp(_IMP_BR,'g'))||[]).map(_impNum);
+  const linhaNum=(ini)=>{ for(let k=ini;k<Math.min(Ln.length,ini+4);k++){ const n=numeros(Ln[k]||''); if(n.length>=6) return n; } return null; };
+  const iIc=Ln.findIndex(l=>/BASE DE C.LC(ULO)?\.?\s+DO ICMS\s+(VL|VALOR) DO ICMS/i.test(l));
+  const iTot=Ln.findIndex(l=>/(VL|VALOR) TOTAL DA NOTA/i.test(l));
+  const n1=iIc>=0?linhaNum(iIc+1):null, n2=iTot>=0?linhaNum(iTot+1):null;
+  if(n1){ r.baseIcms=n1[0]; r.icms=n1[1]; if(n1.length>=8){ r.pis=n1[2]; } else { r.impImport=n1[4]; r.pis=n1[5]; } }
+  if(n2){ r.total=n2[n2.length-1]; if(n2.length>=8){ r.cofins=n2[2]; r.outrasDesp=n2[4]; r.impImport=n2[5]; r.ipi=n2[6]; } else if(n2.length===7){ r.outrasDesp=n2[3]; r.ipi=n2[4]; r.cofins=n2[5]; } }
   const ad=N.replace(/\n/g,' ');
-  const inv=ad.match(/INVOICES?\s*:\s*(.+?)\s*,?\s*NUMERO DA DI/i); if(inv) r.invoice=inv[1].replace(/[\s,]+$/,'').trim();
+  const inv=ad.match(/INVOICES?\s*:\s*(.+?)\s*,?\s*NUMERO DA DI/i)||ad.match(/INVOICES?\s*:\s*([A-Z0-9][A-Z0-9\-\/ ]*?)\s*$/i); if(inv) r.invoice=inv[1].replace(/[\s,]+$/,'').trim();
   const di=ad.match(/NUMERO DA DI\s*:\s*(\d{2}BR\d{10,11})/i); if(di) r.di=di[1];
   const fob=ad.match(/FOB\s*:\s*R\$\s*([\d.]+(?:,\d+)?)/i); if(fob) r.fobR=parseFloat(String(fob[1]).replace(',','.'));
   const fre=ad.match(/FRETE\s*:\s*R\$\s*([\d.]+(?:,\d+)?)\s*SEGURO/i); if(fre) r.freteR=parseFloat(String(fre[1]).replace(',','.'));
@@ -59955,6 +59965,11 @@ function _impLerCambio(L){
     const tx=N.match(/taxa de c.mbio\s*:\s*([\d.,]+)/i); if(tx) r.taxa=_impNumAuto(tx[1]);
     r.data=_impDataBR(_impAcha(/data da contrata..o da taxa\s*:\s*(\d{2}\/\d{2}\/\d{4})/i,N)||'');
     r.beneficiario=(_impAcha(/benefici.rio\s*:\s*([^\n]+)/i,N)||'').trim(); r.layout='A';
+  } else if(/COMPROVANTE DE OPERACAO DE CAMBIO/i.test(N)){ // layout C (Itaú — "Comprovante de Operação de Câmbio")
+    const u=N.match(/Valor em moeda estrangeira[\s\S]{0,80}?USD\s*([\d., ]+[.,]\d{2})/i); if(u) r.usd=_impNumAuto(u[1]);
+    const b=N.match(/Valor em moeda nacional[^\n]*\n\s*([\d.,]+)\s+([\d.]+[.,]\d{2})\s*\(/i); if(b){ r.taxa=_impNumAuto(b[1]); r.brl=_impNumAuto(b[2]); }
+    r.data=_impDataBR(_impAcha(/Data da opera..o\s*\n[^\n]*?(\d{2}\/\d{2}\/\d{4})/i,N)||'');
+    r.beneficiario=(_impAcha(/Pagador \/ Recebedor no exterior\*?\s*\n\s*[.:]?\s*([^\n]+)/i,N)||'').trim(); r.layout='C';
   } else if(/Valor em moeda estrangeira/i.test(N)){ // layout B ("Resumo das operações")
     const u=N.match(/Valor em moeda estrangeira[\s\S]{0,60}?USD\s*([\d., ]+[.,]\d{2})/i); if(u) r.usd=_impNumAuto(u[1]);
     const b=N.match(/Valor em reais[\s\S]{0,60}?BRL\s*([\d., ]+[.,]\d{2})\s+BRL\s*([\d.,]+)/i); if(b){ r.brl=_impNumAuto(b[1]); r.taxa=_impNumAuto(b[2]); }
@@ -59967,14 +59982,14 @@ function _impLerCambio(L){
 function _impLerFreteMar(L){
   const N=_impSemAcento(L.join('\n')); const r={};
   const inv=N.match(/INVOICE\s*N\S{0,3}\s*:?\s*([A-Z]{2,5}-?INV\d{6,})/i); if(inv) r.invoice=inv[1].toUpperCase();
-  r.emissao=_impDataBR(_impAcha(/Data de Emiss.o\s*:\s*(\d{1,2}\/[A-Za-z]{3}\/\d{4})/i,N)||'');
-  r.venc=_impDataBR(_impAcha(/Vencimento\s*:\s*(\d{1,2}\/[A-Za-z]{3}\/\d{4})/i,N)||'');
+  r.emissao=_impDataBR(_impAcha(/Data de Emiss.o\s*:\s*(\d{1,2}\/[A-Za-z0-9]{3}\/\d{4})/i,N)||'');
+  r.venc=_impDataBR(_impAcha(/Vencimento\s*:\s*(\d{1,2}\/[A-Za-z0-9]{3}\/\d{4})/i,N)||'');
   r.cnpj=_impAcha(/CNPJ\s*(07\.010\.092\/0001-30)/,N);
   const tot=N.match(/Total da Fatura\s*:\s*BRL\s*([\d.]+,\d{2})/i)||N.match(/\n\s*\S{0,3}\s*Total\s+([\d.]+,\d{2})\s*\n/i); if(tot) r.total=_impNum(tot[1]);
   const linhas=L.map(_impSemAcento);
   for(const l of linhas){
     let m;
-    if(/^\s*International Freight/i.test(l)&&(m=l.match(/International Freight\s+[\d.,]+\s+[\d.,]+\s+([\d.]+,\d{2})\s+USD\s+([\d.,\/]+)\s+([\d.]+,\d{2})/i))){ r.fretUsd=_impNum(m[1]); r.fretTaxa=_impNum(String(m[2]).replace('/',',')); r.fretBrl=_impNum(m[3]); }
+    if(/^\s*International Freight/i.test(l)&&(m=l.match(/International Freight\s+[\d.,]+\s+[\d.,]+\s+([\d.]+,\d{2})\s+[A-Za-z]{3,4}\s+([\d.,\/]+)\s+([\d.]+,\d{2})/i))){ r.fretUsd=_impNum(m[1]); r.fretTaxa=_impNum(String(m[2]).replace('/',',')); r.fretBrl=_impNum(m[3]); }
     else if(/^\s*Desconsolida/i.test(l)&&(m=l.match(/([\d.]+,\d{2})\s*$/))) r.descons=_impNum(m[1]);
     else if(/^\s*[IL1l|][.\s]?[S58B§$][.\s]?[S58B§$]\.?\s+5,00\s/i.test(l)&&(m=l.match(/([\d.]+,\d{2})\s+BRL/i))) r.iss=_impNum(m[1]);
   }
@@ -60027,7 +60042,7 @@ function _impLerCte(L){
   const n=N.match(/\b57\s+\d{3}\s+(\d{3}\.\d{3}\.\d{3})\b/); if(n) r.numero=String(parseInt(n[1].replace(/\./g,''),10));
   r.emissao=_impDataBR(_impAcha(/(\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}:\d{2}/,N)||'');
   const v=N.match(/VALOR A RECEBER\s*\n?\s*([\d.]+,\d{2})/i)||N.match(/VALOR TOTAL DO SERVICO[\s\S]{0,200}?\n\s*([\d.]+,\d{2})\s*\n/i); if(v) r.valor=_impNum(v[1]);
-  r.nfe=_impAcha(/NF-e\s+0*(\d{3,9})\b/,N);
+  r.nfe=_impAcha(/NF-e\s+0*(\d{3,9})\b/,N)||_impAcha(/Notas fiscais\s*:\s*0*(\d{3,9})/i,N);
   r.di=_impAcha(/DUIMP N\s*:\s*(\d{2}BR\d{10}-?\d)/i,N);
   r.emitente=(_impAcha(/^\s*(DOMINIO EXPRESS LOGISTICA E TRANSPORTE LTDA)/mi,N)||'').trim();
   r.chave=(N.match(/(\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4}\s\d{4})/)||[])[1]||null;
@@ -60036,9 +60051,9 @@ function _impLerCte(L){
 }
 function _impLerFaturaRodov(L){
   const Ln=L.map(_impSemAcento); const N=Ln.join('\n'); const r={itens:[]};
-  const h=N.match(/(\d{3,5}(?:\s*-\s*\d{3,5})*)\s+R\s*\$\s*([\d.]+,\d{2})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{1,2}[-\/ ][A-Za-z]{3}[-\/ ]\d{2,4})/);
+  const h=N.match(/(\d{3,5}(?:\s*-\s*\d{2,5})*)\s+R\s*\$\s*([\d.]+,\d{2})\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{1,2}[-\/ ][A-Za-z]{3}[-\/ ]\d{2,4})/);
   if(h){ r.ref=h[1].replace(/\s/g,''); r.total=_impNum(h[2]); r.emissao=h[3]; r.venc=_impDataBR(h[4]); }
-  const RX=/^\s*([A-Za-z][^\d]*?)\s+R\s*\$\s*([\d.]+,\d{2})\s+R\s*\$\s*([\d.]+,\d{2})\s*$/;
+  const RX=/^\s*([A-Za-z].*?)\s+R\s*\$\s*([\d.]+,\d{2})\s+R\s*\$\s*([\d.]+,\d{2})\s*$/;
   Ln.forEach((l,i)=>{ const m=l.match(RX); if(m&&!/^T\s?O\s?T\s?A\s?L/i.test(m[1])){ const mo=String(L[i]||'').match(RX); r.itens.push({desc:(mo?mo[1]:m[1]).trim(),valor:_impNum(m[3])}); } });
   const t=N.match(/T\s?O\s?T\s?A\s?L\s+R\s*\$\s*([\d.]+,\d{2})\s+R\s*\$\s*([\d.]+,\d{2})/i); if(t) r.totalLinha=_impNum(t[2]);
   r.di=_impAcha(/DI\s*N\W*\s*:?\s*(\d{2}BR\d{10,12}-?\d)/i,N);
@@ -60046,7 +60061,7 @@ function _impLerFaturaRodov(L){
 }
 function _impLerBoleto(L){
   const N=_impSemAcento(L.join('\n')); const r={};
-  const cont={}; const re=/R\s*\$\s*([\d.]+,\d{2})/g; let m; while((m=re.exec(N))){ const v=_impNum(m[1]); if(v>0) cont[v]=(cont[v]||0)+1; }
+  const cont={}; const re=/R\s*[$S5]\s*([\d.]+,\d{2})/g; let m; while((m=re.exec(N))){ const v=_impNum(m[1]); if(v>0) cont[v]=(cont[v]||0)+1; }
   let best=null,bn=0; Object.keys(cont).forEach(k=>{ if(cont[k]>bn){ bn=cont[k]; best=parseFloat(k); } });
   if(best!=null) r.valor=best;
   r.venc=_impDataBR(_impAcha(/Vencimento\s*\n?[\s\S]{0,140}?(\d{2}\/\d{2}\/\d{4})/i,N)||_impAcha(/(\d{2}\/\d{2}\/\d{4})\s*\n\s*Benefici/i,N)||'');
@@ -60445,6 +60460,12 @@ function _impRascunhoSalvarAgora(){
   }catch(e){ console.warn('Rascunho da importação:',e); }
 }
 function _impRascunhoLimpar(){ try{ S.s(_impRascunhoKey(),null); }catch(e){} }
+// Pedido do usuário (19/10/2026): o rascunho aparece na LISTA de importações, com opção de continuar ou excluir quando quiser
+function _impRascunhoDaLista(){ let d=null; try{ d=S.g(_impRascunhoKey()); }catch(e){} return _impRascunhoTemConteudo(d)?d:null; }
+function _impRascunhoExcluirLista(){
+  if(!confirm('Excluir o rascunho desta importação? O que foi digitado/lido e ainda não foi salvo será perdido.')) return;
+  _impRascunhoLimpar(); renderImportacoesLista(); toast('Rascunho excluído','ok');
+}
 let _impRascunhoTimer=null;
 function _impRascunhoAgendar(){ clearTimeout(_impRascunhoTimer); _impRascunhoTimer=setTimeout(_impRascunhoSalvarAgora,600); }
 document.addEventListener('input',e=>{ if(window._formImportacaoMode==='novo'&&e.target.closest&&e.target.closest('#importacaoConteudo')) _impRascunhoAgendar(); },true);
@@ -60452,6 +60473,10 @@ document.addEventListener('change',e=>{ if(window._formImportacaoMode==='novo'&&
 window.addEventListener('pagehide',()=>{ if(window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); });
 document.addEventListener('visibilitychange',()=>{ if(document.visibilityState==='hidden'&&window._formImportacaoMode==='novo') _impRascunhoSalvarAgora(); });
 function _impRascunhoRestaurar(){
+  try{ return _impRascunhoRestaurarInterno(); }
+  catch(e){ console.error('Rascunho da importação com problema — descartado:',e); _impRascunhoLimpar(); try{ toast('O rascunho estava com problema e foi descartado. Recomece a importação.','warn'); }catch(_){} return false; }
+}
+function _impRascunhoRestaurarInterno(){
   let d=null; try{ d=S.g(_impRascunhoKey()); }catch(e){}
   if(!_impRascunhoTemConteudo(d)) return false;
   Object.entries(d.campos||{}).forEach(([id,v])=>{ const e=document.getElementById(id); if(e) e.value=v; });
@@ -61234,7 +61259,8 @@ function renderImportacoesLista(){
     </div>
   `;
 
-  if(dados.length===0){
+  const rasc=_impRascunhoDaLista();
+  if(dados.length===0&&!rasc){
     html+=`<div style="text-align:center;color:var(--gray);padding:40px 20px;background:white;border-radius:8px"><p>Nenhuma importação criada. Clique em "Nova Importação" para adicionar uma.</p></div>`;
   } else {
     html+=`
@@ -61254,6 +61280,25 @@ function renderImportacoesLista(){
           </thead>
           <tbody>
     `;
+
+    if(rasc){
+      const c=rasc.campos||{}; const quando=new Date(rasc.ts).toLocaleString('pt-BR');
+      html+=`
+        <tr class="imp-linha" style="border-bottom:2px solid var(--teal);background:rgba(20,184,166,.10)">
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formPI||'(sem PI)')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formFornecedor||'—')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formNF||'-')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formDataNF||'-')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formDI||'-')}</td>
+          <td style="padding:12px 16px;cursor:pointer" onclick="novaImportacao()">${esc(c.formInvoice||'-')}</td>
+          <td style="padding:12px 16px;font-size:12px"><b>📝 Rascunho</b><div style="color:var(--slate);font-size:11px">não salvo · ${esc(quando)}</div></td>
+          <td style="padding:12px 16px;text-align:center;white-space:nowrap">
+            <button class="btn bp bsm" onclick="event.stopPropagation();novaImportacao()" title="Continuar de onde parou" style="padding:4px 10px">▶ Continuar</button>
+            <button class="icon-btn" onclick="event.stopPropagation();_impRascunhoExcluirLista()" title="Excluir rascunho" style="padding:4px 8px;background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem">🗑️</button>
+          </td>
+        </tr>
+      `;
+    }
 
     dados.forEach((item,idx)=>{
       const statusOpts={
