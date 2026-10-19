@@ -38520,6 +38520,7 @@ async function renderLancctbFluxoCaixa(){
   if(error&&_lancctbFluxoPagina>0&&/range not satisfiable|PGRST103/i.test((error.message||'')+' '+(error.code||''))){ _lancctbFluxoPagina=0; setTimeout(renderLancctbFluxoCaixa,0); return; }
   if(error){ el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar fluxo de caixa: ${esc(error.message)}</div>`; return; }
   _lancctbUltimoFluxo=linhas||[];
+  window.__lancctbFluxoCount=count||0;
   const somaFiltrada=Math.round((_lancctbUltimoFluxo).reduce((a,l)=>a+Number(l.valor_saida||0)+Number(l.valor_entrada||0),0)*100)/100;
 
   const totalPaginas=Math.max(1,Math.ceil((count||0)/LANCCTB_PAGE_SIZE));
@@ -38862,19 +38863,52 @@ async function desassociarLancctbFluxoEmLote(){
   _lancctbFluxoSelecionados.clear();
   renderLancctbFluxoCaixa();
 }
-function exportarLancctbFluxoExcel(){
-  if(!_lancctbUltimoFluxo.length){ toast('Nada para exportar nesta página.','err'); return; }
-  const header=['Data','Descrição','Cliente/Fornecedor','CPF/CNPJ','Valor','Juros','Desconto/Abatimento','Multa','Valor líquido','Status'];
-  const rows=_lancctbUltimoFluxo.map(l=>[
-    l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):'',
-    l.descricao||'', l.cliente_fornecedor_nome||'', _fmtCnpjCpf(l.cnpj_cpf),
-    l.valor_saida>0?Math.round(((Number(l.valor_saida)||0)-(Number(l.valor_juros)||0)-(Number(l.valor_multa)||0)+(Number(l.valor_desconto)||0))*100)/100:(l.valor_entrada||0), Number(l.valor_juros)||0, Number(l.valor_desconto)||0, Number(l.valor_multa)||0, l.valor_saida||l.valor_entrada||0, l.status_associado||''
-  ]);
-  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
-  const wb=XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'Fluxo de Caixa');
-  const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
-  XLSX.writeFile(wb,`Fluxo_Caixa_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+// "Gerar Excel" do Fluxo de Caixa (pedido do usuário 19/10/2026: "preciso gerar todas as páginas em um único Excel"): percorre TODAS as páginas do filtro atual
+// (mesma consulta da tela), junta numa planilha só e traz as mesmas colunas da tela. A tela volta à página em que estava.
+let _lancctbExcelFluxoRodando=false;
+async function exportarLancctbFluxoExcel(){
+  if(_lancctbExcelFluxoRodando){ toast('A geração do Excel já está em andamento.','info'); return; }
+  _lancctbExcelFluxoRodando=true;
+  const paginaOrig=_lancctbFluxoPagina;
+  try{
+    const totalReg=window.__lancctbFluxoCount||(_lancctbUltimoFluxo||[]).length;
+    const totalPag=Math.max(1,Math.ceil(totalReg/LANCCTB_PAGE_SIZE));
+    const todas=[], vistos=new Set();
+    for(let k=0;k<totalPag;k++){
+      toast(`Gerando Excel… página ${k+1} de ${totalPag}`,'info');
+      _lancctbFluxoPagina=k;
+      await renderLancctbFluxoCaixa();
+      (_lancctbUltimoFluxo||[]).forEach(l=>{ if(l&&l.id!=null&&!vistos.has(l.id)){ vistos.add(l.id); todas.push(l); } });
+    }
+    if(!todas.length){ toast('Nada para exportar com esse filtro.','err'); return; }
+    const ags=Object.fromEntries((_lancctbUltimasAgencias||[]).map(a=>[a.id,a]));
+    const header=['Data','Descrição','Cliente/Fornecedor','CPF/CNPJ','Número','Parcela','Unidade/Filial','Banco','Descrição da conta','Conta','Valor','Juros','Desconto/Abatimento','Multa','Valor líquido','Status'];
+    const rows=todas.map(l=>{
+      const a=l.conta_bancaria_id?ags[l.conta_bancaria_id]:null;
+      const conta=l.conta_bancaria_id?(a?`${_lancctbNomeBancoExibicao(a.banco_nome)} Ag ${a.agencia} Cc ${a.conta_corrente}`:'—'):'Qualquer conta';
+      return [
+        l.data?new Date(l.data+'T00:00:00').toLocaleDateString('pt-BR'):'',
+        l.descricao||'', l.cliente_fornecedor_nome||'', _fmtCnpjCpf(l.cnpj_cpf),
+        l.documento_numero||'', l.parcela||'', l.unidade||'', l.port_nom||'', l.descricao_conta_origem||'', conta,
+        l.valor_saida>0?Math.round(((Number(l.valor_saida)||0)-(Number(l.valor_juros)||0)-(Number(l.valor_multa)||0)+(Number(l.valor_desconto)||0))*100)/100:(l.valor_entrada||0),
+        Number(l.valor_juros)||0, Number(l.valor_desconto)||0, Number(l.valor_multa)||0, l.valor_saida||l.valor_entrada||0, l.status_associado||''
+      ];
+    });
+    const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+    const wb=XLSX.utils.book_new();
+    const ws=XLSX.utils.aoa_to_sheet([header,...rows]);
+    ws['!cols']=[11,44,34,18,14,8,12,12,30,28,13,10,13,10,13,14].map(w=>({wch:w}));
+    XLSX.utils.book_append_sheet(wb,ws,'Fluxo de Caixa');
+    const nomeEmp=(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+    XLSX.writeFile(wb,`Fluxo_Caixa_${nomeEmp}_${new Date().toISOString().split('T')[0]}.xlsx`);
+    toast(`Excel gerado: ${rows.length} lançamento(s) de ${totalPag} página(s).`+(rows.length<totalReg?` (a tela mostrava ${totalReg}; confira se algo mudou durante a geração)`:''),'ok');
+  } catch(e){
+    console.error('Excel do Fluxo de Caixa:',e); toast('Erro ao gerar o Excel: '+(e.message||e),'err');
+  } finally {
+    _lancctbFluxoPagina=paginaOrig;
+    _lancctbExcelFluxoRodando=false;
+    try{ await renderLancctbFluxoCaixa(); }catch(e){}
+  }
 }
 
 // ─── Upload/mapeamento de colunas (reaproveita o modal genérico mLancctbUpload) ─
