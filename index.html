@@ -4614,7 +4614,7 @@ const S = {
     }
     return S.s('emps',a);
   },
-  chk:(eid)=>S.g('chk_'+eid)||{documentos:[],tarefas:[],observacoes:''},
+  chk:(eid)=>_chkComTarefasAuto(String(eid),S.g('chk_'+eid)||{documentos:[],tarefas:[],observacoes:''}),
   saveChk:(eid,o)=>S.s('chk_'+eid,o),
   listagem:()=>S.g('listagem')||[],
   saveListagem:(a)=>S.s('listagem',a),
@@ -7638,8 +7638,41 @@ function _mesAnualItem(item){
   if(!mt) return null;
   return _MESES_PT_NUM[mt[1].toLowerCase()]||null;
 }
-function foraDoTrimestre(item,m){
+// ── Tarefa automática do Lucro Presumido (pedido do usuário 19/10/2026) ───────────────────────────────────────────────
+// "Salvar Demonstrativo Trimestral da CSLL e do IRPJ (DOMINIO Fiscal)" nasce sozinha no checklist de TODA empresa que é (ou já foi) Lucro Presumido
+// e só é COBRADA nos trimestres em que a empresa foi Presumido em algum mês (Tributação por mês = tribMes, senão o regime atual):
+//  · virou Presumido no meio do ano → passa a cobrar a partir do trimestre da mudança;
+//  · deixou de ser Presumido → para de cobrar nos trimestres seguintes (os anteriores continuam valendo).
+// Por ter "Trimestral" no nome, já só pesa nos meses 03/06/09/12.
+const TAREFA_DEMO_TRIM_NOME='Salvar Demonstrativo Trimestral da CSLL e do IRPJ (DOMINIO Fiscal)';
+function _ehTarefaDemoTrim(item){ return String((item&&item.nome)||'').toLowerCase().replace(/\s+/g,' ').indexOf('demonstrativo trimestral da csll')>=0; }
+function _empRegimeNoMes(e,ym){ return (e&&e.tribMes&&e.tribMes[ym])||(e&&e.reg)||''; }
+function _empPresumidoNoTrimestre(eid,m){
+  let e=null; try{ e=S.empsRaw().find(x=>String(x.eid)===String(eid)); }catch(_){}
+  if(!e) return true; // sem dado da empresa: não esconde a cobrança
+  const ano=m.substring(0,4), mm=parseInt(m.substring(5,7),10), ini=Math.floor((mm-1)/3)*3+1;
+  for(let k=ini;k<ini+3;k++){ if(/presumido/i.test(_empRegimeNoMes(e,ano+'-'+String(k).padStart(2,'0')))) return true; }
+  return false;
+}
+function _empJaFoiPresumido(e){
+  if(!e) return false;
+  if(/presumido/i.test(e.reg||'')) return true;
+  return Object.keys(e.tribMes||{}).some(k=>/presumido/i.test(e.tribMes[k]||''));
+}
+function _chkComTarefasAuto(eid,c){
+  try{
+    if(!c) return c;
+    if(!Array.isArray(c.tarefas)) c.tarefas=[];
+    if(!c.tarefas.some(_ehTarefaDemoTrim)){
+      const e=S.empsRaw().find(x=>String(x.eid)===String(eid));
+      if(_empJaFoiPresumido(e)) c.tarefas.push({nome:TAREFA_DEMO_TRIM_NOME,info:'',meses:{},formato:''});
+    }
+  }catch(_){}
+  return c;
+}
+function foraDoTrimestre(item,m,eid){
   const mm=m.substring(5,7);
+  if(eid!==undefined&&eid!==null&&_ehTarefaDemoTrim(item)&&!_empPresumidoNoTrimestre(eid,m)) return true;
   if(isTrimestralItem(item) && !MESES_TRIMESTRE.includes(mm)) return true;
   if(isSoDezembroItem(item) && mm!=='12') return true;
   const ma=_mesAnualItem(item);
@@ -7687,7 +7720,7 @@ function _itemAutoValor(item, eid, mes){
 }
 function calcStatusMes(chk, mes, eid){
   if(!chk) return 'vazio';
-  const todos = [...(chk.documentos||[]),...(chk.tarefas||[])].filter(item=>!foraDoTrimestre(item,mes));
+  const todos = [...(chk.documentos||[]),...(chk.tarefas||[])].filter(item=>!foraDoTrimestre(item,mes,eid));
   if(!todos.length) return 'vazio';
   let temAlgum=false, algumVazio=false;
   todos.forEach(item=>{
@@ -7835,7 +7868,7 @@ function enviarEmailPendencias(eid){
   todosItens.forEach(item=>{
     if(!item.nome)return;
     const mesesPendentes=mesesRelevantes.filter(m=>{
-      if(foraDoTrimestre(item,m)) return false;
+      if(foraDoTrimestre(item,m,eid)) return false;
       if(_emailSoMesEntrada(item)&&m!==mesEntradaEmp) return false;
       const v=(item.meses||{})[m]||'';
       return v!=='ok'&&v!=='na'&&v!=='sm';
@@ -7976,7 +8009,7 @@ function renderEmpresaChecklist(eid){
       const cur=m===fech;
       if(mesForaPeriodo(m)){ h+=`<th class="mes${cur?' cur':''}"></th>`; return; }
       // compute status for just this set of items
-      const allItems = items.filter(item=>!(isSoMesEntrada(item) && m!==mesEntrada) && !foraDoTrimestre(item,m));
+      const allItems = items.filter(item=>!(isSoMesEntrada(item) && m!==mesEntrada) && !foraDoTrimestre(item,m,eid));
       if(!allItems.length){ h+=`<th class="mes${cur?' cur':''}"></th>`; return; }
       let vazio=false, algumMarcado=false;
       allItems.forEach(item=>{ const v=isItemGanhosAuto(item)?valorAutoGanhos(m):(isItemLucrosAuto(item)?_lucrosAutoValorPorEid(eid,m):(isItemParcelamentosAuto(item)?valorAutoParcelamentos(m):(isItemLancctbAuto(item)?valorAutoLancctb(m):((item.meses||{})[m]||'')))); if(v==='ok'||v==='na'||v==='sm') algumMarcado=true; else vazio=true; });
@@ -8017,7 +8050,7 @@ function renderEmpresaChecklist(eid){
           cells+=`<td class="mes${cur?' cur':''}"><div class="cell na" style="cursor:default;opacity:.45" title="Cobrado apenas no mês de entrada da empresa">—</div></td>`;
           return;
         }
-        if(foraDoTrimestre(item,m)){
+        if(foraDoTrimestre(item,m,eid)){
           cells+=`<td class="mes${cur?' cur':''}"><div class="cell na" style="cursor:default;opacity:.45" title="Não se aplica a este mês (item trimestral ou só de dezembro)">—</div></td>`;
           return;
         }
@@ -62276,7 +62309,7 @@ const _cronOk=v=>v==='ok'||v==='na'||v==='sm';
 function _cronValItem(e,item,m){ const auto=_itemAutoValor(item,e.eid,m); return auto!==null?auto:((item.meses||{})[m]||''); }
 function _cronMesForaPeriodo(e,m){ if(e.entrada&&e.entrada.substring(0,7)>m) return true; const sd=(e.fechamentoStatus&&e.fechamentoStatus.tipo&&e.fechamentoStatus.tipo!=='ativo'&&e.fechamentoStatus.desde)||e.dataSaida; if(sd&&sd.substring(0,7)<=m) return true; return false; }
 function _cronTarefas(e,comp,grupo){
-  const lista=(S.chk(String(e.eid)).tarefas||[]).filter(t=>!foraDoTrimestre(t,comp)&&!(grupo==='Simples Nacional'&&(t.nome||'')==='Preencher Ganhos/Rendimentos'));
+  const lista=(S.chk(String(e.eid)).tarefas||[]).filter(t=>!foraDoTrimestre(t,comp,e.eid)&&!(grupo==='Simples Nacional'&&(t.nome||'')==='Preencher Ganhos/Rendimentos'));
   if(!lista.length) return {aplica:false,total:0,pend:[]};
   return {aplica:true,total:lista.length,pend:lista.filter(t=>!_cronOk(_cronValItem(e,t,comp))).map(t=>t.nome||'(sem nome)')};
 }
@@ -62286,7 +62319,7 @@ function _cronDocs(e,comp){
   const ano=comp.slice(0,4), meses=[]; for(let m=1;m<=+comp.slice(5);m++) meses.push(ano+'-'+_cronP2(m));
   const pend=[];
   // Documento encerrado ("FIM" no checklist, item.fimAPartir) não é cobrado do mês de encerramento em diante
-  docs.forEach(d=>{ const f=meses.filter(m=>!(d.fimAPartir&&m>=d.fimAPartir)&&!_cronMesForaPeriodo(e,m)&&!foraDoTrimestre(d,m)&&!_cronOk(_cronValItem(e,d,m))); if(f.length) pend.push({nome:d.nome||'(sem nome)',info:d.info||'',meses:f}); });
+  docs.forEach(d=>{ const f=meses.filter(m=>!(d.fimAPartir&&m>=d.fimAPartir)&&!_cronMesForaPeriodo(e,m)&&!foraDoTrimestre(d,m,e.eid)&&!_cronOk(_cronValItem(e,d,m))); if(f.length) pend.push({nome:d.nome||'(sem nome)',info:d.info||'',meses:f}); });
   return {aplica:true,total:docs.length,pend};
 }
 const _cronMesAA=m=>m.slice(5,7)+'/'+m.slice(2,4);
@@ -62438,7 +62471,7 @@ function _cronAtribTarefaDetalheHtml(nome){
     meses12.forEach(m=>{
       const cur=m===fech;
       if(_cronMesForaPeriodo(l.emp,m)){ h+=`<td class="pmes${cur?' pcur':''}"></td>`; return; }
-      if(foraDoTrimestre(l.item,m)){ h+=`<td class="pmes${cur?' pcur':''}" style="text-align:center;color:var(--slate)" title="Não se aplica a este mês">—</td>`; return; }
+      if(foraDoTrimestre(l.item,m,l.eid)){ h+=`<td class="pmes${cur?' pcur':''}" style="text-align:center;color:var(--slate)" title="Não se aplica a este mês">—</td>`; return; }
       const auto=_itemAutoValor(l.item,l.eid,m);
       const v=auto!==null?auto:((l.item.meses||{})[m]||'');
       if(auto!==null){
