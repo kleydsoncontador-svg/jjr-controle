@@ -75,9 +75,10 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { id: 'SP_DEC_46655_2002', calcs: ['itcmd'], uf: 'SP', norma: 'Decreto Estadual (SP)', numero: '46.655/2002', artigo: 'art. 12, § 3º (doações sucessivas somadas no ano civil)', assunto: 'Regulamento do ITCMD paulista', vig_ini: '2002-04-01', vig_fim: null, fonte: 'https://legislacao.fazenda.sp.gov.br', ultima_verificacao: '2026-10-20 (Resposta à Consulta 33778/2026 da SEFAZ-SP)', obs: 'Também: a doação isenta continua com obrigação de declarar (Portaria CAT 15/2003, arts. 12-A e 18). A resposta oficial NÃO diz se, ultrapassado o limite, o imposto incide só sobre a doação atual ou sobre o acumulado; fonte secundária diz que incide sobre o total — conferir.' },
     { id: 'SP_UFESP_2026', calcs: ['itcmd'], uf: 'SP', norma: 'Comunicado DICAR nº 88, de 17/12/2025 (DOE 18/12/2025)', numero: '88/2025', artigo: '—', assunto: 'UFESP de 1º/1 a 31/12/2026 = R$ 38,42 (limite de isenção de doação: 2.500 UFESPs = R$ 96.050,00)', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://legislacao.fazenda.sp.gov.br/Paginas/Comunicado-DICAR-88-de-2025.aspx', ultima_verificacao: '2026-10-20 (site oficial da Fazenda de SP)', obs: 'Valor lido no próprio comunicado da Secretaria da Fazenda de SP.' },
     { id: 'LEI_8981_1995', calcs: ['mutuo'], norma: 'Lei', numero: '8.981/1995', artigo: '(a conferir)', assunto: 'Retenção na fonte sobre rendimentos (tabela regressiva por prazo)', vig_ini: '1995-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR + ' — o conjunto regressivo 22,5/20/17,5/15% foi informado sem citar o artigo.' },
-    { id: 'IOF_CREDITO', calcs: ['mutuo'], norma: 'Decreto do IOF (operações de crédito)', numero: '(a cadastrar)', artigo: '—', assunto: 'Alíquota diária, adicional e limite de dias do IOF-crédito — NÃO cadastrados', vig_ini: null, vig_fim: null, fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: null, obs: 'Sem valores cadastrados: o IOF do mútuo só calcula depois que você cadastrar o conjunto de parâmetros (Bases Legais → Cadastrar parâmetros).' },
+    { id: 'IOF_CREDITO', calcs: ['mutuo'], norma: 'Decreto 6.306/2007 (Regulamento do IOF), art. 7º, I, "b", VI, §§ 1º, 15, com a redação do Decreto 12.499/2025', numero: '6.306/2007; 12.499/2025 (11/6/2025)', artigo: 'art. 7º, I "b" (principal definido: 0,0082% ao dia para PJ e PF); VI (Simples/MEI, operação até R$ 30.000: 0,00274% ao dia); § 1º (limite de 365 dias); § 15 (adicional de 0,38%, qualquer prazo)', assunto: 'IOF-crédito: alíquota diária × principal × dias (máximo 365) + adicional de 0,38% sobre o principal', vig_ini: '2025-06-11', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2007-2010/2007/decreto/d6306.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto / página da Receita Federal)', obs: 'Texto consolidado lido no Planalto. SITUAÇÃO JURÍDICA: o Decreto Legislativo 176/2025 sustou os decretos 12.466 e 12.499; o STF, em medida CAUTELAR na ADC 96 (16/7/2025), restabeleceu a eficácia do Decreto 12.499 retroativamente a 11/6/2025 (exceto risco sacado/forfait) — fonte secundária para o conteúdo da decisão; nenhum decreto de 2026 alterando as alíquotas foi localizado. Pode mudar com o julgamento de mérito.' },
+    { id: 'LEI_9779_13', calcs: ['mutuo'], norma: 'Lei', numero: '9.779/1999', artigo: 'art. 13, caput e §§ 1º a 3º', assunto: 'Mútuo entre pessoas jurídicas ou entre pessoa jurídica e pessoa física sujeita-se ao IOF como as operações de instituições financeiras; fato gerador na concessão do crédito; responsável pela cobrança e recolhimento é a PESSOA JURÍDICA que concede o crédito; recolhimento até o 3º dia útil da semana seguinte', vig_ini: '1999-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9779.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto / página da Receita Federal)', obs: 'Texto lido no Planalto. O caput fala em mútuo "entre pessoa jurídica e pessoa física" (nos dois sentidos), mas o § 2º só nomeia como responsável a PJ que concede o crédito — por isso mútuo concedido por PF a PJ fica SEM IOF automático nesta calculadora (conforme a regra informada pelo usuário); a leitura literal do caput é ambígua.' },
     { id: 'CLT_RESCISAO', calcs: ['ferias', 'decimo_terceiro', 'rescisao'], norma: 'CLT e legislação complementar', numero: 'Decreto-Lei 5.452/1943; Lei 4.090/1962 (13º); Lei 8.036/1990 (FGTS); Lei 12.506/2011 (aviso prévio)', artigo: '(a conferir por rubrica)', assunto: 'Verbas rescisórias, férias, 13º, aviso prévio proporcional, FGTS e multa', vig_ini: null, vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Matriz de incidência da rescisão cadastrada como versão inicial — conferir cada rubrica antes de usar.' },
-    { id: 'PLR_TABELA', calcs: ['plr'], norma: 'Tabela de tributação exclusiva da PLR', numero: '(a cadastrar)', artigo: '—', assunto: 'Tabela da PLR — NÃO cadastrada', vig_ini: null, vig_fim: null, fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: null, obs: 'Sem a tabela cadastrada para a competência, a PLR não calcula.' },
+    { id: 'PLR_TABELA', calcs: ['plr'], norma: 'Lei 10.101/2000, art. 3º, §§ 5º a 11 e Anexo — tabela anual reajustada; valores publicados pela Receita Federal', numero: '10.101/2000 (redação da Lei 12.832/2013)', artigo: 'art. 3º, § 5º (tributação exclusiva na fonte, em separado, no ano do recebimento, pela tabela anual do Anexo); § 7º (mais de uma parcela: recalcula pelo total do ano e deduz o já retido); § 8º e 9º (pagamento acumulado de mais de um ano); § 10 (pensão alimentícia judicial dedutível da base); § 11 (tabela reajustada pelo mesmo percentual da tabela mensal)', assunto: 'PLR: tabela anual — a partir de maio/2025: isento até R$ 8.214,40; 7,5% (R$ 616,08) até 9.922,28; 15% (R$ 1.360,25) até 13.167,00; 22,5% (R$ 2.347,78) até 16.380,38; 27,5% (R$ 3.166,80) acima. De janeiro a abril/2025: isento até 7.640,80, parcelas 573,06 / 1.317,23 / 2.304,76 / 3.123,78', vig_ini: '2025-01-01', vig_fim: null, fonte: 'https://www.gov.br/receitafederal/pt-br/assuntos/meu-imposto-de-renda/tabelas/2026', ultima_verificacao: '2026-10-20 (texto oficial do Planalto / página da Receita Federal)', obs: 'Lei lida no Planalto; valores lidos na página "Tabelas" (2026) da Receita Federal, que ainda traz "a partir de maio de 2025" como a tabela vigente. Anos anteriores a 2025 NÃO estão cadastrados. Os valores seguem a tabela mensal do IRPF: quando ela mudar, cadastre nova versão.' },
   ];
 
   // ───────────────────────────── conjuntos de parâmetros (versionados por vigência) ─────────────────────────────
@@ -187,6 +188,28 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
         aliquota_irpj: P('0.15', 'taxa', 'IRPJ — usado só na economia fiscal estimada (sem o adicional de 10%)'),
         aliquota_csll: P('0.09', 'taxa', 'CSLL — usado só na economia fiscal estimada'),
       },
+    },
+    {
+      id: 'IOF_CREDITO_2025_06', calculator_key: 'iof_credito', valid_from: '2025-06-11', valid_to: null, version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (Decreto 6.306/2007 consolidado no Planalto)',
+      bases: ['IOF_CREDITO', 'LEI_9779_13'],
+      params: {
+        taxa_diaria: P('0.000082', 'taxa/dia', 'Mutuário pessoa jurídica, principal definido: 0,0082% ao dia (art. 7º, I, "b", 1 — redação do Decreto 12.499/2025)'),
+        taxa_diaria_pf: P('0.000082', 'taxa/dia', 'Mutuário pessoa física, principal definido: 0,0082% ao dia (art. 7º, I, "b", 2)'),
+        taxa_diaria_simples: P('0.0000274', 'taxa/dia', 'Mutuário optante pelo Simples Nacional/MEI, operação de até R$ 30.000 (art. 7º, VI): 0,00274% ao dia'),
+        limite_simples: P('30000.00', 'R$', 'Valor máximo da operação para a taxa reduzida do Simples/MEI'),
+        adicional: P('0.0038', 'taxa', 'Alíquota adicional de 0,38% sobre o principal, independentemente do prazo (art. 7º, § 15)'),
+        limite_dias: P(365, 'dias', 'O IOF não excede a alíquota diária × principal × 365 dias, mais o adicional (art. 7º, § 1º)'),
+      },
+    },
+    {
+      id: 'PLR_ATE_ABR_2025', calculator_key: 'plr', valid_from: '2025-01-01', valid_to: '2025-04-30', version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (tabela da Receita Federal)',
+      bases: ['PLR_TABELA'],
+      params: { faixas: P([{ ate: '7640.80', aliq: '0', ded: '0' }, { ate: '9922.28', aliq: '0.075', ded: '573.06' }, { ate: '13167.00', aliq: '0.15', ded: '1317.23' }, { ate: '16380.38', aliq: '0.225', ded: '2304.76' }, { ate: null, aliq: '0.275', ded: '3123.78' }], 'R$ / taxa', 'Tabela anual da PLR — janeiro a abril de 2025') },
+    },
+    {
+      id: 'PLR_2025_05', calculator_key: 'plr', valid_from: '2025-05-01', valid_to: null, version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (tabela da Receita Federal)',
+      bases: ['PLR_TABELA'],
+      params: { faixas: P([{ ate: '8214.40', aliq: '0', ded: '0' }, { ate: '9922.28', aliq: '0.075', ded: '616.08' }, { ate: '13167.00', aliq: '0.15', ded: '1360.25' }, { ate: '16380.38', aliq: '0.225', ded: '2347.78' }, { ate: null, aliq: '0.275', ded: '3166.80' }], 'R$ / taxa', 'Tabela anual da PLR — a partir de maio de 2025 (vigente em 2026 segundo a Receita)') },
     },
     {
       id: 'IRRF_JUROS_REGRESSIVO', calculator_key: 'mutuo_irrf_juros', valid_from: '2005-01-01', valid_to: null, version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (pedido do usuário)',
@@ -577,24 +600,30 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       if (inp.contaCorrente) iofMsg = 'Conta corrente: o IOF depende do saldo devedor diário — não calculado por esta versão.';
       else {
         const sIof = acharSet('iof_credito', ini);
-        if (!sIof) iofMsg = 'IOF: ' + ERRO_PARAM + ' Cadastre o conjunto "iof_credito" em Bases Legais → Cadastrar parâmetros.';
+        if (!sIof) iofMsg = 'IOF: ' + ERRO_PARAM + ' (o IOF só está cadastrado a partir de 11/06/2025; antes dessa data cadastre o conjunto "iof_credito" em Bases Legais).';
         else {
           sets.push(sIof);
-          const modoSimples = inp.mutuarioSimples && pv(sIof, 'taxa_diaria_simples') !== undefined;
-          if (inp.mutuarioSimples && !modoSimples) iofMsg = 'IOF: parâmetros do mutuário Simples não cadastrados no conjunto vigente.';
-          else if (inp.principalDefinido === false) iofMsg = 'IOF com principal NÃO definido (modo prazo): não suportado nesta versão.';
+          if (inp.principalDefinido === false) iofMsg = 'IOF com principal NÃO definido (soma dos saldos devedores diários): não suportado nesta versão.';
           else {
-            const taxa = dec(pv(sIof, modoSimples ? 'taxa_diaria_simples' : 'taxa_diaria')), adic = dec(pv(sIof, 'adicional') || '0'), limDias = parseInt(pv(sIof, 'limite_dias') || 365, 10);
+            const limS = pv(sIof, 'limite_simples') !== undefined ? cents(pv(sIof, 'limite_simples')) : null;
+            const usaSimples = !!inp.mutuarioSimples && mutuario === 'PJ' && pv(sIof, 'taxa_diaria_simples') !== undefined && limS !== null && principal <= limS;
+            const chave = usaSimples ? 'taxa_diaria_simples' : (mutuario === 'PF' && pv(sIof, 'taxa_diaria_pf') !== undefined ? 'taxa_diaria_pf' : 'taxa_diaria');
+            const taxa = dec(pv(sIof, chave)), adic = dec(pv(sIof, 'adicional') || '0'), limDias = parseInt(pv(sIof, 'limite_dias') || 365, 10);
             const dt = Math.min(dias, limDias);
             mem.t('IOF (conjunto ' + sIof.id + ' v' + sIof.version + ')');
+            mem.txt('Alíquota diária aplicada', (Number(pv(sIof, chave)) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 5 }) + '% ao dia' + (usaSimples ? ' (Simples/MEI, operação até ' + brl(limS) + ')' : (mutuario === 'PF' ? ' (mutuário pessoa física)' : ' (mutuário pessoa jurídica)')));
+            if (inp.mutuarioSimples && !usaSimples) mem.n('Taxa reduzida do Simples não aplicada: ' + (mutuario !== 'PJ' ? 'mutuário não é PJ.' : 'a operação passa de ' + brl(limS || 0) + '.'));
             const diario = qRound(qMul(mulQ(principal, taxa), Q(dt)));
-            mem.l('Principal × taxa diária × ' + dt + ' dias tributáveis (limite ' + limDias + ')', diario, '×');
-            const ad = mulC(principal, adic); mem.l('(+) Adicional sobre o principal', ad, '+');
+            mem.l('Principal × alíquota diária × ' + dt + ' dias tributáveis (limite de ' + limDias + ' dias)', diario, '×');
+            const ad = mulC(principal, adic); mem.l('(+) Adicional de ' + (Number(pv(sIof, 'adicional')) * 100).toLocaleString('pt-BR') + '% sobre o principal', ad, '+');
             iofC = diario + ad; mem.tot('IOF', iofC);
+            avisos.push('IOF calculado para pagamento em parcela única com principal definido. Operações com liberação parcelada ou várias parcelas de principal exigem o cálculo por parcela — não feito aqui.');
+            avisos.push('As alíquotas vigentes decorrem do Decreto 12.499/2025, restabelecido por MEDIDA CAUTELAR do STF (ADC 96); o julgamento de mérito pode mudar o quadro.');
+            avisos.push('O IOF é recolhido pela pessoa jurídica que concede o crédito, até o 3º dia útil da semana seguinte à concessão (Lei 9.779/1999, art. 13, § 3º).');
           }
         }
       }
-    } else mem.n('Mutuante PF: não se aplica IOF automaticamente como operação concedida por PJ.');
+    } else { mem.n('Mutuante PF: não há pessoa jurídica concedente para ser responsável pelo IOF (Lei 9.779/1999, art. 13, § 2º) — sem IOF automático.'); avisos.push('Mútuo concedido por pessoa física: o caput do art. 13 da Lei 9.779/1999 cita mútuo "entre pessoa jurídica e pessoa física" sem distinguir o sentido; esta calculadora segue a regra informada (sem IOF automático). Confirme o entendimento da Receita para o seu caso.'); }
     // IRRF sobre os JUROS (nunca sobre o principal) quando o mutuário PJ paga juros
     let irrfC = null;
     if (mutuario === 'PJ' && juros > 0) {
@@ -615,12 +644,12 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
   function calcPLR(inp) {
     const d = data1(inp.competencia); const set = acharSet('plr', d);
     if (!set) return ERR(ERRO_PARAM, { detalhe: 'PLR — tabela de tributação exclusiva não cadastrada para ' + d.slice(0, 7) + '. Cadastre em Bases Legais → Cadastrar parâmetros.' });
-    const mem = Mem(); const total = cents(inp.plrAnterior) + cents(inp.plrAtual); const jaRet = cents(inp.irJaRetido);
-    mem.t('PLR — tributação exclusiva (tabela do conjunto ' + set.id + ' v' + set.version + ')'); mem.l('PLR anterior no ano', cents(inp.plrAnterior), '+'); mem.l('PLR atual', cents(inp.plrAtual), '+'); mem.s('Total no ano', total);
+    const mem = Mem(); const brutoAno = cents(inp.plrAnterior) + cents(inp.plrAtual); const pensPLR = cents(inp.pensaoPLR); const total = max0(brutoAno - pensPLR); const jaRet = cents(inp.irJaRetido);
+    mem.t('PLR — tributação exclusiva (tabela do conjunto ' + set.id + ' v' + set.version + ')'); mem.l('PLR anterior no ano', cents(inp.plrAnterior), '+'); mem.l('PLR atual', cents(inp.plrAtual), '+'); mem.l('(−) Pensão alimentícia judicial correspondente à PLR (art. 3º, § 10)', pensPLR, '−'); mem.s('Base: total da PLR no ano (as parcelas do ano são somadas — § 7º)', total);
     const fx = pv(set, 'faixas').find(f => f.ate === null || total <= cents(f.ate));
     const imp = max0(qRound(qSub(mulQ(total, dec(fx.aliq)), Q(cents(fx.ded)))));
     mem.l('Total × alíquota ' + Number(fx.aliq) * 100 + '% − parcela ' + brl(cents(fx.ded)), imp); mem.l('(−) IR já retido', jaRet, '−'); mem.tot('IR a reter agora', max0(imp - jaRet));
-    return { ok: true, resultado: { ir: max0(imp - jaRet) }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos: [] };
+    return { ok: true, resultado: { ir: max0(imp - jaRet), imposto_ano: imp, base: total }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos: ['Tributação exclusiva na fonte, em separado dos demais rendimentos (Lei 10.101, art. 3º, § 5º): não use o redutor mensal da Lei 15.270, que se aplica a rendimentos sujeitos ao ajuste mensal e ao 13º.', 'PLR paga acumuladamente de mais de um ano-calendário (§§ 8º e 9º) tem tratamento próprio — não calculado aqui.', 'A tabela é a vigente na data do pagamento (a Receita ainda divulga a de maio/2025 como atual); se ela mudar, cadastre nova versão.'] };
   }
 
   // ───────────────────────────── Férias ─────────────────────────────

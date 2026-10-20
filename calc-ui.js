@@ -67,8 +67,8 @@
       { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 }, { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' }, { k: 'outrosDescontos', l: 'Adiantamentos / outros descontos (R$)', t: 'money' },
       { k: 'maisVantajosa', l: 'Usar automaticamente a dedução mais vantajosa no IRRF', t: 'bool', def: true }],
       resumo: r => [['Líquido (sem FGTS)', r.liquido, 1], ['Total das verbas', r.bruto], ['INSS', r.inss], ['IRRF', r.irrf], ['FGTS da rescisão', r.fgts], ['Multa do FGTS', r.multa_fgts]] },
-    plr: { titulo: 'PLR — tributação exclusiva', desc: 'Usa tabela própria da PLR (nunca a do salário). Só calcula se a tabela da competência estiver cadastrada.', campos: [
-      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual }, { k: 'plrAtual', l: 'PLR atual (R$)', t: 'money' }, { k: 'plrAnterior', l: 'PLR já paga no ano (R$)', t: 'money' }, { k: 'irJaRetido', l: 'IR já retido sobre a PLR do ano (R$)', t: 'money' }],
+    plr: { titulo: 'PLR — tributação exclusiva', desc: 'Tributação exclusiva na fonte pela tabela anual própria da PLR (nunca a do salário nem o redutor mensal). Tabelas cadastradas: janeiro/2025 em diante.', campos: [
+      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual }, { k: 'plrAtual', l: 'PLR atual (R$)', t: 'money' }, { k: 'plrAnterior', l: 'PLR já paga no ano (R$)', t: 'money' }, { k: 'irJaRetido', l: 'IR já retido sobre a PLR do ano (R$)', t: 'money' }, { k: 'pensaoPLR', l: 'Pensão alimentícia judicial correspondente à PLR (R$) — dedutível da base', t: 'money' }],
       resumo: r => [['IR a reter agora', r.ir, 1]] },
     pensao: { titulo: 'Pensão alimentícia', desc: 'Percentual sobre a base escolhida, ou valor fixo.', campos: [
       { k: 'modo', l: 'Base da pensão', t: 'select', def: 'bruto', opts: [['bruto', 'Rendimento bruto'], ['bruto_menos_inss', 'Bruto menos INSS'], ['liquido', 'Líquido (bruto − INSS − IRRF − outros)'], ['personalizada', 'Base personalizada (decisão judicial)'], ['fixo', 'Valor fixo']] },
@@ -80,7 +80,7 @@
       { k: 'percentual', l: 'Percentual (%)', t: 'pct', quando: v => v.modo !== 'fixo' },
       { k: 'valorFixo', l: 'Valor fixo (R$)', t: 'money', quando: v => v.modo === 'fixo' }],
       resumo: r => [['Pensão', r.pensao, 1], ['Base', r.base == null ? '—' : r.base]] },
-    mutuo: { titulo: 'Mútuo — IOF, juros e IRRF', desc: 'IOF só calcula com parâmetros cadastrados. IRRF incide sobre os juros (nunca sobre o principal), pela tabela regressiva.', campos: [
+    mutuo: { titulo: 'Mútuo — IOF, juros e IRRF', desc: 'IOF-crédito (principal definido, parcela única) a partir de 11/06/2025: alíquota diária × dias (até 365) + 0,38%. IRRF incide sobre os juros (nunca sobre o principal), pela tabela regressiva.', campos: [
       { k: 'mutuante', l: 'Quem empresta (mutuante)', t: 'select', def: 'PF', opts: [['PF', 'Pessoa física'], ['PJ', 'Pessoa jurídica']] },
       { k: 'mutuario', l: 'Quem recebe (mutuário)', t: 'select', def: 'PJ', opts: [['PF', 'Pessoa física'], ['PJ', 'Pessoa jurídica']] },
       { k: 'mesmoGrupo', l: 'Mesmo grupo econômico', t: 'bool', def: false },

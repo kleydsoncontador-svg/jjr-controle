@@ -82,7 +82,6 @@ t('ITCMD usufruto sem regra cadastrada → não calcula', () => { const x = itd(
 const mu = o => C.calcular('mutuo', Object.assign({ dataLiberacao: '2026-01-10', dataVencimento: '2026-07-10', principal: '100000', mutuante: 'PF', mutuario: 'PJ', valorJuros: '6000' }, o));
 t('Mútuo PF→PJ: IRRF só sobre juros, 181 dias → 20%', () => { const x = mu({}); assert.strictEqual(x.resultado.dias, 181); assert.strictEqual(x.resultado.irrf_juros, c('1200')); });
 t('Mútuo prazo > 720 dias → 15%', () => { const x = mu({ dataVencimento: '2028-06-01' }); assert.strictEqual(x.resultado.irrf_juros, c('900')); });
-t('Mútuo PJ→PJ sem parâmetro de IOF → avisa, não inventa', () => { const x = mu({ mutuante: 'PJ' }); assert.strictEqual(x.resultado.iof, null); assert.ok(x.avisos.some(a => a.includes('IOF'))); });
 t('Mútuo PF→PF → módulo próprio', () => assert.strictEqual(mu({ mutuario: 'PF' }).ok, false));
 t('Mútuo IOF calcula quando o conjunto é cadastrado', () => {
   C.registrarSets([{ id: 'IOF_TESTE', calculator_key: 'iof_credito', valid_from: '2026-01-01', valid_to: null, version: 1, status: 'ativo', params: { taxa_diaria: { value: '0.000082' }, adicional: { value: '0.0038' }, limite_dias: { value: 365 } }, bases: [] }]);
@@ -90,7 +89,6 @@ t('Mútuo IOF calcula quando o conjunto é cadastrado', () => {
   assert.strictEqual(x.resultado.iof, Math.round(10000000 * 0.000082 * 181) + Math.round(10000000 * 0.0038)); });
 
 // ── 10. PLR ──
-t('PLR sem tabela cadastrada → não calcula', () => assert.strictEqual(C.calcular('plr', { competencia: '2026-03', plrAtual: '10000' }).ok, false));
 
 // ── 11. Férias / 13º / Rescisão ──
 t('Férias 30 dias: base + 1/3', () => { const x = C.calcular('ferias', { competencia: '2026-03', remuneracao: '3000', diasFerias: 30 }); assert.strictEqual(x.resultado.ferias, c('3000')); assert.strictEqual(x.resultado.terco, c('1000')); });
@@ -136,6 +134,25 @@ t('LP § 5º, I (4º tri, receita anual abaixo do limite): sem acréscimo no 4º
 t('LP § 5º, II (excedente anual menor que o dos trimestres anteriores): sem acréscimo no 4º', () => { const x = lpX(4, '1000000', ['1500000', '1500000', '1000000']); assert.strictEqual(x.resultado.baseIRPJ, c('80000')); });
 t('LP § 5º, III: excedente do 4º trimestre limitado a (excedente anual − anteriores)', () => { const x = lpX(4, '3000000', ['1000000', '1000000', '1000000']); assert.strictEqual(x.resultado.baseIRPJ, c('248000')); assert.strictEqual(x.resultado.baseCSLL, c('375000')); });
 t('LP 4º trimestre sem os trimestres anteriores informados: avisa e usa só o limite do trimestre', () => { const x = lpX(4, '1500000', undefined); assert.strictEqual(x.resultado.baseIRPJ, c('122000')); });
+
+
+// ── 16. IOF do mútuo (Decreto 6.306 art. 7º com Decreto 12.499/2025) e PLR (tabela da Receita) — valores calculados à mão ──
+const iof = o => C.calcular('mutuo', Object.assign({ dataLiberacao: '2026-01-10', dataVencimento: '2026-07-10', principal: '100000', mutuante: 'PJ', mutuario: 'PJ' }, o));
+t('IOF PJ→PJ: 100.000 × 0,0082% × 181 dias + 0,38% = 1.864,20', () => assert.strictEqual(iof({}).resultado.iof, c('1864.20')));
+t('IOF PJ→PF usa a mesma taxa diária (0,0082%)', () => assert.strictEqual(iof({ mutuario: 'PF' }).resultado.iof, c('1864.20')));
+t('IOF Simples/MEI até R$ 30.000: 0,00274% ao dia → 175,19', () => assert.strictEqual(iof({ principal: '20000', mutuarioSimples: true }).resultado.iof, c('175.19')));
+t('IOF Simples acima de R$ 30.000 cai na taxa de PJ: 745,68', () => assert.strictEqual(iof({ principal: '40000', mutuarioSimples: true }).resultado.iof, c('745.68')));
+t('IOF limita a 365 dias: 100.000 por 729 dias = 3.373,00', () => assert.strictEqual(iof({ dataLiberacao: '2026-01-01', dataVencimento: '2027-12-31' }).resultado.iof, c('3373.00')));
+t('IOF antes de 11/06/2025 não está cadastrado → não calcula e avisa', () => { const x = iof({ dataLiberacao: '2025-01-10', dataVencimento: '2025-05-10' }); assert.strictEqual(x.resultado.iof, null); assert.ok(x.avisos.some(a => a.includes('11/06/2025'))); });
+t('IOF: mútuo de PF para PJ fica sem IOF automático e avisa da ambiguidade', () => { const x = iof({ mutuante: 'PF' }); assert.strictEqual(x.resultado.iof, null); assert.ok(x.avisos.some(a => a.includes('art. 13'))); });
+const plr = (comp, atual, extra) => C.calcular('plr', Object.assign({ competencia: comp, plrAtual: atual }, extra || {}));
+t('PLR 2026: até R$ 8.214,40 é isenta', () => { assert.strictEqual(plr('2026-03', '8000').resultado.ir, 0); assert.strictEqual(plr('2026-03', '8214.40').resultado.ir, 0); });
+t('PLR 2026: 10.000 → 15% − 1.360,25 = 139,75', () => assert.strictEqual(plr('2026-03', '10000').resultado.ir, c('139.75')));
+t('PLR 2026: 20.000 → 27,5% − 3.166,80 = 2.333,20', () => assert.strictEqual(plr('2026-03', '20000').resultado.ir, c('2333.20')));
+t('PLR em duas parcelas: recalcula pelo total e deduz o já retido', () => assert.strictEqual(plr('2026-09', '5000', { plrAnterior: '10000', irJaRetido: '139.75' }).resultado.ir, c('887.47')));
+t('PLR jan–abr/2025 usa a tabela antiga (isento só até 7.640,80)', () => assert.strictEqual(plr('2025-03', '8000').resultado.ir, c('26.94')));
+t('PLR: pensão alimentícia judicial reduz a base (art. 3º, § 10)', () => assert.strictEqual(plr('2026-03', '20000', { pensaoPLR: '5000' }).resultado.ir, c('1027.22')));
+t('PLR 2024: tabela não cadastrada → não calcula', () => assert.strictEqual(plr('2024-06', '10000').ok, false));
 
 // ── 12. Toda calculadora devolve memória, parâmetros e bases ──
 t('memória e bases presentes', () => { const x = C.calcular('salario_liquido', { competencia: '2026-03', salario: '5000' }); assert.ok(x.memoria.length > 5); assert.ok(x.bases.length > 0); assert.ok(x.parametros.length > 0); });
