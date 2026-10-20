@@ -46542,13 +46542,16 @@ function renderGanhoResumoCards(){
       periodKey=mk;
     }
     let colRows='';
+    const _ccColCard=_xpFim?cols.find(_ehColComeCotas):null;
     cols.filter(c=>c.tipo==='num').forEach(c=>{
       let v=c.id==='bruto'?_brutoEfetivo(d,'',isCDBEspecial):(parseFloat(d[c.id])||0);
       if(c.id==='trib'){v=_brutoEfetivo(d,'',isCDBEspecial)-parseFloat(d.iof||0);}
+      // XP: o IRRF do 2º código (3426) é lançado na coluna do Come-Cotas — o IRRF do resumo é a SOMA dos dois (pedido do usuário 20/10/2026)
+      if(c.id==='irrf'&&_ccColCard) v+=parseFloat(d[_ccColCard.id])||0;
       let cor='var(--ink)',sign='';
       if(c.op==='+'){cor='#166534';sign='+ ';}
       else if(c.op==='-'){cor='#dc2626';sign='− ';}
-      const isComeCotas=c.nome.includes('Come-Cotas');
+      const isComeCotas=_ehColComeCotas(c);
       const hlRow=isComeCotas||(isTrim?(c.id==='trib'||c.id==='irrf'):(c.id==='irrf'||c.id==='rendMes'));
       colRows+=`<div style="display:flex;justify-content:space-between;align-items:center;padding:4px ${hlRow?'6':'0'}px;border-bottom:1px solid var(--border);${hlRow?'background:#fef9c3;border-radius:3px;margin:1px 0':''}">
         <span style="font-size:.82rem;${hlRow?'font-weight:700;color:#92400e':'color:var(--slate)'}">${esc(c.nome)}</span>
@@ -46717,7 +46720,7 @@ function enviarTeamsGanhosConsolidado(){
     const ganhos=getGanhos(eid);
     const somaCampoPeriodo=(g,campo)=>{
       const isCDB=_isCDBEspecial(g.nome);
-      const valorCampo=dd=>campo==='bruto'?_brutoEfetivo(dd,'',isCDB):(parseFloat(dd[campo])||0);
+      const valorCampo=dd=>{ let v=campo==='bruto'?_brutoEfetivo(dd,'',isCDB):(parseFloat(dd[campo])||0); if(isXPProduct(g)) v+=campo==='bruto'?_brutoEfetivo(dd,'_r2',isCDB):(parseFloat(dd[campo+'_r2'])||0); return v; };
       let total=0;
       if(empIsTrim){
         const tri=Math.ceil(mes/3);
@@ -46743,9 +46746,10 @@ function enviarTeamsGanhosConsolidado(){
       if(!_isSimpleLayout(g)){
         const codigo=g.codigo||g.codigo1||'';
         if(codigo)linha+=' | Cód.: '+codigo+(g.codigo2?' / '+g.codigo2:'');
-        const irrfVal=somaCampoPeriodo(g,'irrf');
-        const comeCotasCol=(g.cols||[]).find(c=>(c.nome||'').includes('Come-Cotas'));
-        const comeCotas=comeCotasCol?somaCampoPeriodo(g,comeCotasCol.id):0;
+        const comeCotasCol=(g.cols||[]).find(_ehColComeCotas);
+        const ccValor=comeCotasCol?somaCampoPeriodo(g,comeCotasCol.id):0;
+        const irrfVal=somaCampoPeriodo(g,'irrf')+(isXPProduct(g)?ccValor:0); // XP: IRRF do 2º código está na coluna C/C — soma
+        const comeCotas=isXPProduct(g)?0:ccValor;
         const rendaValor=usaRendaTributavel?(somaCampoPeriodo(g,'bruto')-somaCampoPeriodo(g,'iof')):somaCampoPeriodo(g,'rendMes');
         if(!rendaValor)return'';
         linha+=' | Renda R$'+_fmt(rendaValor)+' / IRRF R$'+_fmt(irrfVal)+(comeCotas?' / IRRF Come-Cotas R$'+_fmt(comeCotas):'')+' |';
@@ -46809,15 +46813,16 @@ function exportGanhoEmpresaPDF(eid){
     const cols=isDemaisLayout?COLS_DEMAIS_DEFAULT:(g.cols||[]);
     const isXP=isXPProduct(g);
     const isCDBEspecial=_isCDBEspecial(g.nome);
-    const comeCotasCol=cols.find(c=>(c.nome||'').includes('Come-Cotas'));
+    const comeCotasCol=cols.find(_ehColComeCotas);
     // XP com 2 códigos (ex.: 6800 e 3426): UMA LINHA por código (rendimento tributável + IRRF de cada um) — pedido do usuário 20/10/2026. Sem 2 códigos, XP continua somando os 2 rendimentos numa linha só.
     const doisCods=!isDemaisLayout&&_isXPCods(g);
     const variantes=doisCods?[{sufs:[''],cod:g.codigo1||g.codigo},{sufs:['_r2'],cod:g.codigo2}]:[{sufs:isXP?['','_r2']:[''],cod:g.codigo||g.codigo1||'—'}];
     variantes.forEach(vr=>{
       const somaCampo=campo=>{ let t=0; _mksPdf.forEach(mk2=>{ const dd=(g.dados||{})[mk2]||{}; vr.sufs.forEach(sf=>{ t+=campo==='bruto'?_brutoEfetivo(dd,sf,isCDBEspecial):(parseFloat(dd[campo+sf])||0); }); }); return t; };
       const rendaTributavelValor=(!isDemaisLayout&&usaRendaTributavelPdf)?(somaCampo('bruto')-somaCampo('iof')):somaCampo('rendMes');
-      const irrfValor=somaCampo('irrf');
-      const comeCotasValor=comeCotasCol?somaCampo(comeCotasCol.id):0;
+      const _ccBruto=comeCotasCol?somaCampo(comeCotasCol.id):0;
+      const irrfValor=somaCampo('irrf')+(isXP?_ccBruto:0); // XP: IRRF do 2º código vem na coluna C/C — soma no IRRF
+      const comeCotasValor=isXP?0:_ccBruto;
       const bg=(_idxLinhaPdf++)%2===0?'#fff':'#f8fafc';
       content+=`<tr style="background:${bg}">
       <td style="padding:6px 8px;border-bottom:1px solid #e2e8f0">${esc(g.tipo||'—')}</td>
@@ -46890,9 +46895,11 @@ function exportGanhoEmpresaExcel(eid){
     h+=`<tr><td colspan="2" style="padding:2px;background:#e8eef4"></td></tr>
       <tr class="resumo"><td style="padding:4px 8px">Saldo Anterior</td><td style="padding:4px 14px;text-align:right">${_fmt(saldoAnt)}</td></tr>`;
     cols.filter(c=>c.tipo==='num'&&(c.op||c.id==='trib')).forEach(c=>{
-      const v=c.id==='bruto'?_brutoEfetivo(d,'',isCDBEspecialXl):(c.id==='trib'?_brutoEfetivo(d,'',isCDBEspecialXl)-parseFloat(d.iof||0):(parseFloat(d[c.id])||0));const sign=c.op==='-'?'−':'+';
+      let v=c.id==='bruto'?_brutoEfetivo(d,'',isCDBEspecialXl):(c.id==='trib'?_brutoEfetivo(d,'',isCDBEspecialXl)-parseFloat(d.iof||0):(parseFloat(d[c.id])||0));
+      if(c.id==='irrf'&&isXPProduct(g0)){ const ccx=cols.find(_ehColComeCotas); if(ccx) v+=parseFloat(d[ccx.id])||0; } // XP: soma o IRRF do 2º código (coluna C/C)
+      const sign=c.op==='-'?'−':'+';
       const cor=c.op==='-'?'color:#dc2626':'color:#166534';
-      const isTributavel=c.nome.includes('Renda Tributável')||c.nome.includes('IRRF Come-Cotas')||c.id==='irrf';
+      const isTributavel=c.nome.includes('Renda Tributável')||_ehColComeCotas(c)||c.id==='irrf';
       const bgStyle=isTributavel?'background:#fef08a;':'';
       h+=`<tr style="${bgStyle}"><td style="padding:4px 8px;color:#555;${bgStyle}">${esc(c.nome)}</td><td style="padding:4px 8px;text-align:right;font-weight:600;${cor}${bgStyle ? 'background:#fef08a;' : ''}">${c.id==='trib'?'':sign} ${_fmt(Math.abs(v))}</td></tr>`;
     });
@@ -50964,6 +50971,8 @@ function _fmt(v){return(parseFloat(v)||0).toLocaleString('pt-BR',{minimumFractio
 function _fmtPct(v){return(parseFloat(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2})+'%';}
 function _parseInput(v){v=(v||'').toString().trim().replace(/[^\d.,-]/g,'');if(!v)return 0;if(v.includes(','))return parseFloat(v.replace(/\./g,'').replace(',','.'))||0;if(v.includes('.'))return parseFloat(v.replace(/\./g,''))||0;return parseFloat(v)||0;}
 function isXPProduct(ganho){return ganho&&ganho.nome&&ganho.nome.includes('XP');}
+// Coluna do IRRF Come-Cotas — o usuário pode ter renomeado ("IRRF C/C"), então reconhece pelo nome em qualquer forma
+function _ehColComeCotas(c){ return /come[\s-]*cotas|\bc\/c\b/i.test((c&&c.nome)||''); }
 function _isXPCods(g){ return isXPProduct(g)&&!!(g.codigo1||g.codigo)&&!!g.codigo2; }
 function calcSaldosGanho(ganho){
   const dados=ganho.dados||{},cols=ganho.cols||[];
