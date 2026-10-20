@@ -39197,7 +39197,7 @@ async function renderLancctbFluxoCaixa(){
       <button class="btn bo bsm" title="Linhas que ficaram 'associado' só por terem sido amarradas a um banco (sem ligação com o extrato) voltam para 'não associado', mantendo o banco" onclick="_lancctbFluxoLiberarSoBanco()">🔓 Liberar só-banco</button>
       <button class="btn bo bsm" title="Corrige o número de documento/NF de lançamentos JÁ importados que vieram com letras/prefixo junto (ex: AG893503 → 893503) — não mexe em quem já está limpo" onclick="_lancctbFluxoLimparNumeros()">🧹 Corrigir números</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbFluxoConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes lançamentos</button>
-      <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Excel</button>
+      <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Fluxo de Caixa</button>
     </div>
   </div>
   ${(_lancctbFluxoSelecionados.size>0 || _lancctbFluxoSelecionarTodosMode)?`
@@ -39556,12 +39556,12 @@ async function exportarLancctbFluxoExcel(){
 async function abrirLancctbFluxoImportModal(){
   _lancctbFluxoImportLinhas=null;
   _lancctbFluxoWbTemp=null;
-  document.getElementById('lancctbUploadTitulo').textContent='Importar Fluxo de Caixa (Excel)';
+  document.getElementById('lancctbUploadTitulo').textContent='Importar Fluxo de Caixa';
   _lancctbUploadStatusAtualId='lancctbFluxoImportStatus';
   _lancctbUploadTituloAtual='Importando Fluxo de Caixa';
   document.getElementById('lancctbUploadBody').innerHTML=`
     <div style="background:#fffacd;border-radius:4px;border-left:3px solid #ffd700;padding:12px;margin-bottom:14px;font-size:12.5px">
-      Suba o Fluxo de Caixa do cliente em <strong>Excel ou PDF</strong>. No Excel, se o arquivo tiver colunas SEPARADAS de "Valor Pago" e "Valor Recebido", mapeie as duas na próxima tela — cada linha vira saída ou entrada sozinha, sem precisar importar 2 vezes. Se o arquivo só tiver 1 coluna de valor, use o seletor "Pagamentos/Recebimentos" abaixo. No PDF, a leitura é por IA e já identifica entrada/saída linha a linha.
+      Suba o Fluxo de Caixa do cliente em <strong>Excel ou PDF</strong>. No Excel, se o arquivo tiver colunas SEPARADAS de "Valor Pago" e "Valor Recebido", mapeie as duas na próxima tela — cada linha vira saída ou entrada sozinha, sem precisar importar 2 vezes. Se o arquivo só tiver 1 coluna de valor, use o seletor "Pagamentos/Recebimentos" abaixo. No PDF, a leitura é direta (sem IA) nos modelos reconhecidos: Bling (Contas a Pagar), Contas a Pagar — Fornecedores Pagos, Relatório de Recebimentos e Relatório de Despesas (Karater).
     </div>
     <div class="grid2">
       <div class="fg" id="lancctbFluxoImportTipoWrap">
@@ -40345,6 +40345,127 @@ async function confirmarLancctbFluxoImportBling(){
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
 }
+// ─── Relatório de Despesas — KARATER_RELATORIO_DESPESAS (pedido do usuário 20/10/2026) ─────────────────────────────────────────────────────────────────
+// Leitor 100% local (PDF.js, texto nativo): reconstrói as linhas por Y, atribui cada texto à coluna pelo CENTRO do cabeçalho (DATA DO PAGAMENTO | DESPESA | FAVORECIDO | VALOR | FORMA DE PAGAMENTO — o texto
+// da tabela é centralizado, então a posição de cada coluna é lida do próprio cabeçalho do PDF) e converte o valor em CENTAVOS inteiros. Nunca usa IA. Todas as páginas valem a competência da 1ª.
+// Linhas idênticas no mesmo dia (ex.: 2 tarifas de R$ 13,85) são operações VÁLIDAS: a chave de importação leva o nº da ocorrência, então reimportar o mesmo PDF não duplica e não funde repetições reais.
+let _krResultado=null;
+function _krCentavos(txt){
+  const m=String(txt||'').replace(/\s+/g,' ').trim().match(/^(?:R\$\s*)?(-)?\s*(\d{1,3}(?:\.\d{3})+|\d+),(\d{2})$/); // o "R$" pode faltar em linhas isoladas do relatório (visto em 30/06: "2562,24")
+  if(!m) return null;
+  const c=parseInt(m[2].replace(/\./g,''),10)*100+parseInt(m[3],10);
+  return m[1]?-c:c;
+}
+function _krNorm(t){ return String(t||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/\s+/g,' ').trim(); }
+function _krFmtCentavos(c){ const neg=c<0; c=Math.abs(c); return (neg?'-':'')+String(Math.floor(c/100)).replace(/\B(?=(\d{3})+(?!\d))/g,'.')+','+String(c%100).padStart(2,'0'); }
+async function _krParsearPdf(pdf){
+  const itensPorPag=[];
+  for(let p=1;p<=pdf.numPages;p++){
+    const page=await pdf.getPage(p); const c=await page.getTextContent();
+    itensPorPag.push(c.items.filter(i=>String(i.str||'').trim()).map(i=>({s:String(i.str).replace(/\s+/g,' ').trim(), x:i.transform[4], y:i.transform[5], w:i.width||0})));
+  }
+  const agrupar=its=>{ const o=[...its].sort((a,b)=>b.y-a.y||a.x-b.x); const L=[]; for(const i of o){ const u=L[L.length-1]; if(u&&Math.abs(u.y-i.y)<=2.5) u.itens.push(i); else L.push({y:i.y,itens:[i]}); } L.forEach(l=>l.itens.sort((a,b)=>a.x-b.x)); return L; };
+  // junta pedaços do mesmo texto (distância pequena entre o fim de um item e o início do próximo)
+  const celulas=itens=>{ const out=[]; for(const i of itens){ const u=out[out.length-1]; if(u&&(i.x-(u.x+u.w))<6){ u.s+=((i.x-(u.x+u.w))>1?' ':'')+i.s; u.w=(i.x+i.w)-u.x; } else out.push({...i}); } return out; };
+  const paginas=itensPorPag.map(agrupar);
+  if(!paginas.length||!paginas[0].length) return null;
+  const txt1=paginas[0].map(l=>l.itens.map(i=>i.s).join(' ')).join(' ');
+  const mTit=txt1.match(/RELAT[ÓO]RIO DE DESPESAS\s+(\d{2})\.(\d{4})\s*[-–]?\s*(.*?)\s*DATA DO PAGAMENTO/i);
+  if(!mTit) return null;
+  const COLS=['DATA DO PAGAMENTO','DESPESA','FAVORECIDO','VALOR','FORMA DE PAGAMENTO'];
+  const acharCab=linha=>{ const cs=celulas(linha.itens); const cen=[]; for(const nome of COLS){ const c=cs.find(x=>_krNorm(x.s)===nome); if(!c) return null; cen.push(c.x+c.w/2); } return cen.every((v,i)=>i===0||v>cen[i-1])?cen:null; };
+  let centros=null; for(const l of paginas[0]){ const c=acharCab(l); if(c){ centros=c; break; } }
+  if(!centros) return null; // título parecido, mas não é este layout de 5 colunas
+  const limites=centros.slice(1).map((c,i)=>(centros[i]+c)/2); // fronteiras entre colunas
+  const colDe=i=>{ const cx=i.x+i.w/2; let k=0; while(k<limites.length&&cx>limites[k]) k++; return k; };
+  const mes=mTit[1], ano=mTit[2], empresaNome=(mTit[3]||'').trim();
+  const brutos=[], avisos=[]; let ultimo=null, ultimoY=null;
+  for(let pi=0;pi<paginas.length;pi++){
+    for(const l of paginas[pi]){
+      const cab=acharCab(l);
+      if(cab){ centros=cab; continue; } // cabeçalho repetido: reaproveita a posição (se mudou, atualiza)
+      const cols=[[],[],[],[],[]]; l.itens.forEach(i=>cols[colDe(i)].push(i));
+      const txt=k=>celulas(cols[k]).map(c=>c.s).join(' ').replace(/\s+/g,' ').trim();
+      const data=txt(0);
+      if(/^\d{2}\/\d{2}\/\d{4}$/.test(data)){
+        const centavos=_krCentavos(txt(3));
+        if(centavos===null){ avisos.push(`Linha de ${data} (${txt(1)} / ${txt(2)}): valor "${txt(3)}" não reconhecido — linha NÃO importada.`); ultimo=null; continue; }
+        ultimo={ dataBr:data, despesa:txt(1), favorecido:txt(2), forma:txt(4), centavos, pag:pi };
+        brutos.push(ultimo); ultimoY=l.y;
+      } else if(ultimo&&!data&&!txt(3)&&!txt(4)&&ultimo.pag===pi&&ultimoY!==null&&Math.abs(ultimoY-l.y)<=16&&(txt(1)||txt(2))){
+        // continuação visual da operação anterior (texto que quebrou em 2 linhas) — pela coluna X, sem criar operação nova
+        if(txt(1)) ultimo.despesa=(ultimo.despesa+' '+txt(1)).trim();
+        if(txt(2)) ultimo.favorecido=(ultimo.favorecido+' '+txt(2)).trim();
+        ultimoY=l.y;
+      } else if(l.itens.length&&pi>=0&&(txt(3)||txt(2))&&!/RELAT[ÓO]RIO DE DESPESAS/i.test(l.itens.map(i=>i.s).join(' '))){
+        avisos.push(`Texto sem data ignorado (pág. ${pi+1}): ${l.itens.map(i=>i.s).join(' ').slice(0,90)}`);
+      }
+    }
+  }
+  if(!brutos.length) return null;
+  // ocorrência dentro do arquivo (duas linhas idênticas = duas operações)
+  const vistos=new Map();
+  const registros=brutos.map(b=>{
+    const [d,m,a]=b.dataBr.split('/');
+    const base=[_lancctbEidAtual,`${mes}.${ano}`,`${a}-${m}-${d}`,_krNorm(b.despesa),_krNorm(b.favorecido),b.centavos,_krNorm(b.forma)].join('|');
+    const occ=(vistos.get(base)||0)+1; vistos.set(base,occ);
+    return { data:`${a}-${m}-${d}`, despesa:b.despesa, favorecido:b.favorecido, forma:b.forma, centavos:b.centavos, valor:b.centavos/100, ocorrencia:occ, chave:base+'#'+occ, _incluir:true };
+  });
+  { const cont={}; registros.forEach(x=>{ const k=x.data.slice(0,7); cont[k]=(cont[k]||0)+1; }); const top=Object.entries(cont).sort((x,y)=>y[1]-x[1])[0];
+    if(top&&top[0]!==`${ano}-${mes}`) avisos.unshift(`Atenção: o título do relatório diz ${mes}/${ano}, mas a maioria das datas das linhas é de ${top[0].split('-').reverse().join('/')}. As linhas valem pela DATA DO PAGAMENTO.`); }
+  return { modelo:'KARATER_RELATORIO_DESPESAS', competencia:`${mes}/${ano}`, mes, ano, empresaNome, registros, avisos, paginas:paginas.length };
+}
+function _krPreviewHtml(){
+  const r=_krResultado; const regs=r.registros;
+  const sel=regs.filter(x=>x._incluir), total=sel.reduce((a,x)=>a+x.centavos,0);
+  let html=`<div style="font-size:12.5px;margin-bottom:8px"><strong>Modelo identificado:</strong> Relatório de Despesas${r.empresaNome?' — '+esc(r.empresaNome):''}<br>
+    <strong>Competência:</strong> ${esc(r.competencia)} · ${regs.length} lançamento(s) encontrado(s) em ${r.paginas} página(s) · Total R$ ${_krFmtCentavos(regs.reduce((a,x)=>a+x.centavos,0))}
+    ${sel.length!==regs.length?`<br><span style="color:#b45309">${regs.length-sel.length} linha(s) fora do mês ${esc(fmtMes(S.fechAtual()))} (Fechamento Atual) ou desmarcada(s) — não serão importadas.</span>`:''}</div>
+    ${r.avisos.length?`<div style="font-size:11.5px;background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;padding:6px 10px;margin-bottom:8px">${r.avisos.map(esc).join('<br>')}</div>`:''}
+    <div style="overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+        <th style="padding:6px 8px"><input type="checkbox" ${sel.length===regs.length?'checked':''} onclick="_krToggleTodos(this.checked)"></th>
+        <th style="padding:6px 8px;text-align:left">Data</th><th style="padding:6px 8px;text-align:left">Despesa</th><th style="padding:6px 8px;text-align:left">Favorecido</th>
+        <th style="padding:6px 8px;text-align:right">Valor</th><th style="padding:6px 8px;text-align:left">Forma de pagamento</th>
+      </tr></thead><tbody>`;
+  regs.forEach((x,i)=>{
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${x._incluir?1:.4}">
+      <td style="padding:4px 8px"><input type="checkbox" ${x._incluir?'checked':''} onclick="_krResultado.registros[${i}]._incluir=this.checked;document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_krPreviewHtml()"></td>
+      <td style="padding:4px 8px;white-space:nowrap">${x.data.split('-').reverse().join('/')}</td>
+      <td style="padding:4px 8px">${esc(x.despesa)}</td><td style="padding:4px 8px">${esc(x.favorecido)}</td>
+      <td style="padding:4px 14px;text-align:right;white-space:nowrap">R$ ${_krFmtCentavos(x.centavos)}</td><td style="padding:4px 8px">${esc(x.forma)}</td></tr>`;
+  });
+  html+=`</tbody></table></div>
+  <div style="font-size:12px;margin-top:6px">${sel.length} linha(s) selecionada(s) · Total R$ ${_krFmtCentavos(total)}</div>
+  <div class="ma" style="margin-top:12px">
+    <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
+    <button class="btn bp" onclick="confirmarLancctbFluxoImportKr()">✓ Importar ${sel.length} lançamento(s)</button>
+  </div>`;
+  return html;
+}
+function _krToggleTodos(m){ _krResultado.registros.forEach(x=>x._incluir=m); document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_krPreviewHtml(); }
+async function confirmarLancctbFluxoImportKr(){
+  const r=_krResultado; if(!r) return;
+  const sel=r.registros.filter(x=>x._incluir);
+  if(!sel.length){ toast('Nenhum lançamento selecionado','err'); return; }
+  const contaSel=document.getElementById('lancctbFluxoImportConta').value||null;
+  // idempotência: chave = empresa + competência + data + despesa + favorecido + centavos + forma + nº da ocorrência (duas linhas idênticas reais continuam sendo duas)
+  const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,chave_importacao').eq('empresa_eid',_lancctbEidAtual).not('chave_importacao','is',null).order('id',{ascending:true}));
+  const ja=new Set((ex||[]).map(x=>x.chave_importacao));
+  const novos=sel.filter(x=>!ja.has(x.chave));
+  const puladas=sel.length-novos.length;
+  if(!novos.length){ toast('Todos os lançamentos selecionados já tinham sido importados antes.','err'); return; }
+  const rows=novos.map(x=>({ empresa_eid:_lancctbEidAtual, conta_bancaria_id:contaSel, data:x.data, descricao:x.despesa, descricao_conta_origem:x.despesa,
+    cliente_fornecedor_nome:x.favorecido||null, forma_pagamento:x.forma||null, valor_saida:x.valor, valor_entrada:0, chave_importacao:x.chave, arquivo_origem:_lancctbFluxoImportNomeArquivo }));
+  const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(rows);
+  if(error){ toast('Erro ao importar: '+error.message,'err'); return; }
+  toast(`${rows.length} lançamento(s) do Relatório de Despesas importado(s)${puladas?` — ${puladas} já existiam e foram ignorados`:''}`,'ok');
+  closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar(rows.map(x=>x.data)); }catch(e){}
+  _lancctbFluxoPagina=0;
+  renderLancctbFluxoCaixa();
+}
 // PDF: primeiro tenta o leitor dedicado do Bling "Relatório de Contas a Pagar" (sem IA, ver
 // acima) — só cai na Edge Function genérica (IA) quando o PDF não é esse modelo específico.
 let _lancctbFluxoImportPreviewPdf=[];
@@ -40355,6 +40476,19 @@ async function _lancctbFluxoLerPdf(file,status){
     _convItauGarantirWorker();
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
+    status.textContent='Lendo tabela do PDF…';
+    // KARATER_RELATORIO_DESPESAS: tabela de 5 colunas lida por posição (sem IA)
+    const resultadoKr=await _krParsearPdf(pdf);
+    if(resultadoKr){
+      const fech=String(S.fechAtual()||''), soMes=document.getElementById('lancctbFluxoImportSoMesAtual')?.checked;
+      if(soMes&&fech) resultadoKr.registros.forEach(x=>{ if(x.data.slice(0,7)!==fech) x._incluir=false; });
+      _krResultado=resultadoKr;
+      const dentro=resultadoKr.registros.filter(x=>x._incluir).length;
+      status.textContent=`Modelo identificado: Relatório de Despesas — Competência ${resultadoKr.competencia} · ${resultadoKr.registros.length} lançamentos encontrados`+(dentro===0&&soMes?` — nenhum é de ${fmtMes(fech)} (Fechamento Atual): desmarque a opção "Trazer só lançamentos de…" e leia de novo, ou troque o Fechamento Atual.`:'');
+      document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_krPreviewHtml();
+      document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+      return;
+    }
     // CPFP: Relatório de Contas a Pagar — Fornecedores Pagos (sem IA, colunas Emiss./Duplic./Vencto./Valor Líq.)
     const resultadoCpfp=await _cpfpParsearArquivo(pdf,file.name,status);
     if(resultadoCpfp){
@@ -40388,45 +40522,9 @@ async function _lancctbFluxoLerPdf(file,status){
       document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
       return;
     }
-    const paginasTexto=[];
-    for(let p=1;p<=pdf.numPages;p++){
-      const page=await pdf.getPage(p);
-      const content=await page.getTextContent();
-      paginasTexto.push(content.items.map(it=>it.str).join(' ').replace(/\s+/g,' ').trim());
-    }
-    const textoTotal=paginasTexto.join(' ').trim();
-    const lancamentos=[];
-    if(textoTotal.length<20){
-      status.textContent='PDF sem texto selecionável — renderizando páginas como imagem…';
-      const imagens=[];
-      for(let p=1;p<=pdf.numPages;p++){
-        const page=await pdf.getPage(p);
-        const viewport=page.getViewport({scale:2});
-        const canvas=document.createElement('canvas');
-        canvas.width=viewport.width;canvas.height=viewport.height;
-        const ctx=canvas.getContext('2d');
-        await page.render({canvasContext:ctx,viewport}).promise;
-        imagens.push(canvas.toDataURL('image/jpeg',0.85));
-      }
-      const lotes=_lancctbEmLotes(imagens,LANCCTB_IMAGENS_POR_LOTE);
-      for(let i=0;i<lotes.length;i++){
-        status.textContent=`Lote de imagens ${i+1}/${lotes.length}…`;
-        const d=await _lancctbChamarEdgeExtracao('lancctb-parse-extrato',{imagens:lotes[i]});
-        if(Array.isArray(d.lancamentos)) lancamentos.push(...d.lancamentos);
-      }
-    } else {
-      const lotes=_lancctbEmLotes(paginasTexto,LANCCTB_EXTRATO_PAGINAS_POR_LOTE);
-      for(let i=0;i<lotes.length;i++){
-        status.textContent=lotes.length>1?`Lote ${i+1}/${lotes.length}…`:'Chamando IA para extrair o fluxo de caixa…';
-        const d=await _lancctbChamarEdgeExtracao('lancctb-parse-extrato',{texto:lotes[i].join('\n')});
-        if(Array.isArray(d.lancamentos)) lancamentos.push(...d.lancamentos);
-      }
-    }
-    if(!lancamentos.length){ status.textContent='Não foi possível identificar nenhum lançamento neste PDF.'; return; }
-    _lancctbFluxoImportPreviewPdf=lancamentos.map(l=>({...l,_incluir:true}));
-    status.textContent=`${lancamentos.length} lançamento(s) encontrado(s) — confira abaixo antes de importar.`;
-    document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbFluxoPdfPreviewHtml();
-    document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+    // Sem IA: modelo que nenhum leitor local reconheceu.
+    status.textContent='Modelo de Fluxo não reconhecido. Revise o arquivo ou faça o mapeamento manual (importe em Excel).';
+    document.getElementById('lancctbFluxoImportTipoWrap').style.display='';
   }catch(e){
     console.error(e);
     status.textContent='Erro ao ler PDF: '+e.message;
