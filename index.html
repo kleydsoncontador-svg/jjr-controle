@@ -31374,9 +31374,9 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
 }
 // Conta COMPLETAMENTE (com teto) os subconjuntos de títulos que fecham o alvo — prova de unicidade sem limite de tentativas.
 // itens: [{v:centavos,f}]; retorna {n: quantidade (teto 250), idx: índices do único subconjunto quando n===1, grande: volume acima do limite}
-function _lancctbComposicaoUnica(itens,alvo){
-  const its=itens.map((x,i)=>({v:x.v,i})).filter(x=>x.v>0&&x.v<alvo);
-  if(its.length<2||alvo<=0) return {n:0,idx:null,grande:false};
+function _lancctbComposicaoUnica(itens,alvo,aceitaUnico){
+  const its=itens.map((x,i)=>({v:x.v,i})).filter(x=>x.v>0&&(aceitaUnico?x.v<=alvo:x.v<alvo));
+  if(its.length<(aceitaUnico?1:2)||alvo<=0) return {n:0,idx:null,grande:false};
   if(its.reduce((a,x)=>a+x.v,0)<alvo) return {n:0,idx:null,grande:false};
   const T=alvo; const cnt=new Uint8Array(T+1); cnt[0]=1;
   for(const x of its){ const v=x.v; for(let s=T;s>=v;s--){ const c=cnt[s-v]; if(c){ const t=cnt[s]+c; cnt[s]=t>250?250:t; } } }
@@ -31556,6 +31556,108 @@ async function _lancctbPassadaIntermediadoras(c){
   });
   return out;
 }
+// ═══ KARATER — RELATÓRIO DE RECEBIMENTOS (pedido do usuário 20/10/2026) ══════════════════════════════════════════════════════════════════════════════════
+// O banco mostra QUANTO entrou; o Relatório de Recebimentos (componentes no Fluxo: ALUGUEL/IPTU/CONDOMÍNIO/OUTROS por cliente) mostra DE ONDE veio. Uma entrada pode ter vários clientes e várias naturezas:
+// aqui acha a composição EXATA (1 componente, vários do mesmo cliente ou de clientes diferentes), em faixas de data (Data Pagto/Canc. → Data Venc. quando a de pagamento está incoerente → ±1/±2/±3),
+// e só aplica quando existe UMA solução (contagem completa, sem limite de tentativas). O nome do banco (ex.: REDE INTEGRADA DE LOJAS = OXXO) não bloqueia nada. Abertura/soma: pelo fluxo normal (linhas do Fluxo ligadas ao extrato → "Separada pelo Fluxo").
+async function _lancctbPassadaRecebimentosKarater(c){
+  const { eid, contaId, entradas, fluxoPend, usados }=c;
+  const out={ pares:[], info:new Map(), ambiguos:[], resolvidos:0, semComponente:0 };
+  const fmt=v=>Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const brd=d=>String(d||'').split('-').reverse().join('/').slice(0,5);
+  const dias=(a,b)=>Math.round((new Date(a+'T12:00:00')-new Date(b+'T12:00:00'))/864e5);
+  const pool=fluxoPend.filter(f=>!usados.has(f.id)&&f.valor_entrada>0&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId)));
+  const cents=v=>Math.round(Number(v)*100);
+  const pags=[...entradas].sort((a,b)=>(a.data_pagamento<b.data_pagamento?-1:a.data_pagamento>b.data_pagamento?1:a.id-b.id));
+  // faixas: 0 = Data Pagto/Canc. igual à do banco | 1 = Data Venc. igual à do banco (Data Pagto incoerente: mais de 3 dias de diferença) | 2..4 = ±1/±2/±3 dias na Data Pagto
+  const nomeFaixa=['Data Pagto/Canc. = data do banco','Data Venc. = data do banco (DATA PAGTO/CANC. INCONSISTENTE)','Data Pagto ±1 dia','Data Pagto ±2 dias','Data Pagto ±3 dias'];
+  const faixaDe=(f,p)=>{
+    const d=Math.abs(dias(f.data,p.data_pagamento));
+    if(d===0) return 0;
+    if(f.data_vencimento&&f.data_vencimento===p.data_pagamento&&d>3) return 1;
+    return d>=1&&d<=3?d+1:null;
+  };
+  const tokens=t=>_lancctbIdentTokens(t||'');
+  const nomeCompat=(p,f)=>{ const a=tokens(p.historico_bancario), b=tokens(f.cliente_original||f.cliente_fornecedor_nome||''); return a.some(x=>b.includes(x)); };
+  const consumidas=new Set(), asg=new Map(), amb=new Map();
+  for(let faixa=0;faixa<=4;faixa++){
+    let rodou=true;
+    while(rodou){
+      rodou=false;
+      const props=[];
+      for(const p of pags){
+        if(asg.has(p.id)||amb.has(p.id)) continue;
+        const alvo=cents(p.valor_entrada);
+        const C=pool.filter(f=>!consumidas.has(f.id)&&faixaDe(f,p)===faixa);
+        if(!C.length) continue;
+        const cont=ls=>{ const it=ls.map(f=>({v:cents(f.valor_entrada),f})); const r=_lancctbComposicaoUnica(it,alvo,true); return {r,it}; };
+        let {r,it}=cont(C);
+        if(!r.n&&!r.grande) continue;
+        let linhas=null;
+        if(r.n===1&&r.idx) linhas=r.idx.map(i=>it[i].f);
+        else {
+          // várias soluções: tenta só com os clientes que o histórico do banco cita (ex.: "Restaurante Frigideira"); se isso der UMA, vale
+          const Cn=C.filter(f=>nomeCompat(p,f));
+          if(Cn.length&&Cn.length<C.length){ const x=cont(Cn); if(x.r.n===1&&x.r.idx) linhas=x.r.idx.map(i=>x.it[i].f); }
+        }
+        if(!linhas){ amb.set(p.id,{faixa,n:r.n,grande:r.grande,pool:C}); continue; }
+        props.push({p,linhas,faixa});
+      }
+      // dois pagamentos disputando o mesmo componente na mesma faixa = empate real (resolve em conjunto)
+      const uso=new Map(); props.forEach(x=>x.linhas.forEach(f=>uso.set(f.id,(uso.get(f.id)||0)+1)));
+      for(const x of props){
+        if(x.linhas.some(f=>uso.get(f.id)>1)){ amb.set(x.p.id,{faixa:x.faixa,n:2,grande:false,pool:x.linhas,motivo:'o mesmo componente serve a mais de um crédito do banco (empate)'}); continue; }
+        x.linhas.forEach(f=>{ consumidas.add(f.id); usados.add(f.id); out.pares.push({fId:f.id,lId:x.p.id}); });
+        asg.set(x.p.id,x); out.resolvidos++; rodou=true;
+        const soma=x.linhas.reduce((a,f)=>a+cents(f.valor_entrada),0);
+        out.info.set(x.p.id,`COMPOSIÇÃO DO RELATÓRIO DE RECEBIMENTOS: BANCO ${brd(x.p.data_pagamento)} R$ ${fmt(x.p.valor_entrada)} = ${x.linhas.map(f=>`${f.cliente_fornecedor_nome||'?'} R$ ${fmt(f.valor_entrada)}${f.parcela?' parc. '+f.parcela:''}`).join(' + ')} | SOMA R$ ${fmt(soma/100)} | CRITÉRIO: composição única exata, ${nomeFaixa[x.faixa]}${x.faixa===1?' — MATCH POR DATA DE VENCIMENTO':''}`);
+      }
+    }
+  }
+  pags.forEach(p=>{
+    if(asg.has(p.id)) return;
+    const a=amb.get(p.id);
+    if(a){
+      out.ambiguos.push({ id:p.id, data:p.data_pagamento, valor:p.valor_entrada, hist:p.historico_bancario, motivo:a.motivo||(a.grande?'volume acima do que consigo provar':`${a.n>=250?'várias':a.n} composições equivalentes na faixa "${nomeFaixa[a.faixa]}"`), pool:a.pool });
+      out.info.set(p.id,`AMBÍGUO REAL (RELATÓRIO DE RECEBIMENTOS) | BANCO: ${brd(p.data_pagamento)} R$ ${fmt(p.valor_entrada)} | ${a.motivo||a.n+' composições equivalentes na faixa "'+nomeFaixa[a.faixa]+'"'}`);
+    } else out.semComponente++;
+  });
+  return out;
+}
+// "Ver composição": banco (data, histórico, total) e, abaixo, cliente | CPF/CNPJ | tipo | valor | parcela | data de cada componente — mesmo depois de a entrada ser aberta em vários lançamentos.
+async function abrirLancctbVerComposicaoKarater(extratoId){
+  const eid=_lancctbEidAtual;
+  const { data: e } = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,historico_bancario,informacao,status_conciliacao').eq('id',extratoId).maybeSingle();
+  if(!e){ toast('Lançamento não encontrado','err'); return; }
+  const { data: irmaos } = await _supaClient.from('lancamentos_extrato').select('id,valor_entrada,informacao,status_conciliacao').eq('empresa_eid',eid).eq('conta_bancaria_id',e.conta_bancaria_id).eq('data_pagamento',e.data_pagamento).eq('historico_bancario',e.historico_bancario).gt('valor_entrada',0).neq('status_conciliacao','reabsorvido').order('id');
+  const grupoX=s=>{ const m=String(s||'').match(/pagamento de R\$ ([\d.,]+) em/); return m?m[1]:null; };
+  let ids=[e.id], totalBanco=e.valor_entrada;
+  const xE=grupoX(e.informacao);
+  const filhos=(irmaos||[]).filter(r=>grupoX(r.informacao));
+  const alvoX=xE||(()=>{ for(const x of new Set(filhos.map(r=>grupoX(r.informacao)))){ const gf=filhos.filter(r=>grupoX(r.informacao)===x); const soma=gf.reduce((a,r)=>a+Math.round(r.valor_entrada*100),0)+Math.round(e.valor_entrada*100); if(Math.abs(soma-Math.round(parseFloat(x.replace(/\./g,'').replace(',','.'))*100))<=1) return x; } return null; })();
+  if(alvoX){
+    const gf=filhos.filter(r=>grupoX(r.informacao)===alvoX); ids=[...new Set([e.id,...gf.map(r=>r.id)])];
+    const alvoN=Math.round(parseFloat(alvoX.replace(/\./g,'').replace(',','.'))*100);
+    const orig=(irmaos||[]).find(r=>!grupoX(r.informacao)&&!ids.includes(r.id)&&Math.abs(alvoN-gf.reduce((a,x)=>a+Math.round(x.valor_entrada*100),0)-Math.round(r.valor_entrada*100))<=1);
+    if(orig) ids.push(orig.id);
+    totalBanco=alvoN/100;
+  }
+  const { data: fl } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,data,data_vencimento,cliente_fornecedor_nome,cliente_original,cnpj_cpf,tipo_receita,parcela,descricao,valor_entrada,recebimento_ref').in('lancamento_extrato_id',ids).order('id');
+  const lin=(fl||[]);
+  const soma=lin.reduce((a,f)=>a+Math.round(f.valor_entrada*100),0)/100;
+  let m=document.getElementById('mLancctbVerComposicao');
+  if(!m){ document.body.insertAdjacentHTML('beforeend','<div class="mb" id="mLancctbVerComposicao" style="display:none"><div class="modal" style="max-width:860px"><div class="mt"><h3>🧩 Composição do recebimento</h3><button onclick="closeModal(\'mLancctbVerComposicao\')">&#x2715;</button></div><div class="mc" id="lancctbVerComposicaoBody"></div></div></div>'); m=document.getElementById('mLancctbVerComposicao'); }
+  const f2=v=>Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  document.getElementById('lancctbVerComposicaoBody').innerHTML=`
+    <div style="font-size:12.5px;margin-bottom:8px;padding:8px 10px;background:var(--bg);border-radius:6px"><strong>Banco:</strong> ${new Date(e.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR')} · ${esc(e.historico_bancario||'')} · <strong>R$ ${f2(totalBanco)}</strong></div>
+    ${lin.length?`<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:var(--ink2);color:#fff"><th style="padding:6px 8px;text-align:left">Cliente</th><th style="padding:6px 8px;text-align:left">CPF/CNPJ</th><th style="padding:6px 8px;text-align:left">Tipo</th><th style="padding:6px 8px;text-align:right">Valor</th><th style="padding:6px 8px;text-align:left">Parcela</th><th style="padding:6px 8px;text-align:left">Data</th></tr></thead><tbody>
+    ${lin.map(f=>`<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 8px">${esc(f.cliente_fornecedor_nome||'')}</td><td style="padding:5px 8px;font-family:var(--mono)">${esc(f.cnpj_cpf||'')}</td><td style="padding:5px 8px">${esc(f.tipo_receita||'')}</td><td style="padding:5px 8px;text-align:right">R$ ${f2(f.valor_entrada)}</td><td style="padding:5px 8px">${esc(f.parcela||'')}</td><td style="padding:5px 8px">${new Date(f.data+'T00:00:00').toLocaleDateString('pt-BR')}${f.data_vencimento&&f.data_vencimento!==f.data?' <span style="color:var(--slate)">(venc. '+new Date(f.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR')+')</span>':''}</td></tr>`).join('')}
+    </tbody></table></div>
+    <div style="margin-top:8px;font-size:12.5px"><strong>TOTAL: R$ ${f2(soma)}</strong> ${Math.abs(soma-totalBanco)<0.015?'<span style="color:var(--teal)">✓ fecha com o banco</span>':'<span style="color:#dc2626">⚠ diferença de R$ '+f2(totalBanco-soma)+' em relação ao banco</span>'}</div>`
+    :'<div style="font-size:12.5px;color:var(--slate)">Nenhum componente do Relatório de Recebimentos está ligado a este lançamento (ainda não foi processado, ou a entrada não é de cliente).</div>'}
+    ${e.informacao&&/^(COMPOSIÇÃO|AMBÍGUO)/.test(e.informacao)?`<div style="font-size:11px;color:var(--slate);margin-top:8px;white-space:pre-wrap">${esc(e.informacao)}</div>`:''}`;
+  openModal('mLancctbVerComposicao');
+}
 async function _lancctbProcessarFluxo(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -31583,7 +31685,7 @@ async function _lancctbProcessarFluxo(){
     const _pfDmin=_pfDatas.length?_pfAddD(_pfDatas[0],-Math.max(LANCCTB_MATCH_TOLERANCIA_DIAS,LANCCTB_FLUXO_ATRASO_DIAS)):null; // a janela de atraso busca títulos que venceram até 7 dias antes
     const _pfDmax=_pfDatas.length?_pfAddD(_pfDatas[_pfDatas.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS):null;
     const { data: fluxoTodo } = await _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,status_associado,lancamento_extrato_id')
+      .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,status_associado,lancamento_extrato_id,data_vencimento,tipo_receita,cliente_original')
       .eq('empresa_eid',eid);
       if(_pfDmin) q=q.gte('data',_pfDmin);
       if(_pfDmax) q=q.lte('data',_pfDmax);
@@ -31673,11 +31775,25 @@ async function _lancctbProcessarFluxo(){
         intermRes.pares.forEach(x=>pares.push(x)); compostos+=intermRes.compostos;
       }
     }catch(e){ console.error('Passada das intermediadoras:',e); }
+    // KARATER: entradas do banco abertas pela composição do Relatório de Recebimentos (só as que ainda não têm componente ligado)
+    const idsKar=new Set(); let karRes={ pares:[], info:new Map(), ambiguos:[], resolvidos:0, semComponente:0 };
+    try{
+      if(String(eid)==='15'&&fluxoPend.some(f=>f.valor_entrada>0&&f.tipo_receita)){
+        const ligados=new Set(fluxoTodo.filter(f=>f.lancamento_extrato_id&&f.valor_entrada>0).map(f=>f.lancamento_extrato_id));
+        const ent=pendencias.filter(l=>l.valor_entrada>0&&!(l.valor_saida>0)&&!ligados.has(l.id)&&!/^Separada pelo Fluxo/.test(l.informacao||''));
+        ent.forEach(l=>idsKar.add(l.id));
+        if(ent.length){
+          if(statusEl) statusEl.textContent=`Karater: compondo ${ent.length} entrada(s) pelo Relatório de Recebimentos…`;
+          karRes=await _lancctbPassadaRecebimentosKarater({ eid, contaId, entradas:ent, fluxoPend, usados });
+          karRes.pares.forEach(x=>pares.push(x));
+        }
+      }
+    }catch(e){ console.error('Passada Karater (recebimentos):',e); }
     if(fluxoPend.length){
       for(let i=0;i<pendencias.length;i++){
         if(statusEl&&i%200===0){ statusEl.textContent=`Comparando com o Fluxo ${i}/${pendencias.length}…`; await new Promise(r=>setTimeout(r,0)); }
         const l=pendencias[i];
-        if(idsFopag.has(l.id)||idsInterm.has(l.id)) continue; // rota FOPAG / intermediadora (já resolvida acima)
+        if(idsFopag.has(l.id)||idsInterm.has(l.id)||idsKar.has(l.id)) continue; // rota FOPAG / intermediadora (já resolvida acima)
         const ehSaida=l.valor_saida>0;
         const valor=l.valor_saida||l.valor_entrada;
         const candBase=fluxoPend.filter(f=>!usados.has(f.id))
@@ -31717,7 +31833,7 @@ async function _lancctbProcessarFluxo(){
     try{
       const grupos=new Map();
       pendencias.forEach(l=>{
-        if(!(l.valor_saida>0)||idsFopag.has(l.id)||idsInterm.has(l.id)) return;
+        if(!(l.valor_saida>0)||idsFopag.has(l.id)||idsInterm.has(l.id)||idsKar.has(l.id)) return;
         const ps=_lancctbFluxoParamsDaLinha(l.historico_bancario,_fpListaFluxo).filter(p=>(p.contem||[]).filter(Boolean).length); if(!ps.length) return;
         const k=ps.map(p=>_fpNorm(p.gatilho)).sort().join('|'); if(!grupos.has(k)) grupos.set(k,[]); grupos.get(k).push(l);
       });
@@ -31758,6 +31874,10 @@ async function _lancctbProcessarFluxo(){
         await _supaClient.from('lancamentos_extrato').update({informacao:txt}).eq('id',lId);
       }
     }catch(e){ console.warn('Auditoria das intermediadoras:',e); }
+    try{
+      for(const [lId,txt] of karRes.info.entries()){ await _supaClient.from('lancamentos_extrato').update({informacao:txt}).eq('id',lId); }
+      window.__karAmbig=karRes.ambiguos; window.__karRes=karRes;
+    }catch(e){ console.warn('Auditoria Karater:',e); }
     window.__intermAmbig=(window.__intermAmbig||[]).concat(intermRes.ambiguos); window.__intermRes=intermRes;
     if(intermRes.ambiguos.length) console.info('Intermediadoras — ambíguos reais:\n'+intermRes.ambiguos.map(a=>`${a.data.split('-').reverse().join('/').slice(0,5)} R$ ${a.valor}: ${a.motivo} → ${a.cands.join(' ;; ')}`).join('\n'));
     // Pedido do usuário 18/09/2026: o Fluxo também indica a NF (número +
@@ -31772,7 +31892,7 @@ async function _lancctbProcessarFluxo(){
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
     const diag=(resNf&&resNf.diagAglutinado)||[];
     if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
-    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de até R$ 0,02 aceita]`:''}${particoes?` [${particoes} grupo(s) de pagamentos do mesmo fornecedor resolvidos em conjunto]`:''}${rotaFopag?` [${rotaFopag} pagamento(s) a funcionário da folha deixados pro Processar FOPAG]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${idsInterm.size?` [intermediadoras: ${intermRes.resolvidos} resolvida(s) pelo título real${intermRes.compostos?' ('+intermRes.compostos+' por composição)':''}, ${intermRes.ambiguos.length} ambígua(s) real(is)]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
+    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de até R$ 0,02 aceita]`:''}${particoes?` [${particoes} grupo(s) de pagamentos do mesmo fornecedor resolvidos em conjunto]`:''}${rotaFopag?` [${rotaFopag} pagamento(s) a funcionário da folha deixados pro Processar FOPAG]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${idsKar.size?` [Karater recebimentos: ${karRes.resolvidos} entrada(s) compostas pelo relatório, ${karRes.ambiguos.length} ambígua(s), ${karRes.semComponente} sem componente]`:''}${idsInterm.size?` [intermediadoras: ${intermRes.resolvidos} resolvida(s) pelo título real${intermRes.compostos?' ('+intermRes.compostos+' por composição)':''}, ${intermRes.ambiguos.length} ambígua(s) real(is)]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
     renderLancctbRegistroContabil();
     if(_lancctbFluxoSugParam.length) setTimeout(abrirLancctbSugestoesParam,900);
   } finally {
@@ -32313,7 +32433,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   async function tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch,usarComprovantes){
     const base=(fluxoCaixaPonteBase||[]).filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaEng)&&_lancctbFluxoIdentOk(l.historico_bancario,f)&&!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
       &&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&(f.numero||f.documento_numero));
-    const ehPonteL=_lancctbEhIntermediadora(l.historico_bancario);
+    const ehPonteL=_lancctbEhIntermediadora(l.historico_bancario)||(String(eid)==='15'&&l.valor_entrada>0);
     const temNome=_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
     const vFluxo=f=>ehSaida?f.valor_saida:f.valor_entrada;
     const perto=f=>vFluxo(f)&&Math.abs(vFluxo(f)-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO:0.005)&&(f.lancamento_extrato_id===l.id||_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
@@ -32374,7 +32494,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // não resolve. Só grava se existir EXATAMENTE 1 combinação que fecha o valor
   // do extrato com todos os componentes resolvidos; ambiguidade = fica pendente.
   async function tentarAglutinado(l,ehSaida,valor,usarComprovantes){
-    const ehPonteL=_lancctbEhIntermediadora(l.historico_bancario);
+    const ehPonteL=_lancctbEhIntermediadora(l.historico_bancario)||(String(eid)==='15'&&l.valor_entrada>0);
     const rotuloL=`${l.data_pagamento.split('-').reverse().join('/').slice(0,5)} R$ ${_fmt(valor)}`;
     const vFluxo=f=>ehSaida?f.valor_saida:f.valor_entrada;
     const contraTipo=ehSaida?'D':'C', bancoTipo=ehSaida?'C':'D';
@@ -35806,6 +35926,8 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   // coluna Fluxo de Caixa, pois posso criar regra por ela, tentando
   // associar ao fluxo, pra aqueles que ainda não estão conciliados".
   // Pedido do usuário 20/10/2026: texto da coluna Fluxo de Caixa menor (9,5px) e mais largo (até 320px) pra caber mais informação à vista.
+  // KARATER (20/10/2026): entrada do banco → "Ver composição" mostra de onde veio (cliente | CPF/CNPJ | tipo | valor | parcela | data).
+  const _verCompKar=(String(_lancctbEidAtual)==='15'&&!ehSaida)?`<br><a href="#" style="font-size:9px;color:var(--teal);font-weight:600" onclick="event.stopPropagation();event.preventDefault();abrirLancctbVerComposicaoKarater(${r.id})">🧩 Ver composição</a>`:'';
   const fluxoCelHtml=()=>{
     if(item.fluxoComposicao){
       const c=item.fluxoComposicao, nomeC=(c.itens[0]&&c.itens[0].cliente_fornecedor_nome)||'', tipC=c.itens.map(x=>`${x.documento_numero||x.descricao||''} R$ ${_fmt(x.valor_saida||x.valor_entrada)}`).join(' | ');
@@ -35828,7 +35950,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     const confirmado=!!item.fluxoConfirmado;
     const idnF=_lancctbFluxoIdentidade(r.historico_bancario,f,_lancctbFluxoAliasLista);
     const explF=` <span style="color:var(--slate);font-weight:400;font-style:normal">· ${idnF==='ok'?'nome+data+valor':'data+valor'}</span>`;
-    return `<td style="padding:7px 6px;font-size:9px;white-space:normal;line-height:1.25;word-break:break-word" title="${esc(_lancctbFluxoIndicaTxt(f))}${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})${(f.numero||f.documento_numero)?` · NF ${esc(f.numero||f.documento_numero)}${f.parcela?' parc. '+esc(f.parcela):''}`:''}${explF}</span></td>`;
+    return `<td style="padding:7px 6px;font-size:9px;white-space:normal;line-height:1.25;word-break:break-word" title="${esc(_lancctbFluxoIndicaTxt(f))}${esc(f.descricao||'')} — ${confirmado?'associado pelo Processar Fluxo':'clique pra associar'}" onclick="event.stopPropagation();abrirLancctbRegraModalFluxoAssociacao(${JSON.stringify(f).replace(/"/g,'&quot;')},${JSON.stringify(r).replace(/"/g,'&quot;')})"><span style="${confirmado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--teal)'};cursor:pointer">🔗 ${esc(rotulo)} (${dFmt})${(f.numero||f.documento_numero)?` · NF ${esc(f.numero||f.documento_numero)}${f.parcela?' parc. '+esc(f.parcela):''}`:''}${explF}</span>${_verCompKar}</td>`;
   };
   // Fluxo de Caixa de um lançamento JÁ conciliado — só conferência (18/09/2026).
   const fluxoConciliadoCelHtml=()=>{
@@ -35839,7 +35961,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     const nfN=f.numero||f.documento_numero; const num=nfN?` · NF ${esc(nfN)}${f.parcela?' parc. '+esc(f.parcela):''}`:''; // NF e parcela que o Fluxo indica
     const dFmt=f.data?new Date(f.data+'T00:00:00').toLocaleDateString('pt-BR'):'';
     const tip=`${_lancctbFluxoIndicaTxt(f)}${f.descricao||''} — ${dFmt} — ${ligado?'associado a este lançamento':'palpite por valor+data (não associado)'}`;
-    return `<td style="padding:7px 6px;font-size:9px;white-space:normal;line-height:1.25;word-break:break-word;min-width:200px;max-width:320px" title="${esc(tip)}"><span style="${ligado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--slate)'}">${esc(nome)}${num}${ligado?'':' ?'}</span></td>`;
+    return `<td style="padding:7px 6px;font-size:9px;white-space:normal;line-height:1.25;word-break:break-word;min-width:200px;max-width:320px" title="${esc(tip)}"><span style="${ligado?'color:var(--teal);font-weight:600':'font-style:italic;color:var(--slate)'}">${esc(nome)}${num}${ligado?'':' ?'}</span>${_verCompKar}</td>`;
   };
 
   if(item.ctb.length&&ds.length===1&&cs.length===1){
@@ -37458,6 +37580,11 @@ async function _lancctbProcessarUmArquivoComprovante(file,status,tipo){
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
 
+    // KARATER_RECEBIMENTOS: o Relatório de Recebimentos NÃO é comprovante de banco — seus componentes (aluguel/IPTU/condomínio/outros por cliente) entram no Fluxo de Caixa, que é de onde o Processar abre a composição das entradas.
+    try{
+      const itens=[]; for(let pg=1;pg<=Math.min(pdf.numPages,2);pg++) itens.push(...(await (await pdf.getPage(pg)).getTextContent()).items.map(i=>i.str));
+      if(/RELAT[ÓO]RIO DE RECEBIMENTOS/i.test(itens.join(' '))) throw new Error('Este é o "Relatório de Recebimentos" (KARATER_RECEBIMENTOS), lido SEM IA. Importe-o em Fluxo de Caixa → "Importar Fluxo de Caixa": cada natureza (ALUGUEL/IPTU/CONDOMÍNIO/OUTROS) vira um componente do Fluxo, e o Processar Fluxo abre a entrada do banco pela composição.');
+    }catch(e){ if(/KARATER_RECEBIMENTOS/.test(e.message)) throw e; }
     // Tentar reconhecer layout sem IA
     status.textContent=`"${file.name}" — tentando reconhecer layout (sem IA)…`;
     const reconhecido=await _lancctbParsearItauCobrancaPdf(pdf);
@@ -39986,6 +40113,9 @@ const RR_TIPOS=[
   {k:'adm',rotulo:'Taxa de Administração',desc:'Taxa de Administração',sinal:-1},
   {k:'cor',rotulo:'Taxa de Corretagem',desc:'Taxa de Corretagem',sinal:-1},
 ];
+// KARATER (pedido do usuário 20/10/2026): o cliente leva a NATUREZA entre parênteses, vinda da COLUNA do relatório (nunca do nome): CLIENTE (ALUGUEL) | (IPTU) | (CONDOMÍNIO) | (OUTROS). As taxas são deduções, com rótulo próprio.
+const RR_ROTULO_KARATER={aluguel:'ALUGUEL',iptu:'IPTU',cond:'CONDOMÍNIO',outros:'OUTROS',adm:'TAXA DE ADMINISTRAÇÃO',cor:'TAXA DE CORRETAGEM'};
+const _rrRotuloNome=t=>String(_lancctbEidAtual)==='15'?RR_ROTULO_KARATER[t.k]:t.rotulo;
 function _rrHeaderish(s){ s=s.trim(); return Object.values(RR_HEADERS).some(re=>re.test(s))||/^\(-\) Taxa de$/.test(s)||/RELAT[ÓO]RIO DE RECEBIMENTOS/i.test(s); }
 function _rrColunas(itens){
   const m={};
@@ -40043,6 +40173,7 @@ function _rrParsearItens(paginas,nomeArquivo){
     const cnpjTxt=(r.txt.cnpj||[]).join('').replace(/\s+/g,'');
     const cnpj=cnpjTxt.replace(/\D/g,'');
     const mData=(r.txt.pagto||[]).join(' ').match(/(\d{2})\/(\d{2})\/(\d{4})/);
+    const mVenc=(r.txt.venc||[]).join(' ').match(/(\d{2})\/(\d{2})\/(\d{4})/);
     const parcelaTxt=(r.txt.parcela||[]).join(' ').trim()||null;
     const nf=(r.txt.nf||[]).join(' ').trim(), numfat=(r.txt.numfat||[]).join(' ').trim();
     const banco=(r.txt.banco||[]).join(' ').trim()||null;
@@ -40065,19 +40196,22 @@ function _rrParsearItens(paginas,nomeArquivo){
       registros.push({
         data:`${mData[3]}-${mData[2]}-${mData[1]}`,
         descricao:t.desc+(parcelaTxt?` - parcela ${parcelaTxt}`:''),
-        cliente_fornecedor_nome:`${razao} (${t.rotulo})`,
+        cliente_fornecedor_nome:`${razao} (${_rrRotuloNome(t)})`,
         cnpj_cpf:cnpj||null,
         documento_numero:nf||numfat||null,
         parcela:parcelaTxt&&/^\d+/.test(parcelaTxt)?parseInt(parcelaTxt,10):null,
         port_nom:banco,
         valor_entrada:t.sinal*valor, valor_saida:0,
         arquivo_origem:nomeArquivo,
+        data_vencimento:mVenc?`${mVenc[3]}-${mVenc[2]}-${mVenc[1]}`:null, tipo_receita:RR_ROTULO_KARATER[t.k], cliente_original:razao, valor_total_origem:total, recebimento_ref:`${competencia||''}|linha ${idx+1}`, competencia:competencia||null,
         _tipo:t.rotulo, _parcela_txt:parcelaTxt, _linha:idx+1, _aviso:avisosLinha.join(' · ')||null,
         _incluir:ok,
       });
     });
     if(!ok&&avisosLinha.length){ registros.filter(x=>x._linha===idx+1).forEach(x=>{ x._incluir=false; }); }
   });
+  // chave de importação por OCORRÊNCIA: reimportar o mesmo relatório não duplica, e duas linhas idênticas reais continuam sendo duas
+  { const vistos=new Map(); registros.forEach(x=>{ const base=['RR',_lancctbEidAtual,competencia||'',x.data,x.tipo_receita,_krNorm(x.cliente_original),x.cnpj_cpf||'',Math.round(Math.abs(x.valor_entrada)*100),x._parcela_txt||''].join('|'); const o=(vistos.get(base)||0)+1; vistos.set(base,o); x.chave_importacao=base+'#'+o; }); }
   return {registros,competencia,qtdLinhasPdf:idRows.length,somaTotalPdf:Math.round(somaTotalPdf*100)/100,somaGerada:Math.round(somaGerada*100)/100,divergentes,avisos,nomeArquivo};
 }
 let _rrResultado=null;
@@ -40130,16 +40264,19 @@ async function confirmarLancctbFluxoImportRr(){
   if(!sel.length){ toast('Nenhum lançamento selecionado','err'); return; }
   const contaSel=document.getElementById('lancctbFluxoImportConta')?.value||null;
   const { data: existentes } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-    .select('data,cliente_fornecedor_nome,descricao,cnpj_cpf,valor_entrada').eq('empresa_eid',_lancctbEidAtual));
-  const norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim();
+    .select('data,cliente_fornecedor_nome,descricao,cnpj_cpf,valor_entrada,chave_importacao').eq('empresa_eid',_lancctbEidAtual));
+  const norm=s=>String(s||'').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\s+/g,' ').trim().replace(/\s*\([^)]*\)$/,''); // sem o último "(tipo)": importações antigas vieram com "(Valor Aluguel)" e as novas com "(ALUGUEL)"
   // O tipo da operação (no Cliente/Fornecedor) entra na chave: IPTU e Valor Aluguel do mesmo cliente/data/valor são lançamentos diferentes.
   const chave=r=>`${r.data}|${norm(r.cliente_fornecedor_nome)}|${norm(r.descricao)}|${String(r.cnpj_cpf||'').replace(/\D/g,'')}|${Math.round(Number(r.valor_entrada)*100)}`;
   const ja=new Set((existentes||[]).map(chave));
-  const novos=sel.filter(r=>!ja.has(chave(r))).map(r=>({
+  const jaChave=new Set((existentes||[]).map(e=>e.chave_importacao).filter(Boolean));
+  const novos=sel.filter(r=>!jaChave.has(r.chave_importacao)&&!ja.has(chave(r))).map(r=>({
     empresa_eid:_lancctbEidAtual, conta_bancaria_id:contaSel, data:r.data, descricao:r.descricao,
     valor_entrada:r.valor_entrada, valor_saida:0, cliente_fornecedor_nome:r.cliente_fornecedor_nome,
     cnpj_cpf:r.cnpj_cpf, documento_numero:r.documento_numero, parcela:r.parcela, port_nom:r.port_nom,
     arquivo_origem:r.arquivo_origem,
+    data_vencimento:r.data_vencimento||null, tipo_receita:r.tipo_receita||null, cliente_original:r.cliente_original||null, valor_total_origem:r.valor_total_origem??null,
+    recebimento_ref:r.recebimento_ref||null, competencia:r.competencia||null, chave_importacao:r.chave_importacao||null, source_hash:_rrResultado.hash||null,
   }));
   const puladas=sel.length-novos.length;
   if(!novos.length){ toast('Todos os lançamentos selecionados já tinham sido importados antes.','err'); return; }
@@ -40507,8 +40644,9 @@ async function _lancctbFluxoLerPdf(file,status){
     }
     const resultadoRr=await _rrParsearArquivo(pdf,file.name);
     if(resultadoRr){
+      try{ resultadoRr.hash=Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',buf))).map(b=>b.toString(16).padStart(2,'0')).join(''); }catch(e){}
       _rrResultado=resultadoRr;
-      status.textContent=resultadoRr.erro?'Relatório de Recebimentos reconhecido, mas com problema na leitura.':'Modelo reconhecido: Relatório de Recebimentos (leitura direta, sem IA).';
+      status.textContent=resultadoRr.erro?'Erro de leitura: Relatório de Recebimentos reconhecido, mas as colunas não fecharam (sem IA — nada foi chamado).':'Modelo reconhecido: Relatório de Recebimentos (leitura direta, sem IA).';
       document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_rrPreviewHtml();
       document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
       return;
