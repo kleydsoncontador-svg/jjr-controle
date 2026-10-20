@@ -42946,48 +42946,35 @@ async function _lancctbParsearExtratoBBContaCorrente(pdf){
   const itens1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
   const textoPagina1=itens1.map(i=>i.str).join(' ');
   if(!/extrato de conta corrente/i.test(textoPagina1)) return null;
-  if(!/dia\s+lote\s+documento\s+hist[oó]rico\s+valor/i.test(textoPagina1)) return null;
+  // Cabeçalho "Dia | Lote | Documento | Histórico | Valor": o PDF de 09/2026 (SGP) traz esses 5 textos fora de ordem na leitura (Dia, Documento, Valor, Lote, Histórico) — então reconhece pelo CONJUNTO de rótulos, não pela sequência.
+  const _rotulosBB=['Dia','Lote','Documento','Histórico','Valor'];
+  if(!(/dia\s+lote\s+documento\s+hist[oó]rico\s+valor/i.test(textoPagina1)||_rotulosBB.every(k=>itens1.some(i=>i.str.trim()===k)))) return null;
 
   const RE_DATA=/^(\d{2})\/(\d{2})\/(\d{4})$/;
   const RE_VALOR_DC=/^([\d.]+,\d{2})\s*\(([+-])\)$/;
+  // Leitura por GEOMETRIA (pedido do usuário 20/10/2026, extrato SGP 09/2026): cada token de Valor ("155,00 (-)") é a âncora de um lançamento; a DATA é a mais próxima na vertical e as linhas de
+  // histórico (título acima da linha da data e/ou complemento abaixo) pertencem à âncora mais próxima. A ordem de leitura do PDF NÃO serve (data, valor, lote… e histórico vêm embaralhados, e a data
+  // do lançamento seguinte chegava antes de fechar o anterior — o último lançamento do mês perdia a data).
   const registros=[];
-  let pendingValor=null, pendingDc=null;
-  let buf={dataStr:undefined,historico:[]};
-  const flush=()=>{
-    if(pendingValor!=null) registros.push({dataStr:buf.dataStr,valorStr:pendingValor,dc:pendingDc,historico:buf.historico});
-    buf={dataStr:undefined,historico:[]};
-  };
-
   for(let p=1;p<=pdf.numPages;p++){
-    const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
-    for(const it of itens){
-      const t=it.str.trim();
-      if(!t) continue;
-      if(/^Extrato de Conta Corrente$|^Cliente$|^Ag[êe]ncia:|^Lan[çc]amentos$|^Dia$|^Lote$|^Documento$|^Hist[óo]rico$|^Valor$|^Total Aplica[çc][õo]es Financeiras$|^\*\s*Saldos por dia|^Sujeitos a confirma[çc][ãa]o/i.test(t)) continue;
-
-      const mVal=t.match(RE_VALOR_DC);
-      if(mVal&&it.x>450){
-        flush(); // fecha o registro anterior ANTES de guardar este novo Valor
-        pendingValor=mVal[1]; pendingDc=mVal[2];
-        continue;
-      }
-      // "00/00/0000" ANTES do RE_DATA genérico (achado real 15/09/2026: o
-      // regex \d{2}/\d{2}/\d{4} também casa com "00/00/0000", e testado
-      // depois nunca era alcançado — "Saldo do dia" vazava com a data
-      // literal "0000-00-00", que o Postgres rejeita ao salvar).
-      if(t==='00/00/0000'&&it.x<80){ buf.dataStr=null; continue; } // "Saldo do dia" — sem data real
-      if(RE_DATA.test(t)&&it.x<80){
-        const [,dd,mm,aaaa]=t.match(RE_DATA);
-        buf.dataStr=`${aaaa}-${mm}-${dd}`;
-        continue;
-      }
-      if(it.x>=85&&it.x<230&&/^\d+$/.test(t)) continue; // Lote/Documento — não usado no histórico
-      // Ignora números soltos fora da tabela (ex: "0,00" de "Total Aplicações
-      // Financeiras" no rodapé) — histórico de verdade sempre tem letra.
-      if(it.x>=260&&/[A-Za-zÀ-ú]/.test(t)) buf.historico.push(t);
-    }
+    const itens=(p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p))).map(i=>({...i,t:i.str.trim()})).filter(i=>i.t);
+    const itCab=itens.find(i=>i.t==='Dia'&&i.x<80);
+    const yCab=itCab?itCab.y:Infinity; // nada acima do cabeçalho da tabela (Cliente/Agência/Conta/Período) entra
+    const ancoras=itens.filter(i=>i.x>450&&RE_VALOR_DC.test(i.t)&&i.y<yCab);
+    const datas=itens.filter(i=>i.x<80&&(RE_DATA.test(i.t)||i.t==='00/00/0000')&&i.y<yCab);
+    const textos=itens.filter(i=>i.x>=260&&i.x<450&&/[A-Za-zÀ-ú]/.test(i.t)&&i.y<yCab
+      &&!/^Extrato de Conta Corrente$|^Cliente$|^Ag[êe]ncia:|^Conta:|^Per[ií]odo:|^Lan[çc]amentos$|^Dia$|^Lote$|^Documento$|^Hist[óo]rico$|^Valor$|^Total Aplica[çc][õo]es Financeiras$|^\*\s*Saldos por dia|^Sujeitos a confirma[çc][ãa]o/i.test(i.t));
+    const regs=ancoras.map(a=>{ const m=a.t.match(RE_VALOR_DC); return {y:a.y,valorStr:m[1],dc:m[2],dataStr:undefined,txt:[]}; });
+    regs.forEach(r=>{
+      let best=null,bd=1e9; datas.forEach(d=>{ const dy=Math.abs(d.y-r.y); if(dy<bd){ bd=dy; best=d; } });
+      if(best&&bd<=9){ if(best.t==='00/00/0000') r.dataStr=null; else { const [,dd,mm,aaaa]=best.t.match(RE_DATA); r.dataStr=`${aaaa}-${mm}-${dd}`; } }
+    });
+    textos.forEach(t=>{
+      let best=null,bd=1e9; regs.forEach(r=>{ const dy=Math.abs(r.y-t.y); if(dy<bd){ bd=dy; best=r; } });
+      if(best&&bd<=14) best.txt.push(t);
+    });
+    regs.forEach(r=>{ r.txt.sort((x,y)=>y.y-x.y||x.x-y.x); registros.push({dataStr:r.dataStr,valorStr:r.valorStr,dc:r.dc,historico:r.txt.map(x=>x.t)}); });
   }
-  flush();
 
   let saldoAnteriorDoc=null, saldoFinalDoc=null;
   const lancamentos=[];
