@@ -52,23 +52,28 @@
 
   // ───────────────────────────── bases legais ─────────────────────────────
   // fonte/verificação: itens marcados "informada pelo usuário" foram cadastrados a partir do pedido de 20/10/2026 — SEM conferência independente na norma.
+const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRIA, não oficial); conferir no texto oficial';
   const V_USR = 'Cadastrada conforme informação do usuário (20/10/2026); conferir na fonte oficial';
   const CALC_BASES = [
-    { id: 'LEI_15270_2025', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '15.270/2025', artigo: '(a conferir)', assunto: 'Isenção/redução do IRPF — redutor mensal a partir de 2026', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
+    { id: 'LEI_15270_2025', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '15.270/2025', artigo: '(a conferir)', assunto: 'Isenção/redução do IRPF — redutor mensal a partir de 2026', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. Redutor: até R$ 5.000 de rendimento bruto = até R$ 312,89 (limitado ao imposto); de 5.000,01 a 7.350 = 978,62 − 0,133145 × rendimento; acima, nenhum. O teste do redutor usa o rendimento BRUTO. A tabela de faixas não mudou com esta lei.' },
     { id: 'LEI_9250_1995', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao', 'pensao'], norma: 'Lei', numero: '9.250/1995', artigo: 'arts. 4º e 8º', assunto: 'Deduções do IRPF: dependentes, pensão alimentícia, previdência oficial', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Base geral das deduções legais. Artigos a conferir.' },
-    { id: 'TAB_IRRF_2026', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Tabela progressiva mensal do IRRF', numero: '2026', artigo: '—', assunto: 'Faixas, deduções, dependente (189,59) e desconto simplificado (607,20)', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: null, obs: V_USR },
-    { id: 'TAB_INSS_2026', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial de reajuste do RGPS — tabela de contribuição 2026', numero: '(nº a confirmar)', artigo: '—', assunto: 'Faixas progressivas do empregado (7,5/9/12/14%) e teto de R$ 8.475,55', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/inss', ultima_verificacao: null, obs: V_USR },
+    { id: 'TAB_IRRF_2026', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Tabela progressiva mensal do IRRF', numero: '2026', artigo: '—', assunto: 'Faixas, deduções, dependente (189,59) e desconto simplificado (607,20)', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. Conferidos: isenção até 2.428,80, alíquota máxima 27,5% acima de 4.664,68, dependente 189,59, simplificado 607,20. As faixas intermediárias (7,5/15/22,5%) seguem a tabela vigente desde maio/2025 e não foram reconfirmadas nesta busca.' },
+    { id: 'TAB_INSS_2026', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial de reajuste do RGPS — tabela de contribuição 2026', numero: 'Portaria Interministerial MPS/MF nº 13, de 9/1/2026 (segundo sites especializados)', artigo: '—', assunto: 'Faixas progressivas do empregado (7,5/9/12/14%) e teto de R$ 8.475,55', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/inss', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. Faixas e teto coincidem em várias fontes; contribuição máxima do empregado R$ 988,09 (o motor chega ao mesmo valor).' },
     { id: 'LEI_8212_1991', calcs: ['pro_labore'], norma: 'Lei', numero: '8.212/1991', artigo: '(a conferir)', assunto: 'Contribuição do contribuinte individual (11% sobre o pró-labore, até o teto)', vig_ini: '1991-07-24', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
     { id: 'LEI_9249_1995', calcs: ['lucro_presumido'], norma: 'Lei', numero: '9.249/1995', artigo: 'arts. 15 e 20', assunto: 'Percentuais de presunção do IRPJ (art. 15) e da CSLL (art. 20)', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
     { id: 'LEI_9430_1996', calcs: ['lucro_presumido'], norma: 'Lei', numero: '9.430/1996', artigo: '(regras do Lucro Presumido)', assunto: 'Apuração trimestral, adicional do IRPJ, receitas que integram a base', vig_ini: '1997-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
-    { id: 'LC_224_2025', calcs: ['lucro_presumido'], norma: 'Lei Complementar', numero: '224/2025', artigo: 'art. 4º', assunto: 'Acréscimo de 10% sobre o percentual de presunção na parcela da receita bruta acima do limite', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR + '. IRPJ: efeitos a partir do 1º trimestre/2026. CSLL: efeitos a partir do 2º trimestre/2026.' },
+    { id: 'LC_224_2025', calcs: ['lucro_presumido'], norma: 'Lei Complementar', numero: '224/2025', artigo: 'art. 4º', assunto: 'Acréscimo de 10% sobre o percentual de presunção na parcela da receita bruta acima do limite (R$ 5.000.000/ano, aplicado proporcionalmente a cada período de apuração)', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. IRPJ: 1º trimestre/2026. CSLL: a partir de 01/04/2026 (anterioridade nonagesimal). Publicada em 26/12/2025. ATENÇÃO: há liminares individuais na Justiça Federal e ADIs no STF (7920, 7936, 7944, 7982) contestando a majoração; nenhuma decisão do STF suspendendo foi localizada — conferir a situação da empresa.' },
     { id: 'DEC_12808_2025', calcs: ['lucro_presumido'], norma: 'Decreto', numero: '12.808/2025', artigo: 'art. 12', assunto: 'Regulamentação da majoração do Lucro Presumido', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
-    { id: 'RFB_LP_2026', calcs: ['lucro_presumido'], norma: 'Normas da Receita Federal que regulamentam a alteração', numero: '(a cadastrar)', artigo: '—', assunto: 'Limite anual proporcional da CSLL em 2026 (R$ 3.750.000,00 — três trimestres sujeitos à nova regra)', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: null, obs: V_USR },
+    { id: 'RFB_LP_2026', calcs: ['lucro_presumido'], norma: 'Normas da Receita Federal que regulamentam a alteração', numero: 'IN RFB nº 2.305/2026 e nº 2.306/2026 (segundo a NetCPA)', artigo: '—', assunto: 'Regulamentação da majoração; limite anual proporcional da CSLL em 2026 (R$ 3.750.000,00 — três trimestres sujeitos à nova regra)', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: null, obs: V_USR + '. Os números das INs vêm de site especializado; o limite de R$ 3.750.000 não foi reconfirmado.' },
+    { id: 'LEI_9249_JCP', calcs: ['jcp'], norma: 'Lei', numero: '9.249/1995', artigo: 'art. 9º (e art. 9º-§ 8º, redação da Lei 12.973/2014 — conferir)', assunto: 'Juros sobre o capital próprio: TJLP pro rata dia sobre contas do patrimônio líquido; dedução limitada a 50% do lucro (do período, antes da dedução dos juros) ou 50% de lucros acumulados + reservas de lucros', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. Fontes divergem se o lucro do limite é antes ou depois da CSLL/IRPJ: por isso o lucro do período é um CAMPO que você informa. Dedução só no Lucro Real, com deliberação societária e pagamento/crédito individualizado.' },
+    { id: 'LC_224_JCP', calcs: ['jcp'], norma: 'Lei Complementar', numero: '224/2025', artigo: '(a conferir)', assunto: 'IRRF sobre JCP passa de 15% para 17,5% a partir de 1º/1/2026', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. Um site isolado (Renova Invest) ainda cita 15%; os demais e a Econet indicam 17,5%.' },
+    { id: 'IN_RFB_2296_2025', calcs: ['jcp'], norma: 'Instrução Normativa RFB', numero: '2.296/2025 (de 4/12/2025)', artigo: '(a conferir)', assunto: 'Base do JCP: na conta de lucros acumulados entram só os lucros de exercícios anteriores, já encerrados e incorporados ao patrimônio líquido; o lucro do exercício corrente fica fora da base', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. A Econet não detalhou as demais contas do PL.' },
+    { id: 'TJLP_BCB', calcs: ['jcp'], norma: 'Comunicados do Banco Central — Taxa de Juros de Longo Prazo', numero: '2º tri/2026: Comunicado nº 44.994 (31/03/2026) = 9,13% a.a.', artigo: '—', assunto: 'TJLP trimestral (1º tri/2026 = 9,19% e 3º tri/2026 = 9,14% por fonte secundária; 4º tri/2026 NÃO localizado)', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.bcb.gov.br', ultima_verificacao: '2026-10-20 (2º tri: busca citando o Comunicado do BCB; 1º e 3º: fonte secundária)', obs: 'A TJLP do 4º trimestre de 2026 deve sair até o último dia útil de setembro — não foi encontrada. Cadastre em Cadastrar parâmetros quando confirmar no BCB; sem ela o JCP do 4º trimestre não calcula.' },
     { id: 'CF_155', calcs: ['itcmd'], norma: 'Constituição Federal', numero: '1988', artigo: 'art. 155', assunto: 'Competência estadual do ITCMD e regras de competência territorial', vig_ini: '1988-10-05', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
     { id: 'LC_227_2026', calcs: ['itcmd'], norma: 'Lei Complementar', numero: '227/2026', artigo: '(a conferir)', assunto: 'Normas gerais do ITCMD; alíquotas progressivas pelo valor do quinhão/legado/doação (limite máximo fixado pelo Senado); avaliação de participações societárias não negociadas em mercado organizado', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR + '. O valor efetivamente usado respeita a legislação ESTADUAL vigente na data do fato gerador.' },
-    { id: 'SP_LEI_10705_2000', calcs: ['itcmd'], uf: 'SP', norma: 'Lei Estadual (SP)', numero: '10.705/2000', artigo: '(a conferir)', assunto: 'ITCMD paulista', vig_ini: '2001-01-01', vig_fim: null, fonte: 'https://www.al.sp.gov.br', ultima_verificacao: null, obs: V_USR },
-    { id: 'SP_DEC_46655_2002', calcs: ['itcmd'], uf: 'SP', norma: 'Decreto Estadual (SP)', numero: '46.655/2002', artigo: '(a conferir)', assunto: 'Regulamento do ITCMD paulista (alíquota 4%, isenção de doação até 2.500 UFESPs, doações no ano civil)', vig_ini: '2002-04-01', vig_fim: null, fonte: 'https://legislacao.fazenda.sp.gov.br', ultima_verificacao: null, obs: V_USR },
-    { id: 'SP_UFESP_2026', calcs: ['itcmd'], uf: 'SP', norma: 'UFESP do exercício', numero: '2026', artigo: '—', assunto: '1 UFESP = R$ 38,42 em 2026', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://legislacao.fazenda.sp.gov.br', ultima_verificacao: null, obs: V_USR },
+    { id: 'SP_LEI_10705_2000', calcs: ['itcmd'], uf: 'SP', norma: 'Lei Estadual (SP)', numero: '10.705/2000', artigo: 'art. 6º, II, "a" (isenção de doação até 2.500 UFESPs); art. 16 (alíquota de 4%)', assunto: 'ITCMD paulista', vig_ini: '2001-01-01', vig_fim: null, fonte: 'https://legislacao.fazenda.sp.gov.br', ultima_verificacao: '2026-10-20 (Resposta à Consulta 33778/2026 da SEFAZ-SP)', obs: 'Artigos citados pela própria SEFAZ-SP na Resposta à Consulta Tributária 33778/2026.' },
+    { id: 'SP_DEC_46655_2002', calcs: ['itcmd'], uf: 'SP', norma: 'Decreto Estadual (SP)', numero: '46.655/2002', artigo: 'art. 12, § 3º (doações sucessivas somadas no ano civil)', assunto: 'Regulamento do ITCMD paulista', vig_ini: '2002-04-01', vig_fim: null, fonte: 'https://legislacao.fazenda.sp.gov.br', ultima_verificacao: '2026-10-20 (Resposta à Consulta 33778/2026 da SEFAZ-SP)', obs: 'Também: a doação isenta continua com obrigação de declarar (Portaria CAT 15/2003, arts. 12-A e 18). A resposta oficial NÃO diz se, ultrapassado o limite, o imposto incide só sobre a doação atual ou sobre o acumulado; fonte secundária diz que incide sobre o total — conferir.' },
+    { id: 'SP_UFESP_2026', calcs: ['itcmd'], uf: 'SP', norma: 'UFESP do exercício', numero: '2026', artigo: '—', assunto: '1 UFESP = R$ 38,42 em 2026 (limite de isenção de doação: R$ 96.050,00)', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://legislacao.fazenda.sp.gov.br', ultima_verificacao: '2026-10-20 (fonte secundária)', obs: V_SEC + '. O valor de 2025 (R$ 37,02) aparece na resposta oficial; o de 2026 veio de site especializado que cita o Comunicado DICAR.' },
     { id: 'LEI_8981_1995', calcs: ['mutuo'], norma: 'Lei', numero: '8.981/1995', artigo: '(a conferir)', assunto: 'Retenção na fonte sobre rendimentos (tabela regressiva por prazo)', vig_ini: '1995-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR + ' — o conjunto regressivo 22,5/20/17,5/15% foi informado sem citar o artigo.' },
     { id: 'IOF_CREDITO', calcs: ['mutuo'], norma: 'Decreto do IOF (operações de crédito)', numero: '(a cadastrar)', artigo: '—', assunto: 'Alíquota diária, adicional e limite de dias do IOF-crédito — NÃO cadastrados', vig_ini: null, vig_fim: null, fonte: 'https://www.gov.br/receitafederal', ultima_verificacao: null, obs: 'Sem valores cadastrados: o IOF do mútuo só calcula depois que você cadastrar o conjunto de parâmetros (Bases Legais → Cadastrar parâmetros).' },
     { id: 'CLT_RESCISAO', calcs: ['ferias', 'decimo_terceiro', 'rescisao'], norma: 'CLT e legislação complementar', numero: 'Decreto-Lei 5.452/1943; Lei 4.090/1962 (13º); Lei 8.036/1990 (FGTS); Lei 12.506/2011 (aviso prévio)', artigo: '(a conferir por rubrica)', assunto: 'Verbas rescisórias, férias, 13º, aviso prévio proporcional, FGTS e multa', vig_ini: null, vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Matriz de incidência da rescisão cadastrada como versão inicial — conferir cada rubrica antes de usar.' },
@@ -149,6 +154,27 @@
         sucessivas_base: P('nova_doacao', '', 'Quando o acumulado passa do limite: o imposto incide sobre a doação atual (regra a confirmar na legislação paulista)'),
         usufruto_nua_propriedade: P(null, '', 'NÃO cadastrado para SP'),
         causa_mortis_isencoes: P(null, '', 'Isenções de causa mortis NÃO cadastradas para SP'),
+      },
+    },
+    {
+      id: 'JCP_IRRF_ATE_2025', calculator_key: 'jcp_irrf', valid_from: '1996-01-01', valid_to: '2025-12-31', version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (conferido em fonte secundária)',
+      bases: ['LEI_9249_JCP'],
+      params: { aliquota: P('0.15', 'taxa', 'IRRF sobre o JCP até 31/12/2025'), aliquota_paraiso: P('0.25', 'taxa', 'Beneficiário em país com tributação favorecida (a conferir na norma)') },
+    },
+    {
+      id: 'JCP_IRRF_2026', calculator_key: 'jcp_irrf', valid_from: '2026-01-01', valid_to: null, version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (conferido em fonte secundária)',
+      bases: ['LC_224_JCP'],
+      params: { aliquota: P('0.175', 'taxa', 'IRRF sobre o JCP a partir de 1º/1/2026 (LC 224/2025)'), aliquota_paraiso: P('0.25', 'taxa', 'Beneficiário em país com tributação favorecida (a conferir na norma)') },
+    },
+    {
+      id: 'JCP_BASE_2026', calculator_key: 'jcp_base', valid_from: '2026-01-01', valid_to: '2026-12-31', version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (conferido em fonte secundária)',
+      bases: ['LEI_9249_JCP', 'IN_RFB_2296_2025', 'TJLP_BCB'],
+      params: {
+        tjlp_trimestres: P({ '2026-1': '0.0919', '2026-2': '0.0913', '2026-3': '0.0914' }, '% a.a. (decimal)', 'TJLP por trimestre. 2026-2 = Comunicado BCB 44.994; 2026-1 e 2026-3 por fonte secundária; 2026-4 NÃO cadastrada'),
+        divisor_dias_ano: P(365, 'dias', 'TJLP aplicada pro rata dia = taxa × dias/365. O divisor NÃO foi confirmado em norma — confira'),
+        limite_pct: P('0.5', 'taxa', 'Dedução limitada a 50% do lucro do período ou 50% de lucros acumulados + reservas de lucros (o maior)'),
+        aliquota_irpj: P('0.15', 'taxa', 'IRPJ — usado só na economia fiscal estimada (sem o adicional de 10%)'),
+        aliquota_csll: P('0.09', 'taxa', 'CSLL — usado só na economia fiscal estimada'),
       },
     },
     {
@@ -401,6 +427,7 @@
     const csllRet = cents(inp.csllRetida), antC = cents(inp.outrasAntecipacoesCsll);
     mem.l('(−) CSLL retida a compensar', csllRet, '−'); mem.l('(−) Outras antecipações da CSLL', antC, '−');
     const csllSaldo = csll - csllRet - antC; mem.tot(csllSaldo >= 0 ? 'CSLL A PAGAR' : 'CSLL — SALDO NEGATIVO (a compensar)', csllSaldo);
+    if (majIRPJ || majCSLL) avisos.push('Há liminares individuais na Justiça Federal e ADIs no STF (7920, 7936, 7944, 7982) contestando a majoração de 10%. O cálculo aplica a lei em vigor; se a empresa tem decisão favorável, a base muda — confira o andamento.');
     if (ano === 2026) avisos.push('CSLL 2026: limite anual proporcional de ' + brl(cents(pv(set, 'csll_limite_anual_2026'))) + ' (três trimestres sujeitos à nova regra). O 1º trimestre/2026 NÃO tem majoração da CSLL.');
     if (alCSLLtab && tipoC === 'comum') avisos.push('CSLL calculada à alíquota da empresa comum. Entidades financeiras e outras atividades têm alíquota própria — não cadastradas.');
     return { ok: true, resultado: { baseIRPJ, irpj: irpjTotal, irpjAPagar: max0(irpjSaldo), irpjSaldo, baseCSLL, csll, csllAPagar: max0(csllSaldo), csllSaldo, majoracaoIRPJ: majIRPJ, majoracaoCSLL: majCSLL }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
@@ -466,7 +493,7 @@
     let itcmd = 0, situacao, baseTrib = 0;
     if (acum <= limIsen) { situacao = 'POSSÍVEL ISENÇÃO'; mem.txt('Situação', 'POSSÍVEL ISENÇÃO — acumulado (' + brl(acum) + ') ≤ limite (' + brl(limIsen) + '). Confirme as demais condições legais antes de deixar de recolher.'); mem.tot('ITCMD', 0); avisos.push('Isenção condicionada: confirme doador/donatário, período e demais condições da legislação paulista. A calculadora não zera o imposto sem alertar.'); }
     else { situacao = 'TRIBUTADA'; baseTrib = transmitido; itcmd = mulC(baseTrib, aliq); mem.txt('Situação', 'TRIBUTADA — acumulado (' + brl(acum) + ') acima do limite (' + brl(limIsen) + ')'); mem.l('Base tributável (doação atual)', baseTrib); mem.l('× alíquota ' + Number(pv(set, 'aliquota')) * 100 + '%', itcmd, '×'); mem.tot('ITCMD', itcmd);
-      if (ant > 0) avisos.push('Doações sucessivas: o acumulado do ano ultrapassou o limite. A calculadora aplica a alíquota sobre a doação atual — confirme na legislação paulista se o imposto deve incidir sobre o total acumulado (parâmetro sucessivas_base).'); }
+      if (ant > 0) { const alt = mulC(acum, aliq); mem.n('ATENÇÃO — se o imposto incidir sobre o TOTAL acumulado no ano (' + brl(acum) + ' × alíquota), o valor seria ' + brl(alt) + ' (diferença de ' + brl(alt - itcmd) + ').'); avisos.push('Doações sucessivas: o acumulado do ano ultrapassou o limite. A calculadora aplica a alíquota sobre a doação atual. A resposta oficial da SEFAZ-SP (Consulta 33778/2026) não esclarece se o imposto incide só sobre esta doação ou sobre o acumulado, e fonte secundária diz que é sobre o total — a memória mostra o valor alternativo.'); } }
     Object.assign(out, { itcmd, situacao, base: baseTrib, isencao_limite: limIsen, acumulado: acum, aliquota: pv(set, 'aliquota') });
     return { ok: true, resultado: out, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
   }
@@ -668,6 +695,66 @@
     return { ok: true, resultado: { verbas: linhas, bruto, inss: inssM + inss13, irrf: (irM ? irM.valor : 0) + (ir13 ? ir13.valor : 0), liquido, fgts: fgtsDep, multa_fgts: multa }, memoria: mem.L, parametros: sets.map(refSet), bases: basesDe(sets).concat(CALC_BASES.filter(b => b.id === 'CLT_RESCISAO')), avisos: ['VERSÃO INICIAL: a matriz de incidência e os tipos de rescisão devem ser conferidos rubrica por rubrica antes do uso profissional.', 'Aviso prévio proporcional pela Lei 12.506/2011 (30 dias + 3 por ano completo, até 90). O aviso indenizado integra o tempo de serviço para 13º e férias proporcionais.'] };
   }
 
+
+  // ───────────────────────────── JCP — Juros sobre o Capital Próprio ─────────────────────────────
+  const somaDias = (iso, n) => new Date(Date.UTC(+iso.slice(0, 4), +iso.slice(5, 7) - 1, +iso.slice(8, 10) + n)).toISOString().slice(0, 10);
+  // TJLP pro rata dia por trimestre civil: soma de (dias do trimestre / divisor) × TJLP do trimestre
+  function fatorTJLP(ini, fim, set) {
+    const tj = pv(set, 'tjlp_trimestres'), div = parseInt(pv(set, 'divisor_dias_ano'), 10);
+    const linhas = []; let fator = Q(0), cur = ini;
+    while (cur <= fim) {
+      const y = +cur.slice(0, 4), m = +cur.slice(5, 7), qn = Math.ceil(m / 3);
+      const fimQ = y + '-' + String(qn * 3).padStart(2, '0') + '-' + (qn === 1 || qn === 4 ? '31' : '30');
+      const ate = fimQ < fim ? fimQ : fim; const dias = diasEntre(cur, ate) + 1; const key = y + '-' + qn;
+      if (!tj[key]) return { faltando: qn + 'º trimestre/' + y };
+      fator = qAdd(fator, qMul(Q(dias, div), dec(tj[key]))); linhas.push({ key, qn, y, dias, taxa: tj[key], div });
+      cur = somaDias(ate, 1);
+    }
+    return { fator, linhas };
+  }
+  function calcJCP(inp) {
+    const ini = String(inp.dataInicio || '').slice(0, 10), fim = String(inp.dataFim || '').slice(0, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ini) || !/^\d{4}-\d{2}-\d{2}$/.test(fim) || fim < ini) return ERR('Informe o início e o fim do período (o fim não pode ser anterior ao início).');
+    if (ini.slice(0, 4) !== fim.slice(0, 4)) return ERR('Calcule um ano-calendário por vez (o período deve ficar dentro do mesmo ano).');
+    const sB = acharSet('jcp_base', fim); if (!sB) return ERR(ERRO_PARAM, { detalhe: 'JCP (TJLP, limite) — período até ' + fim });
+    const pag = String(inp.dataPagamento || '').slice(0, 10) || fim;
+    const sI = acharSet('jcp_irrf', pag); if (!sI) return ERR(ERRO_PARAM, { detalhe: 'IRRF sobre JCP — data de pagamento ' + pag });
+    const tj = fatorTJLP(ini, fim, sB); if (tj.faltando) return ERR('TJLP do ' + tj.faltando + ' não cadastrada. Confirme a taxa no Banco Central e cadastre em Bases Legais → Cadastrar parâmetros.', { detalhe: 'Sem a TJLP o JCP não calcula.' });
+    const mem = Mem(), avisos = [];
+    const capital = cents(inp.capitalSocial), resCap = cents(inp.reservasCapital), resLuc = cents(inp.reservasLucros), lucAnt = cents(inp.lucrosAcumuladosAnteriores), tes = cents(inp.acoesTesouraria), prej = cents(inp.prejuizosAcumulados);
+    mem.t('1. Base: contas do patrimônio líquido');
+    mem.l('Capital social', capital, '+'); mem.l('Reservas de capital', resCap, '+'); mem.l('Reservas de lucros', resLuc, '+');
+    mem.l('Lucros acumulados de exercícios ANTERIORES (o lucro do exercício corrente fica fora — IN RFB 2.296/2025)', lucAnt, '+');
+    mem.l('(−) Ações em tesouraria', tes, '−'); mem.l('(−) Prejuízos acumulados', prej, '−');
+    const pl = capital + resCap + resLuc + lucAnt - tes - prej; mem.s('Base de cálculo (PL ajustado)', pl);
+    if (pl <= 0) return ERR('A base do patrimônio líquido ficou zerada ou negativa — não há JCP a calcular.');
+    mem.t('2. JCP teórico = base × TJLP pro rata dia');
+    mem.txt('Período', ini + ' a ' + fim);
+    tj.linhas.forEach(l => mem.l(l.qn + 'º tri/' + l.y + ': TJLP ' + (Number(l.taxa) * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + '% a.a. × ' + l.dias + '/' + l.div + ' dias', qRound(mulQ(pl, qMul(Q(l.dias, l.div), dec(l.taxa)))), '+', 'parcela mostrada arredondada'));
+    const teorico = qRound(mulQ(pl, tj.fator)); mem.s('JCP teórico (soma, arredondada uma só vez)', teorico);
+    mem.t('3. Limite de dedução: o maior entre 50% do lucro do período e 50% de (lucros acumulados + reservas de lucros)');
+    const lucroPer = cents(inp.lucroPeriodo); const lucReservas = inp.lucrosReservasLimite !== undefined && inp.lucrosReservasLimite !== '' ? cents(inp.lucrosReservasLimite) : (resLuc + lucAnt);
+    const lp = parseFloat(pv(sB, 'limite_pct')) ; const pL = dec(pv(sB, 'limite_pct'));
+    const l1 = mulC(max0(lucroPer), pL), l2 = mulC(max0(lucReservas), pL);
+    mem.l('Lucro do período informado (antes da dedução do JCP): ' + brl(lucroPer) + ' × ' + (lp * 100) + '%', l1, '×'); mem.l('Lucros acumulados + reservas de lucros: ' + brl(lucReservas) + ' × ' + (lp * 100) + '%', l2, '×');
+    const limite = Math.max(l1, l2); mem.s('Limite de dedução (o maior)', limite);
+    const maxJcp = Math.min(teorico, limite); mem.tot('JCP MÁXIMO DEDUTÍVEL (menor entre o teórico e o limite)', maxJcp);
+    const deliberado = cents(inp.valorDeliberado); const pago = deliberado > 0 ? deliberado : maxJcp;
+    mem.t('4. Valor pago ou creditado');
+    if (deliberado > 0) { mem.l('Valor deliberado', deliberado); if (deliberado > maxJcp) { mem.l('Excedente sobre o máximo dedutível', deliberado - maxJcp, '−'); avisos.push('O valor deliberado (' + brl(deliberado) + ') passa do máximo dedutível (' + brl(maxJcp) + '). O excedente não é dedutível.'); } }
+    else mem.n('Sem valor deliberado: considerado o máximo dedutível.');
+    const dedutivel = inp.regime === 'lucro_real' ? Math.min(pago, maxJcp) : 0;
+    mem.t('5. IRRF (conjunto ' + sI.id + ' v' + sI.version + ')');
+    const aliq = dec(pv(sI, inp.beneficiario === 'paraiso_fiscal' ? 'aliquota_paraiso' : 'aliquota'));
+    const irrf = mulC(pago, aliq); mem.l(brl(pago) + ' × ' + (Number(pv(sI, inp.beneficiario === 'paraiso_fiscal' ? 'aliquota_paraiso' : 'aliquota')) * 100) + '%' + (inp.beneficiario === 'paraiso_fiscal' ? ' (país com tributação favorecida)' : ''), irrf, '×'); mem.l('Líquido ao beneficiário', pago - irrf);
+    let econ = 0;
+    if (inp.regime === 'lucro_real') { mem.t('6. Economia fiscal estimada na empresa (informativa)'); econ = mulC(dedutivel, dec(pv(sB, 'aliquota_irpj'))) + mulC(dedutivel, dec(pv(sB, 'aliquota_csll'))); mem.l('Dedutível × (IRPJ ' + Number(pv(sB, 'aliquota_irpj')) * 100 + '% + CSLL ' + Number(pv(sB, 'aliquota_csll')) * 100 + '%)', econ, '+', 'sem o adicional de 10% do IRPJ'); }
+    else avisos.push('Regime diferente de Lucro Real: o JCP NÃO é dedutível do IRPJ/CSLL; a retenção na fonte continua incidindo sobre o valor pago.');
+    avisos.push('Dedução exige deliberação societária e pagamento/crédito individualizado. Fontes divergem sobre o lucro do limite (antes/depois da CSLL e do IRPJ): informe o lucro conforme o seu entendimento.');
+    avisos.push('O divisor de dias da TJLP (365) e a base de PL seguem o cadastro; o divisor não foi confirmado em norma.');
+    return { ok: true, resultado: { base: pl, teorico, limite, maxDedutivel: maxJcp, pago, irrf, liquido: pago - irrf, dedutivel, economia: econ }, memoria: mem.L, parametros: [refSet(sB), refSet(sI)], bases: basesDe([sB, sI]), avisos };
+  }
+
   // ───────────────────────────── catálogo ─────────────────────────────
   const CATALOGO = [
     { key: 'irrf_pf', cat: 'FEDERAL', nome: 'IRRF — Pessoa Física', fn: calcIRRF },
@@ -679,6 +766,7 @@
     { key: 'plr', cat: 'TRABALHISTA', nome: 'PLR — tributação exclusiva', fn: calcPLR },
     { key: 'pensao', cat: 'TRABALHISTA', nome: 'Pensão alimentícia', fn: calcPensao },
     { key: 'mutuo', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Mútuo — IOF / juros / IRRF', fn: calcMutuo },
+    { key: 'jcp', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'JCP — Juros sobre Capital Próprio', fn: calcJCP },
     { key: 'lucro_presumido', cat: 'TRIBUTÁRIO PJ', nome: 'Lucro Presumido — IRPJ e CSLL', fn: calcLucroPresumido },
     { key: 'itcmd', cat: 'ESTADUAL', nome: 'ITCMD — Doação e Causa mortis', fn: calcITCMD },
   ];

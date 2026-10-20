@@ -102,6 +102,23 @@ t('Rescisão justa causa: sem 13º nem férias proporcionais', () => { const x =
 t('Rescisão: aviso indenizado não sofre INSS/IRRF (matriz)', () => assert.strictEqual(C.MATRIZ_RESCISAO.aviso_indenizado.inss, false));
 t('Rescisão acordo 484-A: aviso pela metade, multa 20%', () => { const a = C.calcular('rescisao', { competencia: '2026-06', tipo: 'acordo_484a', dataAdmissao: '2022-02-01', dataDesligamento: '2026-06-15', salario: '3000', saldoFgts: '10000' }); const b = C.calcular('rescisao', { competencia: '2026-06', tipo: 'sem_justa_causa', dataAdmissao: '2022-02-01', dataDesligamento: '2026-06-15', salario: '3000', saldoFgts: '10000' }); const av = x => x.resultado.verbas.find(v => v.rub === 'aviso_indenizado').valor; assert.ok(Math.abs(av(a) * 2 - av(b)) <= 1); assert.ok(a.resultado.multa_fgts < b.resultado.multa_fgts); });
 
+
+// ── 13. JCP (referência independente em Python Decimal: PL 1.300.000, 1º semestre/2026 → 59.049,56) ──
+const jcp = o => C.calcular('jcp', Object.assign({ dataInicio: '2026-01-01', dataFim: '2026-06-30', capitalSocial: '1000000', reservasLucros: '200000', lucrosAcumuladosAnteriores: '100000', lucroPeriodo: '300000', regime: 'lucro_real', dataPagamento: '2026-07-10' }, o));
+t('JCP teórico = PL × TJLP pro rata dia', () => assert.strictEqual(jcp({}).resultado.teorico, c('59049.56')));
+t('JCP IRRF 17,5% em 2026', () => assert.strictEqual(jcp({}).resultado.irrf, Math.round(c('59049.56') * 0.175)));
+t('JCP IRRF 15% para pagamento até 2025', () => assert.strictEqual(jcp({ dataPagamento: '2025-12-20' }).resultado.irrf, Math.round(c('59049.56') * 0.15)));
+t('JCP beneficiário em paraíso fiscal 25%', () => assert.strictEqual(jcp({ beneficiario: 'paraiso_fiscal' }).resultado.irrf, Math.round(c('59049.56') * 0.25)));
+t('JCP limitado a 50% quando o lucro é pequeno e não há reservas', () => { const x = jcp({ reservasLucros: '0', lucrosAcumuladosAnteriores: '0', capitalSocial: '1300000', lucroPeriodo: '40000' }); assert.strictEqual(x.resultado.limite, c('20000')); assert.strictEqual(x.resultado.maxDedutivel, c('20000')); });
+t('JCP valor deliberado acima do máximo avisa o excedente', () => { const x = jcp({ valorDeliberado: '70000' }); assert.strictEqual(x.resultado.pago, c('70000')); assert.strictEqual(x.resultado.dedutivel, c('59049.56')); assert.ok(x.avisos.some(a => a.includes('passa do máximo'))); });
+t('JCP fora do Lucro Real não é dedutível', () => assert.strictEqual(jcp({ regime: 'lucro_presumido' }).resultado.dedutivel, 0));
+t('JCP 4º trimestre/2026: sem TJLP cadastrada → não calcula', () => { const x = jcp({ dataInicio: '2026-10-01', dataFim: '2026-12-31' }); assert.strictEqual(x.ok, false); assert.ok(x.erro.includes('TJLP')); });
+t('JCP período em dois anos → recusa', () => assert.strictEqual(jcp({ dataInicio: '2026-07-01', dataFim: '2027-03-31' }).ok, false));
+t('JCP lucros do exercício corrente ficam fora da base (só anteriores)', () => assert.strictEqual(jcp({}).resultado.base, c('1300000')));
+t('INSS: contribuição máxima do empregado = 988,09', () => assert.strictEqual(C.calcular('salario_liquido', { competencia: '2026-03', salario: '20000' }).resultado.inss, c('988.09')));
+t('ITCMD: acumulado acima do limite mostra o valor alternativo (sobre o total)', () => { const x = itd({ valorBem: '80000', doacoesAnteriores: '30000' }); assert.ok(x.memoria.some(l => l.k === 'nota' && l.r.includes('TOTAL acumulado'))); });
+t('Lucro Presumido majorado avisa das liminares/ADIs', () => assert.ok(lp(2026, 2, [{ tipo: 'comercio', receita: '1500000' }]).avisos.some(a => a.includes('ADIs'))));
+
 // ── 12. Toda calculadora devolve memória, parâmetros e bases ──
 t('memória e bases presentes', () => { const x = C.calcular('salario_liquido', { competencia: '2026-03', salario: '5000' }); assert.ok(x.memoria.length > 5); assert.ok(x.bases.length > 0); assert.ok(x.parametros.length > 0); });
 t('entrada inválida não quebra', () => assert.strictEqual(C.calcular('irrf_pf', { competencia: 'abc' }).ok, false));

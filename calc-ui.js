@@ -89,6 +89,17 @@
       { k: 'mutuarioSimples', l: 'Mutuário optante pelo Simples Nacional / MEI', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' },
       { k: 'contaCorrente', l: 'Operação em conta corrente (saldo devedor diário)', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' }],
       resumo: r => [['Dias', String(r.dias)], ['Juros', r.juros], ['IOF', r.iof == null ? 'não calculado' : r.iof, 1], ['IRRF sobre os juros', r.irrf_juros == null ? 'não se aplica' : r.irrf_juros, 1]] },
+    jcp: { titulo: 'JCP — Juros sobre o Capital Próprio', desc: 'TJLP pro rata dia sobre o patrimônio líquido, limite de 50%, IRRF e economia fiscal. Só calcula se a TJLP de todos os trimestres do período estiver cadastrada (4º tri/2026 ainda não).', campos: [
+      { k: 'dataInicio', l: 'Início do período', t: 'date', def: () => new Date().getFullYear() + '-01-01' }, { k: 'dataFim', l: 'Fim do período', t: 'date', def: () => new Date().getFullYear() + '-06-30' },
+      { k: 'dataPagamento', l: 'Data do pagamento/crédito (define o IRRF) — vazio = fim do período', t: 'date' },
+      { k: 'regime', l: 'Regime da empresa', t: 'select', def: 'lucro_real', opts: [['lucro_real', 'Lucro Real (JCP dedutível)'], ['lucro_presumido', 'Lucro Presumido / outro (não dedutível)']] },
+      { k: 'capitalSocial', l: 'Capital social (R$)', t: 'money' }, { k: 'reservasCapital', l: 'Reservas de capital (R$)', t: 'money' }, { k: 'reservasLucros', l: 'Reservas de lucros (R$)', t: 'money' },
+      { k: 'lucrosAcumuladosAnteriores', l: 'Lucros acumulados de exercícios anteriores (R$)', t: 'money' }, { k: 'acoesTesouraria', l: 'Ações em tesouraria (R$) — valor positivo', t: 'money' }, { k: 'prejuizosAcumulados', l: 'Prejuízos acumulados (R$) — valor positivo', t: 'money' },
+      { k: 'lucroPeriodo', l: 'Lucro do período antes da dedução do JCP (R$) — como você apura para o limite de 50%', t: 'money' },
+      { k: 'lucrosReservasLimite', l: 'Lucros acumulados + reservas de lucros p/ o limite (R$) — vazio = soma dos campos acima', t: 'money' },
+      { k: 'valorDeliberado', l: 'Valor deliberado a pagar (R$) — vazio = máximo dedutível', t: 'money' },
+      { k: 'beneficiario', l: 'Beneficiário', t: 'select', def: 'padrao', opts: [['padrao', 'Sócio/acionista residente'], ['paraiso_fiscal', 'Residente em país com tributação favorecida']] }],
+      resumo: r => [['JCP máximo dedutível', r.maxDedutivel, 1], ['IRRF a reter', r.irrf, 1], ['Líquido ao beneficiário', r.liquido], ['Valor pago/creditado', r.pago], ['JCP teórico (base × TJLP)', r.teorico], ['Limite de 50%', r.limite], ['Base (PL ajustado)', r.base], ['Economia IRPJ+CSLL (estimada)', r.economia]] },
     lucro_presumido: { titulo: 'Lucro Presumido — IRPJ e CSLL', desc: 'Apuração trimestral com a majoração de 10% sobre o percentual de presunção acima de R$ 1.250.000 por trimestre.', campos: [
       { k: 'ano', l: 'Ano', t: 'int', def: () => new Date().getFullYear() },
       { k: 'trimestre', l: 'Trimestre', t: 'select', def: '1', opts: [['1', '1º trimestre'], ['2', '2º trimestre'], ['3', '3º trimestre'], ['4', '4º trimestre']] },
