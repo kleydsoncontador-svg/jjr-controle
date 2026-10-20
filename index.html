@@ -24923,22 +24923,9 @@ async function _lancctbProcessarFopag(){
     // com ≥4 letras) ou pelo CPF (dígitos). Sem limite de valor — se o
     // histórico identifica a pessoa, confia (pedido do usuário 10/09/2026).
     const _norm=s=>String(s||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
-    const identificaPessoa=(historico,candidatos)=>{
-      const h=_norm(historico), hDig=h.replace(/\D/g,'');
-      for(const p of candidatos){
-        const cpfDig=String(p.cpf||'').replace(/\D/g,'');
-        if(cpfDig.length===11 && hDig.includes(cpfDig)) return p;
-      }
-      { // CPF mascarado do Pix (***.994.216-**): o miolo de 6 dígitos, se bater com UMA só pessoa
-        const fr=String(historico||'').match(/\*{3}\.(\d{3})\.(\d{3})-\*{2}/);
-        if(fr){ const ms=candidatos.filter(p=>{ const c=String(p.cpf||'').replace(/\D/g,''); return c.length===11&&c.slice(3,9)===fr[1]+fr[2]; }); if(ms.length===1) return ms[0]; }
-      }
-      for(const p of candidatos){
-        const toks=_norm(p.nome).split(' ').filter(t=>t.length>=4);
-        if(toks.length>=2 && toks.filter(t=>h.includes(t)).length>=2) return p;
-      }
-      return null;
-    };
+    // Pedido do usuário 19/10/2026 ("identificação forte"): CPF inteiro, CPF mascarado ou PRIMEIRO nome + outro nome como palavras inteiras; mais de uma pessoa possível = ninguém (não chuta).
+    // O casamento antigo (2 palavras de 4+ letras em qualquer posição) trocava "LUIS EUGENIO RODRIGUES DA SILVA" por "ANDRE LUIS DA SILVA" e "Lucas Older" por "LUCIANO MAINARDO".
+    const identificaPessoa=(historico,candidatos)=>{ const r=_lancctbPessoasForteNoTexto(historico,candidatos); return r.length===1?r[0]:null; };
 
     // Fluxo de Caixa do cliente (quando existe) — algumas empresas põem o
     // NOME do empregado na coluna "cliente/fornecedor" ou "descrição" do
@@ -24947,7 +24934,7 @@ async function _lancctbProcessarFopag(){
     // Prioridade: a linha do fluxo já ASSOCIADA a esta pendência (pelo
     // "Processar Fluxo"); senão, uma linha livre que bate valor+data.
     const { data: fluxoTodo } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,descricao,valor_saida,cliente_fornecedor_nome,status_associado,lancamento_extrato_id')
+      .select('id,data,descricao,valor_saida,cliente_fornecedor_nome,cnpj_cpf,status_associado,lancamento_extrato_id')
       .eq('empresa_eid',eid).gt('valor_saida',0));
     const _pendIdsFopag=new Set(pendencias.map(p=>String(p.id)));
     // "Livre" pra sugerir a uma pendência = não associado, ou sem vínculo, ou
@@ -24965,7 +24952,17 @@ async function _lancctbProcessarFopag(){
         _lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS &&
         !fluxoDeOutraPessoa(l,f));
 
-    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null, antecipacoes=0;
+    let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null, pessoasMarcadas=0;
+    // Marca no começo do histórico quem recebeu (nome/CPF) quando a natureza não está comprovada — conta D vazia, o usuário define depois. Não duplica marca e preserva rótulos de diferença.
+    const marcarPessoaIdentificada=async(l,rotulo,nome,cpf)=>{
+      const h=String(l.historico_bancario||'');
+      if(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|DIFEREN)/i.test(h)) return false;
+      const d=String(cpf||'').replace(/\D/g,''); const cpfTxt=d.length===11?` (CPF ${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)})`:'';
+      const base=h.replace(/^\s*\[SISPAG ABERTO - [^\]]*\]\s*/,'');
+      const novo=`[${rotulo} - CONTA A DEFINIR - ${nome}${cpfTxt}] ${base}`.trim();
+      const { error } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:novo }).eq('id',l.id);
+      if(error) return false; l.historico_bancario=novo; return true;
+    };
     const comprovSociosCache={};
     const indivSispagCache={};
     const relatoriosExtraCache={};
@@ -25225,7 +25222,9 @@ async function _lancctbProcessarFopag(){
       // linhas: o líquido exato (conciliado agora) + a diferença, que vira
       // uma pendência nova pra uma Regra tratar depois.
       const fluxoDaPend=acharFluxoDaPendencia(l);
-      const textoIdent=[l.historico_bancario, fluxoDaPend&&fluxoDaPend.cliente_fornecedor_nome, fluxoDaPend&&fluxoDaPend.descricao].filter(Boolean).join(' ');
+      // O FLUXO diz quem recebeu — mas pagamento com NOME de outra pessoa no histórico do banco nunca é identificado pelo Fluxo (Fluxo da "LUCIANO" não vira o PIX da "Lucas"). Com rótulo [SISPAG ABERTO - …] vale o rótulo + Fluxo.
+      const _hOrigId=String(l.historico_bancario||'');
+      const textoIdent=(histTemNomePessoa(_hOrigId)&&!/^\s*\[/.test(_hOrigId))?_hOrigId:[l.historico_bancario, fluxoDaPend&&fluxoDaPend.cliente_fornecedor_nome, fluxoDaPend&&fluxoDaPend.descricao].filter(Boolean).join(' ');
       let matchIndiv=null;
       // 1º o VALOR EXATO: a pessoa identificada com líquido igual ao pago, em QUALQUER relatório (férias, rescisão, adiantamento, salário…) — modelo Leonardo/rescisão.
       for(const r of relatorios){
@@ -25234,7 +25233,7 @@ async function _lancctbProcessarFopag(){
       }
       if(!matchIndiv) for(const r of relatorios){
         const p=identificaPessoa(textoIdent, r.dados.pessoas);
-        if(p && (!semFolhaAdiant||p.tipo==='contribuinte') && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
+        if(p && !semFolhaAdiant && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; } // empresa em regra estrita (Kajuna): só valor EXATO fecha; o resto fica "pessoa identificada, conta a definir"
       }
       // Achado real 25/09/2026 (Metodo, adiantamento 669,84): o histórico do
       // Pix veio TRUNCADO sem o nome do favorecido ("@Adiantamento salarial 00…")
@@ -25262,33 +25261,30 @@ async function _lancctbProcessarFopag(){
           if(nomeAprendido){
             for(const r of relatorios){
               const p=identificaPessoa(nomeAprendido, r.dados.pessoas);
-              if(p && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
+              if(p && !semFolhaAdiant && l.valor_saida >= p.valor-0.01){ matchIndiv={r,p}; break; }
             }
           }
         }
       }
-      if(!matchIndiv&&!histTemNomePessoa(l.historico_bancario)){ // histórico COM nome de outra pessoa nunca casa só pelo valor (18/10/2026)
+      if(!matchIndiv&&!histTemNomePessoa(l.historico_bancario)&&!/^\s*\[(SISPAG ABERTO|PESSOA IDENTIFICADA|SÓCIO|DIFEREN)/i.test(String(l.historico_bancario||''))){ // histórico COM nome de outra pessoa (ou linha já aberta POR PESSOA) nunca casa só pelo valor (18/10/2026)
         for(const r of relatorios){
           const iguais=r.dados.pessoas.filter(pp=>Math.abs(pp.valor-l.valor_saida)<=0.01);
           if(iguais.length===1){ matchIndiv={r,p:iguais[0]}; break; }
         }
       }
-      // ANTECIPAÇÃO: empregado (não contribuinte) identificado por nome/CPF, valor não bate com nenhum líquido → adiantamento de salário (conta 724) pelo valor total, sem linha de diferença.
-      if(!matchIndiv&&semFolhaAdiant&&contaAdiantamento){
+      // Pedido do usuário 19/10/2026 (2ª): NÃO classificar automaticamente como adiantamento/benefício. Pessoa identificada (empregado, sócio/contribuinte ou pessoa nominal do Fluxo) cujo valor não bate com salário/férias/rescisão
+      // (nem pró-labore inequívoco) fica PENDENTE, com a pessoa preservada no histórico e a conta D vazia — o usuário define a conta depois.
+      if(!matchIndiv){
         const todasP=[]; relatorios.forEach(r=>(r.dados.pessoas||[]).forEach(pp=>todasP.push(pp)));
-        const fortes=_lancctbPessoasForteNoTexto(l.historico_bancario,todasP), pe=fortes.length===1?fortes[0]:null; // só o histórico do banco (o nome do Fluxo não decide: "Lucas" não é "Luciano")
-        if(pe&&pe.tipo!=='contribuinte'){
-          const histA=`Pagamento ref. adiantamento ${cMes} - ${pe.nome}`;
-          const linhasA=[
-            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:histA, cliente_fornecedor_nome:pe.nome, cnpj_cpf:pe.cpf||null, lancamento_extrato_id:l.id, origem_match:'regra' },
-            { empresa_eid:eid, data:l.data_pagamento, classificacao:contaAdiantamento.classificacao, conta_contabil_id:contaAdiantamento.id, tipo:'D', valor:l.valor_saida, historico:histA, cliente_fornecedor_nome:pe.nome, cnpj_cpf:pe.cpf||null, lancamento_extrato_id:l.id, origem_match:'regra' },
-          ];
-          const { error: eA } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasA });
-          if(eA){ console.error('Erro FOPAG (antecipação):',eA); semAchado++; continue; }
-          await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-          if(fluxoDaPend){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxoDaPend.id); const ixA=(fluxoLivre||[]).findIndex(f=>f.id===fluxoDaPend.id); if(ixA>=0) fluxoLivre.splice(ixA,1); }
-          resolvidos++; antecipacoes++;
-          continue;
+        const fortes=_lancctbPessoasForteNoTexto(textoIdent,todasP), pe=fortes.length===1?fortes[0]:null;
+        if(pe){
+          if(await marcarPessoaIdentificada(l,pe.tipo==='contribuinte'?'SÓCIO/CONTRIBUINTE IDENTIFICADO':'PESSOA IDENTIFICADA',pe.nome,pe.cpf)) pessoasMarcadas++;
+          semAchado++; continue;
+        }
+        // pessoa nominal que só o FLUXO conhece (não é da folha): o banco traz o mesmo nome/CPF da linha do Fluxo
+        if(fluxoDaPend&&_lancctbFluxoEhPf(fluxoDaPend)&&_lancctbPessoasForteNoTexto(l.historico_bancario,[{nome:fluxoDaPend.cliente_fornecedor_nome,cpf:fluxoDaPend.cnpj_cpf||''}]).length===1){
+          if(await marcarPessoaIdentificada(l,'PESSOA IDENTIFICADA PELO FLUXO',fluxoDaPend.cliente_fornecedor_nome,fluxoDaPend.cnpj_cpf)) pessoasMarcadas++;
+          semAchado++; continue;
         }
       }
       if(!matchIndiv){
@@ -25347,7 +25343,7 @@ async function _lancctbProcessarFopag(){
       }
       resolvidos++;
     }
-    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${feriasResolvidas?` (${feriasResolvidas} por recibo de férias)`:''}${antecipacoes?` (${antecipacoes} como antecipação de salário)`:''}${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
+    toast(`FOPAG: ${resolvidos} resolvido(s) sozinho(s)${feriasResolvidas?` (${feriasResolvidas} por recibo de férias)`:''}${pessoasMarcadas?`; ${pessoasMarcadas} pessoa(s) identificada(s) com conta a definir`:''}${diferencasAbertas?`, ${diferencasAbertas} com linha de diferença aberta (ficou pendente pra criar Regra)`:''}, ${semAchado} sem correspondência.`,'ok');
     renderLancctbRegistroContabil();
   } finally {
     if(btn) btn.disabled=false;
@@ -31148,7 +31144,8 @@ async function _lancctbExtratosLigadosConciliados(fluxoLinhas,ignorarIds){
 // outro nome da pessoa, como palavras inteiras. Devolve a lista de pessoas distintas que casam; o chamador só age quando é exatamente UMA.
 function _lancctbPessoasForteNoTexto(texto,pessoas){
   const n=t=>String(t||'').toUpperCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim();
-  let t0=String(texto||''); const mb=t0.match(/^\[DIFERENÇA FOLHA\s+[\d-]+\s+-\s+([^\]]+)\]/); if(mb) t0=mb[1]; // a linha de diferença já traz o nome certo no rótulo
+  // Rótulos que a própria rotina grava no começo do histórico já trazem o nome certo: [DIFERENÇA FOLHA …- NOME], [SISPAG ABERTO - NOME], [PESSOA IDENTIFICADA - CONTA A DEFINIR - NOME (CPF …)], [SÓCIO/CONTRIBUINTE IDENTIFICADO …].
+  let t0=String(texto||''); { const mb=t0.match(/^\s*\[([^\]]*)\]/); if(mb&&/DIFEREN|SISPAG ABERTO|IDENTIFICAD/i.test(mb[1])) t0=mb[1].split(' - ').pop().replace(/\s*\(.*$/,''); }
   const h=n(t0), hd=h.replace(/\D/g,''), hw=' '+h+' ', fr=t0.match(/\*{3}\.(\d{3})\.(\d{3})-\*{2}/), out=new Map();
   for(const p of (pessoas||[])){
     const c=String(p.cpf||'').replace(/\D/g,'');
@@ -31259,31 +31256,46 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
     };
     // Primeiro só as linhas do MESMO DIA do pagamento (as de ±1 dia só entram se o mesmo dia não fechar — elas trazem ruído e criam combinações demais).
     const mesmoDia=cand.filter(c=>c.f.data===l.data_pagamento);
-    const rBusca=busca(mesmoDia.filter(c=>c.igualLiq))||busca(mesmoDia)||busca(cand.filter(c=>c.igualLiq))||busca(cand);
-    if(!rBusca){ motivos.push(`${rotulo}: ${pessoas.length} pessoa(s) na folha, ${cand.length} linha(s) do Fluxo delas no dia (±1) — ${cand.length<2?'poucas linhas':'nenhuma combinação fecha o valor'}`); continue; }
+    let rBusca=busca(mesmoDia.filter(c=>c.igualLiq))||busca(mesmoDia)||busca(cand.filter(c=>c.igualLiq))||busca(cand);
+    // Pedido do usuário 19/10/2026: "o Fluxo diz quem recebeu — não deixar um SISPAG inteiro como diferença se o Fluxo identifica parte ou todas as pessoas". Sem combinação EXATA: abre as pessoas do Fluxo do MESMO DIA
+    // (todas, se somam até o valor do banco; senão o subconjunto de maior soma que não passa do banco, na ordem do Fluxo) e o que sobrar vira UMA linha "pessoa não identificada" sem conta.
+    if(!rBusca&&mesmoDia.length){
+      const alvoC=Math.round(l.valor_saida*100), valsC=mesmoDia.map(c=>Math.round(c.f.valor_saida*100)), somaTudo=valsC.reduce((a,b)=>a+b,0);
+      let escolhidos=null;
+      if(somaTudo<=alvoC) escolhidos=mesmoDia.map((c,i)=>i);
+      else if(mesmoDia.length<=40){
+        let alc=new Set([0]); valsC.forEach(v=>{ const novo=new Set(alc); alc.forEach(s=>{ if(s+v<=alvoC) novo.add(s+v); }); alc=novo; });
+        const melhor=Math.max(...alc); escolhidos=melhor>0?_lancctbSomaPrioridade(valsC,melhor):null;
+      }
+      if(escolhidos&&escolhidos.length){ const itensP=escolhidos.map(i=>mesmoDia[i]); const somaP=Math.round(itensP.reduce((a,c)=>a+c.f.valor_saida,0)*100)/100; rBusca={ itens:itensP, resto:Math.round((l.valor_saida-somaP)*100)/100, parcial:true }; }
+    }
+    if(!rBusca){ motivos.push(`${rotulo}: ${pessoas.length} pessoa(s) na folha, ${cand.length} linha(s) do Fluxo delas no dia (±1) — ${cand.length<1?'nenhuma linha':'nenhuma combinação fecha o valor'}`); continue; }
     const itens=rBusca.itens;
+    // histórico base do SISPAG (sem a marca "SISPAG sem composição identificada" que uma rodada anterior possa ter posto)
+    const histBaseSp=String(l.historico_bancario||'').replace(/^\s*\[DIFERENÇA FOLHA[^\]]*SISPAG sem composição identificada\]\s*/i,'');
+    const compFolha=(()=>{ const [a,m]=l.data_pagamento.slice(0,7).split('-').map(Number); const dia=+l.data_pagamento.slice(8,10); const t=dia<=14?(m===1?[a-1,12]:[a,m-1]):[a,m]; return String(t[1]).padStart(2,'0')+'/'+t[0]; })();
     // divide o extrato: a linha original passa a valer o 1º item; os demais viram linhas novas (pendentes), cada uma amarrada ao seu Fluxo
     const valorOrig=l.valor_saida, novos=[]; let falhou=false;
     const v0=Math.round(itens[0].f.valor_saida*100)/100;
-    const { error: eUp } = await _supaClient.from('lancamentos_extrato').update({ valor_saida:v0 }).eq('id',l.id);
+    const { error: eUp } = await _supaClient.from('lancamentos_extrato').update({ valor_saida:v0, historico_bancario:`[SISPAG ABERTO - ${itens[0].pessoa.nome}] ${histBaseSp}`.trim() }).eq('id',l.id);
     if(eUp){ motivos.push(`${rotulo}: erro ao dividir o extrato`); continue; }
     const ids=[l.id];
     for(let k=1;k<itens.length;k++){
       const { data: ni, error: eIn } = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento, valor_saida:Math.round(itens[k].f.valor_saida*100)/100, valor_entrada:0,
-        historico_bancario:`[SISPAG ABERTO - ${itens[k].pessoa.nome}] ${l.historico_bancario||''}`.trim(), origem_importacao:'manual', hash_dedup:`sispag_ab_${l.id}_${k}_${Date.now()}` }).select('id').single();
+        historico_bancario:`[SISPAG ABERTO - ${itens[k].pessoa.nome}] ${histBaseSp}`.trim(), origem_importacao:'manual', hash_dedup:`sispag_ab_${l.id}_${k}_${Date.now()}` }).select('id').single();
       if(eIn||!ni){ falhou=true; break; }
       novos.push(ni.id); ids.push(ni.id);
     }
     if(!falhou&&rBusca.resto>0.009){
       const { data: nr, error: eR } = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento, valor_saida:rBusca.resto, valor_entrada:0,
-        historico_bancario:`[DIFERENÇA A IDENTIFICAR - FOPAG ${l.data_pagamento.split('-').reverse().join('/')}] ${l.historico_bancario||''}`.trim(), origem_importacao:'manual', hash_dedup:`sispag_resto_${l.id}_${Date.now()}` }).select('id').single();
+        historico_bancario:`[DIFERENÇA FOLHA ${compFolha} - PESSOA NÃO IDENTIFICADA] ${histBaseSp}`.trim(), origem_importacao:'manual', hash_dedup:`sispag_resto_${l.id}_${Date.now()}` }).select('id').single();
       if(eR||!nr) falhou=true; else novos.push(nr.id);
     }
     if(falhou){
       console.error('Sispag via Fluxo: falha ao dividir o extrato — desfazendo.');
       motivos.push(`${rotulo}: erro ao dividir o extrato (desfeito)`);
       if(novos.length) await _supaClient.from('lancamentos_extrato').delete().in('id',novos).eq('status_conciliacao','pendente');
-      await _supaClient.from('lancamentos_extrato').update({ valor_saida:valorOrig }).eq('id',l.id);
+      await _supaClient.from('lancamentos_extrato').update({ valor_saida:valorOrig, historico_bancario:l.historico_bancario }).eq('id',l.id);
       continue;
     }
     for(let k=0;k<itens.length;k++){
@@ -31396,6 +31408,8 @@ async function _lancctbProcessarFluxo(){
       const meses=[...new Set(pendencias.map(l=>String(l.data_pagamento||'').slice(0,7)).filter(Boolean))], pessoasFolha=[];
       for(const m of meses){ try{ (await _lancctbRelatoriosFopagDoMes(eid,m+'-15')).forEach(r=>((r.dados&&r.dados.pessoas)||[]).forEach(pp=>pessoasFolha.push(pp))); }catch(e){} }
       if(pessoasFolha.length) pendencias.forEach(l=>{ if(l.valor_saida>0&&_lancctbHistEhTransfNome(l.historico_bancario)&&pessoasFolha.some(pp=>_lancctbPessoaNoTexto(pp,l.historico_bancario))){ idsFopag.add(l.id); } });
+      // linhas já abertas/identificadas POR PESSOA (marcas da rotina de folha) nunca disputam linha de fornecedor
+      pendencias.forEach(l=>{ if(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|SISPAG ABERTO|DIFEREN)/i.test(String(l.historico_bancario||''))) idsFopag.add(l.id); });
       rotaFopag=idsFopag.size;
     }catch(e){ console.warn('Rota FOPAG no Processar Fluxo:',e); }
     const pares=[]; let compostos=0, ambiguosComp=0, centavosAceitos=0;
@@ -35333,7 +35347,7 @@ async function renderLancctbRegistroContabil(){
       // valor+data, desempata por semelhança de texto com o histórico
       // bancário — nunca escolhe uma descrição completamente diferente
       // se existir uma parecida também dentro da tolerância.
-      if(!item.fluxoConfirmado&&ehSaida&&_pessoasFolhaReg.length&&_lancctbHistEhTransfNome(r.historico_bancario)&&_pessoasFolhaReg.some(pp=>_lancctbPessoaNoTexto(pp,r.historico_bancario))){ item.rotaFopag=true; }
+      if(!item.fluxoConfirmado&&ehSaida&&(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|SISPAG ABERTO|DIFEREN)/i.test(String(r.historico_bancario||''))||(_pessoasFolhaReg.length&&_lancctbHistEhTransfNome(r.historico_bancario)&&_pessoasFolhaReg.some(pp=>_lancctbPessoaNoTexto(pp,r.historico_bancario))))){ item.rotaFopag=true; }
       else if(!item.fluxoConfirmado){
         const candidatosFluxo=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
