@@ -7860,8 +7860,8 @@ function _cronMostrarLogCobranca(eid){
 function enviarEmailPendencias(eid){
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   if(!emp){toast('Empresa não encontrada','err');return;}
-  const emails=(emp.emails||[]).map(x=>(x&&x.email)||'').filter(Boolean);
-  if(!emails.length){toast('Nenhum e-mail cadastrado para esta empresa. Cadastre em Cadastro de Empresas.','err');return;}
+  const dest=_destinatariosEmpresa(emp);
+  if(!dest.para.length){toast(dest.excluidos?'Todos os e-mails desta empresa estão marcados como "Não enviar". Desmarque em Cadastro de Empresas.':'Nenhum e-mail cadastrado para esta empresa. Cadastre em Cadastro de Empresas.','err');return;}
 
   const fech=S.fechAtual();
   const chk=S.chk(String(eid));
@@ -7911,15 +7911,15 @@ function enviarEmailPendencias(eid){
     });
   }).join('\n');
 
-  const corpo='Prezados,\n\n'
-    +'Espero que estejam bem.\n\n'
+  const corpo=dest.saudacao+'\n\n'
+    +dest.bemEstar+'\n\n'
     +'Estamos com o fechamento contábil da '+emp.nome+' em andamento e identificamos a ausência dos seguintes documentos/informações, referentes aos períodos indicados abaixo:\n\n'
     +linhas+'\n\n'
     +'Solicitamos a gentileza de nos encaminhar o quanto antes, preferencialmente anexando diretamente na plataforma NIBO, para que possamos dar continuidade aos trabalhos dentro do prazo.\n\n'
     +'Qualquer dúvida, estamos à disposição.';
 
   const assunto='Solicitação de Documentos Pendentes - '+emp.nome;
-  const mailto='mailto:'+emails.join(';')+'?cc='+encodeURIComponent('atendimento@jjrcontabil.com.br')+'&subject='+encodeURIComponent(assunto)+'&body='+encodeURIComponent(corpo.replace(/\r?\n/g,'\r\n')); // quebras CRLF (padrão do mailto, RFC 6068): só LF fazia o Outlook dobrar o espaçamento
+  const mailto='mailto:'+dest.para.join(';')+'?cc='+encodeURIComponent([...dest.cc,'atendimento@jjrcontabil.com.br'].join(';'))+'&subject='+encodeURIComponent(assunto)+'&body='+encodeURIComponent(corpo.replace(/\r?\n/g,'\r\n')); // quebras CRLF (padrão do mailto, RFC 6068): só LF fazia o Outlook dobrar o espaçamento
   _cronRegistrarCobranca(eid);
   _cronMostrarLogCobranca(eid);
   window.open(mailto,'_self');
@@ -8527,7 +8527,7 @@ function openModal_emp(eid){
     const emailArr=emp&&emp.emails?emp.emails:[];
     if(emailArr.length===0) addEmailField('');
     else emailArr.forEach(em=>{
-      if(typeof em==='object') addEmailField(em.email||'',em.nome||'',em.whatsapp||'');
+      if(typeof em==='object') addEmailField(em.email||'',em.nome||'',em.whatsapp||'',!!em.principal,!!em.naoEnviar);
       else addEmailField(em);
     });
   }
@@ -8541,11 +8541,7 @@ function openModal_emp(eid){
 }
 function _saveEmpData(){
   const emps=S.emps();
-  const emails=[...document.querySelectorAll('#emailFields .email-row')]
-    .map(row=>{
-      const inputs=row.querySelectorAll('input');
-      return {nome:(inputs[0]?.value||'').trim(),email:(inputs[1]?.value||'').trim(),whatsapp:(inputs[2]?.value||'').trim()};
-    }).filter(e=>e.email);
+  const emails=_lerEmailsDasLinhas('#emailFields');
   const fsTipo=document.getElementById('eFsTipo')?.value||'ativo';
   const fs={tipo:fsTipo};
   const desde=document.getElementById('eFsDesde')?.value||'';
@@ -8597,7 +8593,34 @@ function onFsTipoChange(v){
   const extra=document.getElementById('eFsExtra');
   if(extra) extra.style.display=tipo==='ativo'?'none':'';
 }
-function addEmailField(val, nome='', whatsapp=''){
+// Pedido do usuário 20/10/2026: em cada contato dá pra marcar o e-mail PRINCIPAL (vai no "Para" e a saudação usa o nome dele) — os demais vão em cópia — e "Não enviar" (fica cadastrado, mas não recebe nada até desmarcar).
+function _emailPrincipalClick(el){ const grp=document.getElementsByName(el.name); if(el.dataset.was==='1'){ el.checked=false; el.dataset.was='0'; } else { grp.forEach(r=>{ r.dataset.was='0'; }); el.dataset.was='1'; } }
+function _emailCtlHtml(grupo,principal,naoEnviar){
+  return `<label title="E-mail principal: vai no campo Para e a mensagem começa com o nome dele (ex.: Janilson, boa tarde). Os outros e-mails ficam em cópia. Clique de novo para desmarcar." style="display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;cursor:pointer"><input type="radio" class="email-principal" name="${grupo}" ${principal?'checked':''} data-was="${principal?'1':'0'}" onclick="_emailPrincipalClick(this)"> Principal</label>
+    <label title="Não enviar: o contato continua cadastrado, mas fica de fora dos e-mails até você desmarcar." style="display:flex;align-items:center;gap:4px;font-size:11px;white-space:nowrap;cursor:pointer"><input type="checkbox" class="email-nao-enviar" ${naoEnviar?'checked':''}> Não enviar</label>`;
+}
+function _lerEmailsDasLinhas(seletor){
+  return [...document.querySelectorAll(seletor+' .email-row')].map(row=>{
+    const inputs=row.querySelectorAll('input');
+    const o={nome:(inputs[0]?.value||'').trim(),email:(inputs[1]?.value||'').trim(),whatsapp:(inputs[2]?.value||'').trim()};
+    if(row.querySelector('.email-principal')?.checked) o.principal=true;
+    if(row.querySelector('.email-nao-enviar')?.checked) o.naoEnviar=true;
+    return o;
+  }).filter(e=>e.email);
+}
+// Quem recebe: sem principal marcado = comportamento antigo (todos no Para). Com principal ativo: ele no Para, os demais ativos em cópia; "Não enviar" fica de fora. A saudação usa o 1º nome do principal e o horário.
+function _destinatariosEmpresa(emp){
+  const lista=(emp&&emp.emails||[]).map(x=>typeof x==='string'?{email:x}:x).filter(x=>x&&x.email);
+  const ativos=lista.filter(x=>!x.naoEnviar);
+  const principal=ativos.find(x=>x.principal)||null;
+  const para=principal?[principal.email]:ativos.map(x=>x.email);
+  const cc=principal?ativos.filter(x=>x!==principal).map(x=>x.email):[];
+  const h=new Date().getHours(); const periodo=h<12?'bom dia':(h<18?'boa tarde':'boa noite');
+  const primeiro=principal&&String(principal.nome||'').trim().split(/\s+/)[0];
+  const nomeBonito=primeiro?primeiro.charAt(0).toUpperCase()+primeiro.slice(1).toLowerCase():'';
+  return { para, cc, nomeado:!!nomeBonito, saudacao:nomeBonito?nomeBonito+', '+periodo+',':'Prezados,', bemEstar:nomeBonito?'Espero que esteja bem.':'Espero que estejam bem.', excluidos:lista.length-ativos.length };
+}
+function addEmailField(val, nome='', whatsapp='', principal=false, naoEnviar=false){
   const wrap=document.getElementById('emailFields');
   if(!wrap) return;
   const d=document.createElement('div');
@@ -8608,6 +8631,7 @@ function addEmailField(val, nome='', whatsapp=''){
   d.innerHTML=`<input class="fi email-nome" type="text" value="${esc(nome)}" placeholder="Nome do contato" style="flex:0.8">
     <input class="fi email-field" type="email" value="${esc(val||'')}" placeholder="email@empresa.com.br" style="flex:1.2">
     <input class="fi email-whatsapp" type="tel" value="${esc(whatsapp)}" placeholder="WhatsApp (11 99999-9999)" style="flex:1">
+    ${_emailCtlHtml('emailPrincipalRadioModal',principal,naoEnviar)}
     <button type="button" class="icon-btn" onclick="this.parentNode.remove()" title="Remover" style="color:var(--red);font-size:16px;flex-shrink:0">×</button>`;
   wrap.appendChild(d);
 }
@@ -8921,7 +8945,7 @@ function abrirCadastroEmpresa(eid){
   // Emails
   const ef = document.getElementById('feEmailFields');
   ef.innerHTML='';
-  (emp.emails||[]).forEach(function(em){ if(typeof em==='string') addEmailFieldForm(em); else addEmailFieldForm(em.email||'',em.nome||'',em.whatsapp||''); });
+  (emp.emails||[]).forEach(function(em){ if(typeof em==='string') addEmailFieldForm(em); else addEmailFieldForm(em.email||'',em.nome||'',em.whatsapp||'',!!em.principal,!!em.naoEnviar); });
   setV('feCapital', emp.capitalSocial!=null?_fmtCapital(emp.capitalSocial):'');
   document.getElementById('feSocios').innerHTML='';
   (emp.sociosRfb||[]).forEach(function(so){ addSocioRfbForm(so); });
@@ -9135,8 +9159,8 @@ function excluirObsPontosAtencao(eid, idx){
 function enviarEmailPontosAtencao(eid){
   const emp=S.emps().find(e=>String(e.eid)===String(eid));
   if(!emp){toast('Empresa não encontrada','err');return;}
-  const emails=(emp.emails||[]).map(x=>(x&&x.email)||'').filter(Boolean);
-  if(!emails.length){toast('Nenhum e-mail cadastrado para esta empresa. Cadastre em Cadastro de Empresas.','err');return;}
+  const dest=_destinatariosEmpresa(emp);
+  if(!dest.para.length){toast(dest.excluidos?'Todos os e-mails desta empresa estão marcados como "Não enviar". Desmarque em Cadastro de Empresas.':'Nenhum e-mail cadastrado para esta empresa. Cadastre em Cadastro de Empresas.','err');return;}
 
   const alertas=JSON.parse(S.g('alertas_'+eid)||'[]');
   const obs=getPontosAtencaoObs(eid).filter(o=>(o.texto||'').trim());
@@ -9156,14 +9180,14 @@ function enviarEmailPontosAtencao(eid){
     blocos+='Observações:\n'+obs.map(o=>'- '+o.texto).join('\n')+'\n\n';
   }
 
-  const corpo='Prezados,\n\n'
-    +'Espero que estejam bem.\n\n'
+  const corpo=dest.saudacao+'\n\n'
+    +dest.bemEstar+'\n\n'
     +'Seguem os pontos de atenção identificados nos trabalhos contábeis da '+emp.nome+':\n\n'
     +blocos
     +'Qualquer dúvida, estamos à disposição.';
 
   const assunto='Pontos de Atenção - '+emp.nome;
-  const mailto='mailto:'+emails.join(';')+'?cc='+encodeURIComponent('atendimento@jjrcontabil.com.br')+'&subject='+encodeURIComponent(assunto)+'&body='+encodeURIComponent(corpo.replace(/\r?\n/g,'\r\n')); // quebras CRLF (padrão do mailto, RFC 6068): só LF fazia o Outlook dobrar o espaçamento
+  const mailto='mailto:'+dest.para.join(';')+'?cc='+encodeURIComponent([...dest.cc,'atendimento@jjrcontabil.com.br'].join(';'))+'&subject='+encodeURIComponent(assunto)+'&body='+encodeURIComponent(corpo.replace(/\r?\n/g,'\r\n')); // quebras CRLF (padrão do mailto, RFC 6068): só LF fazia o Outlook dobrar o espaçamento
   window.open(mailto,'_self');
 }
 
@@ -10888,7 +10912,7 @@ function _rfbDiff(ant, novo){
 function _rfbSociosComPercentual(antSocios, novos){
   return novos.map(n=>{ const a=(antSocios||[]).find(x=>String(x.nome||'').trim().toUpperCase()===n.nome.toUpperCase()); return Object.assign({},n,{percentual:a?(a.percentual||''):''}); });
 }
-function addEmailFieldForm(val='', nome='', whatsapp=''){
+function addEmailFieldForm(val='', nome='', whatsapp='', principal=false, naoEnviar=false){
   const wrap = document.getElementById('feEmailFields');
   if(!wrap) return;
   const row = document.createElement('div');
@@ -10899,6 +10923,7 @@ function addEmailFieldForm(val='', nome='', whatsapp=''){
   row.innerHTML=`<input class="fi" type="text" value="${esc(nome)}" placeholder="Nome do contato" style="flex:0.8">
     <input class="fi" type="email" value="${esc(val)}" placeholder="email@exemplo.com.br" style="flex:1.2">
     <input class="fi" type="tel" value="${esc(whatsapp)}" placeholder="WhatsApp (11 99999-9999)" style="flex:1">
+    ${_emailCtlHtml('emailPrincipalRadioForm',principal,naoEnviar)}
     <button type="button" style="background:none;border:none;color:var(--red);cursor:pointer;font-size:16px;padding:0 4px;flex-shrink:0" onclick="this.parentElement.remove()">&#10005;</button>`;
   wrap.appendChild(row);
 }
@@ -10994,11 +11019,7 @@ function _saveEmpresaFormData(){
   const eidOriginal = _formEmpEid;
   const conflito = emps.find(e=>String(e.eid)===String(eidDigitado)&&String(e.eid)!==String(eidOriginal));
   if(conflito){ toast('Já existe uma empresa com o ID '+eidDigitado+' ('+conflito.nome+'). Escolha outro.','err'); return false; }
-  const emails = [...document.querySelectorAll('#feEmailFields .email-row')]
-    .map(row=>{
-      const inputs=row.querySelectorAll('input');
-      return {nome:(inputs[0]?.value||'').trim(),email:(inputs[1]?.value||'').trim(),whatsapp:(inputs[2]?.value||'').trim()};
-    }).filter(e=>e.email);
+  const emails = _lerEmailsDasLinhas('#feEmailFields');
   const fsTipo = getV('feFsTipo')||'ativo';
   const fs = {tipo:fsTipo};
   if(fsTipo!=='ativo'){ fs.desde=getV('feFsDesde'); }
