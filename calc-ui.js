@@ -100,10 +100,15 @@
       { k: 'valorDeliberado', l: 'Valor deliberado a pagar (R$) — vazio = máximo dedutível', t: 'money' },
       { k: 'beneficiario', l: 'Beneficiário', t: 'select', def: 'padrao', opts: [['padrao', 'Sócio/acionista residente'], ['paraiso_fiscal', 'Residente em país com tributação favorecida']] }],
       resumo: r => [['JCP máximo dedutível', r.maxDedutivel, 1], ['IRRF a reter', r.irrf, 1], ['Líquido ao beneficiário', r.liquido], ['Valor pago/creditado', r.pago], ['JCP teórico (base × TJLP)', r.teorico], ['Limite de 50%', r.limite], ['Base (PL ajustado)', r.base], ['Economia IRPJ+CSLL (estimada)', r.economia]] },
-    lucro_presumido: { titulo: 'Lucro Presumido — IRPJ e CSLL', desc: 'Apuração trimestral com a majoração de 10% sobre o percentual de presunção acima de R$ 1.250.000 por trimestre.', campos: [
+    lucro_presumido: { titulo: 'Lucro Presumido — IRPJ e CSLL', desc: 'Apuração trimestral com a majoração de 10% sobre o percentual de presunção acima de R$ 1.250.000 por trimestre (IN RFB 2.305/2025, art. 15, com ajuste do 4º trimestre pela receita acumulada do ano).', campos: [
       { k: 'ano', l: 'Ano', t: 'int', def: () => new Date().getFullYear() },
       { k: 'trimestre', l: 'Trimestre', t: 'select', def: '1', opts: [['1', '1º trimestre'], ['2', '2º trimestre'], ['3', '3º trimestre'], ['4', '4º trimestre']] },
       { k: '_atividades', t: 'atividades' },
+      { k: 'ra1', l: 'Receita bruta total do 1º trimestre (R$) — para o limite proporcional e o ajuste do 4º trimestre', t: 'money', quando: v => parseInt(v.trimestre, 10) > 1 },
+      { k: 'ra2', l: 'Receita bruta total do 2º trimestre (R$)', t: 'money', quando: v => parseInt(v.trimestre, 10) > 2 },
+      { k: 'ra3', l: 'Receita bruta total do 3º trimestre (R$)', t: 'money', quando: v => parseInt(v.trimestre, 10) > 3 },
+      { k: 'compensarSobraLimite', l: 'Considerar a sobra de limite dos trimestres anteriores (IN RFB 2.305, art. 15, § 4º — opcional)', t: 'bool', def: false, quando: v => parseInt(v.trimestre, 10) > 1 },
+      { k: 'trimestresAtividade', l: 'Trimestres em atividade no ano (início/encerramento — § 9º) — vazio = padrão', t: 'int', def: '', quando: v => parseInt(v.trimestre, 10) > 3 },
       { k: 'receitasFinanceiras', l: 'Receitas financeiras (R$) — somadas integralmente', t: 'money' }, { k: 'ganhosCapital', l: 'Ganhos de capital (R$) — somados integralmente', t: 'money' }, { k: 'outrasAdicoes', l: 'Outras adições integrais (R$)', t: 'money' },
       { k: 'irrfCompensar', l: 'IRRF a compensar (R$)', t: 'money' }, { k: 'csllRetida', l: 'CSLL retida a compensar (R$)', t: 'money' },
       { k: 'outrasAntecipacoesIrpj', l: 'Outras antecipações do IRPJ (R$)', t: 'money' }, { k: 'outrasAntecipacoesCsll', l: 'Outras antecipações da CSLL (R$)', t: 'money' }],
@@ -278,7 +283,8 @@
   // ───────────────────────────── calcular ─────────────────────────────
   window.calcCalcular = function () {
     const f = F[est.key]; const v = valores();
-    if (est.key === 'lucro_presumido') { v.atividades = est.ativ.map(a => ({ tipo: a.tipo, receita: a.receita, irpj: a.irpj, csll: a.csll, nome: a.nome })); }
+    if (est.key === 'lucro_presumido') { v.atividades = est.ativ.map(a => ({ tipo: a.tipo, receita: a.receita, irpj: a.irpj, csll: a.csll, nome: a.nome }));
+      v.receitasAnteriores = [v.ra1, v.ra2, v.ra3]; }
     if (est.key === 'itcmd') {
       v.quotas = { patrimonioLiquido: g('q_patrimonioLiquido'), ajusteAtivos: g('q_ajusteAtivos'), ajustePassivos: g('q_ajustePassivos'), goodwill: g('q_goodwill'), outraMetodologia: g('q_outraMetodologia'), percentualParticipacao: g('q_percentualParticipacao') || '100' };
       v.herdeiros = est.herd.map(h => ({ nome: h.nome, quinhao: h.quinhao })).filter(h => h.nome || h.quinhao);

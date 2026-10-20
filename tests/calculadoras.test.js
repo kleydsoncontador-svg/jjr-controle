@@ -112,7 +112,9 @@ t('JCP beneficiário em paraíso fiscal 25%', () => assert.strictEqual(jcp({ ben
 t('JCP limitado a 50% quando o lucro é pequeno e não há reservas', () => { const x = jcp({ reservasLucros: '0', lucrosAcumuladosAnteriores: '0', capitalSocial: '1300000', lucroPeriodo: '40000' }); assert.strictEqual(x.resultado.limite, c('20000')); assert.strictEqual(x.resultado.maxDedutivel, c('20000')); });
 t('JCP valor deliberado acima do máximo avisa o excedente', () => { const x = jcp({ valorDeliberado: '70000' }); assert.strictEqual(x.resultado.pago, c('70000')); assert.strictEqual(x.resultado.dedutivel, c('59049.56')); assert.ok(x.avisos.some(a => a.includes('passa do máximo'))); });
 t('JCP fora do Lucro Real não é dedutível', () => assert.strictEqual(jcp({ regime: 'lucro_presumido' }).resultado.dedutivel, 0));
-t('JCP 4º trimestre/2026: sem TJLP cadastrada → não calcula', () => { const x = jcp({ dataInicio: '2026-10-01', dataFim: '2026-12-31' }); assert.strictEqual(x.ok, false); assert.ok(x.erro.includes('TJLP')); });
+t('JCP 4º trimestre/2026 (TJLP 9,29% oficial do BCB)', () => assert.strictEqual(jcp({ dataInicio: '2026-10-01', dataFim: '2026-12-31', lucroPeriodo: '1000000' }).resultado.teorico, c('30440.66')));
+t('JCP ano de 2025 inteiro (TJLP oficial 2025)', () => assert.strictEqual(jcp({ dataInicio: '2025-01-01', dataFim: '2025-12-31', dataPagamento: '2025-12-20', lucroPeriodo: '1000000' }).resultado.teorico, c('112662.27')));
+t('JCP ano sem TJLP cadastrada (2027) → não calcula', () => { const x = jcp({ dataInicio: '2027-01-01', dataFim: '2027-03-31', dataPagamento: '2027-03-31' }); assert.strictEqual(x.ok, false); });
 t('JCP período em dois anos → recusa', () => assert.strictEqual(jcp({ dataInicio: '2026-07-01', dataFim: '2027-03-31' }).ok, false));
 t('JCP lucros do exercício corrente ficam fora da base (só anteriores)', () => assert.strictEqual(jcp({}).resultado.base, c('1300000')));
 t('INSS: contribuição máxima do empregado = 988,09', () => assert.strictEqual(C.calcular('salario_liquido', { competencia: '2026-03', salario: '20000' }).resultado.inss, c('988.09')));
@@ -124,6 +126,16 @@ t('Lucro Presumido majorado avisa das liminares/ADIs', () => assert.ok(lp(2026, 
 t('IRRF: rendimento até R$ 5.000,00 → imposto zero (usando a dedução mais vantajosa)', () => { ['1000', '3000', '4999.99', '5000'].forEach(r => assert.strictEqual(C.calcular('irrf_pf', { competencia: '2026-03', rendimentos: r }).resultado.irrf, 0, r)); });
 t('IRRF: 5.000,01 ainda zera (redução contínua) e 6.000 paga 394,54', () => { assert.strictEqual(C.calcular('irrf_pf', { competencia: '2026-03', rendimentos: '5000.01' }).resultado.irrf, 0); assert.strictEqual(C.calcular('irrf_pf', { competencia: '2026-03', rendimentos: '6000' }).resultado.irrf, c('394.54')); });
 t('13º: o redutor 2026 também se aplica (§ 3º do art. 3º-A)', () => { const x = C.calcular('decimo_terceiro', { competencia: '2026-12', remuneracao: '6000', avos: 12 }); assert.strictEqual(x.resultado.irrf, c('385.10')); assert.strictEqual(C.calcular('decimo_terceiro', { competencia: '2026-12', remuneracao: '5000', avos: 12 }).resultado.irrf, 0); });
+
+
+// ── 15. Lucro Presumido pela IN RFB 2.305/2025, art. 15 (redação da IN 2.306/2026) — valores calculados à mão ──
+const lpX = (tri, rec, ant, extra) => C.calcular('lucro_presumido', Object.assign({ ano: 2026, trimestre: tri, atividades: [{ tipo: 'comercio', receita: rec }], receitasAnteriores: ant }, extra || {}));
+t('LP § 4º: sobra do 1º trimestre amplia o limite do 2º (IRPJ 128.800; CSLL ainda 196.200)', () => { const x = lpX(2, '1600000', ['1000000'], { compensarSobraLimite: true }); assert.strictEqual(x.resultado.baseIRPJ, c('128800')); assert.strictEqual(x.resultado.baseCSLL, c('196200')); });
+t('LP sem compensar a sobra: IRPJ 130.800', () => assert.strictEqual(lpX(2, '1600000', ['1000000'], { compensarSobraLimite: false }).resultado.baseIRPJ, c('130800')));
+t('LP § 5º, I (4º tri, receita anual abaixo do limite): sem acréscimo no 4º trimestre', () => { const x = lpX(4, '1500000', ['1000000', '1000000', '1000000']); assert.strictEqual(x.resultado.baseIRPJ, c('120000')); assert.strictEqual(x.resultado.baseCSLL, c('180000')); });
+t('LP § 5º, II (excedente anual menor que o dos trimestres anteriores): sem acréscimo no 4º', () => { const x = lpX(4, '1000000', ['1500000', '1500000', '1000000']); assert.strictEqual(x.resultado.baseIRPJ, c('80000')); });
+t('LP § 5º, III: excedente do 4º trimestre limitado a (excedente anual − anteriores)', () => { const x = lpX(4, '3000000', ['1000000', '1000000', '1000000']); assert.strictEqual(x.resultado.baseIRPJ, c('248000')); assert.strictEqual(x.resultado.baseCSLL, c('375000')); });
+t('LP 4º trimestre sem os trimestres anteriores informados: avisa e usa só o limite do trimestre', () => { const x = lpX(4, '1500000', undefined); assert.strictEqual(x.resultado.baseIRPJ, c('122000')); });
 
 // ── 12. Toda calculadora devolve memória, parâmetros e bases ──
 t('memória e bases presentes', () => { const x = C.calcular('salario_liquido', { competencia: '2026-03', salario: '5000' }); assert.ok(x.memoria.length > 5); assert.ok(x.bases.length > 0); assert.ok(x.parametros.length > 0); });
