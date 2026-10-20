@@ -119,6 +119,12 @@ t('INSS: contribuição máxima do empregado = 988,09', () => assert.strictEqual
 t('ITCMD: acumulado acima do limite mostra o valor alternativo (sobre o total)', () => { const x = itd({ valorBem: '80000', doacoesAnteriores: '30000' }); assert.ok(x.memoria.some(l => l.k === 'nota' && l.r.includes('TOTAL acumulado'))); });
 t('Lucro Presumido majorado avisa das liminares/ADIs', () => assert.ok(lp(2026, 2, [{ tipo: 'comercio', receita: '1500000' }]).avisos.some(a => a.includes('ADIs'))));
 
+
+// ── 14. Conferido no texto oficial (Lei 15.270, art. 3º-A) ──
+t('IRRF: rendimento até R$ 5.000,00 → imposto zero (usando a dedução mais vantajosa)', () => { ['1000', '3000', '4999.99', '5000'].forEach(r => assert.strictEqual(C.calcular('irrf_pf', { competencia: '2026-03', rendimentos: r }).resultado.irrf, 0, r)); });
+t('IRRF: 5.000,01 ainda zera (redução contínua) e 6.000 paga 394,54', () => { assert.strictEqual(C.calcular('irrf_pf', { competencia: '2026-03', rendimentos: '5000.01' }).resultado.irrf, 0); assert.strictEqual(C.calcular('irrf_pf', { competencia: '2026-03', rendimentos: '6000' }).resultado.irrf, c('394.54')); });
+t('13º: o redutor 2026 também se aplica (§ 3º do art. 3º-A)', () => { const x = C.calcular('decimo_terceiro', { competencia: '2026-12', remuneracao: '6000', avos: 12 }); assert.strictEqual(x.resultado.irrf, c('385.10')); assert.strictEqual(C.calcular('decimo_terceiro', { competencia: '2026-12', remuneracao: '5000', avos: 12 }).resultado.irrf, 0); });
+
 // ── 12. Toda calculadora devolve memória, parâmetros e bases ──
 t('memória e bases presentes', () => { const x = C.calcular('salario_liquido', { competencia: '2026-03', salario: '5000' }); assert.ok(x.memoria.length > 5); assert.ok(x.bases.length > 0); assert.ok(x.parametros.length > 0); });
 t('entrada inválida não quebra', () => assert.strictEqual(C.calcular('irrf_pf', { competencia: 'abc' }).ok, false));
