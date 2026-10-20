@@ -32311,7 +32311,10 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // outros créditos (PIX, resgates…) que nada têm a ver com boleto. Pra crédito com histórico de boleto/cobrança, a ambiguidade só conta os OUTROS créditos de boleto/cobrança do dia.
   // Sem acento: o Itaú da Fast Lube vem "Mov Tít Cob Disp" (com acento no í) e o TIT\s*COB antigo não casava — o crédito caía na regra "vários créditos no dia" e o lote nunca rodava (19/10/2026).
   const _ehCreditoBoleto=o=>/BOLETO|COBRAN|TIT\s*COB|LIQUID|RECEBIDOS/i.test(_convMpRemoverAcentos(String(o.historico_bancario||'')));
-  const _idsLoteMultiploResolvidos=new Set(), _diasLoteMultiploTentados=new Set(); // Passo 0.7 (vários "Mov Tít Cob Disp" no mesmo dia)
+  const _idsLoteMultiploResolvidos=new Set(), _diasLoteMultiploTentados=new Set(); // Passo 0.7 (vários "Mov Tít Cob Disp" do mesmo dia de movimentação)
+  // "Mov Tít Cob Disp 09/07S": a DATA NO HISTÓRICO é o dia da movimentação do relatório de cobrança (os comprovantes), NÃO a data em que o banco creditou (créditos de sábado/domingo caem na segunda; "09/07" caiu em 10/07).
+  // Achado com os PDFs reais da Fast Lube (19/10/2026): 63 de 64 dias fecham exatamente por Σ(liquidação + tarifa) do dia indicado no histórico.
+  const _refDiaCobDisp=o=>{ const h=_convMpRemoverAcentos(String(o.historico_bancario||'')).toUpperCase(); const m=h.match(/COB\s*DISP\s+(\d{2})\/(\d{2})/); if(!m) return null; const p=String(o.data_pagamento||'').split('-').map(Number); if(p.length<3||!p[0]) return null; const ano=(+m[2]>p[1])?p[0]-1:p[0]; return `${ano}-${m[2]}-${m[1]}`; };
   const creditosBoletoPendentesPorDia={};
   lancamentos.forEach(o=>{ if(o.valor_entrada>0&&_ehCreditoBoleto(o)) creditosBoletoPendentesPorDia[o.data_pagamento]=(creditosBoletoPendentesPorDia[o.data_pagamento]||0)+1; });
 
@@ -32600,7 +32603,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         if(iNf>0){
           let outrosC=0, outrosD=0; linhasGrupoOp.forEach((x,i)=>{ if(i===0||i===iNf) return; if(x.tipo==='C') outrosC+=x.valor; else outrosD+=x.valor; });
           const plug=Math.round((linhasGrupoOp[0].valor-outrosC+outrosD)*100)/100, vbv=linhasGrupoOp[iNf].valor;
-          if(plug>0.004&&plug<vbv-0.004){ linhasGrupoOp[iNf].valor=plug; linhasGrupoOp[iNf].historico+=' (pagamento parcial de R$ '+_fmt(vbv)+')'; parcial=true; }
+          // O Itaú trata a diferença como DESCONTO/ABATIMENTO (resumo do dia: "(-) Descontos / abatimentos", ex.: MDM 29/09, boleto 2.474,46 liquidado por 1.698,58 → desconto 774,38) e o boleto sai de carteira — o título é baixado inteiro
+          // e a diferença vai a débito na conta padrão de Descontos concedidos. Sem essa conta padrão, cai no tratamento antigo (crédito da NF = o que entrou, parcela NÃO baixada).
+          const cDesc=(plug>0.004&&plug<vbv-0.004)?contaPad('descontos_concedidos'):null;
+          if(plug>0.004&&plug<vbv-0.004&&cDesc){ linhasGrupoOp.push({ empresa_eid:eid, data:ancoraLiquidacao.data_pagamento, classificacao:cDesc.classificacao, conta_contabil_id:cDesc.id, tipo:'D', valor:Math.round((vbv-plug)*100)/100, historico:`${HISTORICO_LABEL_OP.desconto}${refTexto} (abatimento no resumo do Itaú)`, cliente_fornecedor_nome:ancoraLiquidacao.cliente_fornecedor_nome||null, cnpj_cpf:ancoraLiquidacao.cnpj_cpf||null, comprovante_id:null, lancamento_extrato_id:null, origem_match:'automatico_triangular' }); }
+          else if(plug>0.004&&plug<vbv-0.004){ linhasGrupoOp[iNf].valor=plug; linhasGrupoOp[iNf].historico+=' (pagamento parcial de R$ '+_fmt(vbv)+')'; parcial=true; }
           // O banco creditou MAIS que boleto+juros+multa−desconto do relatório (juros pago e não detalhado, ex.: boleto 1.019,77 → crédito 1.023,17): a sobra pequena vira Receita de Juros (conta padrão) pra partida fechar.
           else if(bruto&&plug>vbv+0.004&&(plug-vbv)<=Math.max(50,vbv*0.05)){ // só no lote do dia (crédito bruto consolidado)
             const cJ=contaPad('juros_ativos');
@@ -32641,8 +32648,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // (senão fica ambíguo demais pra separar sozinho — regra do usuário: "não forçar subset-sum",
     // melhor deixar pendente do que chutar uma combinação arbitrária).
     if(/RECEBIDOS/i.test(l.historico_bancario||'')&&!ehSaida) (window.__diagRecebimentos=window.__diagRecebimentos||[]).push({data:l.data_pagamento,passo:'antes06',resolvido,cond:!resolvido&&(modo==='completo'||modo==='comprovantes_recebimento')&&!((_ehCreditoBoleto(l)?creditosBoletoPendentesPorDia:creditosPendentesPorDia)[l.data_pagamento]>1)});
-    if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')&&!((_ehCreditoBoleto(l)?creditosBoletoPendentesPorDia:creditosPendentesPorDia)[l.data_pagamento]>1)){
-      const candidatas=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&_ehAncoraLiq(c)&&c.data_pagamento===l.data_pagamento);
+    const _ref06=_refDiaCobDisp(l), _dia06=_ref06||l.data_pagamento; // Cob Disp: o dia da movimentação vem do histórico
+    if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')&&(_ref06?lancamentos.filter(o=>o.valor_entrada>0&&_refDiaCobDisp(o)===_ref06).length<=1:!((_ehCreditoBoleto(l)?creditosBoletoPendentesPorDia:creditosPendentesPorDia)[l.data_pagamento]>1))){
+      const candidatas=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&_ehAncoraLiq(c)&&c.data_pagamento===_dia06);
       // Crédito consolidado ("Mov Tit Cob Disp") = valor BRUTO por título (liquidação
       // − tarifa, tarifa negativa = soma de volta) — nunca a liquidação líquida de
       // tarifa. Ver "CORREÇÃO DA CONCILIAÇÃO DOS RECEBIMENTOS ITAÚ" (usuário 29/09/2026).
@@ -32657,7 +32665,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         for(const ancora of candidatas){
           const m=await _lancctbMontarGrupoLiquidacao(ancora,true);
           if(!m.ok){ todasOk=false; (window.__diagRecebimentos=window.__diagRecebimentos||[]).push({data:l.data_pagamento,valor,doc:ancora.documento_numero,cliente:ancora.cliente_fornecedor_nome,motivo:m.motivo}); break; }
-          m.linhas.forEach(ln=>{ ln.lancamento_extrato_id=l.id; });
+          m.linhas.forEach(ln=>{ ln.lancamento_extrato_id=l.id; ln.data=l.data_pagamento; }); // data do lançamento = data do CRÉDITO no banco (não o dia da movimentação)
           montagens.push(m);
         }
         (window.__diagRecebimentos=window.__diagRecebimentos||[]).push({data:l.data_pagamento,passo:'lote-montado',todasOk,n:montagens.length});
@@ -32689,13 +32697,14 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // Passo 0.7: VÁRIOS "Mov Tít Cob Disp" no MESMO dia (Fast Lube 19/10/2026: "todos têm comprovantes pra compor cada valor do extrato"). Os créditos do dia dividem os títulos liquidados nesse dia: cada crédito PEQUENO é
     // composto por um título de valor igual ou pela soma exata de alguns (prioridade fixa: título único exato → menor id), e o MAIOR fica com o que sobrar — só vale se o resto fechar o crédito maior em até 1 centavo.
     // Tudo-ou-nada por dia: se qualquer crédito não compuser, ou qualquer partida falhar, nada do dia fica gravado (as partidas já feitas são estornadas).
-    if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')&&creditosBoletoPendentesPorDia[l.data_pagamento]>1&&!_idsLoteMultiploResolvidos.has(l.id)&&!_diasLoteMultiploTentados.has(l.data_pagamento)&&/COB\s*DISP/.test(_convMpRemoverAcentos(String(l.historico_bancario||'')).toUpperCase())){
-      _diasLoteMultiploTentados.add(l.data_pagamento);
-      const credsDia=lancamentos.filter(o=>o.valor_entrada>0&&o.data_pagamento===l.data_pagamento&&_ehCreditoBoleto(o));
-      if(credsDia.length>1&&credsDia.length===creditosBoletoPendentesPorDia[l.data_pagamento]&&credsDia.every(o=>/COB\s*DISP/.test(_convMpRemoverAcentos(String(o.historico_bancario||'')).toUpperCase()))){
+    if(!resolvido&&!ehSaida&&(modo==='completo'||modo==='comprovantes_recebimento')&&_ref06&&!_idsLoteMultiploResolvidos.has(l.id)&&!_diasLoteMultiploTentados.has(_ref06)){
+      _diasLoteMultiploTentados.add(_ref06);
+      // Créditos do MESMO dia de movimentação (data no histórico "Cob Disp DD/MM"), não do mesmo dia de crédito.
+      const credsDia=lancamentos.filter(o=>o.valor_entrada>0&&_refDiaCobDisp(o)===_ref06);
+      if(credsDia.length>1){
         const credsOrd=credsDia.slice().sort((a,b)=>(a.valor_entrada-b.valor_entrada)||(a.id-b.id));
         const brutoCent=c=>{ const tar=comprovantesReceb.find(t=>t.tipo_operacao==='tarifa_cobranca'&&!/cobrada à parte/i.test(t.observacao||'')&&t.documento_numero===c.documento_numero&&t.cliente_fornecedor_nome===c.cliente_fornecedor_nome); return Math.round((tar?c.valor_pago-tar.valor_pago:_valorBrutoSemTarifa(c))*100); };
-        let pool=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&_ehAncoraLiq(c)&&c.data_pagamento===l.data_pagamento).sort((a,b)=>a.id-b.id).map(c=>({c,v:brutoCent(c)}));
+        let pool=comprovantesReceb.filter(c=>!comprovantesUsadosReceb.has(c.id)&&_ehAncoraLiq(c)&&c.data_pagamento===_ref06).sort((a,b)=>a.id-b.id).map(c=>({c,v:brutoCent(c)}));
         const atrib=new Map(); let falhou='';
         for(const cr of credsOrd.slice(0,-1)){
           const alvo=Math.round(cr.valor_entrada*100);
@@ -32710,7 +32719,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         else {
           const tocados=[], montagensPorCredito=[]; let okDia=true;
           for(const cr of credsOrd){
-            const ms=[]; for(const it of atrib.get(cr.id)){ const m=await _lancctbMontarGrupoLiquidacao(it.c,true); if(!m.ok){ okDia=false; (window.__diagRecebimentos=window.__diagRecebimentos||[]).push({data:l.data_pagamento,passo:'multi-credito',motivo:m.motivo||'grupo sem Regra/Conta padrão',doc:it.c.documento_numero}); break; } m.linhas.forEach(ln=>{ ln.lancamento_extrato_id=cr.id; }); ms.push(m); }
+            const ms=[]; for(const it of atrib.get(cr.id)){ const m=await _lancctbMontarGrupoLiquidacao(it.c,true); if(!m.ok){ okDia=false; (window.__diagRecebimentos=window.__diagRecebimentos||[]).push({data:l.data_pagamento,passo:'multi-credito',motivo:m.motivo||'grupo sem Regra/Conta padrão',doc:it.c.documento_numero}); break; } m.linhas.forEach(ln=>{ ln.lancamento_extrato_id=cr.id; ln.data=cr.data_pagamento; }); ms.push(m); }
             if(!okDia) break; montagensPorCredito.push({cr,ms});
           }
           if(okDia){
