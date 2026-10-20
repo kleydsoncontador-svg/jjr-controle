@@ -31372,6 +31372,126 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
   if(motivos.length) console.info('Sispag Salários via Fluxo — não abertos:'+String.fromCharCode(10)+motivos.join(String.fromCharCode(10)));
   return { abertos, motivos };
 }
+// ═══ INTERMEDIADORAS (pedido do usuário 20/10/2026 — "intermediadora não é motivo para parar") ═══════════════════════════════════════════════════════════════════════
+// O beneficiário do banco é uma securitizadora/factoring/instituição de pagamento: o fornecedor REAL está no título do Fluxo/NF. Aqui o NOME do beneficiário não conta; vale DATA → VALOR → título ainda livre → NF/parcela → composição.
+// Faixas de data (para na 1ª com solução única): mesma data → ±1 → ±2 → ±3 → vencimento anterior (até 7 dias antes). Em cada faixa: valor exato antes de diferença de até R$ 0,02. Vários pagamentos disputando as mesmas linhas são
+// resolvidos JUNTOS, faixa a faixa (a mais forte primeiro). Mais de um fornecedor diferente na MESMA faixa = ambíguo real (histórico confirmado do mesmo beneficiário pode desempatar). Mesmo fornecedor = desempate fixo
+// (menor diferença de data → vencimento mais antigo → ordem do Fluxo → menor documento). Composição (2+ títulos, até de fornecedores diferentes) só quando é a ÚNICA possível. NUNCA grava alias intermediadora → fornecedor.
+const LANCCTB_INTERMED_PALAVRAS=[['SARFATY','SARFATY'],['GAVEA','GAVEA'],['MULTIPLIKE','MULTIPLIKE'],['REDFACTOR','REDFACTOR'],['RED FACTOR','REDFACTOR'],['RED S A','REDFACTOR'],['RED S/A','REDFACTOR'],['MAR CAPITAL','MAR CAPITAL'],['SIFRA','SIFRA'],['SOFISA','SOFISA'],['PJBANK','PJBANK'],['LYTEX','LYTEX'],['DJKR','DJKR'],['SOLUCOES EM PAGAMENTOS','BANRISUL SOLUCOES'],['SECURITIZ','SECURITIZADORA'],['FACTORING','FACTORING'],['FOMENTO','FOMENTO']];
+const LANCCTB_INTERMED_CNPJ_NOME={'24765839000189':'SARFATY','11193684000101':'GAVEA','14955141000172':'MULTIPLIKE','67915785000101':'REDFACTOR','30433385000141':'MAR CAPITAL','03729970000110':'SIFRA','60889128000180':'SOFISA','18191228000171':'PJBANK','34778583000106':'LYTEX','35028130000117':'DJKR','92934215000106':'BANRISUL SOLUCOES'};
+function _lancctbChaveIntermediadora(hist){
+  const h=_convMpRemoverAcentos(String(hist||'').toUpperCase());
+  for(const [p,k] of LANCCTB_INTERMED_PALAVRAS) if(h.includes(p)) return k;
+  try{ for(const c of _lancctbCnpjsDoTexto(hist)) if(LANCCTB_INTERMED_CNPJ_NOME[c]) return LANCCTB_INTERMED_CNPJ_NOME[c]; }catch(e){}
+  return 'INTERMEDIADORA';
+}
+async function _lancctbPassadaIntermediadoras(c){
+  const { eid, contaId, pagamentos, fluxoTodo, fluxoPend, usados, fpLista, pessoasFolha, manuais, indicadaDe }=c;
+  const TOL=LANCCTB_FLUXO_TOL_CENTAVO, out={ pares:[], info:new Map(), ambiguos:[], compostos:0, resolvidos:0 };
+  const fmt=v=>Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const brd=d=>String(d||'').split('-').reverse().join('/').slice(0,5);
+  // 1) solta o que uma rodada anterior ligou a estes pagamentos (exceto ligação MANUAL) e refaz tudo em conjunto
+  const ids=new Set(pagamentos.map(p=>p.id));
+  const manualPag=new Set((fluxoTodo||[]).filter(f=>manuais.has(f.id)&&f.lancamento_extrato_id&&ids.has(f.lancamento_extrato_id)).map(f=>f.lancamento_extrato_id));
+  const pags=pagamentos.filter(p=>!manualPag.has(p.id)).sort((a,b)=>(a.data_pagamento<b.data_pagamento?-1:a.data_pagamento>b.data_pagamento?1:a.id-b.id));
+  const idsPags=new Set(pags.map(p=>p.id));
+  const soltar=(fluxoTodo||[]).filter(f=>f.lancamento_extrato_id&&idsPags.has(f.lancamento_extrato_id)&&!manuais.has(f.id));
+  if(soltar.length){
+    await _lancctbEmLotesDb(soltar.map(f=>f.id),200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
+    soltar.forEach(f=>{ f.status_associado='nao_associado'; f.lancamento_extrato_id=null; if(!fluxoPend.includes(f)) fluxoPend.push(f); });
+  }
+  // 2) histórico confirmado do MESMO beneficiário (evidência, nunca trava nem alias): quais fornecedores já foram pagos por ele
+  const hist=new Map();
+  try{
+    const filtros=LANCCTB_INTERMED_PALAVRAS.map(([p])=>`historico_bancario.ilike.%${p}%`).join(',');
+    const ex=[]; for(let from=0;from<4000;from+=1000){ const { data: q, error } = await _supaClient.from('lancamentos_extrato').select('id,historico_bancario').eq('empresa_eid',eid).eq('status_conciliacao','conciliado').gt('valor_saida',0).or(filtros).range(from,from+999); if(error||!q) break; ex.push(...q); if(q.length<1000) break; }
+    const porId=new Map(ex.map(e=>[e.id,e.historico_bancario]));
+    const idsEx=[...porId.keys()];
+    for(let i=0;i<idsEx.length;i+=200){
+      const { data: fl } = await _supaClient.from('fluxo_caixa_lancamentos').select('cliente_fornecedor_nome,lancamento_extrato_id').in('lancamento_extrato_id',idsEx.slice(i,i+200));
+      (fl||[]).forEach(f=>{ const k=_lancctbChaveIntermediadora(porId.get(f.lancamento_extrato_id)); const t=(_lancctbIdentTokens(f.cliente_fornecedor_nome||'')[0]||'').toUpperCase(); if(!t) return; if(!hist.has(k)) hist.set(k,new Set()); hist.get(k).add(t); });
+    }
+  }catch(e){ console.warn('Histórico confirmado das intermediadoras:',e); }
+  // 3) conjunto de títulos LIVRES do Fluxo COMPLETO (sem pessoas da folha, sem NF já baixada em outro lançamento)
+  const dias=(a,b)=>Math.round((new Date(a+'T12:00:00')-new Date(b+'T12:00:00'))/864e5);
+  const tierDe=(f,p)=>{ const d=dias(f.data,p.data_pagamento); if(Math.abs(d)<=3) return Math.abs(d); if(d<0&&d>=-LANCCTB_FLUXO_ATRASO_DIAS) return 4; return null; };
+  const ehFolha=f=>pessoasFolha.length&&pessoasFolha.some(pp=>_lancctbPessoaNoTexto(pp,f.cliente_fornecedor_nome||''));
+  const pool=fluxoPend.filter(f=>!usados.has(f.id)&&f.valor_saida>0&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&!ehFolha(f));
+  const aceita=(p,f)=>{
+    if(!_lancctbFluxoParamOk(p.historico_bancario,f,fpLista)) return false;
+    const par=indicadaDe(f); if(par&&par.status_conciliacao==='conciliado'&&par.lancamento_extrato_id!==p.id) return false;
+    return true;
+  };
+  const tokF=f=>(_lancctbIdentTokens(f.cliente_fornecedor_nome||'')[0]||String(f.cliente_fornecedor_nome||'')).toUpperCase();
+  const desempate=(p)=>(a,b)=>(Math.abs(dias(a.data,p.data_pagamento))-Math.abs(dias(b.data,p.data_pagamento)))||(a.data<b.data?-1:a.data>b.data?1:0)||_lancctbFluxoOrdemCmp(a,b)||(Number(String(a.documento_numero||a.numero||'').replace(/\D/g,'')||0)-Number(String(b.documento_numero||b.numero||'').replace(/\D/g,'')||0));
+  const consumidas=new Set(), asg=new Map(), ambig=new Map();
+  const nomeTier=['mesma data','±1 dia','±2 dias','±3 dias','vencimento anterior (até 7 dias)'];
+  const registra=(p,linhas,tier,tol,tipo)=>{
+    linhas.forEach(f=>{ consumidas.add(f.id); usados.add(f.id); out.pares.push({fId:f.id,lId:p.id}); });
+    const soma=linhas.reduce((a,f)=>a+f.valor_saida,0), dif=Math.round((soma-p.valor_saida)*100)/100;
+    const forn=[...new Set(linhas.map(f=>f.cliente_fornecedor_nome||'?'))];
+    asg.set(p.id,{linhas,tier,tol,tipo});
+    out.info.set(p.id,`INTERMEDIADORA: ${_lancctbChaveIntermediadora(p.historico_bancario)} | BANCO: ${brd(p.data_pagamento)} R$ ${fmt(p.valor_saida)} | FORNECEDOR REAL: ${forn.join(' + ')} | NF/DUP: ${linhas.map(f=>(f.documento_numero||f.numero||'—')+(f.parcela?'/'+f.parcela:'')).join(', ')} | FLUXO: ${linhas.map(f=>brd(f.data)+' R$ '+fmt(f.valor_saida)).join(' + ')} | DIF: R$ ${fmt(dif)} | CRITÉRIO: ${tipo==='composicao'?'composição ÚNICA de '+linhas.length+' títulos livres':'título único livre'}, ${tol<0.005?'valor exato':'diferença de até R$ 0,02'}, ${nomeTier[tier]}`);
+    if(tipo==='composicao'){ out.compostos++; } out.resolvidos++;
+  };
+  // 4) títulos únicos — faixa a faixa; valor exato primeiro
+  for(const tol of [0.0049,TOL]){
+    for(let tier=0;tier<=4;tier++){
+      let mudou=true;
+      while(mudou){
+        mudou=false;
+        for(const p of pags){
+          if(asg.has(p.id)||ambig.has(p.id)) continue;
+          const C=pool.filter(f=>!consumidas.has(f.id)&&Math.abs(f.valor_saida-p.valor_saida)<=tol&&tierDe(f,p)===tier&&aceita(p,f));
+          if(!C.length) continue;
+          const grupos=new Map(); C.forEach(f=>{ const k=tokF(f); if(!grupos.has(k)) grupos.set(k,[]); grupos.get(k).push(f); });
+          let escolhido=null;
+          if(grupos.size===1) escolhido=[...grupos.values()][0];
+          else { const h=hist.get(_lancctbChaveIntermediadora(p.historico_bancario)); const comH=[...grupos.entries()].filter(([k])=>h&&h.has(k)); if(comH.length===1) escolhido=comH[0][1]; }
+          if(!escolhido){ ambig.set(p.id,{tier,tol,cands:[...grupos.values()].map(g=>g.slice().sort(desempate(p))[0])}); continue; }
+          registra(p,[escolhido.slice().sort(desempate(p))[0]],tier,tol,'unico'); mudou=true;
+        }
+      }
+    }
+  }
+  // 5) composição (2+ títulos, até de fornecedores diferentes) — só se for a ÚNICA possível na faixa
+  for(const tol of [0.0049,TOL]){
+    const dlts=tol<0.005?[0]:[-1,1,-2,2];
+    for(const janela of [[0],[0,1],[0,1,2,3],[0,1,2,3,4]]){
+      for(const p of pags){
+        if(asg.has(p.id)||ambig.has(p.id)) continue;
+        const alvo=Math.round(p.valor_saida*100);
+        const linhas=pool.filter(f=>!consumidas.has(f.id)&&janela.includes(tierDe(f,p))&&Math.round(f.valor_saida*100)<=alvo+2&&aceita(p,f)).sort(desempate(p));
+        if(linhas.length<2) continue;
+        if(linhas.length>70){ ambig.set(p.id,{tier:janela[janela.length-1],tol,cands:[],motivo:`${linhas.length} títulos livres na faixa — composições demais`}); continue; }
+        const vals=linhas.map(f=>({v:Math.round(f.valor_saida*100),f}));
+        const solucoes=[]; let estourou=false;
+        for(const dlt of [0,...dlts]){
+          if(dlt===0&&tol>=0.005) continue; // diferença só depois de testar exato (já feito na rodada de valor exato)
+          const orc={n:250000};
+          const r=_lancctbFluxoEnumerarSolucoes(vals,alvo+dlt,3,orc);
+          if(orc.n<=0) estourou=true;
+          r.filter(ix=>ix.length>=2).forEach(ix=>{ const k=ix.slice().sort((a,b)=>a-b).join(','); if(!solucoes.some(x=>x.k===k)) solucoes.push({k,ix}); });
+          if(solucoes.length) break; // dentro da tolerância, a menor diferença primeiro
+        }
+        if(!solucoes.length) continue;
+        if(solucoes.length>1||estourou){ ambig.set(p.id,{tier:janela[janela.length-1],tol,cands:[],motivo:`${solucoes.length} composições equivalentes`}); continue; }
+        registra(p,solucoes[0].ix.map(i=>vals[i].f),janela[janela.length-1],tol,'composicao');
+      }
+    }
+  }
+  // 6) o que sobrou: ambíguo real (2+ soluções equivalentes) ou sem título livre
+  pags.forEach(p=>{
+    if(asg.has(p.id)) return;
+    const a=ambig.get(p.id);
+    if(a){
+      const cs=(a.cands||[]).map(f=>`${f.cliente_fornecedor_nome||'?'} ${brd(f.data)} R$ ${fmt(f.valor_saida)} NF/DUP ${f.documento_numero||f.numero||'—'}`);
+      out.ambiguos.push({ id:p.id, data:p.data_pagamento, valor:p.valor_saida, hist:p.historico_bancario, cands:cs, motivo:a.motivo||`${cs.length} fornecedores diferentes na faixa "${nomeTier[a.tier]}"` });
+      out.info.set(p.id,`AMBÍGUO REAL | INTERMEDIADORA: ${_lancctbChaveIntermediadora(p.historico_bancario)} | BANCO: ${brd(p.data_pagamento)} R$ ${fmt(p.valor_saida)} | ${a.motivo||'candidatos equivalentes na mesma faixa ('+nomeTier[a.tier]+'): '+cs.join(' ;; ')}`);
+    }
+  });
+  return out;
+}
 async function _lancctbProcessarFluxo(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -31387,7 +31507,7 @@ async function _lancctbProcessarFluxo(){
   if(btn){ btn.disabled=true; }
   try{
     const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
-      .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
+      .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,informacao')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
       .order('data_pagamento',{ascending:true}).order('id',{ascending:true})));
     if(!pendencias||!pendencias.length){ toast('Nenhuma pendência no período filtrado nesta conta.','ok'); return; }
@@ -31468,9 +31588,9 @@ async function _lancctbProcessarFluxo(){
     // Resolve os pares (extrato → fluxo) localmente antes de gravar,
     // depois salva em lote paralelo (8 simultâneos) para evitar N round-trips.
     // Rota FOPAG (pedido do usuário 19/10/2026): pagamento a PESSOA que consta na folha desta empresa (relatórios do ConfiBackup/FOPAG do Mês, já filtrados pela empresa) não é fornecedor do Fluxo — fica pro Processar FOPAG.
-    let rotaFopag=0; const idsFopag=new Set();
+    let rotaFopag=0; const idsFopag=new Set(); const pessoasFolhaFx=[];
     try{
-      const meses=[...new Set(pendencias.map(l=>String(l.data_pagamento||'').slice(0,7)).filter(Boolean))], pessoasFolha=[];
+      const meses=[...new Set(pendencias.map(l=>String(l.data_pagamento||'').slice(0,7)).filter(Boolean))], pessoasFolha=pessoasFolhaFx;
       for(const m of meses){ try{ (await _lancctbRelatoriosFopagDoMes(eid,m+'-15')).forEach(r=>((r.dados&&r.dados.pessoas)||[]).forEach(pp=>pessoasFolha.push(pp))); }catch(e){} }
       if(pessoasFolha.length) pendencias.forEach(l=>{ if(l.valor_saida>0&&_lancctbHistEhTransfNome(l.historico_bancario)&&pessoasFolha.some(pp=>_lancctbPessoaNoTexto(pp,l.historico_bancario))){ idsFopag.add(l.id); } });
       // linhas já abertas/identificadas POR PESSOA (marcas da rotina de folha) nunca disputam linha de fornecedor
@@ -31478,11 +31598,21 @@ async function _lancctbProcessarFluxo(){
       rotaFopag=idsFopag.size;
     }catch(e){ console.warn('Rota FOPAG no Processar Fluxo:',e); }
     const pares=[]; let compostos=0, ambiguosComp=0, centavosAceitos=0;
+    // Intermediadoras (SARFATY, GAVEA, REDFACTOR…): resolvidas à parte, em conjunto, pelo título real do Fluxo (ver _lancctbPassadaIntermediadoras).
+    const idsInterm=new Set(pendencias.filter(l=>l.valor_saida>0&&!idsFopag.has(l.id)&&_lancctbEhIntermediadora(l.historico_bancario)).map(l=>l.id));
+    let intermRes={ pares:[], info:new Map(), ambiguos:[], compostos:0, resolvidos:0 };
+    try{
+      if(idsInterm.size){
+        if(statusEl) statusEl.textContent=`Intermediadoras: resolvendo ${idsInterm.size} pagamento(s) pelo título real…`;
+        intermRes=await _lancctbPassadaIntermediadoras({ eid, contaId, pagamentos:pendencias.filter(l=>idsInterm.has(l.id)), fluxoTodo, fluxoPend, usados, fpLista:_fpListaFluxo, pessoasFolha:pessoasFolhaFx, manuais:_manuaisFluxo, indicadaDe });
+        intermRes.pares.forEach(x=>pares.push(x)); compostos+=intermRes.compostos;
+      }
+    }catch(e){ console.error('Passada das intermediadoras:',e); }
     if(fluxoPend.length){
       for(let i=0;i<pendencias.length;i++){
         if(statusEl&&i%200===0){ statusEl.textContent=`Comparando com o Fluxo ${i}/${pendencias.length}…`; await new Promise(r=>setTimeout(r,0)); }
         const l=pendencias[i];
-        if(idsFopag.has(l.id)) continue; // rota FOPAG
+        if(idsFopag.has(l.id)||idsInterm.has(l.id)) continue; // rota FOPAG / intermediadora (já resolvida acima)
         const ehSaida=l.valor_saida>0;
         const valor=l.valor_saida||l.valor_entrada;
         const candBase=fluxoPend.filter(f=>!usados.has(f.id))
@@ -31522,7 +31652,7 @@ async function _lancctbProcessarFluxo(){
     try{
       const grupos=new Map();
       pendencias.forEach(l=>{
-        if(!(l.valor_saida>0)||idsFopag.has(l.id)) return;
+        if(!(l.valor_saida>0)||idsFopag.has(l.id)||idsInterm.has(l.id)) return;
         const ps=_lancctbFluxoParamsDaLinha(l.historico_bancario,_fpListaFluxo).filter(p=>(p.contem||[]).filter(Boolean).length); if(!ps.length) return;
         const k=ps.map(p=>_fpNorm(p.gatilho)).sort().join('|'); if(!grupos.has(k)) grupos.set(k,[]); grupos.get(k).push(l);
       });
@@ -31555,6 +31685,15 @@ async function _lancctbProcessarFluxo(){
         else associados++;
       }
     }
+    // Auditoria das intermediadoras (quem é o fornecedor real, qual título, qual critério) — vai na coluna "informacao" do lançamento do extrato; nunca vira alias.
+    try{
+      for(const [lId,txt] of intermRes.info.entries()){
+        const l=pendencias.find(x=>x.id===lId); const atual=String((l&&l.informacao)||'');
+        if(atual&&!/^(INTERMEDIADORA|AMBÍGUO REAL)/.test(atual)) continue; // não sobrescreve outra informação (ex.: "Separada pelo Fluxo…")
+        await _supaClient.from('lancamentos_extrato').update({informacao:txt}).eq('id',lId);
+      }
+    }catch(e){ console.warn('Auditoria das intermediadoras:',e); }
+    if(intermRes.ambiguos.length) console.info('Intermediadoras — ambíguos reais:\n'+intermRes.ambiguos.map(a=>`${a.data.split('-').reverse().join('/').slice(0,5)} R$ ${a.valor}: ${a.motivo} → ${a.cands.join(' ;; ')}`).join('\n'));
     // Pedido do usuário 18/09/2026: o Fluxo também indica a NF (número +
     // parcela) — depois de associar, amarra as NFs que ele indica.
     if(statusEl) statusEl.textContent='Amarrando NFs indicadas pelo Fluxo…';
@@ -31567,7 +31706,7 @@ async function _lancctbProcessarFluxo(){
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
     const diag=(resNf&&resNf.diagAglutinado)||[];
     if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
-    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de até R$ 0,02 aceita]`:''}${particoes?` [${particoes} grupo(s) de pagamentos do mesmo fornecedor resolvidos em conjunto]`:''}${rotaFopag?` [${rotaFopag} pagamento(s) a funcionário da folha deixados pro Processar FOPAG]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
+    toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de até R$ 0,02 aceita]`:''}${particoes?` [${particoes} grupo(s) de pagamentos do mesmo fornecedor resolvidos em conjunto]`:''}${rotaFopag?` [${rotaFopag} pagamento(s) a funcionário da folha deixados pro Processar FOPAG]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${idsInterm.size?` [intermediadoras: ${intermRes.resolvidos} resolvida(s) pelo título real${intermRes.compostos?' ('+intermRes.compostos+' por composição)':''}, ${intermRes.ambiguos.length} ambígua(s) real(is)]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
     renderLancctbRegistroContabil();
     if(_lancctbFluxoSugParam.length) setTimeout(abrirLancctbSugestoesParam,900);
   } finally {
@@ -32111,7 +32250,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const ehPonteL=_lancctbEhIntermediadora(l.historico_bancario);
     const temNome=_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
     const vFluxo=f=>ehSaida?f.valor_saida:f.valor_entrada;
-    const perto=f=>vFluxo(f)&&Math.abs(vFluxo(f)-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
+    const perto=f=>vFluxo(f)&&Math.abs(vFluxo(f)-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO:0.005)&&(f.lancamento_extrato_id===l.id||_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
     // 03/10/2026 (ACCI, PIX "...05.919.350 0001-70 NF 12031" × Fluxo "AMIGO DO CARRO - ... - 05919350000170", NF 12031): o histórico
     // do banco só traz o CNPJ (sem nome) e o teste de nome barrava a linha do Fluxo que indicava a NF certa. Vale se o CNPJ do histórico
     // é o mesmo do Fluxo, ou se o Fluxo já está associado a ESTE extrato (o usuário já confirmou a ligação).
