@@ -1,0 +1,425 @@
+/* ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════
+ * CALCULADORAS JJR — TELA  (pedido do usuário 20/10/2026)
+ * Depende de calc-motor.js (window.JJRCalc) e das funções do site: S, esc, toast, currentUser, isAdmin, SUPABASE_URL/KEY.
+ * A IA só aparece no botão "🤖 Pesquisar atualizações" dentro de Bases Legais — NUNCA calcula nem altera parâmetro sozinha.
+ * ═══════════════════════════════════════════════════════════════════════════════════════════════════════════════ */
+(function () {
+  'use strict';
+  const C = window.JJRCalc;
+  const E = s => (typeof esc === 'function' ? esc(s) : String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])));
+  const LS = { sets: 'calc_param_sets', hist: 'calc_historico', prop: 'calc_propostas', verif: 'calc_bases_verif' };
+  const lerLista = k => { const v = S.g(k); return Array.isArray(v) ? v : []; };
+  const ehAdmin = () => { try { return !!currentUser && isAdmin(currentUser); } catch (e) { return false; } };
+  const hoje = () => new Date().toISOString().slice(0, 10);
+  const mesAtual = () => hoje().slice(0, 7);
+  const uf27 = ['AC', 'AL', 'AP', 'AM', 'BA', 'CE', 'DF', 'ES', 'GO', 'MA', 'MT', 'MS', 'MG', 'PA', 'PB', 'PR', 'PE', 'PI', 'RJ', 'RN', 'RS', 'RO', 'RR', 'SC', 'SP', 'SE', 'TO'];
+  const OPC_UF = [['', '—']].concat(uf27.map(u => [u, u]));
+
+  // ───────────────────────────── formulários ─────────────────────────────
+  // tipos: money | int | pct | text | month | date | select | bool ; "quando" mostra o campo só se a função devolver true
+  const F = {
+    irrf_pf: { titulo: 'IRRF — Pessoa Física', desc: 'Imposto de renda retido na fonte sobre rendimentos do trabalho, com a tabela e o redutor da competência.', campos: [
+      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual },
+      { k: 'rendimentos', l: 'Rendimentos tributáveis (R$)', t: 'money' },
+      { k: 'previdencia', l: 'Previdência oficial (INSS) (R$)', t: 'money' },
+      { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 },
+      { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' },
+      { k: 'outras', l: 'Outras deduções legais (R$)', t: 'money' },
+      { k: 'maisVantajosa', l: 'Usar automaticamente a dedução mais vantajosa', t: 'bool', def: true }],
+      resumo: r => [['IRRF a reter', r.irrf, 1], ['Base de cálculo', r.base], ['Dedução adotada', r.modo_deducao === 'simplificado' ? 'Desconto simplificado' : 'Deduções legais']] },
+    salario_liquido: { titulo: 'Salário líquido', desc: 'Bruto → INSS progressivo → IRRF (mesmo motor da calculadora de IRRF) → demais descontos.', campos: [
+      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual },
+      { k: 'salario', l: 'Salário (R$)', t: 'money' }, { k: 'horasExtras', l: 'Horas extras (R$)', t: 'money' }, { k: 'comissoes', l: 'Comissões (R$)', t: 'money' }, { k: 'adicionais', l: 'Adicionais (R$)', t: 'money' }, { k: 'outrosProventos', l: 'Outros proventos (R$)', t: 'money' },
+      { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 }, { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' },
+      { k: 'vt', l: 'Vale-transporte (R$)', t: 'money' }, { k: 'vr', l: 'Vale-refeição (R$)', t: 'money' }, { k: 'planoSaude', l: 'Plano de saúde (R$)', t: 'money' }, { k: 'adiantamento', l: 'Adiantamento (R$)', t: 'money' }, { k: 'outrosDescontos', l: 'Outros descontos (R$)', t: 'money' },
+      { k: 'maisVantajosa', l: 'Usar automaticamente a dedução mais vantajosa no IRRF', t: 'bool', def: true }],
+      resumo: r => [['Líquido', r.liquido, 1], ['Bruto', r.bruto], ['INSS', r.inss], ['IRRF', r.irrf], ['Demais descontos', r.descontos]] },
+    pro_labore: { titulo: 'Pró-labore líquido', desc: 'INSS de 11% do contribuinte individual até o teto do RGPS (considerando base já usada em outra fonte) e IRRF.', campos: [
+      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual },
+      { k: 'proLabore', l: 'Pró-labore bruto (R$)', t: 'money' },
+      { k: 'baseJaUtilizadaTeto', l: 'Base já utilizada do teto em outra fonte (R$)', t: 'money' },
+      { k: 'outrasContribuicoes', l: 'Outras contribuições previdenciárias no mês (R$)', t: 'money' },
+      { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 }, { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' }, { k: 'outrosDescontos', l: 'Outros descontos (R$)', t: 'money' },
+      { k: 'maisVantajosa', l: 'Usar automaticamente a dedução mais vantajosa no IRRF', t: 'bool', def: true }],
+      resumo: r => [['Líquido', r.liquido, 1], ['Pró-labore', r.bruto], ['INSS', r.inss], ['IRRF', r.irrf]] },
+    ferias: { titulo: 'Férias', desc: 'Férias + 1/3, abono pecuniário e descontos de INSS e IRRF (abono e seu 1/3 não sofrem desconto).', campos: [
+      { k: 'competencia', l: 'Competência do pagamento', t: 'month', def: mesAtual },
+      { k: 'remuneracao', l: 'Remuneração mensal (R$)', t: 'money' }, { k: 'medias', l: 'Médias de variáveis (R$)', t: 'money' },
+      { k: 'diasFerias', l: 'Dias de férias (5 a 30)', t: 'int', def: 30 }, { k: 'diasAbono', l: 'Dias de abono pecuniário (0 a 10)', t: 'int', def: 0 },
+      { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 }, { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' }, { k: 'outrosDescontos', l: 'Outros descontos (R$)', t: 'money' },
+      { k: 'maisVantajosa', l: 'Usar automaticamente a dedução mais vantajosa no IRRF', t: 'bool', def: true }],
+      resumo: r => [['Líquido das férias', r.liquido, 1], ['Férias', r.ferias], ['1/3 constitucional', r.terco], ['Abono + 1/3', r.abono + r.tercoAbono], ['INSS', r.inss], ['IRRF', r.irrf]] },
+    decimo_terceiro: { titulo: '13º salário', desc: 'Avos (mês com 15 dias ou mais conta), 1ª parcela e 2ª parcela com INSS e IRRF tratados separados da folha.', campos: [
+      { k: 'competencia', l: 'Competência da 2ª parcela', t: 'month', def: () => mesAtual().slice(0, 4) + '-12' },
+      { k: 'remuneracao', l: 'Remuneração mensal (R$)', t: 'money' }, { k: 'medias', l: 'Médias de variáveis (R$)', t: 'money' },
+      { k: 'dataAdmissao', l: 'Data de admissão (se no ano)', t: 'date' }, { k: 'avos', l: 'Avos (deixe vazio para calcular pela admissão)', t: 'int', def: '' },
+      { k: 'primeiraParcela', l: '1ª parcela já paga (R$) — vazio = 50% do bruto', t: 'money' },
+      { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 }, { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' },
+      { k: 'maisVantajosa', l: 'Usar automaticamente a dedução mais vantajosa no IRRF', t: 'bool', def: true }],
+      resumo: r => [['2ª parcela líquida', r.segunda, 1], ['13º bruto', r.bruto], ['1ª parcela', r.primeira], ['INSS', r.inss], ['IRRF', r.irrf], ['Avos', String(r.avos) + '/12']] },
+    rescisao: { titulo: 'Rescisão trabalhista', desc: 'Cada verba com a sua própria incidência de INSS, IRRF e FGTS (matriz por rubrica). Versão inicial — confira as rubricas.', campos: [
+      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual },
+      { k: 'tipo', l: 'Tipo de rescisão', t: 'select', opts: Object.entries(C.TIPOS_RESC).map(([k, v]) => [k, v.nome]) },
+      { k: 'dataAdmissao', l: 'Data de admissão', t: 'date' }, { k: 'dataDesligamento', l: 'Data de desligamento', t: 'date' },
+      { k: 'salario', l: 'Salário (R$)', t: 'money' }, { k: 'medias', l: 'Médias de variáveis (R$)', t: 'money' },
+      { k: 'avisoModo', l: 'Aviso prévio', t: 'select', opts: [['padrao', 'Conforme o tipo (indenizado quando devido)'], ['trabalhado', 'Trabalhado / cumprido'], ['nao_ha', 'Não há']] },
+      { k: 'periodosVencidos', l: 'Períodos de férias vencidas', t: 'int', def: 0 }, { k: 'saldoFgts', l: 'Saldo do FGTS (R$) — para a multa', t: 'money' },
+      { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 }, { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' }, { k: 'outrosDescontos', l: 'Adiantamentos / outros descontos (R$)', t: 'money' },
+      { k: 'maisVantajosa', l: 'Usar automaticamente a dedução mais vantajosa no IRRF', t: 'bool', def: true }],
+      resumo: r => [['Líquido (sem FGTS)', r.liquido, 1], ['Total das verbas', r.bruto], ['INSS', r.inss], ['IRRF', r.irrf], ['FGTS da rescisão', r.fgts], ['Multa do FGTS', r.multa_fgts]] },
+    plr: { titulo: 'PLR — tributação exclusiva', desc: 'Usa tabela própria da PLR (nunca a do salário). Só calcula se a tabela da competência estiver cadastrada.', campos: [
+      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual }, { k: 'plrAtual', l: 'PLR atual (R$)', t: 'money' }, { k: 'plrAnterior', l: 'PLR já paga no ano (R$)', t: 'money' }, { k: 'irJaRetido', l: 'IR já retido sobre a PLR do ano (R$)', t: 'money' }],
+      resumo: r => [['IR a reter agora', r.ir, 1]] },
+    pensao: { titulo: 'Pensão alimentícia', desc: 'Percentual sobre a base escolhida, ou valor fixo.', campos: [
+      { k: 'modo', l: 'Base da pensão', t: 'select', def: 'bruto', opts: [['bruto', 'Rendimento bruto'], ['bruto_menos_inss', 'Bruto menos INSS'], ['liquido', 'Líquido (bruto − INSS − IRRF − outros)'], ['personalizada', 'Base personalizada (decisão judicial)'], ['fixo', 'Valor fixo']] },
+      { k: 'rendimento', l: 'Rendimento bruto (R$)', t: 'money', quando: v => ['bruto', 'bruto_menos_inss', 'liquido'].includes(v.modo) },
+      { k: 'inss', l: 'INSS (R$)', t: 'money', quando: v => ['bruto_menos_inss', 'liquido'].includes(v.modo) },
+      { k: 'irrf', l: 'IRRF (R$)', t: 'money', quando: v => v.modo === 'liquido' },
+      { k: 'outrosDescontos', l: 'Outros descontos (R$)', t: 'money', quando: v => v.modo === 'liquido' },
+      { k: 'basePersonalizada', l: 'Base personalizada (R$)', t: 'money', quando: v => v.modo === 'personalizada' },
+      { k: 'percentual', l: 'Percentual (%)', t: 'pct', quando: v => v.modo !== 'fixo' },
+      { k: 'valorFixo', l: 'Valor fixo (R$)', t: 'money', quando: v => v.modo === 'fixo' }],
+      resumo: r => [['Pensão', r.pensao, 1], ['Base', r.base == null ? '—' : r.base]] },
+    mutuo: { titulo: 'Mútuo — IOF, juros e IRRF', desc: 'IOF só calcula com parâmetros cadastrados. IRRF incide sobre os juros (nunca sobre o principal), pela tabela regressiva.', campos: [
+      { k: 'mutuante', l: 'Quem empresta (mutuante)', t: 'select', def: 'PF', opts: [['PF', 'Pessoa física'], ['PJ', 'Pessoa jurídica']] },
+      { k: 'mutuario', l: 'Quem recebe (mutuário)', t: 'select', def: 'PJ', opts: [['PF', 'Pessoa física'], ['PJ', 'Pessoa jurídica']] },
+      { k: 'mesmoGrupo', l: 'Mesmo grupo econômico', t: 'bool', def: false },
+      { k: 'principal', l: 'Principal (R$)', t: 'money' }, { k: 'dataLiberacao', l: 'Data de liberação', t: 'date' }, { k: 'dataVencimento', l: 'Data de vencimento', t: 'date' },
+      { k: 'valorJuros', l: 'Juros totais do período (R$)', t: 'money' }, { k: 'taxaJuros', l: '…ou taxa de juros do período (%) — usada se os juros acima estiverem vazios', t: 'pct' },
+      { k: 'mutuarioSimples', l: 'Mutuário optante pelo Simples Nacional / MEI', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' },
+      { k: 'contaCorrente', l: 'Operação em conta corrente (saldo devedor diário)', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' }],
+      resumo: r => [['Dias', String(r.dias)], ['Juros', r.juros], ['IOF', r.iof == null ? 'não calculado' : r.iof, 1], ['IRRF sobre os juros', r.irrf_juros == null ? 'não se aplica' : r.irrf_juros, 1]] },
+    lucro_presumido: { titulo: 'Lucro Presumido — IRPJ e CSLL', desc: 'Apuração trimestral com a majoração de 10% sobre o percentual de presunção acima de R$ 1.250.000 por trimestre.', campos: [
+      { k: 'ano', l: 'Ano', t: 'int', def: () => new Date().getFullYear() },
+      { k: 'trimestre', l: 'Trimestre', t: 'select', def: '1', opts: [['1', '1º trimestre'], ['2', '2º trimestre'], ['3', '3º trimestre'], ['4', '4º trimestre']] },
+      { k: '_atividades', t: 'atividades' },
+      { k: 'receitasFinanceiras', l: 'Receitas financeiras (R$) — somadas integralmente', t: 'money' }, { k: 'ganhosCapital', l: 'Ganhos de capital (R$) — somados integralmente', t: 'money' }, { k: 'outrasAdicoes', l: 'Outras adições integrais (R$)', t: 'money' },
+      { k: 'irrfCompensar', l: 'IRRF a compensar (R$)', t: 'money' }, { k: 'csllRetida', l: 'CSLL retida a compensar (R$)', t: 'money' },
+      { k: 'outrasAntecipacoesIrpj', l: 'Outras antecipações do IRPJ (R$)', t: 'money' }, { k: 'outrasAntecipacoesCsll', l: 'Outras antecipações da CSLL (R$)', t: 'money' }],
+      resumo: r => [['IRPJ a pagar', r.irpjAPagar, 1], ['CSLL a pagar', r.csllAPagar, 1], ['Base do IRPJ', r.baseIRPJ], ['Base da CSLL', r.baseCSLL], ['IRPJ total (antes das compensações)', r.irpj], ['CSLL total (antes das compensações)', r.csll], ['Majoração do IRPJ', r.majoracaoIRPJ ? 'aplicada' : 'não se aplica'], ['Majoração da CSLL', r.majoracaoCSLL ? 'aplicada' : 'não se aplica']] },
+    itcmd: { titulo: 'ITCMD — Doação e Causa mortis', desc: 'Primeiro define a UF competente (e justifica); só depois calcula com os parâmetros daquela UF e daquela data. SP já cadastrado.', campos: [
+      { k: 'tipo', l: 'Fato gerador', t: 'select', def: 'doacao', opts: [['doacao', 'Doação'], ['causa_mortis', 'Causa mortis (herança/legado)']] },
+      { k: 'dataFatoGerador', l: 'Data do fato gerador', t: 'date', def: hoje },
+      { k: 'tipoBem', l: 'Tipo do bem', t: 'select', def: 'dinheiro', opts: [['dinheiro', 'Dinheiro / bem móvel / título'], ['imovel', 'Imóvel'], ['quotas', 'Quotas / ações societárias']] },
+      { k: 'ufImovel', l: 'UF onde o imóvel está situado', t: 'select', opts: OPC_UF, quando: v => v.tipoBem === 'imovel' },
+      { k: 'ufDomicilioDoador', l: 'UF do domicílio do doador', t: 'select', opts: OPC_UF.concat([['EXT', 'Exterior']]), def: 'SP', quando: v => v.tipo === 'doacao' },
+      { k: 'ufDomicilioDonatario', l: 'UF do domicílio do donatário', t: 'select', opts: OPC_UF, quando: v => v.tipo === 'doacao' },
+      { k: 'ufInventario', l: 'UF onde se processa o inventário', t: 'select', opts: OPC_UF, def: 'SP', quando: v => v.tipo === 'causa_mortis' },
+      { k: 'valorBem', l: 'Valor do bem / direito (R$)', t: 'money', quando: v => v.tipoBem !== 'quotas' },
+      { k: 'percentualTransmitido', l: '% transmitido', t: 'pct', def: '100', quando: v => v.tipoBem !== 'quotas' },
+      { k: '_quotas', t: 'quotas', quando: v => v.tipoBem === 'quotas' },
+      { k: 'doacoesAnteriores', l: 'Doações anteriores (mesmo doador e donatário, no ano civil) (R$)', t: 'money', quando: v => v.tipo === 'doacao' },
+      { k: '_herdeiros', t: 'herdeiros', quando: v => v.tipo === 'causa_mortis' },
+      { k: 'usufruto', l: 'Há usufruto ou nua-propriedade', t: 'bool', def: false }],
+      resumo: r => r.herdeiros ? [['ITCMD total', r.itcmd, 1], ['UF competente', r.uf]] : [['ITCMD', r.itcmd, 1], ['Situação', r.situacao], ['UF competente', r.uf], ['Base tributável', r.base], ['Limite de isenção', r.isencao_limite]] },
+  };
+
+  // ───────────────────────────── estilo ─────────────────────────────
+  function injetarCss() {
+    if (document.getElementById('calcCss')) return;
+    const st = document.createElement('style'); st.id = 'calcCss';
+    st.textContent = `
+.calc-wrap{display:grid;grid-template-columns:250px minmax(0,1fr);gap:16px;align-items:start}
+@media(max-width:900px){.calc-wrap{grid-template-columns:1fr}.calc-nav{position:static;max-height:none;flex-direction:row;flex-wrap:wrap;gap:6px}.calc-item{width:auto}.calc-cat{width:100%}}
+.calc-soon{display:flex;flex-direction:column;gap:6px}
+.calc-nav{position:sticky;top:8px;display:flex;flex-direction:column;gap:10px;max-height:calc(100vh - 90px);overflow:auto;padding-right:2px}
+.calc-cat{font-size:10px;font-weight:700;letter-spacing:.09em;color:var(--slate);margin:6px 2px 2px}
+.calc-item{display:block;width:100%;text-align:left;border:1px solid var(--border);background:var(--white);border-radius:var(--r);padding:8px 10px;font:500 12.5px var(--sans);color:var(--ink);cursor:pointer}
+.calc-item:hover{border-color:var(--teal)}
+.calc-item.on{background:var(--teal-bg);border-color:var(--teal);color:var(--teal)}
+.calc-item.soon{opacity:.55;cursor:default;border-style:dashed}
+.calc-item.soon:hover{border-color:var(--border)}
+.calc-card{background:var(--white);border:1px solid var(--border);border-radius:var(--r2);padding:16px 18px;box-shadow:var(--shadow);margin-bottom:14px}
+.calc-h{font:700 17px var(--sans);color:var(--ink);margin:0 0 3px}
+.calc-sub{font-size:12.5px;color:var(--slate);margin-bottom:12px;max-width:80ch}
+.calc-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:10px 14px}
+.calc-grid .cf{display:flex;flex-direction:column;gap:3px}
+.calc-grid .cf.bool{flex-direction:row;align-items:center;gap:8px;padding-top:18px}
+.calc-grid .cf.bool input{width:auto}
+.calc-sec{grid-column:1/-1;border-top:1px dashed var(--border);padding-top:10px;margin-top:2px}
+.calc-sec h4{margin:0 0 6px;font:600 12px var(--sans);color:var(--ink3)}
+.calc-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:6px;flex-wrap:wrap}
+.calc-row .fi{width:auto;flex:1;min-width:120px}
+.calc-acts{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+.calc-resumo{display:grid;grid-template-columns:repeat(auto-fill,minmax(190px,1fr));gap:10px;margin-bottom:12px}
+.calc-kpi{border:1px solid var(--border);border-radius:var(--r);padding:9px 12px;background:var(--bg)}
+.calc-kpi.hl{background:var(--teal-bg);border-color:var(--teal)}
+.calc-kpi small{display:block;font-size:10.5px;color:var(--slate);font-weight:600;letter-spacing:.03em}
+.calc-kpi b{font:700 17px var(--mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+.calc-kpi.hl b{color:var(--teal)}
+.calc-det{border-top:1px solid var(--border);padding:8px 0}
+.calc-det>summary{cursor:pointer;font:600 13px var(--sans);color:var(--ink)}
+.calc-mem{width:100%;border-collapse:collapse;font-size:12.5px;margin-top:8px}
+.calc-mem td{padding:3px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+.calc-mem td.v{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.calc-mem tr.titulo td{background:var(--bg);font-weight:700;color:var(--ink3);padding-top:7px}
+.calc-mem tr.subtotal td{font-weight:600}
+.calc-mem tr.total td{font-weight:700;background:var(--teal-bg);color:var(--teal)}
+.calc-mem tr.nota td{color:var(--slate);font-style:italic}
+.calc-erro{background:var(--red-bg);color:var(--red);border:1px solid var(--red);border-radius:var(--r);padding:10px 12px;font-size:13px}
+.calc-aviso{background:var(--amber-bg);color:#92400E;border-radius:var(--r);padding:7px 10px;font-size:12px;margin-top:6px}
+.calc-tag{display:inline-block;font-size:10px;font-weight:700;border-radius:4px;padding:1px 6px;margin-left:4px}
+.calc-tag.warn{background:var(--amber-bg);color:#92400E}.calc-tag.ok{background:var(--green-bg);color:var(--green)}
+.calc-tbl{width:100%;border-collapse:collapse;font-size:12px}
+.calc-tbl th{text-align:left;font-size:10.5px;color:var(--slate);padding:4px 6px;border-bottom:1px solid var(--border)}
+.calc-tbl td{padding:5px 6px;border-bottom:1px solid var(--border);vertical-align:top}
+.calc-prop{border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;margin-bottom:8px;background:var(--bg)}
+.calc-prop dl{display:grid;grid-template-columns:150px 1fr;gap:3px 10px;margin:6px 0;font-size:12.5px}
+.calc-prop dt{font-size:10.5px;font-weight:700;color:var(--slate);letter-spacing:.04em}
+.calc-prop dd{margin:0;word-break:break-word}
+.btn-calc-ia{display:inline-flex;align-items:center;gap:6px}
+.calc-ta{width:100%;min-height:240px;font:12px var(--mono);border:1px solid var(--border);border-radius:var(--r);padding:8px;background:var(--white);color:var(--ink)}
+`;
+    document.head.appendChild(st);
+  }
+
+  // ───────────────────────────── estado ─────────────────────────────
+  const est = { aba: 'calc', key: 'irrf_pf', ultimo: null, ultimoInp: null, ativ: [], herd: [], iaBusy: false };
+
+  function carregarSets() { C.registrarSets(lerLista(LS.sets).filter(s => s.status === 'ativo')); }
+
+  // ───────────────────────────── render principal ─────────────────────────────
+  window.renderCalculadoras = function () {
+    injetarCss(); carregarSets();
+    const root = document.getElementById('calcRoot'); if (!root) return;
+    const nav = [];
+    C.CATEGORIAS.forEach(cat => {
+      const impl = C.CATALOGO.filter(c => c.cat === cat);
+      if (!impl.length) return;
+      nav.push(`<div class="calc-cat">${E(cat)}</div>`);
+      impl.forEach(c => nav.push(`<button class="calc-item ${est.aba === 'calc' && est.key === c.key ? 'on' : ''}" onclick="calcAbrir('${c.key}')">${E(c.nome)}</button>`));
+    });
+    nav.push(`<details class="calc-soon"><summary class="calc-cat" style="cursor:pointer">EM BREVE (${C.EM_BREVE.length})</summary>${C.EM_BREVE.map(x => `<div class="calc-item soon" title="Arquitetura preparada; ainda sem parâmetros e testes cadastrados">${E(x[1])}</div>`).join('')}</details>`);
+    nav.push('<div class="calc-cat">GERAL</div>');
+    nav.push(`<button class="calc-item ${est.aba === 'bases' ? 'on' : ''}" onclick="calcAba('bases')">📚 Bases Legais e parâmetros</button>`);
+    nav.push(`<button class="calc-item ${est.aba === 'hist' ? 'on' : ''}" onclick="calcAba('hist')">🗂️ Cálculos salvos</button>`);
+    root.innerHTML = `<div class="calc-wrap"><div class="calc-nav">${nav.join('')}</div><div id="calcMain"></div></div>`;
+    if (est.aba === 'bases') renderBases(); else if (est.aba === 'hist') renderHistorico(); else renderCalc();
+  };
+  window.calcAba = function (a) { est.aba = a; window.renderCalculadoras(); };
+  window.calcAbrir = function (k) { est.aba = 'calc'; est.key = k; est.ultimo = null; est.ativ = []; est.herd = []; window.renderCalculadoras(); };
+
+  // ───────────────────────────── formulário ─────────────────────────────
+  function campoHtml(c) {
+    const id = 'cf_' + c.k; const def = typeof c.def === 'function' ? c.def() : (c.def === undefined ? '' : c.def);
+    if (c.t === 'atividades') return '<div class="calc-sec" id="calcAtivBox"></div>';
+    if (c.t === 'quotas') return `<div class="calc-sec" id="calcQuotasBox"><h4>Avaliação da participação societária (informe os componentes — o sistema não estima o valor da empresa)</h4><div class="calc-grid">${[
+      ['q_patrimonioLiquido', 'Patrimônio líquido contábil (R$)'], ['q_ajusteAtivos', 'Ajustes de ativos a valor de mercado (R$)'], ['q_ajustePassivos', 'Ajustes de passivos (R$)'], ['q_goodwill', 'Fundo de comércio / goodwill (R$)'], ['q_outraMetodologia', 'OU valor da empresa por outra metodologia (R$)'], ['q_percentualParticipacao', '% de participação transmitida']
+    ].map(([k, l]) => `<div class="cf"><label class="fl">${l}</label><input class="fi" id="cf_${k}" inputmode="decimal" ${k === 'q_percentualParticipacao' ? 'value="100"' : ''}></div>`).join('')}</div></div>`;
+    if (c.t === 'herdeiros') return '<div class="calc-sec" id="calcHerdBox"></div>';
+    let inp;
+    if (c.t === 'bool') return `<div class="cf bool" data-k="${c.k}"><input type="checkbox" id="${id}" ${def ? 'checked' : ''} onchange="calcRefreshQuando()"><label class="fl" for="${id}">${E(c.l)}</label></div>`;
+    if (c.t === 'select') inp = `<select class="fi" id="${id}" onchange="calcRefreshQuando()">${c.opts.map(([v, l]) => `<option value="${E(v)}" ${String(def) === String(v) ? 'selected' : ''}>${E(l)}</option>`).join('')}</select>`;
+    else if (c.t === 'month') inp = `<input class="fi" type="month" id="${id}" value="${E(def)}">`;
+    else if (c.t === 'date') inp = `<input class="fi" type="date" id="${id}" value="${E(def)}">`;
+    else if (c.t === 'int') inp = `<input class="fi" id="${id}" inputmode="numeric" value="${E(def)}">`;
+    else inp = `<input class="fi" id="${id}" inputmode="decimal" value="${E(def)}" placeholder="${c.t === 'money' ? '0,00' : ''}">`;
+    return `<div class="cf" data-k="${c.k}"><label class="fl" for="${id}">${E(c.l)}</label>${inp}</div>`;
+  }
+  function renderCalc() {
+    const f = F[est.key]; const main = document.getElementById('calcMain');
+    main.innerHTML = `<div class="calc-card"><h2 class="calc-h">${E(f.titulo)}</h2><div class="calc-sub">${E(f.desc)}</div>
+      <div class="calc-grid" id="calcForm">${f.campos.map(campoHtml).join('')}</div>
+      <div class="calc-acts"><button class="btn bp" onclick="calcCalcular()">Calcular</button><button class="btn bo" onclick="calcLimpar()">Limpar</button></div></div>
+      <div id="calcResultado"></div>`;
+    if (f.campos.some(c => c.t === 'atividades')) { if (!est.ativ.length) est.ativ = [{ tipo: 'comercio', receita: '' }]; renderAtiv(); }
+    if (f.campos.some(c => c.t === 'herdeiros')) { if (!est.herd.length) est.herd = [{ nome: '', quinhao: '' }]; renderHerd(); }
+    calcRefreshQuando();
+    if (est.ultimo) mostrarResultado(est.ultimo, est.ultimoInp);
+  }
+  window.calcRefreshQuando = function () {
+    const f = F[est.key]; if (!f) return; const v = valores(true);
+    f.campos.forEach(c => { if (!c.quando) return; const show = !!c.quando(v);
+      const el = c.t === 'quotas' ? document.getElementById('calcQuotasBox') : c.t === 'herdeiros' ? document.getElementById('calcHerdBox') : document.querySelector('#calcForm [data-k="' + c.k + '"]');
+      if (el) el.style.display = show ? '' : 'none'; });
+  };
+  function valores(bruto) {
+    const f = F[est.key], v = {};
+    f.campos.forEach(c => { if (c.t.startsWith('_') || ['atividades', 'quotas', 'herdeiros'].includes(c.t)) return; const el = document.getElementById('cf_' + c.k); if (!el) return; v[c.k] = c.t === 'bool' ? el.checked : el.value; });
+    return v;
+  }
+  function renderAtiv() {
+    const box = document.getElementById('calcAtivBox'); if (!box) return;
+    const set = C.acharSet('lucro_presumido', (document.getElementById('cf_ano')?.value || new Date().getFullYear()) + '-12-31');
+    const ativ = set ? set.params.atividades.value : { comercio: { nome: 'Comércio' }, servicos: { nome: 'Serviços' } };
+    const opts = Object.entries(ativ).map(([k, a]) => [k, a.nome]).concat([['outra', 'Outra (informar percentuais)']]);
+    box.innerHTML = '<h4>Receita bruta do trimestre por atividade</h4>' + est.ativ.map((a, i) => `<div class="calc-row">
+      <div style="flex:2;min-width:180px"><label class="fl">Atividade</label><select class="fi" style="width:100%" onchange="calcAtivSet(${i},'tipo',this.value)">${opts.map(([k, n]) => `<option value="${k}" ${a.tipo === k ? 'selected' : ''}>${E(n)}</option>`).join('')}</select></div>
+      <div><label class="fl">Receita bruta (R$)</label><input class="fi" inputmode="decimal" value="${E(a.receita)}" oninput="calcAtivSet(${i},'receita',this.value,1)" placeholder="0,00"></div>
+      ${a.tipo === 'outra' ? `<div><label class="fl">Presunção IRPJ (%)</label><input class="fi" value="${E(a.irpj || '')}" oninput="calcAtivSet(${i},'irpj',this.value,1)"></div><div><label class="fl">Presunção CSLL (%)</label><input class="fi" value="${E(a.csll || '')}" oninput="calcAtivSet(${i},'csll',this.value,1)"></div><div><label class="fl">Nome</label><input class="fi" value="${E(a.nome || '')}" oninput="calcAtivSet(${i},'nome',this.value,1)"></div>` : ''}
+      ${est.ativ.length > 1 ? `<button class="btn bo bsm" onclick="calcAtivDel(${i})">remover</button>` : ''}</div>`).join('') + '<button class="btn bo bsm" onclick="calcAtivAdd()">+ atividade</button>';
+  }
+  window.calcAtivSet = (i, k, v, semRender) => { est.ativ[i][k] = v; if (!semRender) renderAtiv(); };
+  window.calcAtivAdd = () => { est.ativ.push({ tipo: 'servicos', receita: '' }); renderAtiv(); };
+  window.calcAtivDel = i => { est.ativ.splice(i, 1); renderAtiv(); };
+  function renderHerd() {
+    const box = document.getElementById('calcHerdBox'); if (!box) return;
+    box.innerHTML = '<h4>Herdeiros / legatários — cada quinhão é calculado individualmente (deixe em branco para dividir igualmente)</h4>' + est.herd.map((h, i) => `<div class="calc-row">
+      <div style="flex:2"><label class="fl">Nome</label><input class="fi" value="${E(h.nome)}" oninput="calcHerdSet(${i},'nome',this.value)"></div>
+      <div><label class="fl">Quinhão (R$)</label><input class="fi" inputmode="decimal" value="${E(h.quinhao)}" oninput="calcHerdSet(${i},'quinhao',this.value)"></div>
+      ${est.herd.length > 1 ? `<button class="btn bo bsm" onclick="calcHerdDel(${i})">remover</button>` : ''}</div>`).join('') + '<button class="btn bo bsm" onclick="calcHerdAdd()">+ herdeiro</button>';
+  }
+  window.calcHerdSet = (i, k, v) => { est.herd[i][k] = v; };
+  window.calcHerdAdd = () => { est.herd.push({ nome: '', quinhao: '' }); renderHerd(); };
+  window.calcHerdDel = i => { est.herd.splice(i, 1); renderHerd(); };
+  window.calcLimpar = function () { est.ultimo = null; est.ativ = []; est.herd = []; renderCalc(); };
+
+  // ───────────────────────────── calcular ─────────────────────────────
+  window.calcCalcular = function () {
+    const f = F[est.key]; const v = valores();
+    if (est.key === 'lucro_presumido') { v.atividades = est.ativ.map(a => ({ tipo: a.tipo, receita: a.receita, irpj: a.irpj, csll: a.csll, nome: a.nome })); }
+    if (est.key === 'itcmd') {
+      v.quotas = { patrimonioLiquido: g('q_patrimonioLiquido'), ajusteAtivos: g('q_ajusteAtivos'), ajustePassivos: g('q_ajustePassivos'), goodwill: g('q_goodwill'), outraMetodologia: g('q_outraMetodologia'), percentualParticipacao: g('q_percentualParticipacao') || '100' };
+      v.herdeiros = est.herd.map(h => ({ nome: h.nome, quinhao: h.quinhao })).filter(h => h.nome || h.quinhao);
+      if (v.herdeiros.length && v.herdeiros.some(h => !h.quinhao)) v.herdeiros = []; // sem quinhões completos → divisão igual
+      v.numHerdeiros = est.herd.length;
+    }
+    if (est.key === 'rescisao') { /* avisoModo 'padrao' = conforme o tipo */ if (v.avisoModo === 'padrao') v.avisoModo = ''; }
+    const r = C.calcular(est.key, v); est.ultimo = r; est.ultimoInp = v; mostrarResultado(r, v);
+  };
+  function g(id) { return (document.getElementById('cf_' + id) || {}).value || ''; }
+  const brl = n => 'R$ ' + C.brl(n);
+  function fmtV(x) { return typeof x === 'number' ? brl(x) : E(x); }
+  function memHtml(mem) {
+    return '<table class="calc-mem"><tbody>' + mem.map(l => {
+      if (l.k === 'titulo') return `<tr class="titulo"><td colspan="2">${E(l.r)}</td></tr>`;
+      if (l.k === 'nota') return `<tr class="nota"><td colspan="2">${E(l.r)}</td></tr>`;
+      if (l.k === 'texto') return `<tr><td>${E(l.r)}</td><td class="v">${E(l.v)}</td></tr>`;
+      if (l.k === 'inteiro') return `<tr><td>${E(l.r)}</td><td class="v">${E(l.v)}</td></tr>`;
+      return `<tr class="${l.k}"><td>${E(l.r)}${l.nota ? ` <small style="color:var(--slate)">(${E(l.nota)})</small>` : ''}</td><td class="v">${(l.op === '−' ? '− ' : l.op === '+' ? '+ ' : l.op === '×' ? '' : '') + brl(l.v)}</td></tr>`;
+    }).join('') + '</tbody></table>';
+  }
+  function paramsHtml(ps) {
+    if (!ps || !ps.length) return '<div style="font-size:12.5px;color:var(--slate)">Esta calculadora não depende de parâmetros versionados.</div>';
+    return '<table class="calc-tbl"><thead><tr><th>Conjunto</th><th>Calculadora</th><th>Versão</th><th>Vigência</th></tr></thead><tbody>' + ps.map(p => `<tr><td>${E(p.id)}${p.uf ? ' (' + p.uf + ')' : ''}</td><td>${E(p.calculator_key)}</td><td>v${p.version}</td><td>${E(p.valid_from)} → ${E(p.valid_to || 'em vigor')}</td></tr>`).join('') + '</tbody></table>';
+  }
+  function basesHtml(bs) {
+    if (!bs || !bs.length) return '<div style="font-size:12.5px;color:var(--slate)">Sem bases legais associadas.</div>';
+    const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {};
+    return '<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Norma</th><th>Nº</th><th>Artigo</th><th>Assunto</th><th>Vigência</th><th>Fonte oficial</th><th>Última verificação</th><th>Observação</th></tr></thead><tbody>' + bs.map(b => {
+      const vv = ver[b.id] || null; const uv = vv ? vv.data + ' (' + E(vv.por || '') + ')' : (b.ultima_verificacao || '<span class="calc-tag warn">não conferida na fonte</span>');
+      return `<tr><td>${E(b.norma)}</td><td>${E(b.numero)}</td><td>${E(b.artigo)}</td><td>${E(b.assunto)}</td><td>${E(b.vig_ini || '—')} → ${E(b.vig_fim || 'em vigor')}</td><td><a href="${E(b.fonte)}" target="_blank" rel="noopener">${E(b.fonte.replace(/^https?:\/\//, ''))}</a></td><td>${uv}</td><td>${E(b.obs || '')}</td></tr>`;
+    }).join('') + '</tbody></table></div>';
+  }
+  function mostrarResultado(r, inp) {
+    const el = document.getElementById('calcResultado'); if (!el) return; const f = F[est.key];
+    if (!r.ok) { el.innerHTML = `<div class="calc-card"><div class="calc-erro"><b>${E(r.erro)}</b>${r.detalhe ? '<div style="margin-top:4px;font-size:12px">' + E(r.detalhe) + '</div>' : ''}</div>${r.erro === C.ERRO_PARAM ? '<div style="font-size:12px;color:var(--slate);margin-top:8px">Cadastre ou aprove o conjunto de parâmetros da competência em <a href="#" onclick="calcAba(\'bases\');return false">Bases Legais e parâmetros</a>. Nenhum valor foi calculado.</div>' : ''}</div>`; return; }
+    const kp = f.resumo(r.resultado).map(([l, v, hl]) => `<div class="calc-kpi ${hl ? 'hl' : ''}"><small>${E(l).toUpperCase()}</small><b>${fmtV(v)}</b></div>`).join('');
+    el.innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">Resultado</h3><div class="calc-resumo">${kp}</div>
+      ${(r.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}
+      <details class="calc-det" open><summary>Memória de cálculo</summary>${memHtml(r.memoria)}</details>
+      <details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(r.parametros)}</details>
+      <details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(r.bases)}</details>
+      <details class="calc-det"><summary>Observações</summary><div style="font-size:12.5px;color:var(--ink3);padding-top:6px">Cálculo determinístico: nenhuma IA participa. Os parâmetros são os da competência informada (conjunto e versão acima), e uma mudança futura de lei não altera cálculos já salvos. Valores em reais, arredondados uma única vez (meio para cima) ao final de cada tributo.</div></details>
+      <div class="calc-acts"><button class="btn bp" onclick="calcSalvar()">💾 Salvar cálculo</button><button class="btn bo" onclick="calcImprimir()">🖨️ Imprimir / PDF</button></div></div>`;
+  }
+
+  // ───────────────────────────── salvar / imprimir ─────────────────────────────
+  window.calcSalvar = function () {
+    const r = est.ultimo; if (!r || !r.ok) return;
+    const lista = lerLista(LS.hist); const quem = (currentUser && (currentUser.nome || currentUser.login)) || '';
+    lista.unshift({ id: 'c' + Date.now().toString(36), ts: new Date().toISOString(), por: quem, calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
+    S.s(LS.hist, lista.slice(0, 400)); toast('Cálculo salvo com a versão dos parâmetros usada.', 'ok');
+  };
+  function htmlImpressao(titulo, r, entrada, quando) {
+    return `<!doctype html><meta charset="utf-8"><title>${E(titulo)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}td.v{text-align:right;font-family:monospace;white-space:nowrap}tr.titulo td{background:#eee;font-weight:bold}tr.total td{font-weight:bold;background:#e3f3f0}small{color:#666}</style>
+      <h1>${E(titulo)}</h1><p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
+  }
+  window.calcImprimir = function () { const r = est.ultimo; if (!r || !r.ok) return; const w = window.open('', '_blank'); if (!w) { toast('Libere pop-ups para imprimir.', 'err'); return; } w.document.write(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'))); w.document.close(); w.focus(); setTimeout(() => w.print(), 300); };
+
+  // ───────────────────────────── histórico ─────────────────────────────
+  function renderHistorico() {
+    const main = document.getElementById('calcMain'); const lista = lerLista(LS.hist).filter(h => !h.oculto);
+    main.innerHTML = `<div class="calc-card"><h2 class="calc-h">🗂️ Cálculos salvos</h2><div class="calc-sub">Cada cálculo guarda a entrada, o resultado, a memória e a versão dos parâmetros usada. Reabrir mostra exatamente o que foi calculado na época — não recalcula.</div>
+      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr></thead><tbody>${lista.map(h => `<tr><td>${E(new Date(h.ts).toLocaleString('pt-BR'))}</td><td>${E(h.titulo)}</td><td>${E(h.por)}</td><td>${(h.parametros || []).map(p => E(p.id) + ' v' + p.version).join(', ') || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" onclick="calcHistOcultar('${h.id}')">ocultar</button></td></tr>`).join('')}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
+  }
+  window.calcHistAbrir = function (id) {
+    const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return;
+    const bs = (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean);
+    document.getElementById('calcHistVer').innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">${E(h.titulo)} — ${E(new Date(h.ts).toLocaleString('pt-BR'))}</h3><div class="calc-sub">Cálculo salvo por ${E(h.por)}. Não é recalculado.</div>${memHtml(h.memoria)}<details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(h.parametros)}</details><details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(bs)}</details>${(h.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}</div>`;
+    document.getElementById('calcHistVer').scrollIntoView({ behavior: 'smooth' });
+  };
+  window.calcHistOcultar = function (id) { const l = lerLista(LS.hist); const h = l.find(x => x.id === id); if (!h) return; h.oculto = true; S.s(LS.hist, l); renderHistorico(); toast('Cálculo ocultado da lista (continua guardado).', 'ok'); };
+
+  // ───────────────────────────── bases legais, parâmetros e IA ─────────────────────────────
+  function valorTxt(v) { try { return JSON.stringify(v); } catch (e) { return String(v); } }
+  function renderBases() {
+    const main = document.getElementById('calcMain'); const adm = ehAdmin();
+    const sets = C.todosSets(); const props = lerLista(LS.prop).filter(p => p.status === 'pendente'); const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {};
+    main.innerHTML = `<div class="calc-card"><h2 class="calc-h">📚 Bases Legais e parâmetros</h2><div class="calc-sub">Os parâmetros legais ficam em conjuntos versionados por vigência; a competência do cálculo escolhe o conjunto, sem retroatividade. A IA só entra aqui, no botão abaixo — ela <b>propõe</b>, nunca altera. Uma proposta só vira parâmetro depois de aprovada por um administrador, e vira uma NOVA versão.</div>
+      <div class="calc-acts" style="margin-top:0"><button class="btn btn-ia-gemini btn-calc-ia" id="calcBtnIa" onclick="calcPesquisarIA()" ${est.iaBusy ? 'disabled' : ''}>🤖 Pesquisar atualizações</button>${adm ? '<button class="btn bo" onclick="calcCadastrar()">+ Cadastrar parâmetros</button>' : ''}</div><div id="calcIaMsg" style="font-size:12.5px;margin-top:8px;color:var(--slate)"></div></div>
+      ${props.length ? `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">Propostas da IA aguardando decisão</h3>${props.map(propHtml).join('')}</div>` : ''}
+      <div id="calcCadBox"></div>
+      <div class="calc-card"><h3 class="calc-h" style="font-size:15px">Conjuntos de parâmetros</h3><div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Conjunto</th><th>Calculadora</th><th>Versão</th><th>Vigência</th><th>Situação</th><th>Criado</th><th></th></tr></thead><tbody>${sets.map(s => `<tr><td><b>${E(s.id)}</b>${s.uf ? ' (' + s.uf + ')' : ''}</td><td>${E(s.calculator_key)}</td><td>v${s.version}</td><td>${E(s.valid_from)} → ${E(s.valid_to || 'em vigor')}</td><td><span class="calc-tag ok">${E(s.status)}</span></td><td>${E(s.created_at || '')} ${E(s.created_by || '')}</td><td><button class="btn bo bsm" onclick="calcVerSet('${E(s.id)}')">ver</button></td></tr>`).join('')}</tbody></table></div><div id="calcSetVer"></div></div>
+      <div class="calc-card"><h3 class="calc-h" style="font-size:15px">Bases legais cadastradas</h3><div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Norma</th><th>Nº</th><th>Artigo</th><th>Assunto</th><th>Vigência</th><th>Fonte oficial</th><th>Última verificação</th><th>Observação</th>${adm ? '<th></th>' : ''}</tr></thead><tbody>${C.CALC_BASES.map(b => { const vv = ver[b.id]; return `<tr><td>${E(b.norma)}</td><td>${E(b.numero)}</td><td>${E(b.artigo)}</td><td>${E(b.assunto)}</td><td>${E(b.vig_ini || '—')} → ${E(b.vig_fim || 'em vigor')}</td><td><a href="${E(b.fonte)}" target="_blank" rel="noopener">${E(b.fonte.replace(/^https?:\/\//, ''))}</a></td><td>${vv ? E(vv.data) + ' (' + E(vv.por || '') + ')' : '<span class="calc-tag warn">não conferida na fonte</span>'}</td><td>${E(b.obs || '')}</td>${adm ? `<td><button class="btn bo bsm" onclick="calcMarcarVerificada('${b.id}')">marcar conferida hoje</button></td>` : ''}</tr>`; }).join('')}</tbody></table></div></div>`;
+  }
+  window.calcVerSet = function (id) { const s = C.todosSets().find(x => x.id === id); if (!s) return; document.getElementById('calcSetVer').innerHTML = `<pre style="font:11.5px var(--mono);background:var(--bg);padding:10px;border-radius:var(--r);overflow:auto;max-height:340px;margin-top:10px">${E(JSON.stringify(s, null, 2))}</pre>`; };
+  window.calcMarcarVerificada = function (id) { if (!ehAdmin()) return; const v = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? Object.assign({}, S.g(LS.verif)) : {}; v[id] = { data: hoje(), por: (currentUser && (currentUser.nome || currentUser.login)) || '' }; S.s(LS.verif, v); renderBases(); };
+
+  function propHtml(p) {
+    const adm = ehAdmin();
+    return `<div class="calc-prop"><b>${E(p.calculator_key)}</b> — ${E(p.parametro)}<dl>
+      <dt>PARÂMETRO ATUAL</dt><dd>${E(p.atual_txt || '—')}</dd><dt>NOVO SUGERIDO</dt><dd><b>${E(p.novo_txt)}</b></dd><dt>BASE LEGAL</dt><dd>${E(p.base_legal || '—')}</dd><dt>VIGÊNCIA</dt><dd>${E(p.vigencia_inicial || '—')}</dd><dt>FONTE</dt><dd>${p.fonte ? `<a href="${E(p.fonte)}" target="_blank" rel="noopener">${E(p.fonte)}</a>` : '—'}</dd>${p.observacao ? `<dt>OBSERVAÇÃO</dt><dd>${E(p.observacao)}</dd>` : ''}</dl>
+      <div class="calc-acts" style="margin-top:6px">${adm ? `<button class="btn bp bsm" onclick="calcProposta('${p.id}','aprovar')">Aprovar</button>` : '<small style="color:var(--slate)">Só administrador aprova.</small>'}<button class="btn bo bsm" onclick="calcProposta('${p.id}','ignorar')">Ignorar</button></div></div>`;
+  }
+  window.calcProposta = function (id, acao) {
+    const lista = lerLista(LS.prop); const p = lista.find(x => x.id === id); if (!p) return;
+    if (acao === 'ignorar') { p.status = 'ignorada'; p.decidido_em = new Date().toISOString(); S.s(LS.prop, lista); renderBases(); return; }
+    if (!ehAdmin()) { toast('Somente administrador aprova.', 'err'); return; }
+    const atual = C.acharSet(p.calculator_key, p.vigencia_inicial || hoje(), p.uf || undefined) || C.todosSets().filter(s => s.calculator_key === p.calculator_key && s.status === 'ativo').sort((a, b) => b.version - a.version)[0];
+    if (!atual) { toast('Não existe conjunto atual desta calculadora para basear a nova versão. Cadastre manualmente.', 'err'); return; }
+    if (!atual.params[p.parametro]) { toast('O parâmetro "' + p.parametro + '" não existe no conjunto atual — cadastre manualmente.', 'err'); return; }
+    let novo; try { novo = JSON.parse(p.novo_json); } catch (e) { toast('O valor sugerido não está em formato válido — cadastre manualmente.', 'err'); return; }
+    if (Array.isArray(atual.params[p.parametro].value) !== Array.isArray(novo) || (typeof atual.params[p.parametro].value !== typeof novo)) { toast('O tipo do valor sugerido não bate com o do parâmetro atual — cadastre manualmente.', 'err'); return; }
+    if (!p.vigencia_inicial || !/^\d{4}-\d{2}-\d{2}$/.test(p.vigencia_inicial)) { toast('A proposta não trouxe a vigência inicial (AAAA-MM-DD). Cadastre manualmente.', 'err'); return; }
+    if (!confirm('Criar NOVA versão do conjunto ' + atual.id + ' com ' + p.parametro + ' = ' + p.novo_txt + ', valendo a partir de ' + p.vigencia_inicial + '?\n\nOs cálculos de competências anteriores continuam usando a versão atual. Esta ação é registrada.')) return;
+    const nova = JSON.parse(JSON.stringify(atual)); nova.version = Math.max.apply(null, C.todosSets().filter(s => s.calculator_key === atual.calculator_key && (s.uf || '') === (atual.uf || '')).map(s => s.version)) + 1;
+    nova.id = atual.id.replace(/_V\d+$/, '') + '_V' + nova.version; nova.valid_from = p.vigencia_inicial; nova.valid_to = null; nova.status = 'ativo'; nova.created_at = hoje(); nova.created_by = (currentUser && (currentUser.nome || currentUser.login)) || '';
+    nova.params[p.parametro].value = novo; nova.origem = 'proposta IA aprovada (' + (p.fonte || 'sem fonte') + ')';
+    const sets = lerLista(LS.sets); sets.push(nova); S.s(LS.sets, sets);
+    p.status = 'aprovada'; p.decidido_em = new Date().toISOString(); p.set_criado = nova.id; S.s(LS.prop, lista);
+    carregarSets(); toast('Nova versão ' + nova.id + ' criada.', 'ok'); renderBases();
+  };
+
+  window.calcCadastrar = function () {
+    if (!ehAdmin()) return; const box = document.getElementById('calcCadBox');
+    const modelo = { id: 'IOF_CREDITO_2026', calculator_key: 'iof_credito', valid_from: '2026-01-01', valid_to: null, version: 1, status: 'ativo', created_by: (currentUser && currentUser.nome) || '', bases: ['IOF_CREDITO'], params: { taxa_diaria: { value: '0.000082', unit: 'taxa/dia', description: 'EXEMPLO — troque pelo valor da norma' }, taxa_diaria_simples: { value: '0.000041', unit: 'taxa/dia', description: 'EXEMPLO — mutuário Simples/MEI' }, adicional: { value: '0.0038', unit: 'taxa', description: 'EXEMPLO — adicional sobre o principal' }, limite_dias: { value: 365, unit: 'dias', description: 'EXEMPLO — limite de dias tributáveis' } } };
+    box.innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">Cadastrar conjunto de parâmetros</h3><div class="calc-sub">Cole o conjunto em JSON. O modelo abaixo é de IOF e traz valores de EXEMPLO — substitua pelos da norma antes de salvar. O conjunto entra como nova versão com vigência própria; nunca altera os existentes.</div><textarea class="calc-ta" id="calcCadTxt">${E(JSON.stringify(modelo, null, 2))}</textarea><div class="calc-acts"><button class="btn bp" onclick="calcCadSalvar()">Validar e salvar</button><button class="btn bo" onclick="document.getElementById('calcCadBox').innerHTML=''">Cancelar</button></div><div id="calcCadMsg" style="margin-top:8px"></div></div>`;
+  };
+  window.calcCadSalvar = function () {
+    if (!ehAdmin()) return; const msg = document.getElementById('calcCadMsg'); let s;
+    try { s = JSON.parse(document.getElementById('calcCadTxt').value); } catch (e) { msg.innerHTML = '<div class="calc-erro">JSON inválido: ' + E(e.message) + '</div>'; return; }
+    const erros = C.validarSet(s); if (C.todosSets().some(x => x.id === s.id)) erros.push('Já existe um conjunto com o id "' + s.id + '". Use outro id/versão.');
+    if (/EXEMPLO/.test(JSON.stringify(s))) erros.push('O conjunto ainda contém a palavra EXEMPLO nas descrições — troque pelos valores e descrições reais.');
+    if (erros.length) { msg.innerHTML = '<div class="calc-erro">' + erros.map(E).join('<br>') + '</div>'; return; }
+    s.created_at = hoje(); s.created_by = s.created_by || (currentUser && currentUser.nome) || '';
+    const sets = lerLista(LS.sets); sets.push(s); S.s(LS.sets, sets); carregarSets(); toast('Conjunto ' + s.id + ' cadastrado.', 'ok'); renderBases();
+  };
+
+  window.calcPesquisarIA = async function () {
+    if (est.iaBusy) return; est.iaBusy = true; const msg = document.getElementById('calcIaMsg'), btn = document.getElementById('calcBtnIa');
+    if (btn) btn.disabled = true; if (msg) msg.textContent = 'Pesquisando em fontes oficiais… pode levar até um minuto.';
+    try {
+      const atuais = C.todosSets().filter(s => s.status === 'ativo').map(s => ({ conjunto: s.id, calculator_key: s.calculator_key, uf: s.uf || null, versao: s.version, vigencia: s.valid_from + ' → ' + (s.valid_to || 'em vigor'), parametros: Object.fromEntries(Object.entries(s.params).map(([k, p]) => [k, p.value])) }));
+      const resp = await fetch(SUPABASE_URL + '/functions/v1/calc-pesquisar-atualizacoes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ hoje: hoje(), conjuntos: atuais }) });
+      const dados = await resp.json().catch(() => ({}));
+      if (!resp.ok || dados.error) throw new Error(dados.error || ('HTTP ' + resp.status));
+      const lista = lerLista(LS.prop); let novas = 0;
+      (dados.propostas || []).forEach(p => {
+        const atual = C.todosSets().filter(s => s.calculator_key === p.calculator_key && s.status === 'ativo').sort((a, b) => b.version - a.version)[0];
+        const atualVal = atual && atual.params[p.parametro] ? atual.params[p.parametro].value : undefined;
+        const novoJson = JSON.stringify(p.novo_valor); if (novoJson === undefined || novoJson === 'null') return;
+        if (atualVal !== undefined && valorTxt(atualVal) === novoJson) return; // igual ao atual → não é novidade
+        const dup = lista.some(x => x.status === 'pendente' && x.calculator_key === p.calculator_key && x.parametro === p.parametro && x.novo_json === novoJson && x.vigencia_inicial === p.vigencia_inicial);
+        if (dup) return;
+        lista.push({ id: 'p' + Date.now().toString(36) + novas, criado_em: new Date().toISOString(), status: 'pendente', calculator_key: String(p.calculator_key || ''), uf: p.uf || '', parametro: String(p.parametro || ''), atual_txt: atualVal === undefined ? 'não cadastrado' : valorTxt(atualVal), novo_txt: novoJson, novo_json: novoJson, base_legal: String(p.base_legal || ''), vigencia_inicial: String(p.vigencia_inicial || ''), fonte: String(p.fonte || ''), observacao: String(p.observacao || '') });
+        novas++;
+      });
+      S.s(LS.prop, lista);
+      est.iaBusy = false; renderBases();
+      const m2 = document.getElementById('calcIaMsg'); if (m2) m2.innerHTML = (novas ? `<b>${novas} proposta(s) nova(s)</b> abaixo, aguardando decisão.` : 'Nenhuma mudança nova encontrada.') + (dados.resumo ? ' ' + E(dados.resumo) : '') + (dados.usou_busca_web === false ? ' <span class="calc-tag warn">sem busca na internet — resposta só do conhecimento do modelo, confira nas fontes</span>' : '');
+      return;
+    } catch (e) { if (msg) msg.innerHTML = '<span style="color:var(--red)">Não foi possível pesquisar: ' + E(e.message || e) + '</span>'; }
+    est.iaBusy = false; if (btn) btn.disabled = false;
+  };
+})();
