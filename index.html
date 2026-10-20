@@ -24953,6 +24953,20 @@ async function _lancctbProcessarFopag(){
         !fluxoDeOutraPessoa(l,f));
 
     let resolvidos=0, semAchado=0, diferencasAbertas=0, feriasResolvidas=0, cpfFragNome=null, pessoasMarcadas=0;
+    // Combinações (pessoa, tipo de folha, competência) que JÁ têm lançamento de folha não estornado nesta empresa — carregadas 1x, na 1ª vez que precisam.
+    let _consumidosFolha=null;
+    const chaveConsumoFolha=(r,pp)=>`${_norm(pp.nome)}|${_rotP(pp,r.tipo)}|${String(r.dados.competencia||r.competencia||'').replace('/','-')}`;
+    const carregarConsumidosFolha=async()=>{
+      if(_consumidosFolha) return _consumidosFolha; _consumidosFolha=new Set();
+      const re=/^Pagamento ref\. (salário|adiantamento|férias|13º salário|rescisão|pró-labore) (\d{2}[-\/]\d{4}) - (.+)$/;
+      for(let from=0;;from+=1000){
+        const { data: q, error } = await _supaClient.from('lancamentos_contabeis').select('historico').eq('empresa_eid',eid).eq('estornado',false).eq('tipo','D').like('historico','Pagamento ref.%').range(from,from+999);
+        if(error||!q) break;
+        q.forEach(x=>{ const m=String(x.historico||'').match(re); if(m) _consumidosFolha.add(`${_norm(m[3])}|${m[1]}|${m[2].replace('/','-')}`); });
+        if(q.length<1000) break;
+      }
+      return _consumidosFolha;
+    };
     // Marca no começo do histórico quem recebeu (nome/CPF) quando a natureza não está comprovada — conta D vazia, o usuário define depois. Não duplica marca e preserva rótulos de diferença.
     const marcarPessoaIdentificada=async(l,rotulo,nome,cpf)=>{
       const h=String(l.historico_bancario||'');
@@ -25227,8 +25241,10 @@ async function _lancctbProcessarFopag(){
       const textoIdent=(histTemNomePessoa(_hOrigId)&&!/^\s*\[/.test(_hOrigId))?_hOrigId:[l.historico_bancario, fluxoDaPend&&fluxoDaPend.cliente_fornecedor_nome, fluxoDaPend&&fluxoDaPend.descricao].filter(Boolean).join(' ');
       let matchIndiv=null;
       // 1º o VALOR EXATO: a pessoa identificada com líquido igual ao pago, em QUALQUER relatório (férias, rescisão, adiantamento, salário…) — modelo Leonardo/rescisão.
+      // Uma pessoa recebe o líquido de CADA relatório uma única vez (Vagner, salário 08/2026 = R$ 316,00: pagamentos iguais nas semanas seguintes NÃO são o salário de novo) — pedido do usuário 20/10/2026.
+      const consEx=await carregarConsumidosFolha();
       for(const r of relatorios){
-        const exato=(r.dados.pessoas||[]).find(pp=>Math.abs(pp.valor-l.valor_saida)<=0.01&&identificaPessoa(textoIdent,[pp]));
+        const exato=(r.dados.pessoas||[]).find(pp=>Math.abs(pp.valor-l.valor_saida)<=0.01&&identificaPessoa(textoIdent,[pp])&&!consEx.has(chaveConsumoFolha(r,pp)));
         if(exato){ matchIndiv={r,p:exato}; break; }
       }
       if(!matchIndiv) for(const r of relatorios){
@@ -25272,6 +25288,7 @@ async function _lancctbProcessarFopag(){
           if(iguais.length===1){ matchIndiv={r,p:iguais[0]}; break; }
         }
       }
+      if(matchIndiv&&Math.abs(matchIndiv.p.valor-l.valor_saida)<=0.01){ const ch=chaveConsumoFolha(matchIndiv.r,matchIndiv.p); if(consEx.has(ch)) matchIndiv=null; else consEx.add(ch); }
       // Pedido do usuário 19/10/2026 (2ª): NÃO classificar automaticamente como adiantamento/benefício. Pessoa identificada (empregado, sócio/contribuinte ou pessoa nominal do Fluxo) cujo valor não bate com salário/férias/rescisão
       // (nem pró-labore inequívoco) fica PENDENTE, com a pessoa preservada no histórico e a conta D vazia — o usuário define a conta depois.
       if(!matchIndiv){
