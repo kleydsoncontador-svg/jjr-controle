@@ -35380,22 +35380,24 @@ function _lancctbFluxoParticao(pays,pool,tolCent,orcamentoNos){
 }
 function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
   const alvo=Math.round(valor*100), usados=ctx.usados||new Set(), ehSaida=ctx.ehSaida!==false;
-  const visto=new Set(); const cand=[];
+  const visto=new Set(); const cand=[]; const candAnt=[]; // candAnt: títulos que vencem de 4 a 7 dias DEPOIS do pagamento (só entram no último passo, composição ÚNICA)
   (pool||[]).forEach(f=>{
-    if(usados.has(f.id)||!_lancctbFluxoNaJanela(f,dataPag)) return;
+    if(usados.has(f.id)) return;
+    const naJanela=_lancctbFluxoNaJanela(f,dataPag);
+    if(!naJanela&&!(String(f.data||'')>String(dataPag||'')&&_lancctbDiffDias(f.data,dataPag)<=LANCCTB_FLUXO_ATRASO_DIAS)) return;
     if(!_lancctbFluxoParamOk(hist,f,ctx.lista)||!_lancctbFluxoIdentConfirmada(hist,f,ctx.aliases,ctx.lista)) return;
     const v=Math.round(((ehSaida?f.valor_saida:f.valor_entrada)||0)*100); if(v<=0||v>alvo+2) return;
     const k=[f.documento_numero||f.numero||'',f.parcela||'',f.data,v,_fpNorm(f.cliente_fornecedor_nome)].join('|'); // duplicata repetida nunca entra duas vezes
     if(visto.has(k)) return; visto.add(k);
-    cand.push({f,v});
+    (naJanela?cand:candAnt).push({f,v});
   });
-  if(cand.length<2) return null;
+  if(cand.length+candAnt.length<2) return null;
   // Prioridade FIXA (pedido do usuário 19/10/2026): marca exata → data mais próxima do banco → ordem do Fluxo → menor documento.
-  cand.forEach(c=>{ c.m=_lancctbFluxoMarcaPref(hist,c.f,ctx.lista); c.d=_lancctbDiffDias(c.f.data,dataPag); });
+  cand.concat(candAnt).forEach(c=>{ c.m=_lancctbFluxoMarcaPref(hist,c.f,ctx.lista); c.d=_lancctbDiffDias(c.f.data,dataPag); });
   cand.sort((x,y)=>(x.m-y.m)||(x.d-y.d)||_lancctbFluxoOrdemCmp(x.f,y.f));
   // 1ª fase: só a MARCA exata (se existir mais de uma marca no grupo); 2ª fase: o grupo todo. Em cada fase: diferença exata primeiro (depois 1 centavo a menos / a mais) e, dentro dela, mesma data, ±1, ±2, ±3 e por fim o atraso (até 7 dias).
   const fases=cand.some(c=>c.m===1)&&cand.some(c=>c.m===0)?[cand.filter(c=>c.m===0),cand]:[cand];
-  for(const base of fases){
+  if(cand.length>=2) for(const base of fases){
     for(const dlt of [0,-1,1,-2,2]){
       for(const tier of [0,1,2,3,'atraso']){
         const lim=base.filter(c=>tier==='atraso'?true:c.d<=tier).slice(0,120);
@@ -35403,6 +35405,23 @@ function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
         const ix=_lancctbSomaPrioridade(lim.map(c=>c.v),alvo+dlt);
         if(ix&&ix.length>=2) return { itens:ix.map(k=>lim[k].f), soma:(alvo+dlt)/100, delta:dlt/100 };
       }
+    }
+  }
+  // Pedido do usuário 21/10/2026 (Kajuna, Rede Âncora R$ 1.559,93): PAGAMENTO ANTECIPADO — título que vence até 7 dias DEPOIS do pagamento — só entra quando a combinação é ÚNICA (exata ou a 1 centavo,
+  // somando todas as diferenças aceitas); com mais de uma combinação possível não escolhe nada. Último recurso: nunca muda o que os passos acima já resolvem.
+  if(candAnt.length){
+    const todos=cand.concat(candAnt).sort((x,y)=>(x.m-y.m)||(x.d-y.d)||_lancctbFluxoOrdemCmp(x.f,y.f)).slice(0,60);
+    if(todos.length>=2){
+      const orc={n:300000}, achadas=new Map();
+      for(const dlt of [0,-1,1]){
+        const candAl=todos.filter(c=>c.v<=alvo+dlt);
+        for(const ix of _lancctbFluxoEnumerarSolucoes(candAl,alvo+dlt,3,orc)){
+          if(ix.length<2) continue;
+          const key=ix.map(k=>candAl[k].f.id).sort((a,b)=>a-b).join(',');
+          if(!achadas.has(key)) achadas.set(key,{itens:ix.map(k=>candAl[k].f),soma:(alvo+dlt)/100,delta:dlt/100});
+        }
+      }
+      if(orc.n>0&&achadas.size===1) return [...achadas.values()][0];
     }
   }
   return null;
