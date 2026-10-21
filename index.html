@@ -40536,8 +40536,8 @@ async function confirmarLancctbFluxoImportRr(){
 const LANCCTB_BLING_CONTAS_PAGAR_COLS=['fornecedor','historico','documento','vencimento','liquidacao','situacao','pago'];
 function _lancctbBlingAcharColuna(itens,rotulo){
   const alvo=_convMpRemoverAcentos(rotulo.toLowerCase());
-  const it=itens.find(i=>_convMpRemoverAcentos(String(i.str||'').trim().toLowerCase())===alvo);
-  return it?it.x:null;
+  const achados=itens.filter(i=>_convMpRemoverAcentos(String(i.str||'').trim().toLowerCase())===alvo).sort((a,b)=>b.y-a.y);
+  return achados.length?achados[0].x:null;
 }
 // Fingerprint do modelo — só entra neste caminho se o PDF for mesmo este relatório do Bling;
 // qualquer outro PDF cai no caminho antigo (IA), sem risco de "forçar" um layout errado.
@@ -40562,7 +40562,7 @@ function _lancctbBlingContasPagarDetectarColunas(itensPag1){
 function _lancctbBlingColunaDoItem(bounds,x){ const b=bounds.find(b=>x>=b.min&&x<b.max); return b?b.nome:null; }
 // Linhas de cabeçalho/rodapé/paginação do PDF exportado direto do navegador (nunca são registro).
 const LANCCTB_BLING_RUIDO=[/^Relat[oó]rio de Contas a Pagar$/i,/^Per[ií]odo\s/i,/^Fornecedor\s+Hist[oó]rico/i,
-  /bling\.com\.br/i,/^Bling\s*-\s*Relat[oó]rio/i,/^\d{2}\/\d{2}\/\d{4},\s*\d{1,2}:\d{2}$/,/^\d\/\d$/,/^Total\s*=/i];
+  /bling\.com\.br/i,/^Bling\s*-\s*Relat[oó]rio/i,/^\d{2}\/\d{2}\/\d{4},\s*\d{1,2}:\d{2}$/,/^\d\/\d$/,/^Total\s*=/i,/^\d{2}\/\d{2}\/\d{4},\s*\d{1,2}:\d{2}\b/];
 function _lancctbBlingEhRuido(textoLinha){ return LANCCTB_BLING_RUIDO.some(re=>re.test(textoLinha.trim())); }
 const LANCCTB_RE_DATA_BR=/^\d{2}\/\d{2}\/\d{4}$/;
 // NÚMERO/PARCELA (pedido do usuário — não confundir "6/11" de parcelamento com NF+parcela):
@@ -40613,6 +40613,7 @@ async function _lancctbExtrairItensPaginaOcr(page){
   const itens=[];
   (data.words||[]).forEach(w=>{
     const str=String(w.text||'').trim(); if(!str) return;
+    if(str.length<=4&&/[\[\]|]/.test(str)) return; // ícone ✅ lido como lixo
     itens.push({str,x:w.bbox.x0/LANCCTB_BLING_OCR_ESCALA,y:H-((w.bbox.y0+w.bbox.y1)/2)/LANCCTB_BLING_OCR_ESCALA,conf:Number(w.confidence)||0});
   });
   page._jjrBlingOcr=itens;
@@ -40625,6 +40626,22 @@ async function _lancctbBlingItensDaPagina(page,status,msgOcr){
   if(status) status.textContent=msgOcr;
   return {itens:await _lancctbExtrairItensPaginaOcr(page),ocr:true};
 }
+// Monta Fornecedor/Marcador/Histórico/Aviso a partir das partes (refeito quando chega mais uma linha de continuação).
+function _lancctbBlingPreencherTexto(reg){
+  const fornecedorCru=reg._forn.join(' ').replace(/\s{2,}/g,' ').trim();
+  const {nome,marcador}=_lancctbBlingExtrairMarcadorFornecedor(fornecedorCru);
+  const rawHistory=reg._hist.join(' ').replace(/\s{2,}/g,' ').trim();
+  // Aviso (não bloqueia): uma data dentro do próprio texto do Histórico (ex: "03/08/26")
+  // divergindo da Liquidação — fica só pra conferência, nunca substitui a data oficial.
+  let avisoData=null;
+  const mDataNoHist=rawHistory.match(/(\d{2})\/(\d{2})\/(\d{2,4})/);
+  if(mDataNoHist){
+    const anoCurto=mDataNoHist[3].length===2?'20'+mDataNoHist[3]:mDataNoHist[3];
+    if(`${mDataNoHist[1]}/${mDataNoHist[2]}/${anoCurto}`!==reg._liq) avisoData='HISTORY_DATE_DIFFERS_FROM_LIQUIDATION';
+  }
+  reg.descricao=_lancctbBlingLimparHistorico(rawHistory); reg.raw_history=rawHistory;
+  reg.cliente_fornecedor_nome=nome; reg.port_nom=marcador; reg.aviso=avisoData;
+}
 async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
   const r1=await _lancctbBlingItensDaPagina(await pdf.getPage(1),status,`PDF sem texto (só imagem): lendo página 1/${pdf.numPages} por OCR local (sem IA)…`);
   const itensPag1=r1.itens, lidoPorOcr=r1.ocr;
@@ -40632,11 +40649,13 @@ async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
   if(!bounds) return null; // não é este layout — quem chamou cai pro caminho antigo (IA)
   const registros=[];
   let atual=null; // {fornecedorPartes:[], historicoPartes:[]}
+  let ultimo=null, ultimoY=0; // último registro fechado (recebe a continuação do texto que quebrou abaixo da âncora)
   let textoTudo='';
   const iniciarRegistro=()=>{ atual={fornecedorPartes:[],historicoPartes:[]}; };
   iniciarRegistro();
   for(let p=1;p<=pdf.numPages;p++){
     if(status) status.textContent=`Lendo página ${p}/${pdf.numPages} (Bling — Contas a Pagar)…`;
+    ultimo=null;
     const itens=p===1?itensPag1:(await _lancctbBlingItensDaPagina(await pdf.getPage(p),status,`PDF sem texto (só imagem): lendo página ${p}/${pdf.numPages} por OCR local (sem IA)…`)).itens;
     textoTudo+=' '+itens.map(i=>i.str).join(' ');
     const linhas=_lancctbAgruparLinhasPorY(itens,3);
@@ -40649,12 +40668,18 @@ async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
       const txtVenc=juntar(porColuna.vencimento), txtLiq=juntar(porColuna.liquidacao);
       const ehAncora=LANCCTB_RE_DATA_BR.test(txtVenc)&&LANCCTB_RE_DATA_BR.test(txtLiq);
       const txtForn=juntar(porColuna.fornecedor), txtHist=juntar(porColuna.historico);
+      // Nome/histórico que quebra em 2 linhas fica CENTRADO na linha da âncora (a 2ª metade vem logo abaixo dela, ex.: "CIA BRASILEIRA DIST AUTO" / "S.A"):
+      // linha sem data/documento/valor a até 7 pt abaixo da âncora é continuação do registro ANTERIOR, não início do próximo (linhas seguintes distam ≥ 10 pt).
+      const semCampos=!txtVenc&&!txtLiq&&!juntar(porColuna.documento)&&!juntar(porColuna.situacao)&&!juntar(porColuna.pago);
+      if(!ehAncora&&semCampos&&ultimo&&ultimoY-linha.y<=7){
+        if(txtForn) ultimo._forn.push(txtForn);
+        if(txtHist) ultimo._hist.push(txtHist);
+        _lancctbBlingPreencherTexto(ultimo);
+        continue;
+      }
       if(txtForn) atual.fornecedorPartes.push(txtForn);
       if(txtHist) atual.historicoPartes.push(txtHist);
       if(ehAncora){
-        const fornecedorCru=atual.fornecedorPartes.join(' ').replace(/\s{2,}/g,' ').trim();
-        const {nome:fornecedorNome,marcador}=_lancctbBlingExtrairMarcadorFornecedor(fornecedorCru);
-        const rawHistory=atual.historicoPartes.join(' ').replace(/\s{2,}/g,' ').trim();
         const documentoRaw=juntar(porColuna.documento);
         const {numero,parcela}=_lancctbBlingSplitDocParcela(documentoRaw);
         const situacao=juntar(porColuna.situacao);
@@ -40662,21 +40687,13 @@ async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
         const valor=_lancctbParseValorBR2(pagoStr);
         const [dd,mm,aaaa]=txtLiq.split('/');
         const [ddV,mmV,aaaaV]=txtVenc.split('/');
-        // Aviso (não bloqueia): uma data dentro do próprio texto do Histórico (ex: "03/08/26")
-        // divergindo da Liquidação — fica só pra conferência, nunca substitui a data oficial.
-        let avisoData=null;
-        const mDataNoHist=rawHistory.match(/(\d{2})\/(\d{2})\/(\d{2,4})/);
-        if(mDataNoHist){
-          const anoCurto=mDataNoHist[3].length===2?'20'+mDataNoHist[3]:mDataNoHist[3];
-          if(`${mDataNoHist[1]}/${mDataNoHist[2]}/${anoCurto}`!==`${dd}/${mm}/${aaaa}`) avisoData='HISTORY_DATE_DIFFERS_FROM_LIQUIDATION';
-        }
-        registros.push({
+        const reg={
           data:`${aaaa}-${mm}-${dd}`, vencimento:`${aaaaV}-${mmV}-${ddV}`,
-          descricao:_lancctbBlingLimparHistorico(rawHistory), raw_history:rawHistory,
-          cliente_fornecedor_nome:fornecedorNome, port_nom:marcador,
-          documento_numero:numero, parcela, situacao, valor,
-          aviso:avisoData, _incluir:true,
-        });
+          documento_numero:numero, parcela, situacao, valor, _incluir:true,
+          _forn:[...atual.fornecedorPartes], _hist:[...atual.historicoPartes], _liq:`${dd}/${mm}/${aaaa}`,
+        };
+        _lancctbBlingPreencherTexto(reg);
+        registros.push(reg); ultimo=reg; ultimoY=linha.y;
         iniciarRegistro();
       }
     }
