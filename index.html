@@ -31774,13 +31774,14 @@ async function _lancctbMarcarIdentificacaoFluxo(eid,contaId){
     const base=_lancctbInfoSemMarcaFluxo(l.informacao);
     let marca='';
     if(linhas.length){
-      const motivos=new Set(), docs=[];
+      const motivos=new Set(), docs=[], cnpjsNf=new Set();
       linhas.forEach(f=>{
         const num=String(f.numero||f.documento_numero||'').trim().replace(/^0+/,'');
         docs.push(`${f.numero||f.documento_numero||'s/nº'}${f.parcela?'/'+f.parcela:''} R$ ${fmt(f.valor_saida)}`);
         if(!/^\d+$/.test(num)){ motivos.add('FLUXO SEM Nº DE NF'); return; }
         const doNum=parcelas.filter(p=>p.notas_fiscais&&p.notas_fiscais.direcao==='compra'&&_lancctbNumeroNfBate(p.notas_fiscais.numero,num)&&(_lancctbNomeCompativel([f.cliente_fornecedor_nome||''],p.notas_fiscais.nome_emitente)||(String(f.cnpj_cpf||'').replace(/\D/g,'')&&String(f.cnpj_cpf||'').replace(/\D/g,'')===p.notas_fiscais.cnpj_emitente)));
         if(!doNum.length){ motivos.add('NF NÃO IMPORTADA'); return; }
+        if(doNum[0].notas_fiscais.cnpj_emitente) cnpjsNf.add(doNum[0].notas_fiscais.cnpj_emitente);
         const parc=Number(f.parcela)||null, pp=parc?doNum.find(p=>p.numero_parcela===parc):null;
         if(!pp){ const porData=doNum.filter(p=>p.status_conciliacao==='pendente'&&Math.abs(p.valor_parcela-f.valor_saida)<=0.02&&p.data_vencimento===f.data); motivos.add(porData.length===1?'AGUARDANDO PROCESSAR (parcela pela data)':'NF EXISTE, PARCELA '+(parc||'?')+' NÃO ENCONTRADA'); return; }
         if(Math.abs(pp.valor_parcela-f.valor_saida)>0.021){ motivos.add(`PARCELA DIVERGENTE (parcela R$ ${fmt(pp.valor_parcela)} × Fluxo R$ ${fmt(f.valor_saida)})`); return; }
@@ -31788,7 +31789,10 @@ async function _lancctbMarcarIdentificacaoFluxo(eid,contaId){
         motivos.add('AGUARDANDO PROCESSAR');
       });
       const forn=[...new Set(linhas.map(f=>f.cliente_fornecedor_nome||'?'))].join(' + ');
-      const cnpj=_lancctbCnpjsDoTexto(l.historico_bancario)[0]||[...new Set(linhas.map(f=>String(f.cnpj_cpf||'').replace(/\D/g,'')).filter(Boolean))][0]||'—';
+      // intermediadora no histórico (PJBank, Redfactor…): o CNPJ do histórico é o dela, não do fornecedor — o do fornecedor vem do Fluxo ou da NF
+      const eInt=_lancctbEhIntermediadora(l.historico_bancario);
+      const cnpjsFx=[...new Set(linhas.map(f=>String(f.cnpj_cpf||'').replace(/\D/g,'')).filter(Boolean))];
+      const cnpj=(!eInt&&_lancctbCnpjsDoTexto(l.historico_bancario)[0])||cnpjsFx[0]||[...cnpjsNf][0]||'—';
       const somaFx=linhas.reduce((a,f)=>a+f.valor_saida,0), difSoma=Math.round((somaFx-l.valor_saida)*100)/100;
       marca=`FLUXO IDENTIFICADO — ${[...motivos].join(' ; ')} | FORNECEDOR: ${forn} | CNPJ: ${cnpj} | NF/DUP: ${docs.join(' + ')} | DATA: ${brd(linhas[0].data)} | VALOR: R$ ${fmt(l.valor_saida)}${Math.abs(difSoma)>0.015?` (Fluxo soma R$ ${fmt(somaFx)}: dif. R$ ${fmt(difSoma)})`:''}`;
     } else if(/BOLETO|PGTO|PAGAMENTO DE/i.test(String(l.historico_bancario||''))&&!/AMBÍGUO|INTERMEDIADORA/.test(String(l.informacao||''))){
@@ -31883,6 +31887,20 @@ async function _lancctbProcessarFluxo(){
       await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('id',f.id);
       f.status_associado='nao_associado'; f.lancamento_extrato_id=null;
       if(!fluxoPend.includes(f)) fluxoPend.push(f);
+    }
+    // Achado 21/10/2026 (Kajuna 09/2026, EMBREPAR 04/09): o pagamento de R$ 4.338,74 estava ligado a 11 linhas do Fluxo que somavam R$ 8.480,26 (datas de 28/08 a 04/09, até de outro fornecedor) — uma ligação antiga que não fecha o valor do banco. Ela não vale como composição
+    // (só soma exata vale) mas SEGURAVA as linhas, e os pagamentos pequenos (R$ 65,94, R$ 53,05, R$ 43,99…) que correspondem 1:1 a elas ficavam sem Fluxo. Extrato PENDENTE de saída cujas linhas ligadas NÃO somam o valor do banco (±R$ 0,02) tem as ligações soltas
+    // (só o vínculo do Fluxo; nada contábil; nunca ligação MANUAL; intermediadora tem passada própria).
+    { const _ligPend=new Map();
+      fluxoTodo.forEach(f=>{ if(f.status_associado==='associado'&&f.lancamento_extrato_id&&pendIds.has(f.lancamento_extrato_id)&&!_manuaisFluxo.has(f.id)&&f.valor_saida>0){ if(!_ligPend.has(f.lancamento_extrato_id)) _ligPend.set(f.lancamento_extrato_id,[]); _ligPend.get(f.lancamento_extrato_id).push(f); } });
+      for(const [extId,linhasL] of _ligPend){
+        const pend=pendencias.find(x=>x.id===extId); if(!pend||!(pend.valor_saida>0)||_lancctbEhIntermediadora(pend.historico_bancario)||/^\[/.test(String(pend.historico_bancario||''))) continue; // linhas com marca de pessoa ([PESSOA IDENTIFICADA…]) mantêm o vínculo: o Fluxo diz QUEM recebeu mesmo quando o banco pagou só parte
+        if(linhasL.some(f=>_manuaisFluxo.has(f.id))) continue;
+        const somaL=Math.round(linhasL.reduce((a,f)=>a+Math.round(f.valor_saida*100),0))/100;
+        if(Math.abs(somaL-pend.valor_saida)<=0.021) continue;
+        await _lancctbEmLotesDb(linhasL.map(f=>f.id),200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
+        linhasL.forEach(f=>{ f.status_associado='nao_associado'; f.lancamento_extrato_id=null; if(!fluxoPend.includes(f)) fluxoPend.push(f); });
+      }
     }
     // Parâmetros do Fluxo (🎛): associação que desrespeita o que o usuário definiu pro histórico é solta (só se o extrato ainda está pendente; só o vínculo do Fluxo).
     // IDENTIDADE também é revalidada: associação ligada a fornecedor/CNPJ/CPF incompatível com o histórico (e não confirmada à mão) é solta (só o vínculo do Fluxo; extrato ainda pendente).
