@@ -32689,7 +32689,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const c1=base.filter(f=>perto(f)&&nomeOk(f)&&_lancctbFluxoParamOk(l.historico_bancario,f,_lancctbFluxoParamGet(eid))).sort((a,b)=>(b.lancamento_extrato_id===l.id)-(a.lancamento_extrato_id===l.id)||_lancctbDiffDias(a.data,l.data_pagamento)-_lancctbDiffDias(b.data,l.data_pagamento));
     for(const f of c1){
       let par=_lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valor,true);
-      if(par&&!_lancctbNfParamOk(l.historico_bancario,par.notas_fiscais,ehSaida,_fpListaEng)) par=null;
+      if(par&&!(_lancctbNfParamOk(l.historico_bancario,par.notas_fiscais,ehSaida,_fpListaEng)&&_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,par.notas_fiscais))) par=null;
       if(!par) continue;
       let desfazerParcial=null;
       if(par._parcial){
@@ -32786,8 +32786,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       x.cnpj=String(x.c?.cnpj_cpf||x.f?.cnpj_cpf||'').replace(/\D/g,'')||null;
       let par=null;
       if(x.f&&(x.f.numero||x.f.documento_numero)) par=_lancctbAcharParcelaPeloFluxo({...x.f,cnpj_cpf:x.f.cnpj_cpf||x.cnpj},parcelas,ehSaida,parcelasUsadas,x.valor);
+      if(par&&!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,par.notas_fiscais)) par=null;
       if(!par&&x.cnpj){
-        const doCnpj=parcelas.filter(p=>!parcelasUsadas.has(p.id)&&_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)&&p.notas_fiscais?.direcao===(ehSaida?'compra':'venda')
+        const doCnpj=parcelas.filter(p=>!parcelasUsadas.has(p.id)&&_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)&&_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,p.notas_fiscais)&&p.notas_fiscais?.direcao===(ehSaida?'compra':'venda')
           &&(ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario)===x.cnpj
           &&Math.abs(p.valor_parcela-x.valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)&&_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)&&_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento));
         if(doCnpj.length===1) par=doCnpj[0];
@@ -33528,6 +33529,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_lancctbHistoricoSemNF(l.historico_bancario))?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
+      if(!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,p.notas_fiscais)) return false;
       if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
       if(ehPonte){
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
@@ -33611,6 +33613,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
         if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
+        if(!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,p.notas_fiscais)) return false;
         if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
         if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
@@ -35518,6 +35521,14 @@ function _lancctbNfNomeForteOk(hist,nf,ehSaida){
   const hs=[...th].filter(x=>x.length>=4);
   return hs.length>=2&&hs.every(x=>tn.some(t=>t===x||(t.length>=4&&(t.startsWith(x)||x.startsWith(t)))));
 }
+// Pedido do usuário 21/10/2026 (ADELPE, eid 89): pagamento à LWSA S/A é SEMPRE a NF emitida no MÊS ANTERIOR ao do pagamento — nunca a NF do próprio mês. Só vale na Adelpe e só pra LWSA (CNPJ raiz 02.351.877).
+function _lancctbNfRegraMesAnteriorOk(eid,dataPag,nf){
+  if(String(eid)!=='89'||!nf||!dataPag) return true;
+  if(!/LWSA/i.test(nf.nome_emitente||'')&&String(nf.cnpj_emitente||'').replace(/\D/g,'').slice(0,8)!=='02351877') return true;
+  const em=String(nf.data_emissao||'').slice(0,7); if(!em) return true;
+  const [a,m]=String(dataPag).slice(0,7).split('-').map(Number);
+  return em===(m===1?`${a-1}-12`:`${a}-${String(m-1).padStart(2,'0')}`);
+}
 function _lancctbNfParamOk(hist,nf,ehSaida,lista){
   if(!nf) return true;
   const ps=_lancctbFluxoParamsDaLinha(hist,lista); if(!ps.length) return true;
@@ -35942,7 +35953,7 @@ async function renderLancctbRegistroContabil(){
       // Parcela/Mês Bate como PALPITE (itálico), antes de confirmar.
       _lancctbFetchTudoParalelo(()=>{
         let q=_supaClient.from('notas_fiscais_parcelas')
-          .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario)')
+          .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,data_emissao)')
           .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
         if(_dMinPnd) q=q.gte('data_vencimento',_dMinPnd);
         if(_dMaxPnd) q=q.lte('data_vencimento',_dMaxPnd);
@@ -36026,7 +36037,7 @@ async function renderLancctbRegistroContabil(){
       // O palpite também precisa combinar com QUEM é (CNPJ/CPF do histórico ou
       // nome compatível) — antes aparecia parcela de qualquer NF de mesmo valor.
       const nfProx=_idxRng(ehSaida?_idxNFC:_idxNFV,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS*3);
-      const nfMatch=nfProx.find(p=>_lancctbNfParamOk(r.historico_bancario,p.notas_fiscais,ehSaida,_lancctbFluxoParamLista)&&Math.abs(p.valor_parcela-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)
+      const nfMatch=nfProx.find(p=>_lancctbNfParamOk(r.historico_bancario,p.notas_fiscais,ehSaida,_lancctbFluxoParamLista)&&_lancctbNfRegraMesAnteriorOk(eid,r.data_pagamento,p.notas_fiscais)&&Math.abs(p.valor_parcela-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)
         &&(()=>{
           const nf=p.notas_fiscais, cnpjNf=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeNf=(ehSaida?nf.nome_emitente:nf.nome_destinatario)||'';
           const doc=_lancctbExtrairDocDoHistorico(r.historico_bancario);
