@@ -861,6 +861,7 @@ html.dark-mode #vgCalPop .cal-d.pub:hover,html.dark-mode #vgCalPop .cal-d.sel{co
 <script src="razao-parser.js?v=1"></script>
 <script src="calc-motor.js?v=5"></script>
 <script src="calc-ui.js?v=5"></script>
+<script src="pride-fluxo-parser.js?v=1"></script>
 <script src="contabil-parsers.js?v=1"></script>
 <script src="contabil-import.js?v=2"></script>
 <script src="itau-extrato-parsers.js?v=1"></script>
@@ -39976,7 +39977,17 @@ async function _lancctbFluxoLerArquivo(){
   status.textContent='Lendo arquivo…';
   try{
     const buf=await file.arrayBuffer();
-    const wb=XLSX.read(buf,{type:'array',cellDates:true});
+    // CSV brasileiro (separador ";"): lido como TEXTO, sem converter nada. O SheetJS lia "01/07/2026" como 7 de janeiro e "999,92" como 99992 (achado 21/10/2026, Pride).
+    // O arquivo costuma vir em Windows-1252 (acentos) — decodifica certo. Reconhece o relatório da Pride; qualquer outro CSV com ";" segue o mapeamento de colunas normal, agora com datas e valores intactos.
+    let wb;
+    if(/\.csv$/i.test(file.name)&&window.PrideFluxo){
+      const matrizCsv=window.PrideFluxo.parseCsv(window.PrideFluxo.decodificar(buf));
+      const tipoPg=window.PrideFluxo.detectarMatriz(matrizCsv);
+      if(tipoPg){ await _pgMostrar(window.PrideFluxo.registrosDeMatriz(matrizCsv,tipoPg),'csv',file.name,status); return; }
+      const cabCsv=new TextDecoder('windows-1252').decode(new Uint8Array(buf).slice(0,2000)).split(/\r?\n/)[0]||'';
+      if((cabCsv.match(/;/g)||[]).length>=2&&(cabCsv.match(/;/g)||[]).length>(cabCsv.match(/,/g)||[]).length){ wb={SheetNames:['CSV'],Sheets:{CSV:XLSX.utils.aoa_to_sheet(matrizCsv)}}; }
+    }
+    if(!wb) wb=XLSX.read(buf,{type:'array',cellDates:true});
     if(wb.SheetNames.length>1){
       // Pedido do usuário 08/09/2026: Excel com mais de 1 aba (ex: uma aba
       // por conta bancária) não deve assumir a 1ª sozinho — pergunta quais
@@ -40834,6 +40845,69 @@ async function confirmarLancctbFluxoImportKr(){
 }
 // PDF: primeiro tenta o leitor dedicado do Bling "Relatório de Contas a Pagar" (sem IA, ver
 // acima) — só cai na Edge Function genérica (IA) quando o PDF não é esse modelo específico.
+// ═══ PRIDE SURGERY (VM-Financeiro) — Relatório de Documentos Pagos/Recebidos por Dia, em CSV ou PDF (pedido do usuário 21/10/2026) ═══════════════════════════════════════════════════
+// Leitor sem IA em pride-fluxo-parser.js (regras aprendidas no cabeçalho do arquivo). Aqui: prévia, conferência e gravação. Idempotente pela chave_importacao.
+let _pgResultado=null;
+function _pgPrepararResultado(res,origem,nomeArquivo){
+  const fech=String(S.fechAtual()||''), soMes=document.getElementById('lancctbFluxoImportSoMesAtual')?.checked;
+  const regs=res.registros.map(x=>Object.assign({},x,{_incluir:!(soMes&&fech&&String(x.data).slice(0,7)!==fech)}));
+  _pgResultado={ tipo:res.tipo, origem, arquivo:nomeArquivo, registros:regs, conferencia:res.conferencia||null, avisos:[].concat(res.avisos||[],res.erros||[]), paginas:res.paginas||null, existentes:null };
+  return _pgResultado;
+}
+function _pgPreviewHtml(){
+  const r=_pgResultado, P=window.PrideFluxo; const regs=r.registros; const sel=regs.filter(x=>x._incluir);
+  const pagos=r.tipo==='pagos'; const tot=a=>a.reduce((t,x)=>t+x.pago,0);
+  let html=`<div style="font-size:12.5px;margin-bottom:8px"><strong>Modelo identificado:</strong> Relatório de Documentos ${pagos?'Pagos':'Recebidos'} por Dia (${r.origem==='pdf'?'PDF':'CSV'}) — leitura direta, sem IA<br>
+    ${regs.length} documento(s) · Total ${pagos?'pago':'recebido'} R$ ${P.brl(tot(regs))}${sel.length!==regs.length?`<br><span style="color:#b45309">${regs.length-sel.length} documento(s) fora do mês ${esc(fmtMes(S.fechAtual()))} (Fechamento Atual) ou desmarcado(s) — não serão importados.</span>`:''}</div>`;
+  if(r.conferencia&&r.conferencia.length){ const ok=r.conferencia.every(d=>d.ok);
+    html+=`<div style="font-size:11.5px;background:${ok?'#ecfdf5':'#fef2f2'};border:1px solid ${ok?'#10b981':'#ef4444'};border-radius:6px;padding:6px 10px;margin-bottom:8px">${ok?`✓ Conferência: os totais de ${r.conferencia.length} dia(s) do PDF (valor e quantidade de documentos) fecham exatamente com a leitura.`:'⚠ Há dia(s) em que o total do PDF não fecha com a leitura — veja os avisos.'}</div>`; }
+  if(r.origem==='pdf') html+=`<div style="font-size:11.5px;background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;padding:6px 10px;margin-bottom:8px">ℹ️ O PDF da Pride não traz CNPJ e corta nomes longos (ex.: "ADIANTAMENTOS DE DISTRIBUIÇÃO DE"). Quando o mês existir em CSV/Excel, prefira o arquivo em CSV/Excel: ele traz o CNPJ e o nome completo.</div>`;
+  if(r.existentes) html+=`<div style="font-size:11.5px;background:#fffbeb;border:1px solid #f59e0b;border-radius:6px;padding:6px 10px;margin-bottom:8px">⚠ Já existem ${r.existentes} lançamento(s) de ${pagos?'saída':'entrada'} do Fluxo de Caixa neste período. A importação ignora o que veio idêntico do mesmo relatório, mas um mês importado antes em OUTRO formato (CSV × PDF) pode duplicar — confira antes de importar.</div>`;
+  if(r.avisos.length) html+=`<div style="font-size:11.5px;background:#fef2f2;border:1px solid #ef4444;border-radius:6px;padding:6px 10px;margin-bottom:8px">${r.avisos.slice(0,12).map(esc).join('<br>')}</div>`;
+  html+=`<div style="overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12px"><thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+    <th style="padding:6px 8px"><input type="checkbox" ${sel.length===regs.length?'checked':''} onclick="_pgToggleTodos(this.checked)"></th><th style="padding:6px 8px;text-align:left">${pagos?'Pagamento':'Recebimento'}</th><th style="padding:6px 8px;text-align:left">${pagos?'Fornecedor / classificação':'Cliente'}</th>
+    <th style="padding:6px 8px;text-align:left">Doc / parc.</th><th style="padding:6px 8px;text-align:left">Forma</th><th style="padding:6px 8px;text-align:left">Obs</th><th style="padding:6px 8px;text-align:right">Valor</th></tr></thead><tbody>`;
+  regs.forEach((x,i)=>{ const nf=P.ehNf(x.serie);
+    html+=`<tr style="border-bottom:1px solid var(--border);opacity:${x._incluir?1:.4}"><td style="padding:4px 8px"><input type="checkbox" ${x._incluir?'checked':''} onclick="_pgResultado.registros[${i}]._incluir=this.checked;document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_pgPreviewHtml()"></td>
+      <td style="padding:4px 8px;white-space:nowrap">${x.data.split('-').reverse().join('/')}</td><td style="padding:4px 8px">${esc(x.nome)}${!nf?' <span style="color:var(--slate);font-size:10.5px">(lançamento interno)</span>':''}</td>
+      <td style="padding:4px 8px;font-family:var(--mono);font-size:11px">${nf?esc(x.docto)+'/'+esc(x.desdob):'—'}</td><td style="padding:4px 8px">${esc((P.FORMAS[x.ref]||x.ref))}</td><td style="padding:4px 8px;font-size:11px">${esc(x.obs)}</td>
+      <td style="padding:4px 14px;text-align:right;white-space:nowrap">R$ ${P.brl(x.pago)}${(x.varMais||x.varMenos)?`<br><span style="font-size:10px;color:var(--slate)">${x.varMais?'juros '+P.brl(x.varMais):''}${x.varMenos?' desc. '+P.brl(x.varMenos):''}</span>`:''}</td></tr>`; });
+  html+=`</tbody></table></div><div style="font-size:12px;margin-top:6px">${sel.length} documento(s) selecionado(s) · Total R$ ${P.brl(tot(sel))}</div>
+    <div class="ma" style="margin-top:12px"><button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button><button class="btn bp" onclick="confirmarLancctbFluxoImportPride()">✓ Importar ${sel.length} lançamento(s)</button></div>`;
+  return html;
+}
+function _pgToggleTodos(m){ _pgResultado.registros.forEach(x=>x._incluir=m); document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_pgPreviewHtml(); }
+async function _pgMostrar(res,origem,nomeArquivo,status){
+  const r=_pgPrepararResultado(res,origem,nomeArquivo);
+  try{ // já existe Fluxo no período? (aviso de possível duplicidade entre formatos)
+    const datas=r.registros.map(x=>x.data).sort(); if(datas.length){
+      const { count } = await _supaClient.from('fluxo_caixa_lancamentos').select('id',{count:'exact',head:true}).eq('empresa_eid',_lancctbEidAtual).gte('data',datas[0]).lte('data',datas[datas.length-1]).gt(r.tipo==='pagos'?'valor_saida':'valor_entrada',0);
+      r.existentes=count||0; }
+  }catch(e){}
+  if(status) status.textContent=`Modelo identificado: Documentos ${r.tipo==='pagos'?'Pagos':'Recebidos'} por Dia (${origem==='pdf'?'PDF':'CSV'}) · ${r.registros.length} documento(s).`;
+  document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_pgPreviewHtml();
+  document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
+  const tw=document.getElementById('lancctbFluxoImportTipoWrap'); if(tw) tw.style.display='none';
+}
+async function confirmarLancctbFluxoImportPride(){
+  const r=_pgResultado; if(!r) return; const P=window.PrideFluxo;
+  const sel=r.registros.filter(x=>x._incluir);
+  if(!sel.length){ toast('Nenhum lançamento selecionado','err'); return; }
+  const contaSel=document.getElementById('lancctbFluxoImportConta').value||null;
+  const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,chave_importacao').eq('empresa_eid',_lancctbEidAtual).like('chave_importacao','pg|%').order('id',{ascending:true}));
+  const ja=new Set((ex||[]).map(x=>x.chave_importacao));
+  const novos=sel.filter(x=>!ja.has(x.chave)); const puladas=sel.length-novos.length;
+  if(!novos.length){ toast('Todos os lançamentos selecionados já tinham sido importados antes.','err'); return; }
+  const temJ=await _lancctbFluxoColunasJuros();
+  const rows=novos.map(x=>{ const l=P.paraFluxo(x); if(!temJ){ delete l.valor_juros; delete l.valor_desconto; delete l.valor_multa; } return Object.assign({ empresa_eid:_lancctbEidAtual, conta_bancaria_id:contaSel, arquivo_origem:r.arquivo },l); });
+  const status=document.getElementById('lancctbFluxoImportStatus'); let feitos=0;
+  for(let i=0;i<rows.length;i+=500){ const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(rows.slice(i,i+500)); if(error){ toast('Erro ao importar: '+error.message,'err'); return; } feitos+=Math.min(500,rows.length-i); if(status) status.textContent=`Importando… ${feitos}/${rows.length}`; }
+  toast(`${rows.length} lançamento(s) de ${r.tipo==='pagos'?'pagamento':'recebimento'} da Pride importado(s)${puladas?` — ${puladas} já existiam e foram ignorados`:''}`,'ok');
+  if(contaSel){ const cv=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaSel)); if(cv?.doc_visao_geral_fluxo_nome){ [...new Set(rows.map(x=>x.data).filter(Boolean).map(d=>d.slice(0,7)))].forEach(m=>_lancctbFlagVisaoGeral(_lancctbEidAtual,cv.doc_visao_geral_fluxo_nome,m)); } }
+  closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar(rows.map(x=>x.data)); }catch(e){}
+  _lancctbFluxoPagina=0; renderLancctbFluxoCaixa();
+}
 let _lancctbFluxoImportPreviewPdf=[];
 async function _lancctbFluxoLerPdf(file,status){
   document.getElementById('lancctbFluxoImportTipoWrap').style.display='none';
@@ -40843,6 +40917,15 @@ async function _lancctbFluxoLerPdf(file,status){
     const buf=await file.arrayBuffer();
     const pdf=await pdfjsLib.getDocument({data:buf}).promise;
     status.textContent='Lendo tabela do PDF…';
+    // PRIDE (VM-Financeiro): Relatório de Documentos Pagos/Recebidos por Dia — PDF girado, lido por posição e conferido pelos totais de cada dia
+    if(window.PrideFluxo){
+      const pg1=await (await pdf.getPage(1)).getTextContent();
+      if(/Documentos (Pagos|Recebidos) por Dia/i.test(pg1.items.map(i=>i.str).join(' '))){
+        const paginas=[]; for(let n=1;n<=pdf.numPages;n++){ const c=await (await pdf.getPage(n)).getTextContent(); paginas.push(c.items.map(i=>({str:i.str,x:i.transform[4],y:i.transform[5],w:i.width}))); }
+        const resPg=window.PrideFluxo.pdfParsear(paginas);
+        if(resPg&&resPg.registros.length){ await _pgMostrar(resPg,'pdf',file.name,status); return; }
+      }
+    }
     // KARATER_RELATORIO_DESPESAS: tabela de 5 colunas lida por posição (sem IA)
     const resultadoKr=await _krParsearPdf(pdf);
     if(resultadoKr){
