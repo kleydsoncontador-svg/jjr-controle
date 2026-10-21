@@ -40593,8 +40593,41 @@ function _lancctbBlingExtrairMarcadorFornecedor(nomeCru){
   if(m) return {nome:m[1].trim(),marcador:m[2]};
   return {nome:nomeCru.trim(),marcador:null};
 }
+// OCR LOCAL (Tesseract no navegador, SEM IA) para o "Relatório de Contas a Pagar" do Bling quando o PDF veio só como imagem (sem camada de texto — MD 2, ago/set 2026).
+// Devolve os MESMOS itens {str,x,y} (unidades do PDF, y de baixo pra cima) que o pdf.js entregaria, uma PALAVRA por item; o leitor por colunas continua igual. A conferência
+// pelo "Total = R$" impresso no rodapé é o que garante a leitura (a prévia avisa em vermelho se não bater).
+const LANCCTB_BLING_OCR_ESCALA=3;
+async function _lancctbExtrairItensPaginaOcr(page){
+  if(page._jjrBlingOcr) return page._jjrBlingOcr;
+  const H=page.getViewport({scale:1}).height;
+  const canvas=await _ganhoItauFundoRenderizarPagina(page,0,LANCCTB_BLING_OCR_ESCALA);
+  const worker=await _lancctbOcrEmprestar();
+  let data;
+  try{
+    await worker.setParameters({tessedit_pageseg_mode:'3',preserve_interword_spaces:'1'});
+    ({data}=await worker.recognize(canvas));
+  }finally{
+    try{ await worker.setParameters({preserve_interword_spaces:'0'}); }catch(e){}
+    _lancctbOcrDevolver(worker);
+  }
+  const itens=[];
+  (data.words||[]).forEach(w=>{
+    const str=String(w.text||'').trim(); if(!str) return;
+    itens.push({str,x:w.bbox.x0/LANCCTB_BLING_OCR_ESCALA,y:H-((w.bbox.y0+w.bbox.y1)/2)/LANCCTB_BLING_OCR_ESCALA,conf:Number(w.confidence)||0});
+  });
+  page._jjrBlingOcr=itens;
+  return itens;
+}
+// Itens de uma página: texto nativo do PDF; se não houver nenhum (PDF só-imagem), lê por OCR local.
+async function _lancctbBlingItensDaPagina(page,status,msgOcr){
+  const nativos=await _lancctbExtrairItensPagina(page);
+  if(nativos.length) return {itens:nativos,ocr:false};
+  if(status) status.textContent=msgOcr;
+  return {itens:await _lancctbExtrairItensPaginaOcr(page),ocr:true};
+}
 async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
-  const itensPag1=await _lancctbExtrairItensPagina(await pdf.getPage(1));
+  const r1=await _lancctbBlingItensDaPagina(await pdf.getPage(1),status,`PDF sem texto (só imagem): lendo página 1/${pdf.numPages} por OCR local (sem IA)…`);
+  const itensPag1=r1.itens, lidoPorOcr=r1.ocr;
   const bounds=_lancctbBlingContasPagarDetectarColunas(itensPag1);
   if(!bounds) return null; // não é este layout — quem chamou cai pro caminho antigo (IA)
   const registros=[];
@@ -40604,7 +40637,7 @@ async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
   iniciarRegistro();
   for(let p=1;p<=pdf.numPages;p++){
     if(status) status.textContent=`Lendo página ${p}/${pdf.numPages} (Bling — Contas a Pagar)…`;
-    const itens=p===1?itensPag1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
+    const itens=p===1?itensPag1:(await _lancctbBlingItensDaPagina(await pdf.getPage(p),status,`PDF sem texto (só imagem): lendo página ${p}/${pdf.numPages} por OCR local (sem IA)…`)).itens;
     textoTudo+=' '+itens.map(i=>i.str).join(' ');
     const linhas=_lancctbAgruparLinhasPorY(itens,3);
     for(const linha of linhas){
@@ -40652,13 +40685,14 @@ async function _lancctbParsearFluxoBlingContasPagar(pdf,status){
   const mTotal=textoTudo.match(/Total\s*=?\s*R\$\s*([\d.,]+)/i);
   const totalOficial=mTotal?_lancctbParseValorBR2(mTotal[1]):null;
   const soma=Math.round(registros.reduce((s,r)=>s+r.valor,0)*100)/100;
-  return { registros, totalOficial, soma, bate: totalOficial!=null&&Math.abs(soma-totalOficial)<0.01 };
+  return { registros, totalOficial, soma, ocr:lidoPorOcr, bate: totalOficial!=null&&Math.abs(soma-totalOficial)<0.01 };
 }
 function _lancctbBlingPreviewHtml(resultado){
   const { registros, totalOficial, soma, bate } = resultado;
   const qtdComAviso=registros.filter(r=>r.aviso).length;
   let html=`<div style="font-size:12px;margin-bottom:8px">
     <div>${registros.length} registro(s) lido(s) · soma <strong>R$ ${_fmt(soma)}</strong>${totalOficial!=null?` / total impresso no PDF <strong>R$ ${_fmt(totalOficial)}</strong> ${bate?'<span style="color:var(--teal)">✓ bate</span>':'<span style="color:#dc2626">⚠ BLING_TOTAL_MISMATCH — confira antes de importar</span>'}`:'<span style="color:#dc2626">⚠ não achei o "Total =" no PDF pra conferir</span>'}</div>
+    ${resultado.ocr?`<div style="color:#b45309">PDF só de imagem: lido por OCR local (sem IA). Confira a soma com o total impresso${bate?' — bateu, leitura conferida.':' — NÃO bateu: não importe antes de conferir as linhas.'}</div>`:''}
     ${qtdComAviso?`<div style="color:#b45309">⚠ ${qtdComAviso} registro(s) com data dentro do Histórico diferente da Liquidação (HISTORY_DATE_DIFFERS_FROM_LIQUIDATION) — a data usada é sempre a Liquidação.</div>`:''}
   </div>
   <div style="overflow-x:auto;max-height:340px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
@@ -40967,7 +41001,7 @@ async function _lancctbFluxoLerPdf(file,status){
     if(resultadoBling){
       _lancctbBlingResultado=resultadoBling;
       _lancctbBlingPreview=resultadoBling.registros;
-      status.textContent=`Modelo reconhecido: Bling — Relatório de Contas a Pagar (leitura direta, sem IA).`;
+      status.textContent=`Modelo reconhecido: Bling — Relatório de Contas a Pagar (${resultadoBling.ocr?'OCR local':'leitura direta'}, sem IA).`;
       document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_lancctbBlingPreviewHtml(resultadoBling);
       document.getElementById('lancctbFluxoImportLerBtn').style.display='none';
       return;
