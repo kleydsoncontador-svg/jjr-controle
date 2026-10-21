@@ -24984,6 +24984,10 @@ async function _lancctbProcessarFopag(){
       .select('id,data_pagamento,valor_saida,historico_bancario')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)));
     if(!pendencias||!pendencias.length){ toast('Nenhuma pendência de saída no período filtrado nesta conta.','ok'); return; }
+    // Pedido do usuário 21/10/2026 (Adelpe, Danilo R$ 44,81 em 06/08 e 28/08): o pagamento MAIS ANTIGO consome primeiro o líquido do relatório — ordem por data.
+    pendencias.sort((a,b)=>String(a.data_pagamento).localeCompare(String(b.data_pagamento))||(a.id-b.id));
+    // Competência de salário/adiantamento POSTERIOR ao mês do pagamento não existe ("não paga em 08/2026 salário de 09/2026").
+    const _compAposPagamento=(comp,dataPag)=>{ const m=String(comp||'').match(/^(\d{2})[-\/](\d{4})$/); return !!m&&(m[2]+'-'+m[1])>String(dataPag||'').slice(0,7); };
 
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
@@ -25167,6 +25171,7 @@ async function _lancctbProcessarFopag(){
         try{ const dados=await _lancctbParsearRelatorioLiquidos(file); if(dados) relatorios.push({...t,dados}); }
         catch(e){ console.error('Falha ao ler Relatório de Líquidos:',e); }
       }
+      for(let k=relatorios.length-1;k>=0;k--){ const rk=relatorios[k]; if((rk.tipo==='salario'||rk.tipo==='adiantamento')&&_compAposPagamento(rk.dados&&rk.dados.competencia||rk.competencia,l.data_pagamento)) relatorios.splice(k,1); }
       // (sem Relatório de Líquidos o Sispag ainda pode ser só sócios — o Caminho 1b abaixo trata; se nada casar, cai em semAchado no fim)
 
       // ── Caminho 1: uma saída = o TOTAL da folha (paga todo mundo de uma vez)
@@ -25276,7 +25281,7 @@ async function _lancctbProcessarFopag(){
               try{ const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,cp,tp); if(file){ const dd=await _lancctbParsearRelatorioLiquidos(file); if(dd) relatoriosExtraCache[chave]={tipo:tp,competencia:cp,dados:dd}; } }catch(e){ console.warn('Relatório extra (Caminho 1c):',e); }
             }
             const rx=relatoriosExtraCache[chave];
-            if(rx) (rx.dados.pessoas||[]).forEach(pp=>pessoasFolha.push({p:pp,tipo:rx.tipo,comp:rx.dados.competencia||rx.competencia}));
+            if(rx&&!_compAposPagamento(rx.dados.competencia||rx.competencia,l.data_pagamento)) (rx.dados.pessoas||[]).forEach(pp=>pessoasFolha.push({p:pp,tipo:rx.tipo,comp:rx.dados.competencia||rx.competencia}));
           }
         }
         if(pessoasFolha.length){
@@ -25397,7 +25402,7 @@ async function _lancctbProcessarFopag(){
           if(iguais.length===1){ matchIndiv={r,p:iguais[0]}; break; }
         }
       }
-      if(matchIndiv&&Math.abs(matchIndiv.p.valor-l.valor_saida)<=0.01){ const ch=chaveConsumoFolha(matchIndiv.r,matchIndiv.p); if(consEx.has(ch)) matchIndiv=null; else consEx.add(ch); }
+      if(matchIndiv){ const ch=chaveConsumoFolha(matchIndiv.r,matchIndiv.p); if(consEx.has(ch)) matchIndiv=null; else consEx.add(ch); } // a mesma pessoa/tipo/competência só é paga UMA vez (Danilo 44,81 em 06/08 e 28/08 — 21/10/2026)
       // Pedido do usuário 19/10/2026 (2ª): NÃO classificar automaticamente como adiantamento/benefício. Pessoa identificada (empregado, sócio/contribuinte ou pessoa nominal do Fluxo) cujo valor não bate com salário/férias/rescisão
       // (nem pró-labore inequívoco) fica PENDENTE, com a pessoa preservada no histórico e a conta D vazia — o usuário define a conta depois.
       if(!matchIndiv){
