@@ -29909,8 +29909,14 @@ function _lancctbParcelaTxtFluxo(f){
   const m=String(f.descricao||'').match(/parcela\s+(\d+\s*[ªº°]?\s*(?:\/\s*\d+\s*[ªº°]?)?)/i);
   return m?m[1].replace(/\s+/g,''):'';
 }
+// Pedido do usuário 21/10/2026 (Fast Lube, 163): quando a "Descrição da conta" do Fluxo é F07-GNRE FORA DO ESTADO, o histórico do lançamento é a descrição da própria guia no Fluxo, sem a linha digitável —
+// ex.: "Pagamento ICMS PARTILHADO/AL - ANTONIO MONTEIRO DA - NF 259053 - Data ref: 01/07/2026" (e não "Pagamento a SECRETARIA DE ESTADO DA FAZENDA SEFAZ AL - Documento 70695").
+function _lancctbEhGnreForaDoEstadoFastLube(eid,fluxo){ return String(eid)==='163'&&!!fluxo&&/F07\s*-?\s*GNRE\s+FORA\s+DO\s+ESTADO/i.test(String(fluxo.descricao_conta_origem||'')); }
+function _lancctbDescricaoGuiaDoFluxo(fluxo){ return String((fluxo&&fluxo.descricao)||'').replace(/\s*-?\s*Linha\s+digit[áa]vel\s*:.*$/i,'').replace(/\s+/g,' ').trim(); }
+function _lancctbHistoricoGnreFastLube(eid,fluxo){ if(!_lancctbEhGnreForaDoEstadoFastLube(eid,fluxo)) return ''; const d=_lancctbDescricaoGuiaDoFluxo(fluxo); return d?'Pagamento '+d:''; }
 function _lancctbHistoricoSugeridoDoFluxo(fluxoRow,extratoRow){
   if(!fluxoRow) return '';
+  { const g=_lancctbHistoricoGnreFastLube(_lancctbEidAtual,fluxoRow); if(g) return g; }
   const nome=String(fluxoRow.cliente_fornecedor_nome||fluxoRow.descricao||'').trim(); if(!nome) return '';
   const numero=String(fluxoRow.documento_numero||fluxoRow.numero||'').trim();
   const ehEntrada=extratoRow?!((extratoRow.valor_saida||0)>0):!((fluxoRow.valor_saida||0)>0);
@@ -29921,6 +29927,7 @@ function _lancctbHistoricoSugeridoDoFluxo(fluxoRow,extratoRow){
 // pra que nos meses seguintes cada lançamento saia com o fornecedor/documento do SEU Fluxo (e não repita o do primeiro mês).
 function _lancctbModeloHistoricoDoFluxo(fluxoRow,extratoRow){
   const base=_lancctbHistoricoSugeridoDoFluxo(fluxoRow,extratoRow); if(!base) return '';
+  if(_lancctbHistoricoGnreFastLube(_lancctbEidAtual,fluxoRow)) return 'Pagamento {FLUXO_DESCRICAO}'; // guia F07: cada lançamento sai com a descrição da SUA guia
   const ehEntrada=extratoRow?!((extratoRow.valor_saida||0)>0):!((fluxoRow.valor_saida||0)>0);
   const numero=String(fluxoRow.documento_numero||fluxoRow.numero||'').trim();
   return (ehEntrada?'Recebimento de ':'Pagamento a ')+'{FLUXO_CLIENTE}'+(numero?' - Documento {FLUXO_NUMERO}':'')+(_lancctbParcelaTxtFluxo(fluxoRow)?' - parcela {FLUXO_PARCELA}':'');
@@ -29930,7 +29937,7 @@ function _lancctbResolverHistFluxo(texto,fluxo){
   const nome=String((fluxo&&(fluxo.cliente_fornecedor_nome||fluxo.descricao))||'').trim();
   const numero=String((fluxo&&(fluxo.documento_numero||fluxo.numero))||'').trim();
   const parc=_lancctbParcelaTxtFluxo(fluxo);
-  let out=t.split('{FLUXO_CLIENTE}').join(nome).split('{FLUXO_NUMERO}').join(numero).split('{FLUXO_PARCELA}').join(parc);
+  let out=t.split('{FLUXO_CLIENTE}').join(nome).split('{FLUXO_NUMERO}').join(numero).split('{FLUXO_PARCELA}').join(parc).split('{FLUXO_DESCRICAO}').join(_lancctbDescricaoGuiaDoFluxo(fluxo));
   if(!parc) out=out.replace(/\s*-\s*parcela\s*$/i,'');
   if(!numero) out=out.replace(/\s*-\s*Documento\s*(?=-|$)/i,'');
   return out.trim();
@@ -32151,7 +32158,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
       );
       if(!regra) continue;
       const bancoTipo=ehSaida?'C':'D', contrapartidaTipo=ehSaida?'D':'C';
-      const historicoUtilizado=_lancctbResolverHistFluxo(regra.historico_fixo,fluxo)||l.historico_bancario||fluxo.descricao||''; // "Manter o histórico do extrato" = EXATAMENTE o do extrato (nunca a descrição do Fluxo)
+      const historicoUtilizado=(regra.historico_fixo&&_lancctbHistoricoGnreFastLube(eid,fluxo))||_lancctbResolverHistFluxo(regra.historico_fixo,fluxo)||l.historico_bancario||fluxo.descricao||''; // "Manter o histórico do extrato" = EXATAMENTE o do extrato (nunca a descrição do Fluxo)
       const linhas=[
         { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
         { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
@@ -34819,7 +34826,7 @@ async function _lancctbProcessarViaIA(){
         });
         if(!fluxoMatch||!regra){ aindaSemFluxo.push(l); continue; }
         const bancoTipo=ehSaida?'C':'D';
-        const historicoUtilizado=_lancctbResolverHistFluxo(regra.historico_fixo,fluxoMatch)||l.historico_bancario||fluxoMatch.descricao||''; // histórico original do extrato, nunca a descrição do Fluxo
+        const historicoUtilizado=(regra.historico_fixo&&_lancctbHistoricoGnreFastLube(eid,fluxoMatch))||_lancctbResolverHistFluxo(regra.historico_fixo,fluxoMatch)||l.historico_bancario||fluxoMatch.descricao||''; // histórico original do extrato, nunca a descrição do Fluxo
         const linhas=[
           { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:fluxoMatch.cliente_fornecedor_nome||null, cnpj_cpf:fluxoMatch.cnpj_cpf||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
           { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:historicoUtilizado, cliente_fornecedor_nome:fluxoMatch.cliente_fornecedor_nome||null, cnpj_cpf:fluxoMatch.cnpj_cpf||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
