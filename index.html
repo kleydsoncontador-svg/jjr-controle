@@ -27515,15 +27515,42 @@ function _lancctbRetIgnExcluir(i){
   _lancctbRetIgnRender();
   renderLancctbConteudo();
 }
-function exportarLancctbNotasExcel(abaId){
+// Pedido do usuário 21/10/2026: o Excel levava só a página que estava na tela (50 de 1.867). Agora busca TODAS as páginas que batem com os filtros ativos (mesmos filtros de servidor e de cliente da listagem, período de emissão inclusive).
+async function exportarLancctbNotasExcel(abaId){
   const aba=LANCCTB_ABAS.find(a=>a.id===abaId);
-  if(!aba||!_lancctbUltimaLeitura.length){ toast('Nada para exportar nesta página.','err'); return; }
+  if(!aba){ toast('Nada para exportar nesta página.','err'); return; }
+  const eid=_lancctbEidAtual;
+  const btn=(typeof event!=='undefined'&&event&&event.target&&event.target.closest)?event.target.closest('button'):null; const txtBtn=btn?btn.textContent:'';
+  if(btn){ btn.disabled=true; btn.textContent='⏳ Buscando todas as páginas…'; }
+  let todas=[];
+  try{
+    const ehServ=aba.tipoDoc==='nfse';
+    const campoNomeTerc=aba.direcaoNf==='venda'?'notas_fiscais.nome_destinatario':'notas_fiscais.nome_emitente';
+    const campoCnpjTerc=aba.direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
+    const { data: parcelas, error } = await _lancctbFetchTudo(()=>{
+      let q=_supaClient.from('notas_fiscais_parcelas')
+        .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,natureza_operacao)')
+        .eq('empresa_eid',eid).eq('tipo',aba.tipoDoc).eq('direcao',aba.direcaoNf);
+      q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc);
+      return q.order('data_emissao',{ascending:true}).order('numero_parcela',{ascending:true}).order('id',{ascending:true});
+    });
+    if(error){ toast('Erro ao buscar as NFs: '+error.message,'err'); return; }
+    const nfIds=[...new Set((parcelas||[]).map(p=>p.nf_id))];
+    const qtdPorNf={};
+    for(let i=0;i<nfIds.length;i+=200){
+      const { data: rs } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas').select('nf_id').in('nf_id',nfIds.slice(i,i+200)).order('id'));
+      (rs||[]).forEach(r=>{ qtdPorNf[r.nf_id]=(qtdPorNf[r.nf_id]||0)+1; });
+    }
+    todas=(parcelas||[]).map(p=>{ const nf=p.notas_fiscais; return { p, nf, nomeTerc:nf.direcao==='venda'?nf.nome_destinatario:nf.nome_emitente, cnpjTerc:nf.direcao==='venda'?nf.cnpj_destinatario:nf.cnpj_emitente, qtdParcelas:qtdPorNf[p.nf_id]||1 }; });
+    todas=_lancctbNotasAplicarFiltrosCliente(todas,ehServ);
+  } finally { if(btn){ btn.disabled=false; btn.textContent=txtBtn; } }
+  if(!todas.length){ toast('Nada para exportar com os filtros atuais.','err'); return; }
   const ehServico=aba.tipoDoc==='nfse';
   const colTerceiro=ehServico?(aba.direcaoNf==='venda'?'Prestado a':'Tomado de'):'Empresa';
   const header=['Dt Emissão','Data da Parcela','Número','CNPJ',colTerceiro,'Valor Bruto','Valor Parcela','Parcela','Qtd Parcelas'];
   if(ehServico) header.push('ISS','PIS','COFINS','CSLL','IRRF','Valor Líquido');
   header.push('Modelo','Status');
-  const rows=_lancctbUltimaLeitura.map(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
+  const rows=todas.map(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
     const linha=[
       nf.data_emissao?new Date(nf.data_emissao+'T00:00:00').toLocaleDateString('pt-BR'):'',
       p.data_vencimento?new Date(p.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):'',
