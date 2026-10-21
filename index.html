@@ -41366,6 +41366,18 @@ async function confirmarLancctbFluxoImport(){
   }
   if(!registros.length){ toast('Nenhuma linha válida encontrada'+(foraDoMes?` (${foraDoMes} linha(s) ignorada(s) por serem de outro mês)`:' (confira as colunas de Data e Valor)')+'.','err'); return; }
   if(!(await _lancctbFluxoColunasJuros())) registros.forEach(r=>{ delete r.valor_juros; delete r.valor_desconto; delete r.valor_multa; });
+  // Pedido do usuário 21/10/2026: DUPLICIDADE no Fluxo = mesmo Nº de NF + mesma PARCELA + mesmo NOME de fornecedor (na base da empresa ou repetida no próprio arquivo). Linha sem Nº de NF nunca é tratada como duplicada.
+  let duplicadas=0;
+  {
+    const nomeCh=t=>String(t||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/[^A-Z0-9]+/g,' ').trim();
+    const nfCh=t=>String(t||'').replace(/\D/g,'').replace(/^0+/,'');
+    const chaveDup=r=>{ const nf=nfCh(r.documento_numero||r.numero); if(!nf) return null; return nf+'|'+(r.parcela==null||Number.isNaN(r.parcela)?'':String(r.parcela))+'|'+nomeCh(r.cliente_fornecedor_nome); };
+    const { data: jaNoFluxo } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('documento_numero,numero,parcela,cliente_fornecedor_nome').eq('empresa_eid',_lancctbEidAtual).or('documento_numero.not.is.null,numero.not.is.null'));
+    const vistas=new Set((jaNoFluxo||[]).map(chaveDup).filter(Boolean));
+    const manter=registros.filter(r=>{ const k=chaveDup(r); if(!k) return true; if(vistas.has(k)){ duplicadas++; return false; } vistas.add(k); return true; });
+    registros.length=0; manter.forEach(r=>registros.push(r));
+    if(!registros.length){ toast(`Nenhuma linha nova: as ${duplicadas} linha(s) do arquivo já existiam no Fluxo (mesma NF, parcela e fornecedor).`,'err'); return; }
+  }
   const status=document.getElementById('lancctbFluxoImportStatus');
   const TAM_LOTE=500;
   let importados=0;
@@ -41378,7 +41390,7 @@ async function confirmarLancctbFluxoImport(){
   }
   _lancctbFluxoMapaSalvoSet(_lancctbEidAtual,matriz[0].map(h=>String(h||'').trim()),mapa,{ tipoSaidaTxt:document.getElementById('lancctbFluxoTipoSaidaTxt')?.value||'', tipoEntradaTxt:document.getElementById('lancctbFluxoTipoEntradaTxt')?.value||'' });
   if(tipoNaoReconhecido) toast(`${tipoNaoReconhecido} linha(s) ignorada(s): o texto da coluna Tipo não é nenhum dos informados pra saída/entrada.`,'err');
-  toast(`${importados} lançamento(s) de fluxo de caixa importado(s)`+(foraDoMes?` — ${foraDoMes} linha(s) de outro mês ignorada(s)`:''),'ok');
+  toast(`${importados} lançamento(s) de fluxo de caixa importado(s)`+(foraDoMes?` — ${foraDoMes} linha(s) de outro mês ignorada(s)`:'')+(duplicadas?` — ${duplicadas} duplicada(s) ignorada(s) (mesma NF, parcela e fornecedor)`:''),'ok');
   if(contaSel){
     const contaVinculada=_lancctbUltimasAgencias.find(a=>String(a.id)===String(contaSel));
     if(contaVinculada?.doc_visao_geral_fluxo_nome){
