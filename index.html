@@ -23567,6 +23567,8 @@ function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorEx
   }
   const porValor=compat.filter(okValor);
   if(porValor.length===1) return porValor[0];
+  // Achado 21/10/2026 (Kajuna, EMBREPAR 709960/6, 710347/6…): o Fluxo numera a parcela como 6, mas a NF só tem as parcelas 1 a 4 (3 de mesmo valor + 1 que junta as 3 últimas). Sem a parcela indicada, várias têm o mesmo valor — vale a ÚNICA cujo vencimento é a data do Fluxo.
+  if(porValor.length>1&&f.data){ const porData=porValor.filter(p=>p.data_vencimento===f.data); if(porData.length===1) return porData[0]; }
   // Pagamento PARCIAL (03/10/2026, ACCI): o Fluxo indica a NF (número + CNPJ) mas o valor pago é MENOR que a parcela (ex: NF de 8.297,75
   // paga em 2x de 4.148,87). Só vale quando: é 1 NF só, com o CNPJ do Fluxo igual ao da nota, 1 parcela pendente e o valor pago < parcela.
   // Devolve uma cópia marcada _parcial — quem chama divide a parcela (pago + saldo) antes de gerar o lançamento.
@@ -31745,6 +31747,61 @@ async function abrirLancctbVerComposicaoKarater(extratoId){
     ${e.informacao&&/^(COMPOSIÇÃO|AMBÍGUO)/.test(e.informacao)?`<div style="font-size:11px;color:var(--slate);margin-top:8px;white-space:pre-wrap">${esc(e.informacao)}</div>`:''}`;
   openModal('mLancctbVerComposicao');
 }
+// Pedido do usuário 21/10/2026 (Kajuna): conciliar e IDENTIFICAR são etapas diferentes. Se sabemos QUEM é e QUAL título do Fluxo é, a pendência não pode voltar a ser "genérica" só porque falta a NF: o Registro mostra
+// "FLUXO IDENTIFICADO — <o que falta>" + fornecedor, CNPJ, NF/duplicata e parcela informadas pelo Fluxo, data e valor. Só texto da coluna "Informação" das PENDÊNCIAS de saída (nada contábil, nenhuma baixa); o texto original (ex.: "Separada pelo Fluxo…")
+// fica depois de " || ". Rodar de novo troca a marca (idempotente).
+function _lancctbInfoSemMarcaFluxo(info){ const t=String(info||''); if(!/^(FLUXO IDENTIFICADO|SEM FLUXO LIGADO) — /.test(t)) return t; const i=t.indexOf(' || '); return i>=0?t.slice(i+4):''; }
+async function _lancctbMarcarIdentificacaoFluxo(eid,contaId){
+  const fmt=v=>Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+  const brd=d=>String(d||'').split('-').reverse().join('/').slice(0,5);
+  const { data: pend } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
+    .select('id,data_pagamento,valor_saida,historico_bancario,informacao').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0).order('id')));
+  const alvo=(pend||[]).filter(l=>!/^\[/.test(String(l.historico_bancario||''))&&!/^AMBÍGUO REAL/.test(String(l.informacao||'')));
+  if(!alvo.length) return 0;
+  const ids=alvo.map(l=>l.id), fl=[];
+  for(let i=0;i<ids.length;i+=200){ const { data } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,data,valor_saida,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,lancamento_extrato_id').in('lancamento_extrato_id',ids.slice(i,i+200)); (data||[]).forEach(f=>fl.push(f)); }
+  const porExt=new Map(); fl.forEach(f=>{ if(!porExt.has(f.lancamento_extrato_id)) porExt.set(f.lancamento_extrato_id,[]); porExt.get(f.lancamento_extrato_id).push(f); });
+  const nums=[...new Set(fl.map(f=>String(f.numero||f.documento_numero||'').trim().replace(/^0+/,'')).filter(n=>/^\d+$/.test(n)))];
+  const parcelas=[];
+  for(let k=0;k<nums.length;k+=100){
+    const { data: pf } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas')
+      .select('id,nf_id,numero_parcela,valor_parcela,data_vencimento,status_conciliacao,lancamento_extrato_id,notas_fiscais!inner(numero,direcao,nome_emitente,cnpj_emitente)').eq('empresa_eid',eid).in('notas_fiscais.numero',nums.slice(k,k+100)));
+    (pf||[]).forEach(x=>parcelas.push(x));
+  }
+  let marcadas=0;
+  for(const l of alvo){
+    const linhas=porExt.get(l.id)||[];
+    const base=_lancctbInfoSemMarcaFluxo(l.informacao);
+    let marca='';
+    if(linhas.length){
+      const motivos=new Set(), docs=[];
+      linhas.forEach(f=>{
+        const num=String(f.numero||f.documento_numero||'').trim().replace(/^0+/,'');
+        docs.push(`${f.numero||f.documento_numero||'s/nº'}${f.parcela?'/'+f.parcela:''} R$ ${fmt(f.valor_saida)}`);
+        if(!/^\d+$/.test(num)){ motivos.add('FLUXO SEM Nº DE NF'); return; }
+        const doNum=parcelas.filter(p=>p.notas_fiscais&&p.notas_fiscais.direcao==='compra'&&_lancctbNumeroNfBate(p.notas_fiscais.numero,num)&&(_lancctbNomeCompativel([f.cliente_fornecedor_nome||''],p.notas_fiscais.nome_emitente)||(String(f.cnpj_cpf||'').replace(/\D/g,'')&&String(f.cnpj_cpf||'').replace(/\D/g,'')===p.notas_fiscais.cnpj_emitente)));
+        if(!doNum.length){ motivos.add('NF NÃO IMPORTADA'); return; }
+        const parc=Number(f.parcela)||null, pp=parc?doNum.find(p=>p.numero_parcela===parc):null;
+        if(!pp){ const porData=doNum.filter(p=>p.status_conciliacao==='pendente'&&Math.abs(p.valor_parcela-f.valor_saida)<=0.02&&p.data_vencimento===f.data); motivos.add(porData.length===1?'AGUARDANDO PROCESSAR (parcela pela data)':'NF EXISTE, PARCELA '+(parc||'?')+' NÃO ENCONTRADA'); return; }
+        if(Math.abs(pp.valor_parcela-f.valor_saida)>0.021){ motivos.add(`PARCELA DIVERGENTE (parcela R$ ${fmt(pp.valor_parcela)} × Fluxo R$ ${fmt(f.valor_saida)})`); return; }
+        if(pp.status_conciliacao==='conciliado'&&pp.lancamento_extrato_id!==l.id){ motivos.add(`PARCELA JÁ BAIXADA NO LANÇAMENTO ${pp.lancamento_extrato_id}`); return; }
+        motivos.add('AGUARDANDO PROCESSAR');
+      });
+      const forn=[...new Set(linhas.map(f=>f.cliente_fornecedor_nome||'?'))].join(' + ');
+      const cnpj=_lancctbCnpjsDoTexto(l.historico_bancario)[0]||[...new Set(linhas.map(f=>String(f.cnpj_cpf||'').replace(/\D/g,'')).filter(Boolean))][0]||'—';
+      const somaFx=linhas.reduce((a,f)=>a+f.valor_saida,0), difSoma=Math.round((somaFx-l.valor_saida)*100)/100;
+      marca=`FLUXO IDENTIFICADO — ${[...motivos].join(' ; ')} | FORNECEDOR: ${forn} | CNPJ: ${cnpj} | NF/DUP: ${docs.join(' + ')} | DATA: ${brd(linhas[0].data)} | VALOR: R$ ${fmt(l.valor_saida)}${Math.abs(difSoma)>0.015?` (Fluxo soma R$ ${fmt(somaFx)}: dif. R$ ${fmt(difSoma)})`:''}`;
+    } else if(/BOLETO|PGTO|PAGAMENTO DE/i.test(String(l.historico_bancario||''))&&!/AMBÍGUO|INTERMEDIADORA/.test(String(l.informacao||''))){
+      const cnpj=_lancctbCnpjsDoTexto(l.historico_bancario)[0]||'—';
+      const nome=String(l.historico_bancario||'').replace(/^(PGTO BOLETO|BOLETO PAGO|PAGAMENTO DE BOLETO)\s+/i,'').replace(/\s*\d{2}[.\s]?\d{3}[.\s]?\d{3}[\s\/]?\d{4}[\s-]?\d{2}.*$/,'').trim();
+      marca=`SEM FLUXO LIGADO — FORNECEDOR PELO HISTÓRICO: ${nome} | CNPJ: ${cnpj} | DATA: ${brd(l.data_pagamento)} | VALOR: R$ ${fmt(l.valor_saida)}`;
+    }
+    if(!marca) continue;
+    const novo=(marca+(base?' || '+base:'')).slice(0,950);
+    if(novo!==String(l.informacao||'')){ await _supaClient.from('lancamentos_extrato').update({informacao:novo}).eq('id',l.id); marcadas++; }
+  }
+  return marcadas;
+}
 async function _lancctbProcessarFluxo(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
@@ -31979,6 +32036,7 @@ async function _lancctbProcessarFluxo(){
     if(statusEl) statusEl.textContent='Aplicando Regras com gatilho de Fluxo…';
     let viaRegra=0;
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
+    try{ const nMarc=await _lancctbMarcarIdentificacaoFluxo(eid,contaId); if(nMarc) console.info(`Fluxo identificado: ${nMarc} pendência(s) com a identificação do Fluxo no campo Informação.`); }catch(e){ console.warn('Marca do Fluxo identificado:',e); }
     const diag=(resNf&&resNf.diagAglutinado)||[];
     if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
     toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de até R$ 0,02 aceita]`:''}${particoes?` [${particoes} grupo(s) de pagamentos do mesmo fornecedor resolvidos em conjunto]`:''}${rotaFopag?` [${rotaFopag} pagamento(s) a funcionário da folha deixados pro Processar FOPAG]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${idsKar.size?` [Karater recebimentos: ${karRes.resolvidos} entrada(s) compostas pelo relatório, ${karRes.ambiguos.length} ambígua(s), ${karRes.semComponente} sem componente]`:''}${idsInterm.size?` [intermediadoras: ${intermRes.resolvidos} resolvida(s) pelo título real${intermRes.compostos?' ('+intermRes.compostos+' por composição)':''}, ${intermRes.ambiguos.length} ambígua(s) real(is)]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
