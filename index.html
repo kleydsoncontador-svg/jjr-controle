@@ -33535,8 +33535,13 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const vF=ehSaida?f.valor_saida:f.valor_entrada;
       return vF&&Math.abs(vF-valor)<0.005&&f.data===l.data_pagamento;
     }):[];
+    // Pedido do usuário 21/10/2026 (Kajuna): é OBRIGATÓRIO que o número da NF bata com o que o Fluxo indica. Se o Fluxo já amarrado a este lançamento traz NF, só a parcela DESSA NF pode ser amarrada;
+    // se ela não existir nas NFs importadas, o lançamento fica PENDENTE (pra criar a Regra via Fluxo) — nunca vai pra outra NF só porque o valor/data bate.
+    const nfsDoFluxoLigado=new Set((fluxoCaixaPonteBase||[]).filter(f=>String(f.lancamento_extrato_id)===String(l.id)).map(f=>String(f.numero||f.documento_numero||'').split('/')[0].replace(/\D/g,'').replace(/^0+/,'')).filter(Boolean));
+    const nfBateFluxoLigado=p=>!nfsDoFluxoLigado.size||nfsDoFluxoLigado.has(String(p.notas_fiscais&&p.notas_fiscais.numero||'').replace(/\D/g,'').replace(/^0+/,''));
     const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_lancctbHistoricoSemNF(l.historico_bancario))?[]:parcelas.filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
+      if(!nfBateFluxoLigado(p)) return false;
       if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
       if(!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,p.notas_fiscais)) return false;
       if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
@@ -33621,6 +33626,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     } else if(cnpjAncora&&!ehPonte&&!bloqueiaNf){
       const doCnpj=parcelas.filter(p=>{
         if(parcelasUsadas.has(p.id)) return false;
+        if(!nfBateFluxoLigado(p)) return false;
         if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
         if(!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,p.notas_fiscais)) return false;
         if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
@@ -35241,12 +35247,12 @@ function _lancctbNfBateInfo(histUsado,fluxoRows){
   const fx=(fluxoRows||[]).filter(Boolean); if(!fx.length) return {estado:null,hist:[],fluxo:[]};
   const nh=_lancctbNfsDoHistorico(histUsado), nf=_lancctbNfsDoFluxo(fx);
   if(!nh.size&&!nf.size) return {estado:null,hist:[],fluxo:[]};
-  const bate=nh.size>0&&nf.size>0&&[...nf].every(n=>nh.has(n));
+  const bate=nh.size>0&&nf.size>0&&([...nf].every(n=>nh.has(n))||[...nh].every(n=>nf.has(n)));
   return {estado:bate?'sim':'nao',hist:[...nh],fluxo:[...nf]};
 }
 function _lancctbRegistroNfBateDoItem(item){
   const h=(item.ctb||[]).find(c=>c.tipo==='D')||(item.ctb||[])[0]; if(!h) return {estado:null,hist:[],fluxo:[]};
-  const fx=item.fluxoConciliado?[item.fluxoConciliado]:(item.fluxoComposicao&&item.fluxoComposicao.itens)||(item.fluxoSugerido?[item.fluxoSugerido]:[]);
+  const fx=item.fluxoConciliadoTodas||(item.fluxoConciliado?[item.fluxoConciliado]:(item.fluxoComposicao&&item.fluxoComposicao.itens)||(item.fluxoSugerido?[item.fluxoSugerido]:[]));
   return _lancctbNfBateInfo(h.historico,fx);
 }
 function _lancctbNfBateCelHtml(info,palpite){
@@ -35913,6 +35919,7 @@ async function renderLancctbRegistroContabil(){
     const fluxoPorExtrato={}, _ligPorExtC={};
     (fluxoAll||[]).forEach(f=>{ if(f.lancamento_extrato_id) (_ligPorExtC[f.lancamento_extrato_id]=_ligPorExtC[f.lancamento_extrato_id]||[]).push(f); });
     (extratoRows||[]).forEach(r=>{ const lig=_ligPorExtC[r.id]; if(lig) fluxoPorExtrato[r.id]=_lancctbEscolherFluxoLigado(lig,r); });
+    conciliadosItens.forEach(it=>{ const lig=_ligPorExtC[it.extrato.id]; if(lig&&lig.length>1) it.fluxoConciliadoTodas=lig; }); // pagamento composto: várias linhas do Fluxo (NF Bate? compara com todas)
     const livres=(fluxoAll||[]).filter(f=>!f.lancamento_extrato_id);
     const usados=new Set();
     conciliadosItens.forEach(item=>{
@@ -36300,7 +36307,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(d.cnpj_cpf))}</td>
       ${parcelaCelsHtml(d.nf_parcela_id?d:(c.nf_parcela_id?c:null))}
       ${fluxoConciliadoCelHtml()}
-      ${_lancctbNfBateCelHtml(_lancctbNfBateInfo(d.historico,item.fluxoConciliado?[item.fluxoConciliado]:[]),item.fluxoConciliado&&!item.fluxoConciliadoLigado)}
+      ${_lancctbNfBateCelHtml(_lancctbNfBateInfo(d.historico,item.fluxoConciliadoTodas||(item.fluxoConciliado?[item.fluxoConciliado]:[])),item.fluxoConciliado&&!item.fluxoConciliadoLigado)}
       ${_lancctbFluxoParamCelHtml(r)}
       ${statusCelHtml}
       ${iaCelHtml(d.origem_match==='ia'?d:c)}
@@ -36328,7 +36335,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         <td style="padding:7px 10px;font-size:11px;font-family:var(--mono);white-space:nowrap">${esc(_fmtCnpjCpf(l.cnpj_cpf))}</td>
         ${parcelaCelsHtml(l)}
         ${fluxoConciliadoCelHtml()}
-        ${_lancctbNfBateCelHtml(_lancctbNfBateInfo(l.historico,item.fluxoConciliado?[item.fluxoConciliado]:[]),item.fluxoConciliado&&!item.fluxoConciliadoLigado)}
+        ${_lancctbNfBateCelHtml(_lancctbNfBateInfo(l.historico,item.fluxoConciliadoTodas||(item.fluxoConciliado?[item.fluxoConciliado]:[])),item.fluxoConciliado&&!item.fluxoConciliadoLigado)}
       ${_lancctbFluxoParamCelHtml(r)}
         ${statusCelHtml}
         ${iaCelHtml(l)}
@@ -36828,7 +36835,7 @@ async function exportarLancctbRegistroExcel(){
       const parcelaDe=l=>{ const dv=(l&&l.notas_fiscais_parcelas&&l.notas_fiscais_parcelas.data_vencimento)||(item.parcelaSugerida&&item.parcelaSugerida.data_vencimento)||''; if(!dv) return ['','']; return [fmtD(dv),dv.slice(0,7)===(r.data_pagamento||'').slice(0,7)?'Sim':'Não']; };
       const ia=l=>(l&&l.origem_match==='ia'&&l.informacao_extra)?l.informacao_extra:'';
       const ds=item.ctb.filter(c=>c.tipo==='D'), cs=item.ctb.filter(c=>c.tipo==='C');
-      const nfb=hu=>{ const i=_lancctbNfBateInfo(hu,item.fluxoConciliado?[item.fluxoConciliado]:[]); return i.estado==='sim'?'Sim':i.estado==='nao'?'Não':''; };
+      const nfb=hu=>{ const i=_lancctbNfBateInfo(hu,item.fluxoConciliadoTodas||(item.fluxoConciliado?[item.fluxoConciliado]:[])); return i.estado==='sim'?'Sim':i.estado==='nao'?'Não':''; };
       if(item.ctb.length&&ds.length===1&&cs.length===1){
         const d=ds[0],c=cs[0], pc=parcelaDe(d);
         rows.push([conta,dataFmt,d.plano_contas?.numero_conta||'',d.classificacao||'',d.plano_contas?.descricao||'',c.plano_contas?.numero_conta||'',c.classificacao||'',c.plano_contas?.descricao||'',valor,r.historico_bancario||'',d.historico||'',d.cliente_fornecedor_nome||'',_fmtCnpjCpf(d.cnpj_cpf),pc[0],pc[1],fluxoTxt,nfb(d.historico),paramTxt,r.status_conciliacao||'',ia(d)||ia(c)]);
