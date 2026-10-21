@@ -7692,13 +7692,6 @@ function _chkComTarefasAuto(eid,c){
       const e=S.empsRaw().find(x=>String(x.eid)===String(eid));
       if(_empJaFoiPresumido(e)) c.tarefas.push({nome:TAREFA_DEMO_TRIM_NOME,info:'',meses:{},formato:''});
     }
-    // Pedido do usuário 21/10/2026: tarefa atribuída a uma empresa em Cronograma → Responsáveis por Tarefa/Documento ("parâmetros") conta como cadastrada no checklist dela
-    // (ex.: "Salvar Balanço Patrimonial (assinado)" com 129 empresas aparecia como "nenhuma empresa tem esta tarefa"). Entra sozinha; só é gravada quando alguém marca uma célula.
-    const atrib=S.g('cronAtribTarefa')||[];
-    atrib.forEach(a=>{
-      if(!a||a.tipo!=='tarefa'||!a.nome||!(a.empresas||[]).map(String).includes(String(eid))) return;
-      if(!c.tarefas.some(t=>String((t&&t.nome)||'')===String(a.nome))) c.tarefas.push({nome:a.nome,info:'',meses:{},formato:''});
-    });
   }catch(_){}
   return c;
 }
@@ -64019,7 +64012,20 @@ function abrirCronAtribModal(){ _cronAtribTab='tarefa'; _cronAtribFormAberto=fal
 // Visão Geral (mesmo dado, sem precisar de nenhuma lógica de sync separada).
 function _cronAtribAbrirTarefa(nome){ _cronAtribTarefaSel=nome; _cronAtribRenderFull(); }
 function _cronAtribFecharTarefa(){ _cronAtribTarefaSel=null; _cronAtribRenderFull(); }
+// Pedido do usuário 21/10/2026: tarefa do Cronograma (Responsáveis por Tarefa) é UMA TAREFA À PARTE, cobrada só do operador responsável — NÃO entra no checklist da Visão Geral. O status por empresa/mês fica em 'cronTarefaStatus' ({tarefa:{eid:{AAAA-MM:'ok'|'na'|'sm'}}}).
+function _cronTarefaStatusGet(){ const v=S.g('cronTarefaStatus'); return (v&&typeof v==='object'&&!Array.isArray(v))?v:{}; }
 function _cronAtribTarefaToggleCel(eid,idx,mes){
+  if(idx<0){
+    const nome=_cronAtribTarefaSel; if(!nome) return;
+    const todo=JSON.parse(JSON.stringify(_cronTarefaStatusGet()));
+    const porEmp=todo[nome]=todo[nome]||{}, meses=porEmp[String(eid)]=porEmp[String(eid)]||{};
+    const cur=meses[mes]||'';
+    const novo=cur===''?'ok':cur==='ok'?'na':cur==='na'?'sm':'';
+    if(novo) meses[mes]=novo; else delete meses[mes];
+    S.s('cronTarefaStatus',todo);
+    _cronAtribRenderFull();
+    return;
+  }
   const chk=S.chk(String(eid));
   const item=(chk.tarefas||[])[idx]; if(!item) return;
   if(!item.meses) item.meses={};
@@ -64052,20 +64058,22 @@ function _cronAtribTarefaDetalheHtml(nome){
   const meses12=Array.from({length:12},(_,i)=>anoFech+'-'+String(i+1).padStart(2,'0'));
   const fech=S.fechAtual();
   const linhas=[];
+  const stCron=_cronTarefaStatusGet()[nome]||{};
   S.emps().forEach(e=>{
     const tarefas=S.chk(String(e.eid)).tarefas||[];
     const idx=tarefas.findIndex(t=>(t.nome||'')===nome);
-    if(idx<0) return;
-    const resps=[...new Set(_cronAtribuicoes().filter(a=>a.tipo==='tarefa'&&a.nome===nome&&(a.empresas||[]).includes(String(e.eid))).map(a=>a.resp))];
-    linhas.push({eid:String(e.eid),nome:e.nome||'',resp:resps.join(', ')||'—',idx,item:tarefas[idx],emp:e});
+    const resps=[...new Set(_cronAtribuicoes().filter(a=>a.tipo==='tarefa'&&a.nome===nome&&(a.empresas||[]).map(String).includes(String(e.eid))).map(a=>a.resp))];
+    // Empresa com a tarefa JÁ no checklist (criada na Visão Geral) mantém o vínculo antigo; empresa só atribuída aqui usa o status próprio do Cronograma.
+    if(idx<0&&!resps.length) return;
+    linhas.push({eid:String(e.eid),nome:e.nome||'',resp:resps.join(', ')||'—',idx:idx<0?-1:idx,item:idx>=0?tarefas[idx]:{nome,info:'',formato:'',meses:stCron[String(e.eid)]||{}},emp:e});
   });
   linhas.sort((a,b)=>Number(a.eid||0)-Number(b.eid||0));
   let h=`<button class="btn bo bsm" onclick="_cronAtribFecharTarefa()" style="margin-bottom:12px">← Voltar à lista de tarefas</button>
   <div class="ptitle" style="margin-bottom:4px">${esc(nome)}</div>
-  <div style="font-size:12px;color:var(--slate);margin-bottom:12px">${linhas.length} empresa${linhas.length!==1?'s':''} com esta tarefa cadastrada no checklist. Clique numa célula pra alternar Pendente → Entregue → N/A → Sem Movimento — o mesmo dado da Visão Geral desta empresa.</div>`;
+  <div style="font-size:12px;color:var(--slate);margin-bottom:12px">${linhas.length} empresa${linhas.length!==1?'s':''} com esta tarefa atribuída. É uma tarefa à parte do Cronograma (cobrada só do responsável, não aparece na Visão Geral da empresa). Clique numa célula pra alternar Pendente → Entregue → N/A → Sem Movimento.</div>`;
   h+=_cronOrientacaoHtml(nome);
   if(!linhas.length){
-    h+=`<div style="color:var(--slate);padding:20px;text-align:center">Nenhuma empresa tem esta tarefa cadastrada no checklist (Visão Geral → ficha da empresa → Tarefas adicionais).</div>`;
+    h+=`<div style="color:var(--slate);padding:20px;text-align:center">Nenhuma empresa tem esta tarefa atribuída (use "Editar" na lista de tarefas e adicione as empresas).</div>`;
     return h;
   }
   h+=`<div style="overflow:auto;max-height:70vh;border:1px solid var(--border);border-radius:var(--r)"><table class="pend-t" style="width:100%;border-collapse:collapse;font-size:12px;background:var(--white)"><thead style="position:sticky;top:0;z-index:2"><tr>
