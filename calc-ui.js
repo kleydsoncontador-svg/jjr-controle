@@ -535,7 +535,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   const pv2 = (s, k) => s.params[k] && s.params[k].value;
   function setsTab(chaves) { return C.todosSets().filter(s => chaves.includes(s.calculator_key) && s.status === 'ativo' && (s.valid_to || '9999-12-31') >= '2021-01-01' && s.valid_from <= '2026-12-31').sort((a, b) => a.valid_from < b.valid_from ? 1 : a.valid_from > b.valid_from ? -1 : b.version - a.version); }
   function situacaoSet(s) {
-    const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {}; const bs = (s.bases || []).map(id => C.CALC_BASES.find(b => b.id === id)).filter(Boolean);
+    const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {}; const bs = (s.bases || []).filter(id => /^TAB_/.test(id)).map(id => C.CALC_BASES.find(b => b.id === id)).filter(Boolean); // só a base da própria tabela decide "conferida"
     const ok = bs.length && bs.every(b => ver[b.id] || b.ultima_verificacao); return ok ? '<span class="calc-tag ok">conferida na fonte</span>' : '<span class="calc-tag warn">não conferida na fonte</span>';
   }
   const fonteSet = s => { const b = (s.bases || []).map(id => C.CALC_BASES.find(x => x.id === id)).filter(Boolean).find(x => /TAB_/.test(x.id)); return b ? `<a href="${E(b.fonte)}" target="_blank" rel="noopener">${E(b.norma + ' ' + b.numero)}</a>` : '—'; };
