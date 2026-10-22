@@ -8903,6 +8903,18 @@ function toggleVerSaidasEmpresas(){
   if(sel) sel.value = _empListColF.status;
   renderEmpresasPage();
 }
+function _feGrupoMontar(sel,valor){
+  const c=S.g('gruposeconomicos'); if(Array.isArray(c)&&c.length) _gruposEconomicos=c;
+  const ativos=_gruposEconomicos.filter(g=>g&&!g.dataSaida&&g.nome).map(g=>g.nome).sort((a,b)=>a.localeCompare(b,'pt-BR'));
+  sel.innerHTML='<option value="">— Nenhum —</option>';
+  ativos.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=g; sel.appendChild(o); });
+  if(valor&&!ativos.includes(valor)){
+    const o=document.createElement('option'); o.value=valor;
+    o.textContent=valor+(_gruposEconomicos.some(g=>g&&g.nome===valor)?' (grupo encerrado)':' (não está na lista de grupos)');
+    sel.appendChild(o);
+  }
+  sel.value=valor||'';
+}
 function abrirCadastroEmpresa(eid){
   _formEmpEid = eid||null;
   const lista = document.getElementById('page-empresas-lista');
@@ -8921,12 +8933,14 @@ function abrirCadastroEmpresa(eid){
   // excluído DEPOIS em "Grupos Econômicos" nunca aparecia aqui, mesmo essa
   // tela já tendo aberto uma vez antes. Sempre reconstrói, preservando a
   // seleção atual (mesmo cuidado já usado em fillSelects() pro "eGrupo").
+  // 22/10/2026 ("os grupos econômicos cadastrados não aparecem"): a lista em memória é carregada na abertura do site, ANTES do login terminar de sincronizar, e podia estar vazia aqui — a caixa ficava em branco e, ao salvar, a empresa perdia o grupo.
+  // Agora relê o cache a cada abertura, consulta a nuvem se ainda estiver vazio e SEMPRE inclui o grupo atual da empresa na lista (mesmo encerrado ou ausente), pra nunca apagá-lo sem querer.
   {
-    const cv=grupoSel.value;
-    grupoSel.innerHTML='<option value="">— Nenhum —</option>';
-    const grupos = _gruposEconomicos.filter(g=>!g.dataSaida).map(g=>g.nome).sort();
-    grupos.forEach(g=>{ const o=document.createElement('option'); o.value=g; o.textContent=g; grupoSel.appendChild(o); });
-    if(cv) grupoSel.value=cv;
+    const _empEdit=eid?(emps.find(e=>String(e.eid)===String(eid))||{}):{};
+    _feGrupoMontar(grupoSel,_empEdit.grupoNome||grupoSel.value||'');
+    if(!_gruposEconomicos.length){
+      carregarGruposEconomicos().then(()=>{ if(_gruposEconomicos.length&&grupoSel.isConnected) _feGrupoMontar(grupoSel,grupoSel.value); }).catch(()=>{});
+    }
   }
   if(!eid){
     // Nova empresa
@@ -10905,10 +10919,15 @@ function _lerSociosRfbForm(){
   return [...document.querySelectorAll('#feSocios .socio-rfb-row')].map(r=>{ const i=r.querySelectorAll('input'); return {nome:(i[0].value||'').trim(),qualificacao:(i[1].value||'').trim(),percentual:(i[2].value||'').trim(),entrada:r.dataset.entrada||''}; }).filter(x=>x.nome);
 }
 function _rfbNormalizar(d){
+  const qsa=(d.qsa||[]).map(q=>({nome:(q.nome_socio||'').trim(),qualificacao:q.qualificacao_socio||'',entrada:q.data_entrada_sociedade||''})).filter(q=>q.nome);
+  // 22/10/2026 (LIVIA FRANCINE MAION, 15.793.312/0001-77): Empresário Individual (e MEI) NÃO tem quadro societário na Receita — "qsa" vem vazio. O titular é a própria razão social (no MEI vem seguida do CPF), com 100%.
+  const ehEi=String(d.codigo_natureza_juridica||'')==='2135'||/empres[aá]rio\s*\(individual\)/i.test(String(d.natureza_juridica||''));
+  const titular=String(d.razao_social||'').replace(/\s+\d{11}\s*$/,'').trim();
+  const socios=(!qsa.length&&ehEi&&titular)?[{nome:titular,qualificacao:'Titular (Empresário Individual)',entrada:d.data_inicio_atividade||'',percentual:'100'}]:qsa;
   return {nome:d.razao_social||'',fantasia:d.nome_fantasia||'',atividade:d.cnae_fiscal_descricao||'',
     cnaes:(d.cnaes_secundarios||[]).map(c=>c.descricao).filter(Boolean),natJur:d.natureza_juridica||'',porte:d.porte||'',
     capital:(d.capital_social!=null&&d.capital_social!=='')?Number(d.capital_social):null,
-    socios:(d.qsa||[]).map(q=>({nome:(q.nome_socio||'').trim(),qualificacao:q.qualificacao_socio||'',entrada:q.data_entrada_sociedade||''})).filter(q=>q.nome)};
+    socios};
 }
 // Compara o cadastro SALVO (antes da atualização) com o que a Receita devolveu agora. Só registra mudança de algo
 // que já estava preenchido (a 1ª carga de capital/sócios vira base, sem ruído). Sempre mostra "era X → agora Y".
@@ -10931,7 +10950,7 @@ function _rfbDiff(ant, novo){
   return out;
 }
 function _rfbSociosComPercentual(antSocios, novos){
-  return novos.map(n=>{ const a=(antSocios||[]).find(x=>String(x.nome||'').trim().toUpperCase()===n.nome.toUpperCase()); return Object.assign({},n,{percentual:a?(a.percentual||''):''}); });
+  return novos.map(n=>{ const a=(antSocios||[]).find(x=>String(x.nome||'').trim().toUpperCase()===n.nome.toUpperCase()); return Object.assign({},n,{percentual:a?(a.percentual||n.percentual||''):(n.percentual||'')}); });
 }
 function addEmailFieldForm(val='', nome='', whatsapp='', principal=false, naoEnviar=false){
   const wrap = document.getElementById('feEmailFields');
