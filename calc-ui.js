@@ -84,11 +84,11 @@
       { k: 'mutuante', l: 'Quem empresta (mutuante)', t: 'select', def: 'PF', opts: [['PF', 'Pessoa física'], ['PJ', 'Pessoa jurídica']] },
       { k: 'mutuario', l: 'Quem recebe (mutuário)', t: 'select', def: 'PJ', opts: [['PF', 'Pessoa física'], ['PJ', 'Pessoa jurídica']] },
       { k: 'mesmoGrupo', l: 'Mesmo grupo econômico', t: 'bool', def: false },
-      { k: 'principal', l: 'Principal (R$)', t: 'money' }, { k: 'dataLiberacao', l: 'Data de liberação', t: 'date' }, { k: 'dataVencimento', l: 'Data de vencimento', t: 'date' },
+      { k: 'principal', l: 'Principal (R$)', t: 'money' }, { k: 'dataLiberacao', l: 'Data de liberação', t: 'date' }, { k: 'dataVencimento', l: 'Data de vencimento (opcional — da parcela única ou da 1ª parcela; vazio = prazo indeterminado, IOF por 365 dias)', t: 'date' }, { k: 'numParcelas', l: 'Número de parcelas (opcional — vazio = pagamento único)', t: 'int', def: '' },
       { k: 'valorJuros', l: 'Juros totais do período (R$)', t: 'money' }, { k: 'taxaJuros', l: '…ou taxa de juros do período (%) — usada se os juros acima estiverem vazios', t: 'pct' },
       { k: 'mutuarioSimples', l: 'Mutuário optante pelo Simples Nacional / MEI', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' },
       { k: 'contaCorrente', l: 'Operação em conta corrente (saldo devedor diário)', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' }],
-      resumo: r => [['Dias', String(r.dias)], ['Juros', r.juros], ['IOF', r.iof == null ? 'não calculado' : r.iof, 1], ['IRRF sobre os juros', r.irrf_juros == null ? 'não se aplica' : r.irrf_juros, 1]] },
+      resumo: r => [['Dias', r.dias == null ? 'indeterminado (IOF: 365)' : String(r.dias)], ['Parcelas', r.parcelas > 1 ? r.parcelas + ' mensais' : 'pagamento único'], ['Juros', r.juros], ['IOF', r.iof == null ? 'não calculado' : r.iof, 1], ['IRRF sobre os juros', r.irrf_juros == null ? 'não calculado / não se aplica' : r.irrf_juros, 1]] },
     jcp: { titulo: 'JCP — Juros sobre o Capital Próprio', desc: 'TJLP pro rata dia sobre o patrimônio líquido, limite de 50%, IRRF e economia fiscal. Só calcula se a TJLP de todos os trimestres do período estiver cadastrada (4º tri/2026 ainda não).', campos: [
       { k: 'dataInicio', l: 'Início do período', t: 'date', def: () => new Date().getFullYear() + '-01-01' }, { k: 'dataFim', l: 'Fim do período', t: 'date', def: () => new Date().getFullYear() + '-06-30' },
       { k: 'dataPagamento', l: 'Data do pagamento/crédito (define o IRRF) — vazio = fim do período', t: 'date' },
@@ -162,6 +162,7 @@
 .calc-grid .cf{display:flex;flex-direction:column;gap:3px}
 .calc-grid .cf.bool{flex-direction:row;align-items:center;gap:8px;padding-top:18px}
 .calc-grid .cf.bool input{width:auto}
+.calc-sfx{position:relative;display:block}.calc-sfx input{width:100%;padding-right:26px;box-sizing:border-box}.calc-sfx>span{position:absolute;right:9px;top:50%;transform:translateY(-50%);color:var(--slate);font-size:13px;pointer-events:none}
 .calc-sec{grid-column:1/-1;border-top:1px dashed var(--border);padding-top:10px;margin-top:2px}
 .calc-sec h4{margin:0 0 6px;font:600 12px var(--sans);color:var(--ink3)}
 .calc-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:6px;flex-wrap:wrap}
@@ -226,12 +227,36 @@
   window.calcAbrir = function (k) { est.aba = 'calc'; est.key = k; est.ultimo = null; est.ativ = []; est.herd = []; window.renderCalculadoras(); };
 
   // ───────────────────────────── formulário ─────────────────────────────
+  // Máscara de valor em reais enquanto digita: 100000 → 100.000 ; ao sair do campo completa os centavos → 100.000,00 (pedido do usuário 22/10/2026). O motor entende "1.234,56".
+  function maskMoney(str, fim) {
+    let s = String(str == null ? '' : str).replace(/[^\d,.]/g, '');
+    let dec = null, int;
+    const iv = s.indexOf(',');
+    if (iv >= 0) { int = s.slice(0, iv).replace(/\D/g, ''); dec = s.slice(iv + 1).replace(/\D/g, '').slice(0, 2); }
+    else { const m = s.match(/^(.*)\.(\d{1,2})$/); if (m && (m[1].match(/\./g) || []).length === 0) { int = m[1].replace(/\D/g, ''); dec = m[2]; } else int = s.replace(/\D/g, ''); }
+    int = int.replace(/^0+(?=\d)/, '');
+    if (int === '' && dec === null) return '';
+    if (int === '') int = '0';
+    const milhar = int.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
+    if (fim) return milhar + ',' + String(dec == null ? '' : dec).padEnd(2, '0');
+    return milhar + (dec === null ? '' : ',' + dec);
+  }
+  window.calcMaskMoney = function (el) {
+    const antes = el.value, pos = el.selectionStart == null ? antes.length : el.selectionStart;
+    const sig = antes.slice(0, pos).replace(/[^\d,]/g, '').length; // dígitos+vírgula antes do cursor
+    const novo = maskMoney(antes, false); if (novo === antes) return; el.value = novo;
+    let cnt = 0, p = 0; while (p < novo.length && cnt < sig) { if (/[\d,]/.test(novo[p])) cnt++; p++; }
+    try { el.setSelectionRange(p, p); } catch (e) { }
+  };
+  window.calcFmtMoney = function (el) { el.value = maskMoney(el.value, true); };
+  const MASK = 'data-m="money" oninput="calcMaskMoney(this)" onblur="calcFmtMoney(this)"';
+  const sfx = (inp, s) => `<span class="calc-sfx">${inp}<span>${s}</span></span>`;
   function campoHtml(c) {
     const id = 'cf_' + c.k; const def = typeof c.def === 'function' ? c.def() : (c.def === undefined ? '' : c.def);
     if (c.t === 'atividades') return '<div class="calc-sec" id="calcAtivBox"></div>';
     if (c.t === 'quotas') return `<div class="calc-sec" id="calcQuotasBox"><h4>Avaliação da participação societária (informe os componentes — o sistema não estima o valor da empresa)</h4><div class="calc-grid">${[
       ['q_patrimonioLiquido', 'Patrimônio líquido contábil (R$)'], ['q_ajusteAtivos', 'Ajustes de ativos a valor de mercado (R$)'], ['q_ajustePassivos', 'Ajustes de passivos (R$)'], ['q_goodwill', 'Fundo de comércio / goodwill (R$)'], ['q_outraMetodologia', 'OU valor da empresa por outra metodologia (R$)'], ['q_percentualParticipacao', '% de participação transmitida']
-    ].map(([k, l]) => `<div class="cf"><label class="fl">${l}</label><input class="fi" id="cf_${k}" inputmode="decimal" ${k === 'q_percentualParticipacao' ? 'value="100"' : ''}></div>`).join('')}</div></div>`;
+    ].map(([k, l]) => `<div class="cf"><label class="fl">${l}</label>${k === 'q_percentualParticipacao' ? sfx(`<input class="fi" id="cf_${k}" inputmode="decimal" value="100">`, '%') : `<input class="fi" id="cf_${k}" inputmode="decimal" placeholder="0,00" ${MASK}>`}</div>`).join('')}</div></div>`;
     if (c.t === 'herdeiros') return '<div class="calc-sec" id="calcHerdBox"></div>';
     let inp;
     if (c.t === 'bool') return `<div class="cf bool" data-k="${c.k}"><input type="checkbox" id="${id}" ${def ? 'checked' : ''} onchange="calcRefreshQuando()"><label class="fl" for="${id}">${E(c.l)}</label></div>`;
@@ -239,7 +264,9 @@
     else if (c.t === 'month') inp = `<input class="fi" type="month" id="${id}" value="${E(def)}">`;
     else if (c.t === 'date') inp = `<input class="fi" type="date" id="${id}" value="${E(def)}">`;
     else if (c.t === 'int') inp = `<input class="fi" id="${id}" inputmode="numeric" value="${E(def)}">`;
-    else inp = `<input class="fi" id="${id}" inputmode="decimal" value="${E(def)}" placeholder="${c.t === 'money' ? '0,00' : ''}">`;
+    else if (c.t === 'money') inp = `<input class="fi" id="${id}" inputmode="decimal" value="${E(def)}" placeholder="0,00" ${MASK}>`;
+    else if (c.t === 'pct') inp = sfx(`<input class="fi" id="${id}" inputmode="decimal" value="${E(def)}" placeholder="0">`, '%');
+    else inp = `<input class="fi" id="${id}" inputmode="decimal" value="${E(def)}">`;
     return `<div class="cf" data-k="${c.k}"><label class="fl" for="${id}">${E(c.l)}</label>${inp}</div>`;
   }
   function renderCalc() {
@@ -271,8 +298,8 @@
     const opts = Object.entries(ativ).map(([k, a]) => [k, a.nome]).concat([['outra', 'Outra (informar percentuais)']]);
     box.innerHTML = '<h4>Receita bruta do trimestre por atividade</h4>' + est.ativ.map((a, i) => `<div class="calc-row">
       <div style="flex:2;min-width:180px"><label class="fl">Atividade</label><select class="fi" style="width:100%" onchange="calcAtivSet(${i},'tipo',this.value)">${opts.map(([k, n]) => `<option value="${k}" ${a.tipo === k ? 'selected' : ''}>${E(n)}</option>`).join('')}</select></div>
-      <div><label class="fl">Receita bruta (R$)</label><input class="fi" inputmode="decimal" value="${E(a.receita)}" oninput="calcAtivSet(${i},'receita',this.value,1)" placeholder="0,00"></div>
-      ${a.tipo === 'outra' ? `<div><label class="fl">Presunção IRPJ (%)</label><input class="fi" value="${E(a.irpj || '')}" oninput="calcAtivSet(${i},'irpj',this.value,1)"></div><div><label class="fl">Presunção CSLL (%)</label><input class="fi" value="${E(a.csll || '')}" oninput="calcAtivSet(${i},'csll',this.value,1)"></div><div><label class="fl">Nome</label><input class="fi" value="${E(a.nome || '')}" oninput="calcAtivSet(${i},'nome',this.value,1)"></div>` : ''}
+      <div><label class="fl">Receita bruta (R$)</label><input class="fi" inputmode="decimal" value="${E(a.receita)}" oninput="calcMaskMoney(this);calcAtivSet(${i},'receita',this.value,1)" onblur="calcFmtMoney(this);calcAtivSet(${i},'receita',this.value,1)" placeholder="0,00"></div>
+      ${a.tipo === 'outra' ? `<div><label class="fl">Presunção IRPJ</label>${sfx(`<input class="fi" value="${E(a.irpj || '')}" oninput="calcAtivSet(${i},'irpj',this.value,1)">`, '%')}</div><div><label class="fl">Presunção CSLL</label>${sfx(`<input class="fi" value="${E(a.csll || '')}" oninput="calcAtivSet(${i},'csll',this.value,1)">`, '%')}</div><div><label class="fl">Nome</label><input class="fi" value="${E(a.nome || '')}" oninput="calcAtivSet(${i},'nome',this.value,1)"></div>` : ''}
       ${est.ativ.length > 1 ? `<button class="btn bo bsm" onclick="calcAtivDel(${i})">remover</button>` : ''}</div>`).join('') + '<button class="btn bo bsm" onclick="calcAtivAdd()">+ atividade</button>';
   }
   window.calcAtivSet = (i, k, v, semRender) => { est.ativ[i][k] = v; if (!semRender) renderAtiv(); };
@@ -282,7 +309,7 @@
     const box = document.getElementById('calcHerdBox'); if (!box) return;
     box.innerHTML = '<h4>Herdeiros / legatários — cada quinhão é calculado individualmente (deixe em branco para dividir igualmente)</h4>' + est.herd.map((h, i) => `<div class="calc-row">
       <div style="flex:2"><label class="fl">Nome</label><input class="fi" value="${E(h.nome)}" oninput="calcHerdSet(${i},'nome',this.value)"></div>
-      <div><label class="fl">Quinhão (R$)</label><input class="fi" inputmode="decimal" value="${E(h.quinhao)}" oninput="calcHerdSet(${i},'quinhao',this.value)"></div>
+      <div><label class="fl">Quinhão (R$)</label><input class="fi" inputmode="decimal" value="${E(h.quinhao)}" placeholder="0,00" oninput="calcMaskMoney(this);calcHerdSet(${i},'quinhao',this.value)" onblur="calcFmtMoney(this);calcHerdSet(${i},'quinhao',this.value)"></div>
       ${est.herd.length > 1 ? `<button class="btn bo bsm" onclick="calcHerdDel(${i})">remover</button>` : ''}</div>`).join('') + '<button class="btn bo bsm" onclick="calcHerdAdd()">+ herdeiro</button>';
   }
   window.calcHerdSet = (i, k, v) => { est.herd[i][k] = v; };

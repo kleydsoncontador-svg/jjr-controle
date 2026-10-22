@@ -595,18 +595,32 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
 
   // ───────────────────────────── Mútuo / IOF / juros / IRRF ─────────────────────────────
   function diasEntre(a, b) { const d1 = Date.UTC(+a.slice(0, 4), +a.slice(5, 7) - 1, +a.slice(8, 10)), d2 = Date.UTC(+b.slice(0, 4), +b.slice(5, 7) - 1, +b.slice(8, 10)); return Math.round((d2 - d1) / 864e5); }
+  // soma meses a uma data AAAA-MM-DD mantendo o dia (dia 31 em mês curto → último dia do mês)
+  function somaMeses(iso, n) { const a = +iso.slice(0, 4), m = +iso.slice(5, 7) - 1, d = +iso.slice(8, 10); const t = m + n, ano = a + Math.floor(t / 12), mes = ((t % 12) + 12) % 12; const ult = new Date(Date.UTC(ano, mes + 1, 0)).getUTCDate(); return ano + '-' + String(mes + 1).padStart(2, '0') + '-' + String(Math.min(d, ult)).padStart(2, '0'); }
   function calcMutuo(inp) {
-    const ini = String(inp.dataLiberacao || '').slice(0, 10), fim = String(inp.dataVencimento || '').slice(0, 10);
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(ini) || !/^\d{4}-\d{2}-\d{2}$/.test(fim) || fim < ini) return ERR('Informe a data de liberação e a data de vencimento (vencimento não pode ser anterior).');
+    // Pedido do usuário 22/10/2026: nº de parcelas e data de vencimento OPCIONAIS. Sem vencimento (e sem parcelas) = prazo indeterminado → IOF por 365 dias sobre o principal (Decreto 6.306, art. 7º, § 14).
+    // Com N parcelas (N ≥ 2): principal dividido em N partes iguais (resto de centavos na última), vencimentos MENSAIS a partir da data informada (1ª parcela); IOF = Σ principal da parcela × alíquota diária × dias da liberação ao vencimento de cada uma (art. 7º, I, "b": "o valor do principal de cada uma das parcelas"), até 365 dias (§ 1º), + adicional de 0,38% uma vez sobre o principal.
+    const ini = String(inp.dataLiberacao || '').slice(0, 10), fimRaw = String(inp.dataVencimento || '').slice(0, 10);
+    const temFim = /^\d{4}-\d{2}-\d{2}$/.test(fimRaw), fim = temFim ? fimRaw : '';
+    const nParc = (inp.numParcelas === undefined || inp.numParcelas === null || String(inp.numParcelas).trim() === '') ? 1 : parseInt(inp.numParcelas, 10);
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ini)) return ERR('Informe a data de liberação.');
+    if (temFim && fim < ini) return ERR('A data de vencimento não pode ser anterior à data de liberação.');
+    if (!(nParc >= 1 && nParc <= 360)) return ERR('Número de parcelas inválido (use de 1 a 360, ou deixe vazio para pagamento único).');
+    if (nParc > 1 && !temFim) return ERR('Para mais de uma parcela, informe a data de vencimento da 1ª parcela (as demais vencem mês a mês).');
+    const indeterminado = !temFim, parcelado = nParc > 1;
     const principal = cents(inp.principal), mem = Mem(), avisos = [], sets = [];
-    const dias = diasEntre(ini, fim); const mutuante = inp.mutuante, mutuario = inp.mutuario;
+    const dias = temFim ? diasEntre(ini, fim) : null; const mutuante = inp.mutuante, mutuario = inp.mutuario;
     let juros = cents(inp.valorJuros);
     if (!juros && inp.taxaJuros) { juros = mulC(principal, pct(inp.taxaJuros)); }
-    mem.t('Operação'); mem.l('Principal', principal); mem.i('Prazo (dias corridos)', dias); mem.l('Juros', juros);
+    mem.t('Operação'); mem.l('Principal', principal);
+    if (indeterminado) mem.txt('Prazo', 'indeterminado (sem data de vencimento) — o IOF usa 365 dias (art. 7º, § 14)');
+    else if (parcelado) mem.txt('Pagamento', nParc + ' parcelas mensais de principal; 1ª em ' + fim.split('-').reverse().join('/') + ' (' + dias + ' dias da liberação)');
+    else mem.i('Prazo (dias corridos)', dias);
+    mem.l('Juros', juros);
     mem.txt('Mutuante → Mutuário', mutuante + ' → ' + mutuario + (inp.mesmoGrupo ? ' (mesmo grupo econômico)' : ''));
     if (inp.mesmoGrupo) mem.n('Pertencer ao mesmo grupo econômico NÃO dispensa o IOF automaticamente.');
     if (mutuante === 'PF' && mutuario === 'PF') return ERR('Mútuo PF → PF: tratar em módulo próprio conforme a natureza da operação.');
-    let iofC = null, iofMsg = '';
+    let iofC = null, iofMsg = '', detParc = [];
     // IOF — só quando o mutuante é PJ (PJ→PJ e PJ→PF)
     if (mutuante === 'PJ') {
       if (inp.contaCorrente) iofMsg = 'Conta corrente: o IOF depende do saldo devedor diário — não calculado por esta versão.';
@@ -621,15 +635,31 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
             const usaSimples = !!inp.mutuarioSimples && mutuario === 'PJ' && pv(sIof, 'taxa_diaria_simples') !== undefined && limS !== null && principal <= limS;
             const chave = usaSimples ? 'taxa_diaria_simples' : (mutuario === 'PF' && pv(sIof, 'taxa_diaria_pf') !== undefined ? 'taxa_diaria_pf' : 'taxa_diaria');
             const taxa = dec(pv(sIof, chave)), adic = dec(pv(sIof, 'adicional') || '0'), limDias = parseInt(pv(sIof, 'limite_dias') || 365, 10);
-            const dt = Math.min(dias, limDias);
+            const dt = indeterminado ? limDias : Math.min(dias, limDias);
             mem.t('IOF (conjunto ' + sIof.id + ' v' + sIof.version + ')');
             mem.txt('Alíquota diária aplicada', (Number(pv(sIof, chave)) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 5 }) + '% ao dia' + (usaSimples ? ' (Simples/MEI, operação até ' + brl(limS) + ')' : (mutuario === 'PF' ? ' (mutuário pessoa física)' : ' (mutuário pessoa jurídica)')));
             if (inp.mutuarioSimples && !usaSimples) mem.n('Taxa reduzida do Simples não aplicada: ' + (mutuario !== 'PJ' ? 'mutuário não é PJ.' : 'a operação passa de ' + brl(limS || 0) + '.'));
-            const diario = qRound(qMul(mulQ(principal, taxa), Q(dt)));
-            mem.l('Principal × alíquota diária × ' + dt + ' dias tributáveis (limite de ' + limDias + ' dias)', diario, '×');
+            let diario;
+            if (parcelado) {
+              // parcelas iguais de principal; o resto de centavos fica na última; um único arredondamento no total do IOF diário
+              const base = Math.floor(principal / nParc), resto = principal - base * nParc; let acc = Q(0); detParc = [];
+              for (let i = 1; i <= nParc; i++) {
+                const pP = base + (i === nParc ? resto : 0), ven = somaMeses(fim, i - 1), dd = diasEntre(ini, ven), dtI = Math.min(dd, limDias);
+                const exato = qMul(mulQ(pP, taxa), Q(dtI)); acc = qAdd(acc, exato);
+                detParc.push({ n: i, vencimento: ven, dias: dd, dias_tributaveis: dtI, principal: pP, iof_diario: qRound(exato) });
+              }
+              diario = qRound(acc);
+              mem.t('IOF por parcela de principal (' + nParc + ' parcelas — art. 7º, I, "b")');
+              detParc.forEach(p => mem.l('Parcela ' + p.n + ' — vence ' + p.vencimento.split('-').reverse().join('/') + ': ' + brl(p.principal) + ' × alíquota × ' + p.dias_tributaveis + ' dias' + (p.dias > limDias ? ' (limitado a ' + limDias + ')' : ''), p.iof_diario, '+'));
+              mem.s('IOF diário total (soma exata das parcelas, arredondada uma só vez)', diario);
+              mem.n('Principal dividido em ' + nParc + ' partes iguais (resto de centavos na última) e vencimentos mensais — premissa da calculadora; se o contrato tiver outra distribuição, o IOF muda.');
+            } else {
+              diario = qRound(qMul(mulQ(principal, taxa), Q(dt)));
+              mem.l('Principal × alíquota diária × ' + dt + ' dias tributáveis (limite de ' + limDias + ' dias)' + (indeterminado ? ' — prazo indeterminado (§ 14)' : ''), diario, '×');
+            }
             const ad = mulC(principal, adic); mem.l('(+) Adicional de ' + (Number(pv(sIof, 'adicional')) * 100).toLocaleString('pt-BR') + '% sobre o principal', ad, '+');
             iofC = diario + ad; mem.tot('IOF', iofC);
-            avisos.push('IOF calculado para pagamento em parcela única com principal definido. Operações com liberação parcelada ou várias parcelas de principal exigem o cálculo por parcela — não feito aqui.');
+            avisos.push(parcelado ? 'IOF calculado por parcela de principal (art. 7º, I, "b"), com principal dividido em partes iguais e vencimentos mensais. Liberação do crédito em parcelas (art. 7º, IV) não é calculada aqui.' : (indeterminado ? 'Sem data de vencimento: IOF calculado por 365 dias sobre o principal (art. 7º, § 14, prazo indeterminado com principal definido); o IRRF sobre juros exige o prazo e não foi calculado.' : 'IOF calculado para pagamento em parcela única com principal definido. Para pagamento em várias parcelas informe o número de parcelas; liberação do crédito em parcelas (art. 7º, IV) não é calculada aqui.'));
             avisos.push('As alíquotas vigentes decorrem do Decreto 12.499/2025, restabelecido por MEDIDA CAUTELAR do STF (ADC 96); o julgamento de mérito pode mudar o quadro.');
             avisos.push('O IOF é recolhido pela pessoa jurídica que concede o crédito, até o 3º dia útil da semana seguinte à concessão (Lei 9.779/1999, art. 13, § 3º).');
           }
@@ -638,7 +668,8 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     } else { mem.n('Mutuante PF: não há pessoa jurídica concedente para ser responsável pelo IOF (Lei 9.779/1999, art. 13, § 2º) — sem IOF automático.'); avisos.push('Mútuo concedido por pessoa física: o caput do art. 13 da Lei 9.779/1999 cita mútuo "entre pessoa jurídica e pessoa física" sem distinguir o sentido; esta calculadora segue a regra informada (sem IOF automático). Confirme o entendimento da Receita para o seu caso.'); }
     // IRRF sobre os JUROS (nunca sobre o principal) quando o mutuário PJ paga juros
     let irrfC = null;
-    if (mutuario === 'PJ' && juros > 0) {
+    if (mutuario === 'PJ' && juros > 0 && (indeterminado || parcelado)) avisos.push('IRRF sobre juros NÃO calculado: ' + (parcelado ? 'com várias parcelas a lei não define como os juros se distribuem entre elas (a alíquota depende do prazo de cada pagamento).' : 'sem data de vencimento não há prazo para a tabela regressiva.'));
+    else if (mutuario === 'PJ' && juros > 0) {
       const sR = acharSet('mutuo_irrf_juros', fim);
       if (!sR) avisos.push('IRRF dos juros: ' + ERRO_PARAM);
       else {
@@ -649,7 +680,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       }
     }
     if (iofMsg) avisos.push(iofMsg);
-    return { ok: true, resultado: { dias, juros, iof: iofC, irrf_juros: irrfC }, memoria: mem.L, parametros: sets.map(refSet), bases: basesDe(sets).concat(CALC_BASES.filter(b => b.id === 'IOF_CREDITO' && !sets.some(s => s.calculator_key === 'iof_credito'))), avisos };
+    return { ok: true, resultado: { dias, juros, iof: iofC, irrf_juros: irrfC, parcelas: nParc, parcelasDetalhe: detParc }, memoria: mem.L, parametros: sets.map(refSet), bases: basesDe(sets).concat(CALC_BASES.filter(b => b.id === 'IOF_CREDITO' && !sets.some(s => s.calculator_key === 'iof_credito'))), avisos };
   }
 
   // ───────────────────────────── PLR (tabela exclusiva, versionada) ─────────────────────────────
@@ -962,7 +993,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     return erros;
   }
 
-  const API = { cents, brl, dec, pct, Q, qRound, qAdd, qMul, mulC, avosAno, acharSet, registrarSets, todosSets, CALC_SEED_SETS, CALC_BASES, CATALOGO, EM_BREVE, CATEGORIAS, ERRO_PARAM, MATRIZ_RESCISAO, TIPOS_RESC, validarSet, irrfMensal, inssProgressivo, ufCompetente, diasEntre,
+  const API = { somaMeses, cents, brl, dec, pct, Q, qRound, qAdd, qMul, mulC, avosAno, acharSet, registrarSets, todosSets, CALC_SEED_SETS, CALC_BASES, CATALOGO, EM_BREVE, CATEGORIAS, ERRO_PARAM, MATRIZ_RESCISAO, TIPOS_RESC, validarSet, irrfMensal, inssProgressivo, ufCompetente, diasEntre,
     calcular(key, inp) { const c = CATALOGO.find(x => x.key === key); if (!c) return ERR('Calculadora desconhecida.'); try { return c.fn(inp || {}); } catch (e) { return ERR('Entrada inválida: ' + (e && e.message || e)); } } };
   if (typeof module !== 'undefined' && module.exports) module.exports = API; else root.JJRCalc = API;
 })(typeof window !== 'undefined' ? window : globalThis);
