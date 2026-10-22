@@ -427,7 +427,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
       else larg[c] = Math.max(larg[c], Math.min(70, String(cell.v == null ? '' : cell.v).length + 2)); }
     ws['!cols'] = larg.map(w => ({ wch: w })); return ws;
   }
-  function nomeArquivo(t) { return String(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '_').slice(0, 60) + '_' + hoje(); }
+  function nomeArquivo(t) { return String(t).split(/[:?]/)[0].normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '_').slice(0, 60) + '_' + hoje(); }
   function baixarXlsx(wb, titulo) { try { XLSX.writeFile(wb, nomeArquivo(titulo) + '.xlsx'); toast('Excel gerado.', 'ok'); } catch (e) { toast('Não foi possível gerar o Excel: ' + (e.message || e), 'err'); } }
   function addSheet(wb, nome, aoa, o) { XLSX.utils.book_append_sheet(wb, xlsxSheet(aoa, o), nome.slice(0, 31)); }
   function memAoa(mem) {
