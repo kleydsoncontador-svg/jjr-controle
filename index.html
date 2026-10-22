@@ -24477,7 +24477,14 @@ const LANCCTB_PASTA_EMPRESA_TIPOS={
   aplicacoes:{ rotulo:'Aplicações Financeiras', subpasta:n=>n.includes('aplicac') },
 };
 const _lancctbPastaEmpresaChave=eid=>'pastaEmpresa_'+eid;
-async function _lancctbPastaEmpresaHandle(eid){ try{ return await _lancctbCarregarHandleGenerico(_lancctbPastaEmpresaChave(eid)); }catch(e){ return null; } }
+// Pasta guardada: a do TIPO (Fluxo/comprovantes/aplicações — quando o usuário aponta direto a subpasta) tem prioridade; senão a pasta da empresa inteira.
+async function _lancctbPastaEmpresaHandle(eid,tipo){
+  try{
+    if(tipo){ const h=await _lancctbCarregarHandleGenerico(_lancctbPastaEmpresaChave(eid)+'_'+tipo); if(h) return h; }
+    return await _lancctbCarregarHandleGenerico(_lancctbPastaEmpresaChave(eid));
+  }catch(e){ return null; }
+}
+const _lancctbPastaEmpresaNomeNorm=n=>_convMpRemoverAcentos(String(n||'').toLowerCase());
 // pedir=true só dentro de um clique do usuário (o Chrome exige gesto pra pedir permissão)
 async function _lancctbPastaEmpresaPermissao(h,pedir){
   if(!h||!h.queryPermission) return 'sem';
@@ -24501,8 +24508,10 @@ async function _lancctbPastaEmpresaAcharArquivos(handle,tipo,competencia,nomeFil
   const tokens=_lancctbTokensCompetencia(competencia);
   const ehArq=n=>/\.(pdf|xlsx|xls|csv)$/i.test(n)&&!/c[oó]pia|~\$/i.test(n);
   const subs=[], achados=[];
-  for await (const [nome,fh] of handle.entries()){
-    if(fh.kind==='directory'&&cfg.subpasta(_convMpRemoverAcentos(String(nome).toLowerCase()))) subs.push([nome,fh]);
+  // 22/10/2026 (usuário associou direto "Fluxo de Caixa (contas pagas no mês)"): se a PRÓPRIA pasta escolhida é a do tipo, varre ela mesma; senão procura as subpastas do tipo dentro dela.
+  if(cfg.subpasta(_lancctbPastaEmpresaNomeNorm(handle.name))) subs.push([handle.name,handle]);
+  else for await (const [nome,fh] of handle.entries()){
+    if(fh.kind==='directory'&&cfg.subpasta(_lancctbPastaEmpresaNomeNorm(nome))) subs.push([nome,fh]);
   }
   async function varrer(dir,ancestrais,prof){
     for await (const [nome,fh] of dir.entries()){
@@ -24539,7 +24548,7 @@ async function _lancctbPastaEmpresaIniciarBarra(tipo,inputId,competencia,nomeFil
 async function _lancctbPastaEmpresaRender(autoBuscar){
   const ctx=_lancctbPastaEmpresaCtx; const linha=document.getElementById('lancctbPastaEmpresaLinha'); if(!ctx||!linha) return;
   const cfg=LANCCTB_PASTA_EMPRESA_TIPOS[ctx.tipo];
-  const handle=await _lancctbPastaEmpresaHandle(ctx.eid);
+  const handle=await _lancctbPastaEmpresaHandle(ctx.eid,ctx.tipo);
   if(!handle){
     linha.innerHTML=`<span>📁 <b>Pasta da empresa</b> ainda não associada.</span> <button class="btn bo bsm" onclick="_lancctbPastaEmpresaAssociar()">📁 Associar pasta da empresa</button>`;
     document.getElementById('lancctbPastaEmpresaMsg').innerHTML='Escolha a pasta do cliente (ex.: "Kajuna - … - 238"). Guardada só neste navegador; depois o sistema acha sozinho o arquivo do mês.';
@@ -24559,15 +24568,17 @@ async function _lancctbPastaEmpresaAssociar(){
   try{
     const escolhida=await window.showDirectoryPicker();
     const handle=await _lancctbPastaEmpresaResolver(escolhida,ctx.eid);
-    await _lancctbSalvarHandleGenerico(_lancctbPastaEmpresaChave(ctx.eid),handle);
-    toast('Pasta da empresa associada: '+handle.name,'ok');
+    // escolheu direto a subpasta do tipo (ex.: "Fluxo de Caixa (contas pagas no mês)") → vale só pra este tipo; escolheu a pasta do cliente → vale pra todos
+    const ehDoTipo=LANCCTB_PASTA_EMPRESA_TIPOS[ctx.tipo].subpasta(_lancctbPastaEmpresaNomeNorm(handle.name));
+    await _lancctbSalvarHandleGenerico(_lancctbPastaEmpresaChave(ctx.eid)+(ehDoTipo?'_'+ctx.tipo:''),handle);
+    toast((ehDoTipo?'Pasta de '+LANCCTB_PASTA_EMPRESA_TIPOS[ctx.tipo].rotulo:'Pasta da empresa')+' associada: '+handle.name,'ok');
     await _lancctbPastaEmpresaRender(true);
   } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
 }
 async function _lancctbPastaEmpresaBuscar(auto){
   const ctx=_lancctbPastaEmpresaCtx; const msg=document.getElementById('lancctbPastaEmpresaMsg'); if(!ctx||!msg) return;
   const cfg=LANCCTB_PASTA_EMPRESA_TIPOS[ctx.tipo];
-  const handle=await _lancctbPastaEmpresaHandle(ctx.eid); if(!handle){ await _lancctbPastaEmpresaRender(false); return; }
+  const handle=await _lancctbPastaEmpresaHandle(ctx.eid,ctx.tipo); if(!handle){ await _lancctbPastaEmpresaRender(false); return; }
   const perm=await _lancctbPastaEmpresaPermissao(handle,!auto);
   if(perm!=='granted'){ msg.textContent='Sem permissão de leitura da pasta — clique em "Buscar" e permita.'; return; }
   const mesEl=document.getElementById('lancctbPastaEmpresaMes'); const comp=(mesEl&&mesEl.value)||ctx.competencia;
@@ -24575,7 +24586,7 @@ async function _lancctbPastaEmpresaBuscar(auto){
   msg.textContent='Procurando…';
   let r; try{ r=await _lancctbPastaEmpresaAcharArquivos(handle,ctx.tipo,comp,ctx.nomeFiltro); }catch(e){ msg.textContent='Erro ao ler a pasta: '+(e.message||e); return; }
   const mesTxt=comp.slice(5)+'/'+comp.slice(0,4);
-  if(!r.subpastas.length){ msg.innerHTML=`⚠ Não achei, dentro de <b>${esc(handle.name)}</b>, nenhuma subpasta de <b>${esc(cfg.rotulo)}</b>.`; return; }
+  if(!r.subpastas.length){ msg.innerHTML=`⚠ A pasta associada (<b>${esc(handle.name)}</b>) não é nem tem subpasta de <b>${esc(cfg.rotulo)}</b>. Clique em <b>Trocar pasta</b> e escolha a pasta do cliente (ou direto a subpasta de ${esc(cfg.rotulo)}) — a associação dos outros tipos não é perdida.`; return; }
   if(!r.arquivos.length){ msg.innerHTML=`⚠ Nenhum arquivo de <b>${mesTxt}</b> em ${r.subpastas.map(x=>'<i>'+esc(x)+'</i>').join(', ')} (procuro "_${comp}" ou o nome do mês no arquivo).`; return; }
   const inp=document.getElementById(ctx.inputId);
   if(!inp){ msg.textContent='Campo de arquivo não encontrado.'; return; }
