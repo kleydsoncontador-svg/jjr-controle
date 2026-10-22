@@ -32788,7 +32788,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     }
   }
 
-  async function gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,numerosNF,comprovanteMatch,numeroParcela,parcelaId,valorParcela){
+  async function gerarLancamentoNF(l,valor,ehSaida,cnpjTerceiro,nomeTerceiro,numerosNF,comprovanteMatch,numeroParcela,parcelaId,valorParcela,opcoes){
     const bancoTipo=ehSaida?'C':'D';
     const contrapartidaTipo=ehSaida?'D':'C';
     const regraOverride=regras.find(r=>{
@@ -32802,10 +32802,10 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       classifContrapartida=regraOverride.plano_contas.classificacao;
       regraUsadaId=regraOverride.id;
     } else {
-      const fixa=ehSaida?contaSaidaNF:contaEntradaNF;
+      const fixa=(opcoes&&opcoes.devolucao)?contaEntradaNF:(ehSaida?contaSaidaNF:contaEntradaNF); // devolução de venda paga ao cliente: debita a conta de vendas (10000), não a de compras
       contaContrapartidaId=fixa.id; classifContrapartida=fixa.classificacao;
     }
-    const nfTexto=numerosNF&&numerosNF.length?`NF ${numerosNF.join(', ')}`:'';
+    const nfTexto=numerosNF&&numerosNF.length?`${opcoes&&opcoes.devolucao?'devolução ':''}NF ${numerosNF.join(', ')}`:'';
     // Só anexa "- parcela N" quando dá pra identificar uma única parcela
     // (1 NF só, casada 1:1) — num subset-sum de várias NFs numeroParcela
     // fica undefined de propósito, porque não haveria uma parcela "a" pra citar.
@@ -33865,8 +33865,34 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       }
       return true;
     });
+    // Devolução de venda paga ao cliente (pedido do usuário 22/10/2026: "alguns pagamentos podem ser devoluções, ainda mais a pessoas físicas; geralmente tem uma NF de ENTRADA no nome da própria empresa ou da pessoa, emitida no mesmo mês, de valor igual"):
+    // só quando NADA mais casou, a NF tem natureza de DEVOLUÇÃO, valor EXATO, emissão/vencimento no MESMO MÊS do pagamento e é a ÚNICA candidata.
+    const devCands=(nfCandidatas.length===0&&ehSaida&&!ehPonte&&!bloqueiaNf&&!gruposComprovantes&&modo!=='recebimentos_so_regras'&&!_lancctbHistoricoSemNF(l.historico_bancario))?parcelas.filter(p=>{
+      if(parcelasUsadas.has(p.id)||!nfBateFluxoLigado(p)) return false;
+      const nf=p.notas_fiscais; if(!nf||nf.direcao!=='compra') return false;
+      if(!/DEVOLU/.test(_convMpRemoverAcentos(String(nf.natureza_operacao||'').toUpperCase()))) return false;
+      if(Math.abs(_lancctbNfValorParaMatching(p,valor)-valor)>=0.005) return false;
+      const mp=String(l.data_pagamento).slice(0,7);
+      return String(nf.data_emissao||'').slice(0,7)===mp||String(p.data_vencimento||'').slice(0,7)===mp;
+    }):[];
     if(gruposComprovantes){
       // já tratado no Passo 1c acima — não tenta NF pra grupo.
+    } else if(devCands.length===1){
+      const escolhida=devCands[0], nf=escolhida.notas_fiscais;
+      const nomeHist=[l.historico_bancario];
+      const emitCasa=_lancctbNomeCompativel(nomeHist,nf.nome_emitente||''), destCasa=_lancctbNomeCompativel(nomeHist,nf.nome_destinatario||'');
+      const usaEmit=emitCasa&&!destCasa; // terceiro = quem o histórico do banco nomeia; senão o destinatário (o cliente que recebeu a devolução)
+      const cnpjTerceiro=(usaEmit?nf.cnpj_emitente:nf.cnpj_destinatario)||nf.cnpj_destinatario||nf.cnpj_emitente;
+      const nomeTerceiro=(usaEmit?nf.nome_emitente:nf.nome_destinatario)||nf.nome_destinatario||nf.nome_emitente;
+      const { error } = await gerarLancamentoNF(l,valor,true,cnpjTerceiro,nomeTerceiro,nf.numero?[nf.numero]:[],null,escolhida.numero_parcela,escolhida.id,_lancctbNfValorParaMatching(escolhida,valor),{devolucao:true});
+      if(error){
+        erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`);
+      } else {
+        parcelasUsadas.add(escolhida.id);
+        await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',escolhida.id);
+        await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+        resolvNF++; resolvido=true;
+      }
     } else if(nfCandidatas.length>=1){
       // Entre parcelas empatadas em valor (ex.: NF com 3 parcelas de valor
       // igual/quase igual), desempata pela DATA DE VENCIMENTO mais próxima
