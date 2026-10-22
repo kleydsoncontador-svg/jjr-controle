@@ -24465,6 +24465,129 @@ async function _lancctbMaisRecente(candidatos){
   comData.sort((a,b)=>b.mtime-a.mtime);
   return comData[0].fh;
 }
+// ─── Pasta da EMPRESA (pedido do usuário 22/10/2026) ─────────────────────────────────────────────────────────────────────────────
+// "permita que demos acesso a uma pasta específica de cada empresa, para achar o Fluxo de forma automática, como os extratos: Fluxo, comprovantes de pagamentos e recebimentos, e aplicações financeiras."
+// UMA pasta por empresa (a pasta do cliente, ex. "X:\03 - CONTABIL\CLIENTES\Kajuna - Magrão Auto Peças - 238") guardada no navegador (IndexedDB, chave 'pastaEmpresa_<eid>'; se escolherem a pasta CLIENTES inteira,
+// desce sozinho pra subpasta que termina em "- <eid>"). Dentro dela as subpastas padrão são achadas pelo NOME e os arquivos do mês pelo sufixo _AAAA-MM (ou nome de mês). Cada tela de importação ganha uma barra
+// que acha o(s) arquivo(s) e já os coloca no campo de arquivo — NUNCA importa sozinho: o usuário confere e clica em "Ler arquivo"/"Extrair".
+const LANCCTB_PASTA_EMPRESA_TIPOS={
+  fluxo:{ rotulo:'Fluxo de Caixa', subpasta:n=>n.includes('fluxo') },
+  comp_pagamento:{ rotulo:'Comprovantes de Pagamento', subpasta:n=>n.includes('comprovante')&&n.includes('pagamento') },
+  comp_recebimento:{ rotulo:'Comprovantes de Recebimento', subpasta:n=>(n.includes('recebimento')&&!n.includes('recibo'))||n.includes('cobranca') },
+  aplicacoes:{ rotulo:'Aplicações Financeiras', subpasta:n=>n.includes('aplicac') },
+};
+const _lancctbPastaEmpresaChave=eid=>'pastaEmpresa_'+eid;
+async function _lancctbPastaEmpresaHandle(eid){ try{ return await _lancctbCarregarHandleGenerico(_lancctbPastaEmpresaChave(eid)); }catch(e){ return null; } }
+// pedir=true só dentro de um clique do usuário (o Chrome exige gesto pra pedir permissão)
+async function _lancctbPastaEmpresaPermissao(h,pedir){
+  if(!h||!h.queryPermission) return 'sem';
+  let perm='prompt'; try{ perm=await h.queryPermission({mode:'read'}); }catch(e){}
+  if(perm==='prompt'&&pedir){ try{ perm=await h.requestPermission({mode:'read'}); }catch(e){} }
+  return perm;
+}
+// Se escolheram a pasta pai (CLIENTES), desce pra subpasta da empresa: nome termina em "- <eid>" / "-<eid>" ou traz "(<eid>)".
+async function _lancctbPastaEmpresaResolver(handle,eid){
+  try{
+    for await (const [nome,fh] of handle.entries()){
+      if(fh.kind!=='directory') continue;
+      const n=String(nome).trim();
+      if(n.endsWith('- '+eid)||n.endsWith('-'+eid)||n.includes('('+eid+')')) return fh;
+    }
+  }catch(e){}
+  return handle;
+}
+async function _lancctbPastaEmpresaAcharArquivos(handle,tipo,competencia,nomeFiltro){
+  const cfg=LANCCTB_PASTA_EMPRESA_TIPOS[tipo];
+  const tokens=_lancctbTokensCompetencia(competencia);
+  const ehArq=n=>/\.(pdf|xlsx|xls|csv)$/i.test(n)&&!/c[oó]pia|~\$/i.test(n);
+  const subs=[], achados=[];
+  for await (const [nome,fh] of handle.entries()){
+    if(fh.kind==='directory'&&cfg.subpasta(_convMpRemoverAcentos(String(nome).toLowerCase()))) subs.push([nome,fh]);
+  }
+  async function varrer(dir,ancestrais,prof){
+    for await (const [nome,fh] of dir.entries()){
+      if(fh.kind==='file'){
+        if(!ehArq(nome)) continue;
+        if(_lancctbNomeCasaCompetencia(nome,tokens)||ancestrais.some(a=>_lancctbNomeCasaCompetencia(a,tokens))) achados.push({fh,nome,caminho:[...ancestrais,nome].join(' / ')});
+      } else if(prof<3){ try{ await varrer(fh,[...ancestrais,nome],prof+1); }catch(e){} }
+    }
+  }
+  for(const [nome,fh] of subs){ try{ await varrer(fh,[nome],0); }catch(e){ console.warn('Varredura da pasta da empresa:',e); } }
+  let lista=achados, filtrou=false;
+  // aplicação específica (cada produto tem o seu PDF): fica só com o que traz as palavras do nome do produto, se sobrar algum
+  const toksFiltro=_convMpRemoverAcentos(String(nomeFiltro||'').toLowerCase()).split(/[^a-z0-9]+/).filter(t=>t.length>=3);
+  if(toksFiltro.length){
+    const f=achados.filter(a=>{ const n=_convMpRemoverAcentos(a.nome.toLowerCase()); return toksFiltro.every(t=>n.includes(t)); });
+    if(f.length){ lista=f; filtrou=true; }
+  }
+  lista.sort((a,b)=>a.nome.localeCompare(b.nome,'pt-BR'));
+  return { arquivos:lista, subpastas:subs.map(x=>x[0]), filtrou };
+}
+let _lancctbPastaEmpresaCtx=null; // {tipo,inputId,competencia,nomeFiltro,eid}
+function _lancctbPastaEmpresaBarraHtml(){
+  if(!window.showDirectoryPicker) return '';
+  return `<div id="lancctbPastaEmpresaBarra" style="border:1px dashed var(--teal);border-radius:8px;padding:8px 10px;margin-bottom:10px;font-size:12.5px">
+    <div id="lancctbPastaEmpresaLinha" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center"><span style="color:var(--slate)">📁 Pasta da empresa…</span></div>
+    <div id="lancctbPastaEmpresaMsg" style="margin-top:6px;color:var(--slate)"></div>
+  </div>`;
+}
+async function _lancctbPastaEmpresaIniciarBarra(tipo,inputId,competencia,nomeFiltro){
+  if(!document.getElementById('lancctbPastaEmpresaBarra')) return;
+  _lancctbPastaEmpresaCtx={ tipo, inputId, competencia:String(competencia||'').slice(0,7), nomeFiltro:nomeFiltro||'', eid:_lancctbEidAtual };
+  await _lancctbPastaEmpresaRender(true);
+}
+async function _lancctbPastaEmpresaRender(autoBuscar){
+  const ctx=_lancctbPastaEmpresaCtx; const linha=document.getElementById('lancctbPastaEmpresaLinha'); if(!ctx||!linha) return;
+  const cfg=LANCCTB_PASTA_EMPRESA_TIPOS[ctx.tipo];
+  const handle=await _lancctbPastaEmpresaHandle(ctx.eid);
+  if(!handle){
+    linha.innerHTML=`<span>📁 <b>Pasta da empresa</b> ainda não associada.</span> <button class="btn bo bsm" onclick="_lancctbPastaEmpresaAssociar()">📁 Associar pasta da empresa</button>`;
+    document.getElementById('lancctbPastaEmpresaMsg').innerHTML='Escolha a pasta do cliente (ex.: "Kajuna - … - 238"). Guardada só neste navegador; depois o sistema acha sozinho o arquivo do mês.';
+    return;
+  }
+  const perm=await _lancctbPastaEmpresaPermissao(handle,false);
+  linha.innerHTML=`<span>📁 <b>${esc(handle.name)}</b>${perm==='granted'?'':' <span style="color:#d97706">(permissão pendente)</span>'}</span>
+    <span style="color:var(--slate)">Mês:</span> <input type="month" id="lancctbPastaEmpresaMes" class="si" style="width:140px" value="${esc(ctx.competencia)}">
+    <button class="btn bp bsm" onclick="_lancctbPastaEmpresaBuscar(false)">🔎 Buscar ${esc(cfg.rotulo)}</button>
+    <button class="btn bo bsm" onclick="_lancctbPastaEmpresaAssociar()">Trocar pasta</button>`;
+  if(perm==='granted'&&autoBuscar) await _lancctbPastaEmpresaBuscar(true);
+  else if(perm!=='granted') document.getElementById('lancctbPastaEmpresaMsg').textContent='Clique em "Buscar" e permita o acesso (o Chrome pede de novo depois de fechado).';
+}
+async function _lancctbPastaEmpresaAssociar(){
+  const ctx=_lancctbPastaEmpresaCtx; if(!ctx) return;
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{
+    const escolhida=await window.showDirectoryPicker();
+    const handle=await _lancctbPastaEmpresaResolver(escolhida,ctx.eid);
+    await _lancctbSalvarHandleGenerico(_lancctbPastaEmpresaChave(ctx.eid),handle);
+    toast('Pasta da empresa associada: '+handle.name,'ok');
+    await _lancctbPastaEmpresaRender(true);
+  } catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+async function _lancctbPastaEmpresaBuscar(auto){
+  const ctx=_lancctbPastaEmpresaCtx; const msg=document.getElementById('lancctbPastaEmpresaMsg'); if(!ctx||!msg) return;
+  const cfg=LANCCTB_PASTA_EMPRESA_TIPOS[ctx.tipo];
+  const handle=await _lancctbPastaEmpresaHandle(ctx.eid); if(!handle){ await _lancctbPastaEmpresaRender(false); return; }
+  const perm=await _lancctbPastaEmpresaPermissao(handle,!auto);
+  if(perm!=='granted'){ msg.textContent='Sem permissão de leitura da pasta — clique em "Buscar" e permita.'; return; }
+  const mesEl=document.getElementById('lancctbPastaEmpresaMes'); const comp=(mesEl&&mesEl.value)||ctx.competencia;
+  if(!/^\d{4}-\d{2}$/.test(comp)){ msg.textContent='Escolha o mês.'; return; }
+  msg.textContent='Procurando…';
+  let r; try{ r=await _lancctbPastaEmpresaAcharArquivos(handle,ctx.tipo,comp,ctx.nomeFiltro); }catch(e){ msg.textContent='Erro ao ler a pasta: '+(e.message||e); return; }
+  const mesTxt=comp.slice(5)+'/'+comp.slice(0,4);
+  if(!r.subpastas.length){ msg.innerHTML=`⚠ Não achei, dentro de <b>${esc(handle.name)}</b>, nenhuma subpasta de <b>${esc(cfg.rotulo)}</b>.`; return; }
+  if(!r.arquivos.length){ msg.innerHTML=`⚠ Nenhum arquivo de <b>${mesTxt}</b> em ${r.subpastas.map(x=>'<i>'+esc(x)+'</i>').join(', ')} (procuro "_${comp}" ou o nome do mês no arquivo).`; return; }
+  const inp=document.getElementById(ctx.inputId);
+  if(!inp){ msg.textContent='Campo de arquivo não encontrado.'; return; }
+  let usar=r.arquivos, aviso='';
+  if(!inp.multiple&&usar.length>1){ aviso=` Esta tela aceita 1 arquivo por vez — usei o primeiro; os outros: ${usar.slice(1).map(a=>esc(a.nome)).join(', ')}.`; usar=[usar[0]]; }
+  try{
+    const files=[]; for(const a of usar) files.push(await a.fh.getFile());
+    const dt=new DataTransfer(); files.forEach(f=>dt.items.add(f));
+    inp.files=dt.files; inp.dispatchEvent(new Event('change',{bubbles:true}));
+    msg.innerHTML=`✅ ${usar.length} arquivo(s) de <b>${mesTxt}</b> já escolhido(s): ${usar.map(a=>esc(a.nome)).join(' · ')}.${aviso} Confira e clique em <b>Ler arquivo / Extrair</b>.`+(r.filtrou?'':'');
+  }catch(e){ msg.textContent='Não consegui abrir o arquivo: '+(e.message||e); }
+}
 // ─── Arquivos de Transferência de Rede — X:\03 - CONTABIL\Arquivos de
 // Transferência de Rede. Pedido do usuário 11/09/2026: "sempre que a gente
 // gerar o txt, mande para essa pasta de forma automática" (Registro
@@ -29181,6 +29304,7 @@ function abrirLancctbAplicUploadModal(aplicacaoId){
   document.getElementById('lancctbAplicUploadArquivo').value='';
   document.getElementById('lancctbAplicUploadStatus').textContent='';
   document.getElementById('lancctbAplicUploadBody').innerHTML=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Aceita o "Extrato Padrão" do Bradesco (leitura direta — ex: modelo Invest Fácil, com as seções "Aplicações" e "Resgates/Vencimentos").</div>
+    ${_lancctbPastaEmpresaBarraHtml()}
     <input type="file" id="lancctbAplicUploadArquivo" accept=".pdf" class="fi">
     <div id="lancctbAplicUploadStatus" style="font-size:12px;color:var(--slate);margin-top:8px"></div>`;
   const btnExtrair=document.getElementById('lancctbAplicUploadBtnExtrair');
@@ -29193,6 +29317,7 @@ function abrirLancctbAplicUploadModal(aplicacaoId){
   if(btnConfirmarValor) btnConfirmarValor.remove();
   document.getElementById('lancctbAplicUploadChip').style.display='none';
   openModal('mLancctbAplicUpload');
+  _lancctbPastaEmpresaIniciarBarra('aplicacoes','lancctbAplicUploadArquivo',_lancctbAplicacoesMes||S.fechAtual(),a.nome);
 }
 // Minimizar (pedido do usuário 08/09/2026): a leitura do PDF via IA pode
 // levar alguns segundos e o usuário quer ver a listagem por trás enquanto
@@ -37339,6 +37464,7 @@ function abrirLancctbUploadComprovanteModal(tipo,semIA){
           : 'Modo IA: comprovantes de vários formatos. Pode selecionar vários PDFs de uma vez (Ctrl+Shift) — cada PDF pode ter vários comprovantes por página.')
       }
     </div>
+    ${_lancctbPastaEmpresaBarraHtml()}
     <input class="fi" id="lancctbComprovArquivo" type="file" accept="${ehReceb?'.pdf,.xls,.xlsx':'.pdf'}" ${_lancctbComprovanteSemIA?'':'multiple'}>
     <div id="lancctbComprovStatus" style="font-size:12.5px;margin-top:10px;min-height:16px;color:var(--slate)"></div>
     <div id="lancctbComprovPreviewArea" style="margin-top:14px"></div>
@@ -37347,6 +37473,7 @@ function abrirLancctbUploadComprovanteModal(tipo,semIA){
       <button class="btn bp" id="lancctbComprovProcessarBtn" onclick="_lancctbComprovForcarIA=false;processarLancctbUploadComprovante()">▶ ${_lancctbComprovanteSemIA?'Preencher':'Extrair'}</button>
     </div>`;
   openModal('mLancctbUpload');
+  _lancctbPastaEmpresaIniciarBarra(ehReceb?'comp_recebimento':'comp_pagamento','lancctbComprovArquivo',(ehReceb?_lancctbComprovRecebMes:_lancctbComprovMes)||S.fechAtual());
 }
 // ─── Formatos dedicados de Comprovantes de Recebimento — a Fast Lube manda
 // relatórios PRONTOS de cobrança do próprio banco (não comprovantes
@@ -40074,6 +40201,7 @@ async function abrirLancctbFluxoImportModal(){
         <select class="si" id="lancctbFluxoImportConta" style="width:100%"><option value="">— Vale pra qualquer conta —</option></select>
       </div>
     </div>
+    ${_lancctbPastaEmpresaBarraHtml()}
     <div class="fg">
       <div class="fl">Arquivo (Excel ou PDF)</div>
       <input class="fi" id="lancctbFluxoImportArquivo" type="file" accept=".xls,.xlsx,.csv,.pdf" multiple>
@@ -40098,6 +40226,7 @@ async function abrirLancctbFluxoImportModal(){
     const o=document.createElement('option'); o.value=a.id; o.textContent=`${_lancctbNomeBancoExibicao(a.banco_nome)}${_lancctbAgCcTxt(a)}`; selConta.appendChild(o);
   });
   openModal('mLancctbUpload');
+  _lancctbPastaEmpresaIniciarBarra('fluxo','lancctbFluxoImportArquivo',_lancctbFluxoMes||S.fechAtual());
 }
 let _lancctbFluxoWbTemp=null; // workbook em espera enquanto o usuário escolhe a(s) aba(s)
 async function _lancctbFluxoLerArquivo(){
