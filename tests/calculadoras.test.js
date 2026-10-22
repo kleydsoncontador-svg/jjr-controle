@@ -154,6 +154,27 @@ t('PLR jan–abr/2025 usa a tabela antiga (isento só até 7.640,80)', () => ass
 t('PLR: pensão alimentícia judicial reduz a base (art. 3º, § 10)', () => assert.strictEqual(plr('2026-03', '20000', { pensaoPLR: '5000' }).resultado.ir, c('1027.22')));
 t('PLR 2024: tabela não cadastrada → não calcula', () => assert.strictEqual(plr('2024-06', '10000').ok, false));
 
+// ── 17. Distribuição de lucros — retenção de 10% acima de R$ 50.000/mês (Lei 15.270/2025, art. 6º-A) — valores calculados à mão ──
+const dl = (o) => C.calcular('dist_lucros', Object.assign({ competencia: '2026-03', beneficiario: 'pf_residente' }, o));
+t('Lucros: até R$ 50.000,00 no mês → sem retenção, líquido = bruto', () => { const x = dl({ valorBruto: '50000' }); assert.strictEqual(x.resultado.ir, 0); assert.strictEqual(x.resultado.liquido, c('50000')); });
+t('Lucros: R$ 50.000,01 → 10% sobre o TOTAL = 5.000,00 (o "degrau")', () => { const x = dl({ valorBruto: '50000.01' }); assert.strictEqual(x.resultado.ir, c('5000.00')); assert.strictEqual(x.resultado.liquido, c('45000.01')); });
+t('Lucros: R$ 100.000 → IRRF 10.000, líquido 90.000 (não só o excedente)', () => { const x = dl({ valorBruto: '100000' }); assert.strictEqual(x.resultado.ir, c('10000')); assert.strictEqual(x.resultado.liquido, c('90000')); });
+t('Lucros: 2 pagamentos de 30.000 no mês → o 2º retém 6.000 (recalcula pelo total de 60.000)', () => { const x = dl({ valorBruto: '30000', jaPagoMes: '30000' }); assert.strictEqual(x.resultado.ir, c('6000')); assert.strictEqual(x.resultado.liquido, c('24000')); });
+t('Lucros: já pago 60.000 (retido 6.000 pela regra) + 10.000 → devido 7.000, retém só 1.000', () => { const x = dl({ valorBruto: '10000', jaPagoMes: '60000' }); assert.strictEqual(x.resultado.ir, c('1000')); assert.strictEqual(x.resultado.devidoMes, c('7000')); });
+t('Lucros: IRRF já retido informado é abatido', () => { const x = dl({ valorBruto: '10000', jaPagoMes: '60000', irJaRetido: '6000' }); assert.strictEqual(x.resultado.ir, c('1000')); });
+t('Lucros: parte isenta (apurada até 2025) fora do teste: 80.000 com 40.000 isentos → sem retenção', () => { const x = dl({ valorBruto: '80000', parteIsenta: '40000' }); assert.strictEqual(x.resultado.ir, 0); assert.strictEqual(x.resultado.liquido, c('80000')); });
+t('Lucros: 100.000 com 40.000 isentos → 10% sobre 60.000 = 6.000', () => { const x = dl({ valorBruto: '100000', parteIsenta: '40000' }); assert.strictEqual(x.resultado.ir, c('6000')); assert.strictEqual(x.resultado.liquido, c('94000')); });
+t('Lucros (partindo do líquido): 45.000 líquidos → bruto 45.000, sem retenção', () => { const x = dl({ modo: 'liquido', valorLiquido: '45000' }); assert.strictEqual(x.resultado.bruto, c('45000')); assert.strictEqual(x.resultado.ir, 0); });
+t('Lucros (partindo do líquido): 50.000 líquidos → bruto 50.000 (no limite, sem retenção)', () => { const x = dl({ modo: 'liquido', valorLiquido: '50000' }); assert.strictEqual(x.resultado.bruto, c('50000')); assert.strictEqual(x.resultado.ir, 0); });
+t('Lucros (partindo do líquido): 90.000 líquidos → bruto 100.000, IRRF 10.000', () => { const x = dl({ modo: 'liquido', valorLiquido: '90000' }); assert.strictEqual(x.resultado.bruto, c('100000')); assert.strictEqual(x.resultado.ir, c('10000')); });
+t('Lucros (partindo do líquido): 50.001 líquidos → bruto 55.556,67, retém 5.555,67 e entrega ≥ 50.001', () => { const x = dl({ modo: 'liquido', valorLiquido: '50001' }); assert.strictEqual(x.resultado.bruto, c('55556.67')); assert.strictEqual(x.resultado.ir, c('5555.67')); assert.ok(x.resultado.liquido >= c('50001')); });
+t('Lucros (partindo do líquido) com 30.000 já pagos no mês: 30.000 líquidos → bruto 36.666,67, IRRF 6.666,67', () => { const x = dl({ modo: 'liquido', valorLiquido: '30000', jaPagoMes: '30000' }); assert.strictEqual(x.resultado.bruto, c('36666.67')); assert.strictEqual(x.resultado.ir, c('6666.67')); assert.strictEqual(x.resultado.liquido, c('30000')); });
+t('Lucros: residente no exterior → 10% SEM piso (10.000 → 1.000)', () => { const x = dl({ beneficiario: 'exterior', valorBruto: '10000' }); assert.strictEqual(x.resultado.ir, c('1000')); assert.strictEqual(x.resultado.liquido, c('9000')); });
+t('Lucros: exterior enquadrado no § 5º, II (governo/fundo soberano/previdência) → sem retenção', () => { const x = dl({ beneficiario: 'exterior_isento', valorBruto: '10000' }); assert.strictEqual(x.resultado.ir, 0); });
+t('Lucros: antes de 2026 não calcula (retenção só vale desde 01/2026)', () => { const x = dl({ competencia: '2025-12', valorBruto: '100000' }); assert.strictEqual(x.ok, false); });
+t('Lucros: parte isenta maior que o pagamento é erro', () => assert.strictEqual(dl({ valorBruto: '1000', parteIsenta: '2000' }).ok, false));
+t('Lucros: traz memória, parâmetros e as duas bases legais', () => { const x = dl({ valorBruto: '60000' }); assert.ok(x.memoria.length > 5); assert.strictEqual(x.parametros[0].id, 'DIST_LUCROS_2026'); assert.ok(x.bases.some(b => b.id === 'LEI_9250_6A') && x.bases.some(b => b.id === 'LEI_9249_10')); });
+
 // ── 12. Toda calculadora devolve memória, parâmetros e bases ──
 t('memória e bases presentes', () => { const x = C.calcular('salario_liquido', { competencia: '2026-03', salario: '5000' }); assert.ok(x.memoria.length > 5); assert.ok(x.bases.length > 0); assert.ok(x.parametros.length > 0); });
 t('entrada inválida não quebra', () => assert.strictEqual(C.calcular('irrf_pf', { competencia: 'abc' }).ok, false));

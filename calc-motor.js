@@ -55,7 +55,9 @@
 const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRIA, não oficial); conferir no texto oficial';
   const V_USR = 'Cadastrada conforme informação do usuário (20/10/2026); conferir na fonte oficial';
   const CALC_BASES = [
-    { id: 'LEI_15270_2025', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '15.270/2025 (de 26/11/2025)', artigo: 'art. 2º: Lei 9.250, art. 3º-A, caput e §§ 1º a 3º', assunto: 'Redução mensal do IRPF a partir de janeiro/2026: rendimentos até R$ 5.000,00 → redução de até R$ 312,89 (imposto zero); de R$ 5.000,01 a R$ 7.350,00 → R$ 978,62 − (0,133145 × rendimentos tributáveis); acima de R$ 7.350,00 → nenhuma. Limitada ao imposto pela tabela (§ 1º). Aplica-se também ao imposto exclusivo na fonte do 13º salário (§ 3º).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Mesma lei: retenção de 10% sobre dividendos acima de R$ 50.000/mês por PF (art. 6º-A, Lei 9.250) — fora do escopo destas calculadoras.' },
+    { id: 'LEI_15270_2025', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '15.270/2025 (de 26/11/2025)', artigo: 'art. 2º: Lei 9.250, art. 3º-A, caput e §§ 1º a 3º', assunto: 'Redução mensal do IRPF a partir de janeiro/2026: rendimentos até R$ 5.000,00 → redução de até R$ 312,89 (imposto zero); de R$ 5.000,01 a R$ 7.350,00 → R$ 978,62 − (0,133145 × rendimentos tributáveis); acima de R$ 7.350,00 → nenhuma. Limitada ao imposto pela tabela (§ 1º). Aplica-se também ao imposto exclusivo na fonte do 13º salário (§ 3º).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Mesma lei: retenção de 10% sobre dividendos acima de R$ 50.000/mês por PF (art. 6º-A, Lei 9.250) — ver a calculadora "Distribuição de lucros".' },
+    { id: 'LEI_9250_6A', calcs: ['dist_lucros'], norma: 'Lei 15.270/2025, art. 2º (acrescenta o art. 6º-A à Lei 9.250/1995)', numero: '15.270/2025 (de 26/11/2025) — Lei 9.250/1995, art. 6º-A', artigo: 'art. 6º-A, caput e §§ 1º, 2º e 3º', assunto: 'A partir de janeiro/2026: lucros e dividendos pagos, creditados, empregados ou entregues por uma MESMA pessoa jurídica a uma MESMA pessoa física residente no Brasil, em montante superior a R$ 50.000,00 em um mesmo mês, sofrem retenção do IRPF na fonte à alíquota de 10% sobre o TOTAL do valor pago (§ 1º: vedadas quaisquer deduções); com mais de um pagamento no mês, a retenção é recalculada pelo total do mês (§ 2º). Não se sujeitam (§ 3º): lucros de resultados apurados até 2025, cuja distribuição tenha sido aprovada até 31/12/2025 e que sejam exigíveis nos termos da legislação civil ou empresarial, pagos nos termos originalmente previstos no ato de aprovação.', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-22 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. A lei NÃO diz se a parcela isenta do § 3º conta para o teste de R$ 50.000 no mês (parâmetro isenta_compoe_limite = NÃO) nem se o IRRF é definitivo ou antecipação. A IN RFB 2.299/2025 e o "Perguntas e Respostas" da Receita NÃO foram lidos no texto oficial (só resumo em fonte secundária: a Receita entende que a retenção alcança também sócios de optantes pelo Simples Nacional — há controvérsia pelo art. 14 da LC 123/2006).' },
+    { id: 'LEI_9249_10', calcs: ['dist_lucros'], norma: 'Lei 15.270/2025, art. 3º (nova redação do art. 10 da Lei 9.249/1995)', numero: '15.270/2025 — Lei 9.249/1995, art. 10', artigo: 'art. 10, caput (ressalva dos arts. 6º-A e 16-A da Lei 9.250), § 4º e § 5º', assunto: 'Lucros e dividendos pagos, creditados, entregues, empregados ou REMETIDOS AO EXTERIOR: IRRF de 10% (§ 4º), sem piso mensal. Não se sujeitam (§ 5º): I – resultados apurados até 2025 com distribuição aprovada até 31/12/2025, exigíveis e pagos nos termos originalmente previstos; II – pagos a governos estrangeiros (com reciprocidade), fundos soberanos (Lei 11.312, art. 3º, § 5º) e entidades no exterior de previdência. Art. 10-A: crédito opcional ao beneficiário no exterior (não calculado aqui).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-22 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Tributação mínima anual (Lei 9.250, art. 16-A; rendimentos anuais acima de R$ 600.000; alíquota até 10%) é outra apuração e NÃO é calculada aqui.' },
     { id: 'LEI_9250_1995', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao', 'pensao'], norma: 'Lei', numero: '9.250/1995', artigo: 'arts. 4º e 8º', assunto: 'Deduções do IRPF: dependentes, pensão alimentícia, previdência oficial', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Base geral das deduções legais. Artigos a conferir.' },
     { id: 'TAB_IRRF_2026', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Leis 15.191/2025 (art. 2º, nova redação do art. 1º, XII, da Lei 11.482/2007) e 9.250/1995 (art. 4º, III, "i" e § 2º)', numero: '15.191/2025 e 9.250/1995', artigo: 'Lei 15.191 art. 2º; Lei 9.250 art. 4º, III, "i" e § 2º (redação da Lei 14.663/2023)', assunto: 'Tabela progressiva mensal desde maio/2025: até 2.428,80 (0%); até 2.826,65 (7,5% − 182,16); até 3.751,05 (15% − 394,16); até 4.664,68 (22,5% − 675,49); acima (27,5% − 908,73). Dependente R$ 189,59 (desde abril/2015). Desconto simplificado mensal = 25% da faixa de alíquota zero = R$ 607,20.', vig_ini: '2025-05-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9250.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Tudo lido no texto oficial do Planalto. O simplificado de R$ 607,20 é derivado: 25% × R$ 2.428,80 (a lei define o percentual, não o valor).' },
     { id: 'TAB_INSS_2026', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial MPS/MF nº 13, de 9/1/2026 (DOU 12/1/2026), Anexo II — tabela publicada pelo INSS', numero: '13/2026', artigo: 'Anexo II', assunto: 'Empregado, doméstico e avulso: até 1.621,00 (7,5%); 1.621,01 a 2.902,84 (9%); 2.902,85 a 4.354,27 (12%); 4.354,28 a 8.475,55 (14%) — alíquotas progressivas; teto R$ 8.475,55. O 13º não se soma à remuneração mensal para enquadramento.', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: '2026-10-20 (página oficial do INSS, atualizada em 13/1/2026)', obs: 'Faixas e teto lidos na página oficial do INSS, que cita a Portaria 13/2026. O texto da portaria no DOU não foi lido.' },
@@ -199,6 +201,16 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
         limite_simples: P('30000.00', 'R$', 'Valor máximo da operação para a taxa reduzida do Simples/MEI'),
         adicional: P('0.0038', 'taxa', 'Alíquota adicional de 0,38% sobre o principal, independentemente do prazo (art. 7º, § 15)'),
         limite_dias: P(365, 'dias', 'O IOF não excede a alíquota diária × principal × 365 dias, mais o adicional (art. 7º, § 1º)'),
+      },
+    },
+    {
+      id: 'DIST_LUCROS_2026', calculator_key: 'dist_lucros', valid_from: '2026-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (texto oficial da Lei 15.270/2025)',
+      bases: ['LEI_9250_6A', 'LEI_9249_10'],
+      params: {
+        limite_mensal: P('50000.00', 'R$', 'Montante mensal, por pagador e por beneficiário, ACIMA do qual há retenção (Lei 9.250, art. 6º-A, caput). Até R$ 50.000,00 no mês: sem retenção'),
+        aliquota: P('0.10', 'taxa', 'IRRF de 10% sobre o TOTAL pago no mês, sem deduções (art. 6º-A, caput e § 1º)'),
+        aliquota_exterior: P('0.10', 'taxa', 'Lucros/dividendos remetidos ao exterior: 10% (Lei 9.249, art. 10, § 4º), sem piso mensal'),
+        isenta_compoe_limite: P(false, 'bool', 'A parcela isenta do § 3º conta para o teste de R$ 50.000 no mês? A lei não diz; adotado NÃO — conferir na IN RFB 2.299/2025'),
       },
     },
     {
@@ -652,6 +664,75 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     return { ok: true, resultado: { ir: max0(imp - jaRet), imposto_ano: imp, base: total }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos: ['Tributação exclusiva na fonte, em separado dos demais rendimentos (Lei 10.101, art. 3º, § 5º): não use o redutor mensal da Lei 15.270, que se aplica a rendimentos sujeitos ao ajuste mensal e ao 13º.', 'PLR paga acumuladamente de mais de um ano-calendário (§§ 8º e 9º) tem tratamento próprio — não calculado aqui.', 'A tabela é a vigente na data do pagamento (a Receita ainda divulga a de maio/2025 como atual); se ela mudar, cadastre nova versão.'] };
   }
 
+  // ───────────────────────────── Distribuição de lucros — IRRF 10% (Lei 15.270/2025, art. 6º-A da Lei 9.250) ─────────────────────────────
+  // Pedido do usuário 22/10/2026: "faltou o cálculo da distribuição de lucros — isenção até R$ 50 mil pagos líquidos e tributação a partir de um valor maior, com 10% de IRRF".
+  // Dois modos: parte do BRUTO a distribuir, ou do LÍQUIDO que o sócio precisa receber (acha o bruto menor que entrega esse líquido).
+  function calcDistLucros(inp) {
+    const d = data1(inp.competencia); const set = acharSet('dist_lucros', d);
+    if (!set) return ERR(ERRO_PARAM, { detalhe: 'Distribuição de lucros — a retenção de 10% existe a partir de janeiro/2026 (Lei 9.250, art. 6º-A); antes disso a distribuição é isenta (Lei 9.249, art. 10, redação anterior), e essa regra antiga não está cadastrada.' });
+    const mem = Mem(), benef = inp.beneficiario || 'pf_residente', modo = inp.modo || 'bruto';
+    if (!['pf_residente', 'exterior', 'exterior_isento'].includes(benef)) return ERR('Beneficiário inválido.');
+    const limite = cents(pv(set, 'limite_mensal')), aliq = dec(pv(set, 'aliquota')), aliqExt = dec(pv(set, 'aliquota_exterior')), isentaCompoe = !!pv(set, 'isenta_compoe_limite');
+    const A = benef === 'pf_residente' ? cents(inp.jaPagoMes) : 0, E = benef === 'exterior_isento' ? 0 : cents(inp.parteIsenta);
+    const informouRet = inp.irJaRetido !== undefined && inp.irJaRetido !== '' && inp.irJaRetido !== null;
+    const jaRet = benef !== 'pf_residente' ? 0 : (informouRet ? cents(inp.irJaRetido) : (A > limite ? mulC(A, aliq) : 0));
+    if (A < 0 || E < 0 || jaRet < 0) return ERR('Valores não podem ser negativos.');
+    // retenção sobre UM pagamento de bruto B
+    const calc = B => {
+      const T = max0(B - E);
+      if (benef === 'exterior_isento') return { T: 0, teste: 0, devido: 0, retAgora: 0 };
+      if (benef === 'exterior') { const dev = mulC(T, aliqExt); return { T, teste: T, devido: dev, retAgora: dev }; }
+      const teste = A + T + (isentaCompoe ? E : 0);
+      const devido = teste > limite ? mulC(A + T, aliq) : 0;
+      return { T, teste, devido, retAgora: max0(devido - jaRet) };
+    };
+    const maxSemRet = benef !== 'pf_residente' ? null : max0(isentaCompoe ? limite - A : limite - A + E);
+    let B;
+    if (modo === 'liquido') {
+      const N = cents(inp.valorLiquido); if (!(N > 0)) return ERR('Informe o valor líquido que o sócio deve receber.');
+      if (benef === 'exterior_isento' || (benef === 'pf_residente' && N <= maxSemRet)) B = N;
+      else {
+        // líquido = B − retenção(B); retenção linear acima do limite → B = (N + base_extra) ÷ (1 − alíquota); arredonda PARA CIMA e confere
+        const a = benef === 'exterior' ? aliqExt : aliq; const den = qSub(Q(1), a);
+        const base0 = benef === 'exterior' ? qNeg(mulQ(E, a)) : qSub(mulQ(A - E, a), Q(jaRet));
+        const num = qAdd(Q(N), base0), q = qMul(num, Q(den.d, den.n));
+        B = q.n <= 0n ? 0 : Number((q.n + q.d - 1n) / q.d);
+        for (let i = 0; i < 6 && B - calc(B).retAgora < N; i++) B += 1;
+        for (let i = 0; i < 6 && B > 0 && (B - 1) - calc(B - 1).retAgora >= N && (benef !== 'pf_residente' || calc(B - 1).retAgora > 0); i++) B -= 1;
+      }
+      if (benef === 'pf_residente' && B <= maxSemRet && N > maxSemRet) B = N; // proteção
+    } else B = cents(inp.valorBruto);
+    if (!(B > 0)) return ERR('Informe o valor a distribuir.');
+    if (E > B) return ERR('A parte isenta não pode ser maior que o valor do pagamento.');
+    const r = calc(B), liquido = B - r.retAgora;
+    mem.t('Distribuição de lucros — retenção na fonte (conjunto ' + set.id + ' v' + set.version + ')');
+    if (modo === 'liquido') mem.l('Líquido que o sócio deve receber (informado)', cents(inp.valorLiquido), '+');
+    mem.l(modo === 'liquido' ? 'Bruto necessário para entregar esse líquido' : 'Valor bruto deste pagamento', B, '+');
+    if (benef === 'exterior_isento') {
+      mem.n('Beneficiário no exterior enquadrado no art. 10, § 5º, II (governo estrangeiro com reciprocidade, fundo soberano ou entidade de previdência): sem retenção.');
+    } else if (benef === 'exterior') {
+      if (E) mem.l('(−) Parte isenta (art. 10, § 5º, I)', E, '−');
+      mem.s('Base da retenção (sem piso mensal, sem deduções)', r.T); mem.l('IRRF = ' + (Number(aliqExt.n) * 100 / Number(aliqExt.d)) + '% × base', r.devido);
+    } else {
+      mem.l('(−) Parte isenta (§ 3º: apurado até 2025, aprovado até 31/12/2025)', E, '−'); mem.s('Parte deste pagamento sujeita ao art. 6º-A', r.T);
+      mem.l('(+) Já pago/creditado no mês (mesma empresa → mesma pessoa)', A, '+'); mem.s('Total do mês sujeito ao teste', A + r.T);
+      mem.txt('Limite mensal sem retenção', 'R$ ' + brl(limite));
+      if (r.teste > limite) {
+        mem.n('Total do mês ACIMA de R$ ' + brl(limite) + ': retenção de ' + (Number(aliq.n) * 100 / Number(aliq.d)) + '% sobre o TOTAL do mês (não só sobre o excedente), sem deduções.');
+        mem.l('IRRF devido no mês = ' + (Number(aliq.n) * 100 / Number(aliq.d)) + '% × R$ ' + brl(A + r.T), r.devido); mem.l('(−) IRRF já retido no mês' + (informouRet ? '' : ' (calculado pela regra sobre o já pago)'), jaRet, '−');
+      } else mem.n('Total do mês até R$ ' + brl(limite) + ': SEM retenção — o sócio recebe o valor integral (líquido = bruto).');
+    }
+    mem.tot('IRRF A RETER AGORA', r.retAgora); mem.tot('LÍQUIDO AO SÓCIO neste pagamento', liquido);
+    const avisos = [];
+    if (benef === 'pf_residente') {
+      avisos.push('A retenção é de 10% sobre o TOTAL pago no mês, não só sobre o que passa de R$ 50.000 (art. 6º-A, caput e § 1º). Por isso há um "degrau": pagar R$ 50.000,00 entrega R$ 50.000,00 líquidos; pagar R$ 50.000,01 entrega cerca de R$ 45.000,01. O teste é por MÊS, por empresa pagadora e por pessoa.');
+      avisos.push('Mais de um pagamento no mês, da mesma empresa à mesma pessoa: a retenção é recalculada pelo total do mês (§ 2º) — informe o já pago e o já retido.');
+      avisos.push('Lucros apurados até 2025 e com distribuição aprovada até 31/12/2025 ficam de fora (§ 3º), se exigíveis e pagos nos termos originalmente aprovados — informe só a parte isenta. Adotado: essa parte NÃO conta para o teste de R$ 50.000 (a lei não esclarece; conferir na IN RFB 2.299/2025, que não foi lida no texto oficial).');
+      avisos.push('Tributação mínima anual (art. 16-A: rendimentos acima de R$ 600.000/ano) é outra apuração e NÃO é calculada aqui. A Receita entende que a retenção alcança também sócios de empresas do Simples Nacional (fonte secundária; há controvérsia pelo art. 14 da LC 123/2006).');
+    } else if (benef === 'exterior') avisos.push('Beneficiário no exterior: 10% sobre o valor total, SEM piso de R$ 50.000 (Lei 9.249, art. 10, § 4º). Isenções do § 5º; crédito opcional do art. 10-A não calculado.');
+    return { ok: true, resultado: { bruto: B, ir: r.retAgora, liquido, base: r.T, totalMes: benef === 'pf_residente' ? A + r.T : null, devidoMes: r.devido, folga: maxSemRet }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
+  }
+
   // ───────────────────────────── Férias ─────────────────────────────
   function calcFerias(inp) {
     const d = data1(inp.competencia), mem = Mem();
@@ -858,6 +939,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { key: 'pensao', cat: 'TRABALHISTA', nome: 'Pensão alimentícia', fn: calcPensao },
     { key: 'mutuo', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Mútuo — IOF / juros / IRRF', fn: calcMutuo },
     { key: 'jcp', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'JCP — Juros sobre Capital Próprio', fn: calcJCP },
+    { key: 'dist_lucros', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Distribuição de lucros — IRRF 10%', fn: calcDistLucros },
     { key: 'lucro_presumido', cat: 'TRIBUTÁRIO PJ', nome: 'Lucro Presumido — IRPJ e CSLL', fn: calcLucroPresumido },
     { key: 'itcmd', cat: 'ESTADUAL', nome: 'ITCMD — Doação e Causa mortis', fn: calcITCMD },
   ];
