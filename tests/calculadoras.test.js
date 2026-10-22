@@ -215,5 +215,18 @@ t('COMPARATIVO Presumido: pró-labore soma patronal 20% e não gera economia', (
 t('COMPARATIVO: valor vazio e regime inválido dão erro claro', () => { assert.strictEqual(cmp({ valor: '' }).ok, false); assert.strictEqual(cmp({ regime: 'x' }).ok, false); });
 t('COMPARATIVO: antes de 2026 a distribuição some (sem retenção cadastrada) e o resto calcula', () => { const r = cmp({ competencia: '2025-08' }); assert.ok(r.ok); assert.ok(r.resultado.indisponiveis.some(x => x.nome === 'Distribuição de lucros')); });
 
+// ── 20. Mútuo: regras de juros por polo (PF→PJ teto 12% a.a.; PJ mínimo Selic) e Selic/CDI do BCB ──
+const mj = (o) => C.calcular('mutuo', Object.assign({ mutuante: 'PJ', mutuario: 'PJ', principal: '100000', dataLiberacao: '2026-09-01', dataVencimento: '2026-10-01' }, o || {}));
+t('Selic de set/2026 = 1,08% (série 4390 do BCB) sobre R$ 100.000 = R$ 1.080,00', () => { const r = mj({ valorJuros: '1080' }); assert.strictEqual(r.resultado.juros_minimos, 108000); assert.strictEqual(r.resultado.selic_acumulada, '1,08%'); });
+t('Selic acumulada jan–mar/2026 compõe os meses (1,16%, 1,00%, 1,21%) = 3,4079%', () => { const a = C.selicAcumulada(C.acharSet('mutuo_juros', '2026-09-01'), '2026-01-01', '2026-04-01'); assert.strictEqual(((a.fator - 1) * 100).toFixed(4), '3.4079'); });
+t('PJ mutuante sem juros: avisa que o mútuo gratuito é vedado e mostra o mínimo pela Selic', () => { const r = mj({ valorJuros: '0' }); assert.ok(r.avisos.some(x => /ABAIXO de 100% da Selic/.test(x))); assert.ok(r.avisos.some(x => /veda o mútuo gratuito/.test(x))); });
+t('PJ mutuante com juros ≥ Selic: sem aviso de piso', () => { assert.ok(!mj({ valorJuros: '1080' }).avisos.some(x => /ABAIXO/.test(x))); });
+t('PF → PJ: teto de 12% a.a. (R$ 12.000 em 1 ano sobre 100 mil); 13% avisa, 12% não', () => { const base = { mutuante: 'PF', dataVencimento: '2027-09-01' }; assert.strictEqual(mj(Object.assign({ valorJuros: '12000' }, base)).resultado.juros_maximos, 1200000); assert.ok(mj(Object.assign({ valorJuros: '13000' }, base)).avisos.some(x => /acima do teto/.test(x))); assert.ok(!mj(Object.assign({ valorJuros: '12000' }, base)).avisos.some(x => /acima do teto/.test(x))); });
+t('PF → PJ sem juros: gratuito admitido (sem aviso de piso da Selic)', () => { const r = mj({ mutuante: 'PF', valorJuros: '0', dataVencimento: '2027-09-01' }); assert.ok(!r.avisos.some(x => /ABAIXO/.test(x))); });
+t('PF → entidade imune: juros acima de 100% da Selic avisam distribuição disfarçada', () => { const r = mj({ mutuante: 'PF', mutuarioImune: true, dataLiberacao: '2025-09-01', dataVencimento: '2026-09-01', valorJuros: '20000' }); assert.ok(r.avisos.some(x => /imune\/isenta/.test(x))); });
+t('mês sem Selic cadastrada: avisa em vez de inventar', () => { const r = mj({ dataLiberacao: '2026-09-15', dataVencimento: '2026-11-15', valorJuros: '100' }); assert.ok(r.avisos.some(x => /Selic não cadastrada/.test(x))); assert.strictEqual(r.resultado.juros_minimos, null); });
+t('CDI cadastrado e série contínua de 01/2021 a 09/2026', () => { const s = C.acharSet('mutuo_juros', '2026-09-01'); const a = s.params.selic_mensal.value, b = s.params.cdi_mensal.value; for (let y = 2021; y <= 2026; y++) for (let m = 1; m <= 12; m++) { const k = y + '-' + String(m).padStart(2, '0'); if (k > '2026-09') break; assert.ok(a[k] !== undefined && b[k] !== undefined, k); } });
+t('COMPARATIVO propaga o aviso de juros do mútuo PJ→PF', () => { const r = C.calcular('comparativo', { competencia: '2026-09', valor: '10000', regime: 'lucro_real', dataVencimentoMutuo: '2026-10-01' }); assert.ok(r.ok); assert.ok(r.avisos.some(x => /^Mútuo: .*ABAIXO/.test(x))); });
+
 console.log('\nCalculadoras JJR — ' + ok + ' ok, ' + fail + ' falhas');
 process.exit(fail ? 1 : 0);

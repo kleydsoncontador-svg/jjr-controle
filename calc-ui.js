@@ -87,8 +87,9 @@
       { k: 'principal', l: 'Principal (R$)', t: 'money' }, { k: 'dataLiberacao', l: 'Data de liberação', t: 'date' }, { k: 'dataVencimento', l: 'Data de vencimento (opcional — da parcela única ou da 1ª parcela; vazio = prazo indeterminado, IOF por 365 dias)', t: 'date' }, { k: 'numParcelas', l: 'Número de parcelas (opcional — vazio = pagamento único)', t: 'int', def: '' },
       { k: 'valorJuros', l: 'Juros totais do período (R$)', t: 'money' }, { k: 'taxaJuros', l: '…ou taxa de juros do período (%) — usada se os juros acima estiverem vazios', t: 'pct' },
       { k: 'mutuarioSimples', l: 'Mutuário optante pelo Simples Nacional / MEI', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' },
-      { k: 'contaCorrente', l: 'Operação em conta corrente (saldo devedor diário)', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' }],
-      resumo: r => [['Dias', r.dias == null ? 'indeterminado (IOF: 365)' : String(r.dias)], ['Parcelas', r.parcelas > 1 ? r.parcelas + ' mensais' : 'pagamento único'], ['Juros', r.juros], ['IOF', r.iof == null ? 'não calculado' : r.iof, 1], ['IRRF sobre os juros', r.irrf_juros == null ? 'não calculado / não se aplica' : r.irrf_juros, 1]] },
+      { k: 'contaCorrente', l: 'Operação em conta corrente (saldo devedor diário)', t: 'bool', def: false, quando: v => v.mutuante === 'PJ' },
+      { k: 'mutuarioImune', l: 'Mutuário é entidade imune/isenta (terceiro setor) — juros limitados a 100% da Selic', t: 'bool', def: false, quando: v => v.mutuante === 'PF' && v.mutuario === 'PJ' }],
+      resumo: r => [['Dias', r.dias == null ? 'indeterminado (IOF: 365)' : String(r.dias)], ['Parcelas', r.parcelas > 1 ? r.parcelas + ' mensais' : 'pagamento único'], ['Juros', r.juros], ['IOF', r.iof == null ? 'não calculado' : r.iof, 1], ['IRRF sobre os juros', r.irrf_juros == null ? 'não calculado / não se aplica' : r.irrf_juros, 1], ['Selic acumulada no período', r.selic_acumulada == null ? '—' : r.selic_acumulada], ['Juros mínimos (100% da Selic)', r.juros_minimos == null ? '—' : r.juros_minimos], ['Juros máximos (Lei de Usura, PF→PJ)', r.juros_maximos == null ? '—' : r.juros_maximos]] },
     jcp: { titulo: 'JCP — Juros sobre o Capital Próprio', desc: 'TJLP pro rata dia sobre o patrimônio líquido, limite de 50%, IRRF e economia fiscal. Só calcula se a TJLP de todos os trimestres do período estiver cadastrada (4º tri/2026 ainda não).', campos: [
       { k: 'dataInicio', l: 'Início do período', t: 'date', def: () => new Date().getFullYear() + '-01-01' }, { k: 'dataFim', l: 'Fim do período', t: 'date', def: () => new Date().getFullYear() + '-06-30' },
       { k: 'dataPagamento', l: 'Data do pagamento/crédito (define o IRRF) — vazio = fim do período', t: 'date' },
@@ -181,6 +182,13 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
 .calc-rank td.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
 .calc-rank tr.rk-best td{background:var(--teal-bg)}
 .calc-rank tr.rk-worst td{opacity:.9}
+.calc-cal{display:grid;grid-template-columns:repeat(6,minmax(86px,1fr));gap:6px}
+@media(max-width:700px){.calc-cal{grid-template-columns:repeat(3,minmax(86px,1fr))}}
+.calc-mes{border:1px solid var(--border);border-radius:var(--r);padding:6px 8px;background:var(--bg);line-height:1.25}
+.calc-mes small{display:block;font-size:10.5px;color:var(--slate);font-weight:600;letter-spacing:.04em;text-transform:uppercase}
+.calc-mes b{display:block;font:700 14px var(--mono);font-variant-numeric:tabular-nums;color:var(--ink)}
+.calc-mes i{display:block;font:normal 11.5px var(--mono);color:var(--slate)}
+.calc-mes.vazio{opacity:.45}
 .calc-tabgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;align-items:start}
 .calc-tabcab{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .calc-sec{grid-column:1/-1;border-top:1px dashed var(--border);padding-top:10px;margin-top:2px}
@@ -243,10 +251,11 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     nav.push('<div class="calc-cat">TABELAS 2021 A 2026</div>');
     nav.push(`<button class="calc-item ${est.aba === 'tab_irrf' ? 'on' : ''}" onclick="calcAba('tab_irrf')">📊 Tabela do IRRF</button>`);
     nav.push(`<button class="calc-item ${est.aba === 'tab_inss' ? 'on' : ''}" onclick="calcAba('tab_inss')">📊 Tabela do INSS</button>`);
+    nav.push(`<button class="calc-item ${est.aba === 'tab_selic' ? 'on' : ''}" onclick="calcAba('tab_selic')">📊 Taxa SELIC acumulada no período (ou 100% do CDI)</button>`);
     root.innerHTML = `<div class="calc-wrap"><div class="calc-nav">${nav.join('')}</div><div id="calcMain"></div></div>`;
     renderAbaAtual();
   };
-  function renderAbaAtual() { if (est.aba === 'bases') renderBases(); else if (est.aba === 'hist') renderHistorico(); else if (est.aba === 'tab_irrf' || est.aba === 'tab_inss') renderTabela(est.aba); else renderCalc(); }
+  function renderAbaAtual() { if (est.aba === 'bases') renderBases(); else if (est.aba === 'hist') renderHistorico(); else if (est.aba === 'tab_irrf' || est.aba === 'tab_inss') renderTabela(est.aba); else if (est.aba === 'tab_selic') renderSelic(); else renderCalc(); }
   window.calcAba = function (a) { est.aba = a; window.renderCalculadoras(); };
   window.calcAbrir = function (k) { est.aba = 'calc'; est.key = k; est.ultimo = null; est.ativ = []; est.herd = []; window.renderCalculadoras(); };
 
@@ -566,6 +575,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     main.innerHTML = cab + '<div id="calcTabConteudo">' + corpo + '</div>';
   }
   function tabAoa() {
+    if (est.aba === 'tab_selic') return selicAoa();
     if (est.aba === 'tab_irrf') {
       const a = [['Vigência', 'Conjunto', 'Faixa', 'Base até (R$)', 'Alíquota (%)', 'Parcela a deduzir (R$)', 'Dependente (R$)', 'Desconto simplificado (R$)', 'Redução Lei 15.270', 'Situação']];
       setsTab(['irrf_pf']).forEach(s => { const fx = pv2(s, 'faixas'); fx.forEach((f, i) => a.push([vigTxt(s), s.id + ' v' + s.version, (i + 1) + 'ª', f.ate === null ? 'acima' : Number(f.ate), Number(f.aliq), Number(f.ded), Number(pv2(s, 'dependente')), Number(pv2(s, 'desconto_simplificado')), pv2(s, 'redutor_limite1') !== undefined ? 'sim' : 'não existia', semTags(situacaoSet(s))])); });
@@ -577,7 +587,78 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     return { nome: 'INSS 2021-2026', aoa: a, pctCols: [ref.length + 2] };
   }
   window.calcTabExcel = function () { const t = tabAoa(); const wb = XLSX.utils.book_new(); addSheet(wb, t.nome, t.aoa, t); baixarXlsx(wb, t.nome); };
-  window.calcTabImprimir = function () { const t = tabAoa(); const el = document.getElementById('calcTabConteudo'); if (!el) return; abrirImpressao(`<!doctype html><meta charset="utf-8"><title>${E(t.nome)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}table{border-collapse:collapse;width:100%;margin:6px 0 12px}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}.calc-card{border:1px solid #ccc;padding:8px 10px;margin:8px 0;page-break-inside:avoid}.calc-tag{border:1px solid #999;border-radius:3px;padding:0 4px;font-size:10px}.calc-tabgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}dt{font-size:10px;font-weight:bold;color:#666;margin-top:6px}dd{margin:0}h3{margin:0 0 6px;font-size:14px}</style><h1>${E(t.nome)}</h1><p><small>Calculadoras JJR — ${E(new Date().toLocaleString('pt-BR'))}</small></p>${el.innerHTML}`); };
+  window.calcTabImprimir = function () { const t = tabAoa(); const el = document.getElementById('calcTabConteudo'); if (!el) return; abrirImpressao(`<!doctype html><meta charset="utf-8"><title>${E(t.nome)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}table{border-collapse:collapse;width:100%;margin:6px 0 12px}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}.calc-card{border:1px solid #ccc;padding:8px 10px;margin:8px 0;page-break-inside:avoid}.calc-tag{border:1px solid #999;border-radius:3px;padding:0 4px;font-size:10px}.calc-tabgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.calc-cal{display:grid;grid-template-columns:repeat(6,1fr);gap:4px}.calc-mes{border:1px solid #ccc;padding:3px 5px;font-size:11px}.calc-mes small{display:block;color:#666}.calc-mes b{display:block}.calc-mes i{display:block;font-style:normal;color:#666}dt{font-size:10px;font-weight:bold;color:#666;margin-top:6px}dd{margin:0}h3{margin:0 0 6px;font-size:14px}</style><h1>${E(t.nome)}</h1><p><small>Calculadoras JJR — ${E(new Date().toLocaleString('pt-BR'))}</small></p>${el.innerHTML}`); };
+
+  // ───────────────────────────── Selic / CDI acumulados (BCB, séries 4390 e 4391) — calendário por ano, desde 01/2021 ─────────────────────────────
+  const pad2 = n => String(n).padStart(2, '0');
+  const pp = x => Number(x).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 }) + '%';
+  const setSelic = () => C.acharSet('mutuo_juros', hoje()) || C.acharSet('mutuo_juros', '2021-01-01');
+  function selicAno(ano, mapa) { let f = 1, n = 0; for (let m = 1; m <= 12; m++) { const v = mapa[ano + '-' + pad2(m)]; if (v !== undefined) { f *= 1 + Number(v) / 100; n++; } } return { pct: (f - 1) * 100, n }; }
+  function calendarioHtml(set) {
+    const sel = (set && pv2(set, 'selic_mensal')) || {}, cdi = (set && pv2(set, 'cdi_mensal')) || {}; const ano0 = 2021, ano1 = +hoje().slice(0, 4), mesCorr = hoje().slice(0, 7); let h = '';
+    for (let a = ano1; a >= ano0; a--) {
+      const sa = selicAno(a, sel), ca = selicAno(a, cdi);
+      h += `<div class="calc-card"><div class="calc-tabcab"><h3 class="calc-h" style="font-size:15px;margin:0">${a}</h3><div style="font-size:12.5px;color:var(--slate)">${sa.n ? 'Selic no ano: <b>' + pp(sa.pct) + '</b>' + (sa.n < 12 ? ' (' + sa.n + ' meses)' : '') : 'sem dados'}${ca.n ? ' · CDI no ano: <b>' + pp(ca.pct) + '</b>' + (ca.n < 12 ? ' (' + ca.n + ' meses)' : '') : ''}</div></div><div class="calc-cal">`;
+      for (let m = 1; m <= 12; m++) {
+        const ym = a + '-' + pad2(m), v = sel[ym], c = cdi[ym];
+        h += `<div class="calc-mes ${v === undefined ? 'vazio' : ''}"><small>${MESES[m - 1]}/${String(a).slice(2)}</small>${v === undefined ? `<b>—</b><i>${ym === mesCorr ? 'em andamento' : (ym > mesCorr ? 'ainda não' : 'não cadastrado')}</i>` : `<b>${pp(v)}</b><i>CDI ${c === undefined ? '—' : pp(c)}</i>`}</div>`;
+      }
+      h += '</div></div>';
+    }
+    return h;
+  }
+  function selicDetalhe(set, ini, fim) {
+    const sel = pv2(set, 'selic_mensal') || {}, cdi = pv2(set, 'cdi_mensal') || {}; const linhas = []; let cur = ini;
+    while (cur < fim) { const ym = cur.slice(0, 7), prox = C.somaMeses(ym + '-01', 1), fimMes = prox < fim ? prox : fim; linhas.push({ ym, usados: C.diasEntre(cur, fimMes), dm: C.diasEntre(ym + '-01', prox), s: sel[ym], c: cdi[ym] }); cur = fimMes; }
+    return linhas;
+  }
+  function renderSelic() {
+    const main = document.getElementById('calcMain'); const set = setSelic(); const adm = ehAdmin();
+    const sel = (set && pv2(set, 'selic_mensal')) || {}; const ult = Object.keys(sel).sort().pop();
+    const ini0 = est.selicIni || (hoje().slice(0, 4) + '-01-01'), fim0 = est.selicFim || (hoje().slice(0, 7) + '-01');
+    main.innerHTML = `<div class="calc-card"><h2 class="calc-h">📊 Taxa SELIC acumulada no período (ou 100% do CDI)</h2><div class="calc-sub">Série oficial do Banco Central (SGS 4390 — Selic e 4391 — CDI, acumulados no mês), desde 01/2021. Serve de referência para os juros do mútuo: a PJ que empresta deve cobrar ao menos a Selic acumulada (ou 100% do CDI). Os meses fechados ficam visíveis no calendário abaixo, ano a ano. ${ult ? 'Última competência cadastrada: <b>' + MESES[+ult.slice(5) - 1] + '/' + ult.slice(0, 4) + '</b> (' + E(set.id) + ' v' + set.version + ').' : ''}</div>
+      <div class="calc-grid"><div class="cf"><label class="fl" for="cs_ini">Data inicial (inclusive)</label><input class="fi" type="date" id="cs_ini" value="${E(ini0)}" min="2021-01-01"></div><div class="cf"><label class="fl" for="cs_fim">Data final (exclusive — ex.: o vencimento)</label><input class="fi" type="date" id="cs_fim" value="${E(fim0)}"></div><div class="cf"><label class="fl" for="cs_prin">Principal (R$) — opcional, para ver os juros mínimos</label><input class="fi" id="cs_prin" inputmode="decimal" placeholder="0,00" ${MASK}></div></div>
+      <div class="calc-acts"><button class="btn bp" onclick="calcSelicCalcular()">Calcular acumulado</button><button class="btn btn-ia-gemini btn-calc-ia" onclick="calcSelicAtualizar()" id="calcBtnBcb">🔄 Atualizar pelo Banco Central</button><button class="btn bo" onclick="calcTabImprimir()">🖨️ Imprimir / PDF</button><button class="btn bo" onclick="calcTabExcel()">📊 Excel</button></div><div id="calcSelicMsg" style="font-size:12.5px;margin-top:8px;color:var(--slate)">${adm ? 'A atualização busca os meses fechados que faltam na API oficial do BCB e <b>salva</b> como nova versão da série (não apaga nada).' : 'Só administrador atualiza a série.'}</div></div>
+      <div id="calcTabConteudo"><div id="calcSelicRes"></div>${calendarioHtml(set)}</div>`;
+    if (est.selicRes) document.getElementById('calcSelicRes').innerHTML = est.selicRes;
+  }
+  window.calcSelicCalcular = function () {
+    const set = setSelic(); const g2 = id => (document.getElementById(id) || {}).value || ''; const ini = g2('cs_ini'), fim = g2('cs_fim'), prin = C.cents(g2('cs_prin')); est.selicIni = ini; est.selicFim = fim;
+    const el = document.getElementById('calcSelicRes'); const erro = m => { el.innerHTML = `<div class="calc-card"><div class="calc-erro">${E(m)}</div></div>`; est.selicRes = el.innerHTML; };
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(ini) || !/^\d{4}-\d{2}-\d{2}$/.test(fim)) return erro('Informe a data inicial e a final.');
+    if (fim <= ini) return erro('A data final precisa ser posterior à inicial.');
+    if (ini < '2021-01-01') return erro('A série cadastrada começa em 01/2021.');
+    const a = C.selicAcumulada(set, ini, fim, 'selic_mensal'), b = C.selicAcumulada(set, ini, fim, 'cdi_mensal'); const dias = C.diasEntre(ini, fim);
+    const faltam = a.faltando.length ? a.faltando : b.faltando; const det = selicDetalhe(set, ini, fim);
+    const kp = (l, v, hl) => `<div class="calc-kpi ${hl ? 'hl' : ''}"><small>${E(l).toUpperCase()}</small><b>${v}</b></div>`;
+    el.innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">Acumulado de ${ini.split('-').reverse().join('/')} a ${fim.split('-').reverse().join('/')} (${dias} dias)</h3>${faltam.length ? `<div class="calc-aviso">⚠️ Série sem dados para ${faltam.map(x => MESES[+x.slice(5) - 1] + '/' + x.slice(0, 4)).join(', ')} — o acumulado não pôde ser calculado. Use “Atualizar pelo Banco Central” depois que o mês fechar.</div>` : `<div class="calc-resumo">${kp('Selic acumulada', pp((a.fator - 1) * 100), 1)}${kp('CDI acumulado', pp((b.fator - 1) * 100))}${prin ? kp('Juros a 100% da Selic', brl(Math.round(prin * (a.fator - 1))), 1) + kp('Juros a 100% do CDI', brl(Math.round(prin * (b.fator - 1)))) : ''}</div>`}
+      <div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Mês</th><th>Dias usados</th><th>Selic no mês</th><th>CDI no mês</th></tr></thead><tbody>${det.map(l => `<tr><td>${MESES[+l.ym.slice(5) - 1]}/${l.ym.slice(0, 4)}</td><td>${l.usados} de ${l.dm}${l.usados < l.dm ? ' (parcial)' : ''}</td><td>${l.s === undefined ? '—' : pp(l.s)}</td><td>${l.c === undefined ? '—' : pp(l.c)}</td></tr>`).join('')}</tbody></table></div>
+      <div style="font-size:12px;color:var(--slate);margin-top:6px">Meses fechados são compostos; o mês parcial entra proporcional aos dias corridos (aproximação — o BCB usa dias úteis). Guarde o extrato oficial da Selic/CDI do período junto com a memória de cálculo do mútuo.</div></div>`;
+    est.selicRes = el.innerHTML;
+  };
+  window.calcSelicAtualizar = async function () {
+    if (!ehAdmin()) { toast('Somente administrador atualiza a série.', 'err'); return; }
+    const btn = document.getElementById('calcBtnBcb'), msg = document.getElementById('calcSelicMsg'); if (btn) btn.disabled = true; if (msg) msg.textContent = 'Consultando o Banco Central…';
+    try {
+      const d = new Date(), dd = pad2(d.getDate()) + '/' + pad2(d.getMonth() + 1) + '/' + d.getFullYear();
+      const [a, b] = await Promise.all([4390, 4391].map(c => fetch('https://api.bcb.gov.br/dados/serie/bcdata.sgs.' + c + '/dados?formato=json&dataInicial=01/01/2021&dataFinal=' + dd).then(r => { if (!r.ok) throw new Error('BCB respondeu HTTP ' + r.status); return r.json(); })));
+      const atual = setSelic(); if (!atual) throw new Error('Série de Selic não encontrada.');
+      const nova = JSON.parse(JSON.stringify(atual)); const mesCorr = hoje().slice(0, 7);
+      const juntar = (mapa, arr) => { let n = 0; arr.forEach(x => { const ym = String(x.data).slice(6) + '-' + String(x.data).slice(3, 5); if (ym >= mesCorr || !/^\d{4}-\d{2}$/.test(ym)) return; const v = parseFloat(String(x.valor).replace(',', '.')); if (!isFinite(v)) return; if (mapa[ym] === undefined) { mapa[ym] = String(x.valor).replace(',', '.'); n++; } }); return n; };
+      const n1 = juntar(nova.params.selic_mensal.value, a), n2 = juntar(nova.params.cdi_mensal.value, b);
+      if (!n1 && !n2) { if (msg) msg.textContent = 'Já está atualizado: nenhum mês fechado novo no Banco Central.'; if (btn) btn.disabled = false; return; }
+      nova.version = Math.max.apply(null, C.todosSets().filter(s => s.calculator_key === 'mutuo_juros').map(s => s.version)) + 1;
+      nova.id = atual.id.replace(/_V\d+$/, '') + '_V' + nova.version; nova.status = 'ativo'; nova.created_at = hoje(); nova.created_by = (currentUser && (currentUser.nome || currentUser.login)) || ''; nova.origem = 'Banco Central — SGS 4390 e 4391 (atualização pelo botão)';
+      const sets = lerLista(LS.sets); sets.push(nova); S.s(LS.sets, sets); carregarSets();
+      toast('Série atualizada: ' + Math.max(n1, n2) + ' mês(es) novo(s) salvo(s).', 'ok'); renderSelic();
+      const m2 = document.getElementById('calcSelicMsg'); if (m2) m2.innerHTML = '✅ Salvo como <b>' + E(nova.id) + '</b>: ' + Math.max(n1, n2) + ' mês(es) novo(s) da fonte oficial do BCB.';
+    } catch (e) { if (msg) msg.innerHTML = '<span style="color:var(--red)">Não foi possível atualizar: ' + E(e.message || e) + '</span>'; if (btn) btn.disabled = false; }
+  };
+  function selicAoa() {
+    const set = setSelic(); const sel = (set && pv2(set, 'selic_mensal')) || {}, cdi = (set && pv2(set, 'cdi_mensal')) || {}; const a = [['Ano', 'Mês', 'Selic no mês (%)', 'CDI no mês (%)']];
+    Object.keys(sel).sort().forEach(ym => a.push([+ym.slice(0, 4), MESES[+ym.slice(5) - 1], Number(sel[ym]) / 100, cdi[ym] === undefined ? '' : Number(cdi[ym]) / 100]));
+    return { nome: 'Selic e CDI mensais', aoa: a, pctCols: [2, 3], intCols: [0] };
+  }
 
   window.calcPesquisarIA = async function (foco) {
     foco = FOCOS[foco] ? foco : '';
