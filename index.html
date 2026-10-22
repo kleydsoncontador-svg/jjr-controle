@@ -16220,6 +16220,88 @@ function _parsearFaturaCartaoSicoobPdf(paginas){
   return transacoes.length?transacoes:null;
 }
 
+// ─── Fatura Sicoob — layout "Sipag Net" (pedido do usuário 22/10/2026: "aprenda a ler essa fatura do Sicoob", P.H. de Oliveira Silva Acessórios, eid 254, fatura 09/2026) ──────────────────────────────
+// Página A4: cabeçalho "Sipag Net" / "Conta Cartao: …" / "Vencimento: dd/mm/aaaa"; "Movimentos" com colunas Data (x≈57) | Descrição (x≈92) | Crédito (valor termina ≈x 505-515) | Débito (valor termina ≈x 560-566).
+// Primeiro um bloco GERAL (anuidade, desconto de anuidade, pagamento da fatura anterior, proteção…), depois um bloco por portador ("GASTOS DE NOME (final do cartão)") fechado por "TOTAL".
+// Data só dd/mm; parcela "09/10" (parcela 9 de 10) fica DEPOIS da descrição e ANTES da cidade. Valor na coluna Crédito (x do valor < 500) vira NEGATIVO (como estorno).
+// O "Resumo" do rodapé traz Despesas/Débitos, Encargos, Pagamento/Crédito e Saldo Total — usados para CONFERIR a leitura (soma dos blocos × resumo). As regras de 1ª parcela/à vista/anuidade são as de sempre (processarConvSicoob).
+function _parsearFaturaSicoobSipagPdf(paginas){
+  const txt1=(paginas[0]&&paginas[0].itens||[]).map(i=>i.text).join(' ');
+  if(!/Movimentos/i.test(txt1)) return null;
+  if(!(/sipag\s*net/i.test(txt1)||(/conta\s*cart/i.test(txt1)&&/pagamento\s*m[ií]nimo/i.test(txt1)))) return null;
+  const num=t=>/^[\d.]+,\d{2}$/.test(t), val=t=>parseFloat(String(t).replace(/\./g,'').replace(',','.'));
+  const r2=x=>Math.round(x*100)/100;
+  const transacoes=[], resumo={}, meta={};
+  let portador='', dentro=false, fim=false;
+  for(const pagina of paginas){
+    const linhas=[];
+    for(const it of (pagina.itens||[])){
+      const y=it.y; let l=linhas.find(l=>Math.abs(l.y-y)<=3);
+      if(!l){ l={y,it:[]}; linhas.push(l); }
+      l.it.push(it);
+    }
+    linhas.sort((a,b)=>b.y-a.y);
+    for(const l of linhas){
+      const linha=l.it.slice().sort((a,b)=>a.x-b.x);
+      const textos=linha.map(i=>String(i.text||'').trim()).filter(Boolean);
+      if(!textos.length) continue;
+      const full=textos.join(' ');
+      // metadados e Resumo (rótulo à esquerda x<200, valor à direita) — lidos em qualquer posição da página
+      let m;
+      if((m=full.match(/Vencimento:\s*(\d{2}\/\d{2}\/\d{4})/i))) meta.vencimento=m[1];
+      { const mf=linha.find(i=>i.x>400&&/^Fatura\s+\S+/i.test(String(i.text||'').trim())); if(mf&&!meta.mesRef) meta.mesRef=String(mf.text).trim().replace(/^Fatura\s+/i,'').toUpperCase(); }
+      if(/Pagamento\s*M[ií]nimo/i.test(full)&&/Total da Fatura/i.test(full)) meta._proxTotais=true;
+      else if(meta._proxTotais&&/R\$/.test(full)){ const v=(full.match(/R\$\s*([\d.]+,\d{2})/g)||[]).map(x=>val(x.replace(/R\$\s*/,''))); if(v.length>=2){ resumo.minimo=v[0]; resumo.totalFatura=v[1]; } meta._proxTotais=false; }
+      const rot=linha.filter(i=>i.x<200).map(i=>String(i.text||'').trim()).join(' ').trim();
+      const vd=[...linha].reverse().find(i=>i.x>=200&&num(String(i.text||'').trim()));
+      if(vd&&rot){
+        const v=val(String(vd.text).trim());
+        if(/^Valor do Saldo Anterior$/i.test(rot)) resumo.saldoAnterior=v;
+        else if(/^Pagamento\/Cr[eé]dito$/i.test(rot)) resumo.credito=v;
+        else if(/^Encargos$/i.test(rot)) resumo.encargos=v;
+        else if(/^Despesas\/D[eé]bitos$/i.test(rot)) resumo.despesas=v;
+        else if(/^Saldo Total$/i.test(rot)) resumo.saldoTotal=v;
+        else if(/^Data de Fechamento$/i.test(rot)){ }
+      }
+      if((m=full.match(/^Data de Fechamento\s+(\d{2}\/\d{2}\/\d{4})/i))) meta.fechamento=m[1];
+      // ─── Movimentos ───
+      if(/^Movimentos$/i.test(textos[0])){ dentro=true; continue; }
+      if(!dentro||fim) continue;
+      if(/Pagamento\s*M[ií]nimo/i.test(full)){ fim=true; continue; }
+      if(/^Data$/i.test(textos[0])) continue;                                   // cabeçalho da tabela
+      if(textos.some(t=>/^SALDO$/i.test(t))&&textos.some(t=>/ANTERIOR/i.test(t))) continue;
+      if(/^GASTOS DE\s+/i.test(full)){ portador=full.replace(/^GASTOS DE\s+/i,'').replace(/\s+/g,' ').trim(); continue; }
+      if(/^TOTAL$/i.test(textos[0])&&!linha.some(i=>i.x<80&&/^\d{2}\/\d{2}$/.test(String(i.text).trim()))){ portador=''; continue; }
+      const dateItem=linha.find(i=>i.x<85&&/^\d{2}\/\d{2}$/.test(String(i.text||'').trim()));
+      if(!dateItem) continue;
+      const vi=[...linha].reverse().find(i=>i.x>=400&&num(String(i.text||'').trim()));
+      if(!vi) continue;
+      const valorAbs=val(String(vi.text).trim()); if(isNaN(valorAbs)) continue;
+      const credito=vi.x<500;                                                   // coluna Crédito (início do valor < x 500); Débito começa ≥ x 520
+      const regiao=linha.filter(i=>i.x>=85&&i.x<400).map(i=>String(i.text||'').trim()).filter(Boolean);
+      const mk=regiao.find(t=>/^\d{2}\/\d{2}$/.test(t));
+      let parcelaAtual=null, parcelaTotal=null;
+      if(mk){ const a=parseInt(mk.slice(0,2),10), t=parseInt(mk.slice(3,5),10); if(t>=2&&a>=1&&a<=t){ parcelaAtual=a; parcelaTotal=t; } }
+      let usouMk=false; const descricao=regiao.filter(t=>{ if(!usouMk&&t===mk){ usouMk=true; return false; } return true; }).join(' ').replace(/\s+/g,' ').trim();
+      if(!descricao) continue;
+      transacoes.push({ dataStr:String(dateItem.text).trim(), descricao, valor:credito?-valorAbs:valorAbs, usdInfo:null, parcelaAtual, parcelaTotal, portador });
+    }
+  }
+  if(!transacoes.length) return null;
+  // Conferência com o Resumo da própria fatura
+  const soma=a=>r2(a.reduce((x,y)=>x+y,0));
+  const itens=[
+    ['Despesas/Débitos (gastos dos portadores)', soma(transacoes.filter(t=>t.portador&&t.valor>0).map(t=>t.valor)), resumo.despesas],
+    ['Encargos e tarifas (bloco geral)', soma(transacoes.filter(t=>!t.portador&&t.valor>0).map(t=>t.valor)), resumo.encargos],
+    ['Pagamento/Crédito', soma(transacoes.filter(t=>t.valor<0).map(t=>-t.valor)), resumo.credito],
+  ];
+  delete meta._proxTotais;
+  const conf={ itens:itens.map(([rot,lido,inf])=>({rot,lido,informado:inf==null?null:inf,ok:inf==null?null:Math.abs(lido-inf)<0.005})), resumo, meta };
+  conf.ok=conf.itens.every(x=>x.ok!==false)&&conf.itens.some(x=>x.ok===true);
+  transacoes._conf=conf;
+  return transacoes;
+}
+
 async function processarConvSicoob(eid){
   const btn=document.getElementById('convSicoobBtnProcessar_'+eid);
   _convSicoobSetStatus(eid,'','');
@@ -16236,7 +16318,12 @@ async function processarConvSicoob(eid){
   toast('Processando fatura…','');
   try{
     const paginas=await _convItauExtrairPaginas(file);
-    const transacoesLidas=_parsearFaturaCartaoSicoobPdf(paginas);
+    const transacoesLidas=_parsearFaturaCartaoSicoobPdf(paginas)||_parsearFaturaSicoobSipagPdf(paginas);
+    if(transacoesLidas&&transacoesLidas._conf){
+      const cf=transacoesLidas._conf;
+      console.info('Fatura Sicoob (Sipag Net) — conferência com o Resumo:',cf.itens.map(x=>x.rot+': lido '+_fmt(x.lido)+(x.informado==null?'':' × fatura '+_fmt(x.informado)+(x.ok?' ✓':' ✗'))).join(' | '));
+      if(!cf.ok) toast('Atenção: a soma lida não bate com o Resumo da fatura ('+cf.itens.filter(x=>x.ok===false).map(x=>x.rot+': lido '+_fmt(x.lido)+' × fatura '+_fmt(x.informado)).join('; ')+'). Confira o PDF.','err');
+    }
 
     if(!transacoesLidas||!transacoesLidas.length){
       _convSicoobSetStatus(eid,'Nenhum lançamento encontrado no PDF. Verifique se o arquivo é uma fatura Sicoob válida.','err');
