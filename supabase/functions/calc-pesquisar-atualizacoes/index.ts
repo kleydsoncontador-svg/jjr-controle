@@ -61,7 +61,7 @@ Deno.serve(async (req: Request) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: CORS_HEADERS });
   const H = { ...CORS_HEADERS, 'Content-Type': 'application/json' };
   try {
-    const { hoje, conjuntos } = await req.json();
+    const { hoje, conjuntos, foco } = await req.json();
     if (!Array.isArray(conjuntos)) return new Response(JSON.stringify({ error: 'Envie a lista de conjuntos de parâmetros atuais.' }), { status: 400, headers: H });
 
     const prompt = `Você é um pesquisador de legislação tributária e trabalhista brasileira. Hoje é ${hoje}.
@@ -74,6 +74,8 @@ REGRAS RÍGIDAS:
 - "parametro" deve ser exatamente o nome de uma chave existente em "parametros" do conjunto. "novo_valor" deve ter o MESMO formato (tipo JSON) do valor atual (número como string decimal com ponto, ex.: "0.075", se o atual for string; array de objetos com as mesmas chaves, se o atual for array).
 - "vigencia_inicial" no formato AAAA-MM-DD, a data em que a norma passa a valer.
 - Não repita valores que já são iguais aos atuais.
+
+${foco ? String(foco).slice(0, 1500) + ' ' : ''}
 
 CONJUNTOS ATUAIS:
 ${JSON.stringify(conjuntos, null, 1)}

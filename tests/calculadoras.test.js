@@ -23,7 +23,7 @@ t('cents 1.005 arredonda meio p/ cima', () => assert.strictEqual(c('1,005'), 101
 t('brl', () => assert.strictEqual(C.brl(123456789), '1.234.567,89'));
 
 // ── 3. Parâmetros por competência ──
-t('sem parâmetro para 2024 → não calcula', () => { const x = C.calcular('irrf_pf', { competencia: '2024-05', rendimentos: '5000' }); assert.strictEqual(x.ok, false); assert.strictEqual(x.erro, C.ERRO_PARAM); });
+t('sem parâmetro para antes de 04/2015 → não calcula', () => { const x = C.calcular('irrf_pf', { competencia: '2014-05', rendimentos: '5000' }); assert.strictEqual(x.ok, false); assert.strictEqual(x.erro, C.ERRO_PARAM); });
 t('sem parâmetro p/ Lucro Presumido 2024', () => { const x = C.calcular('lucro_presumido', { ano: 2024, trimestre: 1, atividades: [{ tipo: 'comercio', receita: '100' }] }); assert.strictEqual(x.ok, false); });
 t('resultado informa o conjunto/versão usados', () => { const x = C.calcular('irrf_pf', { competencia: '2026-03', rendimentos: '5000' }); assert.strictEqual(x.parametros[0].id, 'IRRF_2026'); assert.strictEqual(x.parametros[0].version, 1); });
 t('conjunto novo aprovado vence pela versão maior e não é retroativo', () => {
@@ -194,6 +194,26 @@ t('somaMeses: 31/01 + 1 mês = 28/02 e vira o ano', () => { assert.strictEqual(C
 // ── 12. Toda calculadora devolve memória, parâmetros e bases ──
 t('memória e bases presentes', () => { const x = C.calcular('salario_liquido', { competencia: '2026-03', salario: '5000' }); assert.ok(x.memoria.length > 5); assert.ok(x.bases.length > 0); assert.ok(x.parametros.length > 0); });
 t('entrada inválida não quebra', () => assert.strictEqual(C.calcular('irrf_pf', { competencia: 'abc' }).ok, false));
+
+// ── 19. Tabelas históricas IRRF/INSS 2021-2026 (mês de cada mudança) e COMPARATIVO ──
+t('IRRF: conjunto certo em cada virada de mês', () => { [['2023-04', 'IRRF_2015_04'], ['2023-05', 'IRRF_2023_05'], ['2024-01', 'IRRF_2023_05'], ['2024-02', 'IRRF_2024_02'], ['2025-04', 'IRRF_2024_02'], ['2025-05', 'IRRF_2025_05'], ['2025-12', 'IRRF_2025_05'], ['2026-01', 'IRRF_2026'], ['2021-01', 'IRRF_2015_04']].forEach(([m, id]) => assert.strictEqual(C.acharSet('irrf_pf', m + '-01').id, id, m)); });
+t('INSS: conjunto certo em cada virada (inclui maio/2023)', () => { [['2021-12', 'INSS_2021'], ['2022-01', 'INSS_2022'], ['2023-04', 'INSS_2023_01'], ['2023-05', 'INSS_2023_05'], ['2023-12', 'INSS_2023_05'], ['2024-01', 'INSS_2024'], ['2025-12', 'INSS_2025'], ['2026-01', 'INSS_2026']].forEach(([m, id]) => assert.strictEqual(C.acharSet('inss_empregado', m + '-01').id, id, m)); });
+t('INSS 2021 sobre 5.000,00 = 551,29 (faixas 2021)', () => { const x = C.calcular('salario_liquido', { competencia: '2021-03', salario: '5000' }); assert.strictEqual(x.resultado.inss, 55129); });
+t('IRRF antes de 2026 não tem redutor (avisa na memória)', () => { const a = C.calcular('irrf_pf', { competencia: '2023-04', rendimentos: '2000' }); assert.ok(a.ok); assert.ok(a.memoria.some(l => /Redução da Lei 15\.270/.test(l.r || ''))); });
+t('IRRF: simplificado de 528,00 só a partir de 05/2023', () => { const a = C.acharSet('irrf_pf', '2023-04-01'), b = C.acharSet('irrf_pf', '2023-05-01'); assert.strictEqual(a.params.desconto_simplificado.value, '0'); assert.strictEqual(b.params.desconto_simplificado.value, '528.00'); });
+t('vigência contínua sem buracos (IRRF 04/2015 a 12/2026; INSS 01/2021 a 12/2026)', () => {
+  [['irrf_pf', 2015, 4], ['inss_empregado', 2021, 1], ['inss_contribuinte_individual', 2021, 1]].forEach(([k, a0, m0]) => { for (let a = a0; a <= 2026; a++) for (let m = (a === a0 ? m0 : 1); m <= 12; m++) assert.ok(C.acharSet(k, a + '-' + String(m).padStart(2, '0') + '-01'), k + ' ' + a + '-' + m); });
+});
+t('INSS contribuinte individual: teto por ano (2021 a 2026)', () => { [['2021-06', '6433.57'], ['2022-06', '7087.22'], ['2023-06', '7507.49'], ['2024-06', '7786.02'], ['2025-06', '8157.41'], ['2026-06', '8475.55']].forEach(([m, t2]) => assert.strictEqual(C.acharSet('inss_contribuinte_individual', m + '-01').params.teto.value, t2, m)); });
+const cmp = (o) => C.calcular('comparativo', Object.assign({ competencia: '2026-10', valor: '10000', regime: 'lucro_real' }, o || {}));
+t('COMPARATIVO Lucro Real R$ 10.000: ordem JCP > Distribuição > Mútuo > Pró-labore', () => { const r = cmp(); assert.ok(r.ok); assert.deepStrictEqual(r.resultado.ranking.map(x => x.key), ['jcp', 'dist_lucros', 'mutuo', 'pro_labore']); });
+t('COMPARATIVO: líquido da distribuição = bruto até R$ 50 mil; acima, retém 10% do total', () => { const a = cmp().resultado.ranking.find(x => x.key === 'dist_lucros'); assert.strictEqual(a.liquidoSocio, 1000000); const b = cmp({ valor: '80000' }).resultado.ranking.find(x => x.key === 'dist_lucros'); assert.strictEqual(b.liquidoSocio, 7200000); });
+t('COMPARATIVO: JCP líquido = 82,5% (IRRF 17,5% em 2026) e custo = 76% (economia 24%) no Lucro Real', () => { const j = cmp().resultado.ranking.find(x => x.key === 'jcp'); assert.strictEqual(j.liquidoSocio, 825000); assert.strictEqual(j.empresaEconomia, 240000); assert.strictEqual(j.custoEmpresa, 760000); });
+t('COMPARATIVO: tributos líquidos = custo − líquido do sócio, em todas as formas', () => cmp().resultado.ranking.forEach(o => assert.strictEqual(o.tributosLiquidos, o.custoEmpresa - o.liquidoSocio)));
+t('COMPARATIVO Simples: JCP fora da comparação; sem patronal', () => { const r = cmp({ regime: 'simples' }); assert.ok(r.ok); assert.ok(!r.resultado.ranking.some(x => x.key === 'jcp')); assert.ok(r.resultado.indisponiveis.some(x => x.nome === 'JCP')); assert.strictEqual(r.resultado.ranking.find(x => x.key === 'pro_labore').empresaEncargos, 0); });
+t('COMPARATIVO Presumido: pró-labore soma patronal 20% e não gera economia', () => { const p = cmp({ regime: 'lucro_presumido' }).resultado.ranking.find(x => x.key === 'pro_labore'); assert.strictEqual(p.empresaEncargos, 200000); assert.strictEqual(p.empresaEconomia, 0); assert.strictEqual(p.custoEmpresa, 1200000); });
+t('COMPARATIVO: valor vazio e regime inválido dão erro claro', () => { assert.strictEqual(cmp({ valor: '' }).ok, false); assert.strictEqual(cmp({ regime: 'x' }).ok, false); });
+t('COMPARATIVO: antes de 2026 a distribuição some (sem retenção cadastrada) e o resto calcula', () => { const r = cmp({ competencia: '2025-08' }); assert.ok(r.ok); assert.ok(r.resultado.indisponiveis.some(x => x.nome === 'Distribuição de lucros')); });
 
 console.log('\nCalculadoras JJR — ' + ok + ' ok, ' + fail + ' falhas');
 process.exit(fail ? 1 : 0);

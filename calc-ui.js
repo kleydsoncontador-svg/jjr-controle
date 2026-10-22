@@ -110,6 +110,17 @@
       { k: 'irJaRetido', l: 'IRRF já retido nesse mês sobre esses pagamentos (R$) — vazio = calcula pela regra', t: 'money', quando: v => v.beneficiario === 'pf_residente' },
       { k: 'parteIsenta', l: 'Parte DESTE pagamento que é lucro apurado até 2025, aprovado até 31/12/2025 e pago nos termos aprovados (R$) — isenta', t: 'money', quando: v => v.beneficiario !== 'exterior_isento' }],
       resumo: r => [['IRRF a reter agora', r.ir, 1], ['Líquido ao sócio', r.liquido, 1], ['Valor bruto do pagamento', r.bruto], ['Total do mês sujeito ao teste', r.totalMes == null ? '—' : r.totalMes], ['IRRF devido no mês', r.devidoMes], ['Máximo bruto SEM retenção neste mês', r.folga == null ? '—' : r.folga]] },
+    comparativo: { titulo: 'COMPARATIVO — pagar uma pessoa física: qual forma pesa menos de imposto?', desc: 'Informe o valor. A tela calcula esse pagamento como Pró-labore, JCP, Distribuição de lucros e Mútuo (cada uma com o mesmo motor das calculadoras próprias) e ordena, do mais ao menos vantajoso tributariamente, pelos tributos líquidos totais ÷ custo líquido da empresa (impostos do sócio + encargos da empresa − economia de IRPJ/CSLL). Compara só o imposto; cada forma exige os seus requisitos legais.', campos: [
+      { k: 'competencia', l: 'Mês do pagamento', t: 'month', def: mesAtual },
+      { k: 'valor', l: 'Valor a pagar à pessoa física (R$)', t: 'money' },
+      { k: 'regime', l: 'Regime da empresa', t: 'select', def: 'lucro_real', opts: [['lucro_real', 'Lucro Real'], ['lucro_presumido', 'Lucro Presumido'], ['simples', 'Simples Nacional']] },
+      { k: 'dependentes', l: 'Nº de dependentes do sócio (pró-labore)', t: 'int', def: 0 },
+      { k: 'limiteJCP', l: 'JCP: máximo dedutível (R$) — opcional, vem da calculadora JCP', t: 'money' },
+      { k: 'dataVencimentoMutuo', l: 'Mútuo: data de vencimento (opcional — vazio = prazo indeterminado, IOF por 365 dias)', t: 'date' },
+      { k: 'taxaJurosMutuo', l: 'Mútuo: taxa de juros do período (%) — opcional', t: 'pct' }],
+      resumo: r => [['Mais vantajosa', r.melhor, 1], ['Menos vantajosa', r.pior], ['Valor pago', r.valor]],
+      extra: res => rankingHtml(res),
+      tabela: res => ({ nome: 'Ranking', cab: ['Posição', 'Forma', 'Líquido ao sócio', 'Tributos retidos do sócio', 'Encargos da empresa', 'Economia IRPJ/CSLL', 'Custo líquido da empresa', 'Tributos líquidos totais', 'Carga efetiva (%)', 'Observação'], intCols: [0], pctCols: [8], linhas: res.ranking.map(o => [o.posicao, o.nome, o.liquidoSocio / 100, o.socioTributos / 100, o.empresaEncargos / 100, o.empresaEconomia / 100, o.custoEmpresa / 100, o.tributosLiquidos / 100, o.cargaBp / 10000, o.detalhe + (o.naoRemuneracao ? ' | NÃO é remuneração: precisa ser devolvido' : '')]).concat(res.indisponiveis.map(x => ['—', x.nome, '', '', '', '', '', '', '', 'Fora da comparação: ' + x.motivo])) }) },
     lucro_presumido: { titulo: 'Lucro Presumido — IRPJ e CSLL', desc: 'Apuração trimestral com a majoração de 10% sobre o percentual de presunção acima de R$ 1.250.000 por trimestre (IN RFB 2.305/2025, art. 15, com ajuste do 4º trimestre pela receita acumulada do ano).', campos: [
       { k: 'ano', l: 'Ano', t: 'int', def: () => new Date().getFullYear() },
       { k: 'trimestre', l: 'Trimestre', t: 'select', def: '1', opts: [['1', '1º trimestre'], ['2', '2º trimestre'], ['3', '3º trimestre'], ['4', '4º trimestre']] },
@@ -163,6 +174,15 @@
 .calc-grid .cf.bool{flex-direction:row;align-items:center;gap:8px;padding-top:18px}
 .calc-grid .cf.bool input{width:auto}
 .calc-sfx{position:relative;display:block}.calc-sfx input{width:100%;padding-right:26px;box-sizing:border-box}.calc-sfx>span{position:absolute;right:9px;top:50%;transform:translateY(-50%);color:var(--slate);font-size:13px;pointer-events:none}
+.calc-item.cmp{background:#111;color:#fff;border-color:#111;font-weight:700;letter-spacing:.06em}
+html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
+.calc-item.cmp:hover{border-color:var(--teal)}
+.calc-item.cmp.on{box-shadow:0 0 0 2px var(--teal)}
+.calc-rank td.n{text-align:right;font-family:var(--mono);font-variant-numeric:tabular-nums;white-space:nowrap}
+.calc-rank tr.rk-best td{background:var(--teal-bg)}
+.calc-rank tr.rk-worst td{opacity:.9}
+.calc-tabgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:14px;align-items:start}
+.calc-tabcab{display:flex;justify-content:space-between;align-items:baseline;gap:8px;flex-wrap:wrap;margin-bottom:8px}
 .calc-sec{grid-column:1/-1;border-top:1px dashed var(--border);padding-top:10px;margin-top:2px}
 .calc-sec h4{margin:0 0 6px;font:600 12px var(--sans);color:var(--ink3)}
 .calc-row{display:flex;gap:8px;align-items:flex-end;margin-bottom:6px;flex-wrap:wrap}
@@ -214,15 +234,19 @@
       const impl = C.CATALOGO.filter(c => c.cat === cat);
       if (!impl.length) return;
       nav.push(`<div class="calc-cat">${E(cat)}</div>`);
-      impl.forEach(c => nav.push(`<button class="calc-item ${est.aba === 'calc' && est.key === c.key ? 'on' : ''}" onclick="calcAbrir('${c.key}')">${E(c.nome)}</button>`));
+      impl.forEach(c => nav.push(`<button class="calc-item ${c.key === 'comparativo' ? 'cmp' : ''} ${est.aba === 'calc' && est.key === c.key ? 'on' : ''}" onclick="calcAbrir('${c.key}')">${E(c.nome)}</button>`));
     });
     nav.push(`<details class="calc-soon"><summary class="calc-cat" style="cursor:pointer">EM BREVE (${C.EM_BREVE.length})</summary>${C.EM_BREVE.map(x => `<div class="calc-item soon" title="Arquitetura preparada; ainda sem parâmetros e testes cadastrados">${E(x[1])}</div>`).join('')}</details>`);
     nav.push('<div class="calc-cat">GERAL</div>');
     nav.push(`<button class="calc-item ${est.aba === 'bases' ? 'on' : ''}" onclick="calcAba('bases')">📚 Bases Legais e parâmetros</button>`);
     nav.push(`<button class="calc-item ${est.aba === 'hist' ? 'on' : ''}" onclick="calcAba('hist')">🗂️ Cálculos salvos</button>`);
+    nav.push('<div class="calc-cat">TABELAS 2021 A 2026</div>');
+    nav.push(`<button class="calc-item ${est.aba === 'tab_irrf' ? 'on' : ''}" onclick="calcAba('tab_irrf')">📊 Tabela do IRRF</button>`);
+    nav.push(`<button class="calc-item ${est.aba === 'tab_inss' ? 'on' : ''}" onclick="calcAba('tab_inss')">📊 Tabela do INSS</button>`);
     root.innerHTML = `<div class="calc-wrap"><div class="calc-nav">${nav.join('')}</div><div id="calcMain"></div></div>`;
-    if (est.aba === 'bases') renderBases(); else if (est.aba === 'hist') renderHistorico(); else renderCalc();
+    renderAbaAtual();
   };
+  function renderAbaAtual() { if (est.aba === 'bases') renderBases(); else if (est.aba === 'hist') renderHistorico(); else if (est.aba === 'tab_irrf' || est.aba === 'tab_inss') renderTabela(est.aba); else renderCalc(); }
   window.calcAba = function (a) { est.aba = a; window.renderCalculadoras(); };
   window.calcAbrir = function (k) { est.aba = 'calc'; est.key = k; est.ultimo = null; est.ativ = []; est.herd = []; window.renderCalculadoras(); };
 
@@ -360,12 +384,18 @@
     if (!r.ok) { el.innerHTML = `<div class="calc-card"><div class="calc-erro"><b>${E(r.erro)}</b>${r.detalhe ? '<div style="margin-top:4px;font-size:12px">' + E(r.detalhe) + '</div>' : ''}</div>${r.erro === C.ERRO_PARAM ? '<div style="font-size:12px;color:var(--slate);margin-top:8px">Cadastre ou aprove o conjunto de parâmetros da competência em <a href="#" onclick="calcAba(\'bases\');return false">Bases Legais e parâmetros</a>. Nenhum valor foi calculado.</div>' : ''}</div>`; return; }
     const kp = f.resumo(r.resultado).map(([l, v, hl]) => `<div class="calc-kpi ${hl ? 'hl' : ''}"><small>${E(l).toUpperCase()}</small><b>${fmtV(v)}</b></div>`).join('');
     el.innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">Resultado</h3><div class="calc-resumo">${kp}</div>
+      ${f.extra ? f.extra(r.resultado) : ''}
       ${(r.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}
       <details class="calc-det" open><summary>Memória de cálculo</summary>${memHtml(r.memoria)}</details>
       <details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(r.parametros)}</details>
       <details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(r.bases)}</details>
       <details class="calc-det"><summary>Observações</summary><div style="font-size:12.5px;color:var(--ink3);padding-top:6px">Cálculo determinístico: nenhuma IA participa. Os parâmetros são os da competência informada (conjunto e versão acima), e uma mudança futura de lei não altera cálculos já salvos. Valores em reais, arredondados uma única vez (meio para cima) ao final de cada tributo.</div></details>
-      <div class="calc-acts"><button class="btn bp" onclick="calcSalvar()">💾 Salvar cálculo</button><button class="btn bo" onclick="calcImprimir()">🖨️ Imprimir / PDF</button></div></div>`;
+      <div class="calc-acts"><button class="btn bp" onclick="calcSalvar()">💾 Salvar cálculo</button><button class="btn bo" onclick="calcImprimir()">🖨️ Imprimir / PDF</button><button class="btn bo" onclick="calcExcel()">📊 Excel</button></div></div>`;
+  }
+  // ranking do COMPARATIVO (tela e impressão)
+  function rankingHtml(res) {
+    const pc = bp => (bp / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%'; const n = res.ranking.length;
+    return `<div class="calc-rank" style="margin:6px 0 12px"><h3 class="calc-h" style="font-size:15px">Do mais vantajoso ao menos vantajoso (tributariamente)</h3><div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>#</th><th>Forma de pagamento</th><th>Líquido ao sócio</th><th>Tributos do sócio</th><th>Encargos da empresa</th><th>Economia IRPJ/CSLL</th><th>Custo líquido da empresa</th><th>Tributos líquidos</th><th>Carga efetiva</th></tr></thead><tbody>${res.ranking.map((o, i) => `<tr class="${i === 0 ? 'rk-best' : (i === n - 1 && n > 1 ? 'rk-worst' : '')}"><td><b>${o.posicao}º</b></td><td><b>${E(o.nome)}</b>${i === 0 ? ' <span class="calc-tag ok">mais vantajosa</span>' : ''}${i === n - 1 && n > 1 ? ' <span class="calc-tag warn">menos vantajosa</span>' : ''}${o.naoRemuneracao ? ' <span class="calc-tag warn">não é remuneração: tem que devolver</span>' : ''}<div style="font-size:11px;color:#667">${E(o.detalhe)}</div></td><td class="n">${brl(o.liquidoSocio)}</td><td class="n">${brl(o.socioTributos)}</td><td class="n">${brl(o.empresaEncargos)}</td><td class="n">${brl(o.empresaEconomia)}</td><td class="n">${brl(o.custoEmpresa)}</td><td class="n">${brl(o.tributosLiquidos)}</td><td class="n"><b>${pc(o.cargaBp)}</b></td></tr>`).join('')}</tbody></table></div>${res.indisponiveis.length ? '<div class="calc-aviso">Fora da comparação: ' + res.indisponiveis.map(x => '<b>' + E(x.nome) + '</b> — ' + E(x.motivo)).join(' · ') + '</div>' : ''}<div style="font-size:11.5px;color:#667">Carga efetiva = tributos líquidos ÷ custo líquido da empresa. Negativa = a economia de IRPJ/CSLL da empresa supera o imposto do sócio.</div></div>`;
   }
 
   // ───────────────────────────── salvar / imprimir ─────────────────────────────
@@ -375,11 +405,53 @@
     lista.unshift({ id: 'c' + Date.now().toString(36), ts: new Date().toISOString(), por: quem, calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
     S.s(LS.hist, lista.slice(0, 400)); toast('Cálculo salvo com a versão dos parâmetros usada.', 'ok');
   };
-  function htmlImpressao(titulo, r, entrada, quando) {
-    return `<!doctype html><meta charset="utf-8"><title>${E(titulo)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}td.v{text-align:right;font-family:monospace;white-space:nowrap}tr.titulo td{background:#eee;font-weight:bold}tr.total td{font-weight:bold;background:#e3f3f0}small{color:#666}</style>
-      <h1>${E(titulo)}</h1><p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
+  function resumoHtml(f, r) {
+    if (!f || !r.resultado) return '';
+    return '<table class="calc-tbl"><tbody>' + f.resumo(r.resultado).map(([l, v]) => `<tr><td>${E(l)}</td><td class="v"><b>${fmtV(v)}</b></td></tr>`).join('') + '</tbody></table>' + (f.extra ? f.extra(r.resultado) : '');
   }
-  window.calcImprimir = function () { const r = est.ultimo; if (!r || !r.ok) return; const w = window.open('', '_blank'); if (!w) { toast('Libere pop-ups para imprimir.', 'err'); return; } w.document.write(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'))); w.document.close(); w.focus(); setTimeout(() => w.print(), 300); };
+  function htmlImpressao(titulo, r, entrada, quando, f) {
+    return `<!doctype html><meta charset="utf-8"><title>${E(titulo)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}h3{font-size:14px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}td.v,td.n{text-align:right;font-family:monospace;white-space:nowrap}tr.titulo td{background:#eee;font-weight:bold}tr.total td{font-weight:bold;background:#e3f3f0}tr.rk-best td{background:#e3f3f0}small{color:#666}.calc-tag{border:1px solid #999;border-radius:3px;padding:0 4px;font-size:10px}.calc-aviso{margin:6px 0}</style>
+      <h1>${E(titulo)}</h1><p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${resumoHtml(f, r)}<h3>Memória de cálculo</h3>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
+  }
+  function abrirImpressao(html) { const w = window.open('', '_blank'); if (!w) { toast('Libere pop-ups para imprimir.', 'err'); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(() => w.print(), 300); }
+  window.calcImprimir = function () { const r = est.ultimo; if (!r || !r.ok) return; abrirImpressao(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'), F[est.key])); };
+
+  // ───── Excel (todas as calculadoras, o cálculo salvo e as tabelas) — SheetJS (XLSX) já carregado no site ─────
+  const numR = v => typeof v === 'number' ? v / 100 : v;               // centavos → reais
+  const semTags = t => String(t == null ? '' : t).replace(/<[^>]+>/g, '');
+  function xlsxSheet(aoa, o) {
+    o = o || {}; const ws = XLSX.utils.aoa_to_sheet(aoa); const ref = ws['!ref']; if (!ref) return ws; const rg = XLSX.utils.decode_range(ref);
+    const larg = []; for (let c = rg.s.c; c <= rg.e.c; c++) larg[c] = 8;
+    for (let R = rg.s.r; R <= rg.e.r; R++) for (let c = rg.s.c; c <= rg.e.c; c++) { const cell = ws[XLSX.utils.encode_cell({ r: R, c })]; if (!cell) continue;
+      if (cell.t === 'n') { cell.z = (o.pctCols || []).includes(c) ? '0.00%' : ((o.intCols || []).includes(c) ? '0' : '#,##0.00'); larg[c] = Math.max(larg[c], 14); }
+      else larg[c] = Math.max(larg[c], Math.min(70, String(cell.v == null ? '' : cell.v).length + 2)); }
+    ws['!cols'] = larg.map(w => ({ wch: w })); return ws;
+  }
+  function nomeArquivo(t) { return String(t).normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '_').slice(0, 60) + '_' + hoje(); }
+  function baixarXlsx(wb, titulo) { try { XLSX.writeFile(wb, nomeArquivo(titulo) + '.xlsx'); toast('Excel gerado.', 'ok'); } catch (e) { toast('Não foi possível gerar o Excel: ' + (e.message || e), 'err'); } }
+  function addSheet(wb, nome, aoa, o) { XLSX.utils.book_append_sheet(wb, xlsxSheet(aoa, o), nome.slice(0, 31)); }
+  function memAoa(mem) {
+    const a = [['Descrição', 'Valor (R$)', 'Operação / nota']];
+    (mem || []).forEach(l => { if (l.k === 'titulo') a.push([l.r]); else if (l.k === 'nota') a.push([l.r]); else if (l.k === 'texto' || l.k === 'inteiro') a.push([l.r, l.v]); else a.push([l.r, numR(l.v), (l.op || '') + (l.nota ? ' ' + l.nota : '') + (l.k === 'subtotal' ? ' (subtotal)' : l.k === 'total' ? ' (TOTAL)' : '')]); });
+    return a;
+  }
+  function montarWorkbook(titulo, f, r, entrada, quando) {
+    const wb = XLSX.utils.book_new(); const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {};
+    const res = [[titulo], ['Gerado em', quando], ['Cálculo determinístico, sem IA'], [], ['Resumo', 'Valor']];
+    if (f && r.resultado) f.resumo(r.resultado).forEach(([l, v]) => res.push([l, numR(v)]));
+    addSheet(wb, 'Resumo', res);
+    if (f && f.tabela && r.resultado) { const t = f.tabela(r.resultado); addSheet(wb, t.nome, [t.cab].concat(t.linhas), t); }
+    if (f && entrada) { const en = [['Dado informado', 'Valor']]; f.campos.forEach(c => { if (c.l && entrada[c.k] !== undefined && entrada[c.k] !== '') en.push([c.l, typeof entrada[c.k] === 'boolean' ? (entrada[c.k] ? 'Sim' : 'Não') : entrada[c.k]]); }); addSheet(wb, 'Dados informados', en); }
+    addSheet(wb, 'Memória de cálculo', memAoa(r.memoria));
+    addSheet(wb, 'Parâmetros', [['Conjunto', 'Calculadora', 'Versão', 'Vigência']].concat((r.parametros || []).map(p => [p.id + (p.uf ? ' (' + p.uf + ')' : ''), p.calculator_key, 'v' + p.version, p.valid_from + ' → ' + (p.valid_to || 'em vigor')])));
+    addSheet(wb, 'Bases legais', [['Norma', 'Nº', 'Artigo', 'Assunto', 'Vigência', 'Fonte oficial', 'Última verificação', 'Observação']].concat((r.bases || []).map(b => { const vv = ver[b.id]; return [b.norma, b.numero, b.artigo, b.assunto, (b.vig_ini || '—') + ' → ' + (b.vig_fim || 'em vigor'), b.fonte, vv ? vv.data + ' (' + (vv.por || '') + ')' : (b.ultima_verificacao || 'não conferida na fonte'), b.obs || '']; })));
+    if ((r.avisos || []).length) addSheet(wb, 'Avisos', [['Avisos']].concat(r.avisos.map(a => [a])));
+    return wb;
+  }
+  window.calcExcel = function () { const r = est.ultimo; if (!r || !r.ok) return; baixarXlsx(montarWorkbook(F[est.key].titulo, F[est.key], r, est.ultimoInp, new Date().toLocaleString('pt-BR')), F[est.key].titulo); };
+  function dadosHist(id) { const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return null; return { h, f: F[h.calc], r: { ok: true, resultado: h.resultado, memoria: h.memoria, parametros: h.parametros, bases: (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean), avisos: h.avisos || [] } }; }
+  window.calcHistImprimir = function (id) { const d = dadosHist(id); if (!d) return; abrirImpressao(htmlImpressao(d.h.titulo, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.f)); };
+  window.calcHistExcel = function (id) { const d = dadosHist(id); if (!d) return; baixarXlsx(montarWorkbook(d.h.titulo, d.f, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR')), d.h.titulo); };
 
   // ───────────────────────────── histórico ─────────────────────────────
   function renderHistorico() {
@@ -390,7 +462,7 @@
   window.calcHistAbrir = function (id) {
     const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return;
     const bs = (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean);
-    document.getElementById('calcHistVer').innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">${E(h.titulo)} — ${E(new Date(h.ts).toLocaleString('pt-BR'))}</h3><div class="calc-sub">Cálculo salvo por ${E(h.por)}. Não é recalculado.</div>${memHtml(h.memoria)}<details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(h.parametros)}</details><details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(bs)}</details>${(h.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}</div>`;
+    document.getElementById('calcHistVer').innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">${E(h.titulo)} — ${E(new Date(h.ts).toLocaleString('pt-BR'))}</h3><div class="calc-sub">Cálculo salvo por ${E(h.por)}. Não é recalculado.</div><div class="calc-acts" style="margin:0 0 8px"><button class="btn bo bsm" onclick="calcHistImprimir('${h.id}')">🖨️ Imprimir / PDF</button><button class="btn bo bsm" onclick="calcHistExcel('${h.id}')">📊 Excel</button></div>${F[h.calc] && F[h.calc].extra && h.resultado && h.resultado.ranking ? F[h.calc].extra(h.resultado) : ''}${memHtml(h.memoria)}<details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(h.parametros)}</details><details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(bs)}</details>${(h.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}</div>`;
     document.getElementById('calcHistVer').scrollIntoView({ behavior: 'smooth' });
   };
   window.calcHistOcultar = function (id) { const l = lerLista(LS.hist); const h = l.find(x => x.id === id); if (!h) return; h.oculto = true; S.s(LS.hist, l); renderHistorico(); toast('Cálculo ocultado da lista (continua guardado).', 'ok'); };
@@ -418,7 +490,7 @@
   }
   window.calcProposta = function (id, acao) {
     const lista = lerLista(LS.prop); const p = lista.find(x => x.id === id); if (!p) return;
-    if (acao === 'ignorar') { p.status = 'ignorada'; p.decidido_em = new Date().toISOString(); S.s(LS.prop, lista); renderBases(); return; }
+    if (acao === 'ignorar') { p.status = 'ignorada'; p.decidido_em = new Date().toISOString(); S.s(LS.prop, lista); renderAbaAtual(); return; }
     if (!ehAdmin()) { toast('Somente administrador aprova.', 'err'); return; }
     const atual = C.acharSet(p.calculator_key, p.vigencia_inicial || hoje(), p.uf || undefined) || C.todosSets().filter(s => s.calculator_key === p.calculator_key && s.status === 'ativo').sort((a, b) => b.version - a.version)[0];
     if (!atual) { toast('Não existe conjunto atual desta calculadora para basear a nova versão. Cadastre manualmente.', 'err'); return; }
@@ -428,11 +500,11 @@
     if (!p.vigencia_inicial || !/^\d{4}-\d{2}-\d{2}$/.test(p.vigencia_inicial)) { toast('A proposta não trouxe a vigência inicial (AAAA-MM-DD). Cadastre manualmente.', 'err'); return; }
     if (!confirm('Criar NOVA versão do conjunto ' + atual.id + ' com ' + p.parametro + ' = ' + p.novo_txt + ', valendo a partir de ' + p.vigencia_inicial + '?\n\nOs cálculos de competências anteriores continuam usando a versão atual. Esta ação é registrada.')) return;
     const nova = JSON.parse(JSON.stringify(atual)); nova.version = Math.max.apply(null, C.todosSets().filter(s => s.calculator_key === atual.calculator_key && (s.uf || '') === (atual.uf || '')).map(s => s.version)) + 1;
-    nova.id = atual.id.replace(/_V\d+$/, '') + '_V' + nova.version; nova.valid_from = p.vigencia_inicial; nova.valid_to = null; nova.status = 'ativo'; nova.created_at = hoje(); nova.created_by = (currentUser && (currentUser.nome || currentUser.login)) || '';
+    nova.id = atual.id.replace(/_V\d+$/, '') + '_V' + nova.version; nova.valid_from = p.vigencia_inicial; nova.valid_to = (atual.valid_to && p.vigencia_inicial <= atual.valid_to) ? atual.valid_to : null; nova.status = 'ativo'; nova.created_at = hoje(); nova.created_by = (currentUser && (currentUser.nome || currentUser.login)) || '';
     nova.params[p.parametro].value = novo; nova.origem = 'proposta IA aprovada (' + (p.fonte || 'sem fonte') + ')';
     const sets = lerLista(LS.sets); sets.push(nova); S.s(LS.sets, sets);
     p.status = 'aprovada'; p.decidido_em = new Date().toISOString(); p.set_criado = nova.id; S.s(LS.prop, lista);
-    carregarSets(); toast('Nova versão ' + nova.id + ' criada.', 'ok'); renderBases();
+    carregarSets(); toast('Nova versão ' + nova.id + ' criada.', 'ok'); renderAbaAtual();
   };
 
   window.calcCadastrar = function () {
@@ -450,12 +522,70 @@
     const sets = lerLista(LS.sets); sets.push(s); S.s(LS.sets, sets); carregarSets(); toast('Conjunto ' + s.id + ' cadastrado.', 'ok'); renderBases();
   };
 
-  window.calcPesquisarIA = async function () {
+  const FOCOS = {
+    irrf: { chaves: ['irrf_pf'], txt: 'FOCO: tabela mensal do IRRF de pessoa física. Confira, mês a mês, de janeiro/2021 a dezembro/2026, se cada conjunto está correto (faixas, alíquotas, parcela a deduzir, dedução por dependente, desconto simplificado mensal e a redução da Lei 15.270/2025 a partir de 01/2026). Se algum valor estiver errado, ou se houve mudança NO MEIO da vigência de um conjunto, proponha com "vigencia_inicial" = o primeiro dia do mês em que o valor correto passou a valer. Ignore os demais conjuntos.' },
+    inss: { chaves: ['inss_empregado', 'inss_contribuinte_individual'], txt: 'FOCO: tabela de contribuição do INSS (empregado/avulso/doméstico e contribuinte individual). Confira, mês a mês, de janeiro/2021 a dezembro/2026, se cada conjunto está correto (limites das faixas, alíquotas e teto; em 2023 houve mudança em maio por causa do salário mínimo). Se algum valor estiver errado, ou se houve mudança NO MEIO da vigência de um conjunto, proponha com "vigencia_inicial" = o primeiro dia do mês em que o valor correto passou a valer. Ignore os demais conjuntos.' },
+  };
+  // ───────────────────────────── Tabelas do IRRF e do INSS (2021 a 2026, mês a mês) ─────────────────────────────
+  const MESES = ['jan', 'fev', 'mar', 'abr', 'mai', 'jun', 'jul', 'ago', 'set', 'out', 'nov', 'dez'];
+  const mesBR = iso => MESES[+iso.slice(5, 7) - 1] + '/' + iso.slice(0, 4);
+  const vigTxt = s => mesBR(s.valid_from) + ' → ' + (s.valid_to ? mesBR(s.valid_to) : 'em vigor');
+  const rs = v => 'R$ ' + C.brl(C.cents(v));
+  const pc = v => (Number(v) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 3 }) + '%';
+  const pv2 = (s, k) => s.params[k] && s.params[k].value;
+  function setsTab(chaves) { return C.todosSets().filter(s => chaves.includes(s.calculator_key) && s.status === 'ativo' && (s.valid_to || '9999-12-31') >= '2021-01-01' && s.valid_from <= '2026-12-31').sort((a, b) => a.valid_from < b.valid_from ? 1 : a.valid_from > b.valid_from ? -1 : b.version - a.version); }
+  function situacaoSet(s) {
+    const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {}; const bs = (s.bases || []).map(id => C.CALC_BASES.find(b => b.id === id)).filter(Boolean);
+    const ok = bs.length && bs.every(b => ver[b.id] || b.ultima_verificacao); return ok ? '<span class="calc-tag ok">conferida na fonte</span>' : '<span class="calc-tag warn">não conferida na fonte</span>';
+  }
+  const fonteSet = s => { const b = (s.bases || []).map(id => C.CALC_BASES.find(x => x.id === id)).filter(Boolean).find(x => /TAB_/.test(x.id)); return b ? `<a href="${E(b.fonte)}" target="_blank" rel="noopener">${E(b.norma + ' ' + b.numero)}</a>` : '—'; };
+  function irrfCard(s) {
+    const fx = pv2(s, 'faixas'); let ant = null;
+    const linhas = fx.map(f => { const t = `<tr><td>${f.ate === null ? 'Acima de ' + rs(ant) : (ant === null ? 'Até ' + rs(f.ate) : 'De ' + rs(ant) + ' até ' + rs(f.ate))}</td><td>${Number(f.aliq) === 0 ? 'isento' : pc(f.aliq)}</td><td>${rs(f.ded)}</td></tr>`; ant = f.ate; return t; }).join('');
+    const simpl = C.cents(pv2(s, 'desconto_simplificado')), temRed = pv2(s, 'redutor_limite1') !== undefined;
+    return `<div class="calc-card"><div class="calc-tabcab"><h3 class="calc-h" style="font-size:15px;margin:0">${E(vigTxt(s))}</h3><div>${situacaoSet(s)} <small style="color:var(--slate)">${E(s.id)} v${s.version}</small></div></div>
+      <div class="calc-tabgrid"><table class="calc-tbl"><thead><tr><th>Base de cálculo mensal</th><th>Alíquota</th><th>Parcela a deduzir</th></tr></thead><tbody>${linhas}</tbody></table>
+      <dl class="calc-prop" style="margin:0"><dt>DEPENDENTE</dt><dd>${rs(pv2(s, 'dependente'))} por dependente</dd><dt>DESCONTO SIMPLIFICADO MENSAL</dt><dd>${simpl ? rs(pv2(s, 'desconto_simplificado')) : 'não existia nesta época'}</dd><dt>REDUÇÃO DA LEI 15.270/2025</dt><dd>${temRed ? 'até ' + rs(pv2(s, 'redutor_max1')) + ' para rendimentos até ' + rs(pv2(s, 'redutor_limite1')) + '; entre esse valor e ' + rs(pv2(s, 'redutor_limite2')) + ': ' + rs(pv2(s, 'redutor_const2')) + ' − ' + pv2(s, 'redutor_coef2') + ' × rendimentos' : 'não existia (vale a partir de 01/2026)'}</dd><dt>FONTE</dt><dd>${fonteSet(s)}</dd></dl></div></div>`;
+  }
+  function inssLinhas() {
+    const emp = setsTab(['inss_empregado']), ci = setsTab(['inss_contribuinte_individual']);
+    return emp.map(s => { const c = ci.find(x => x.valid_from === s.valid_from) || ci.find(x => x.valid_from <= s.valid_from && (!x.valid_to || x.valid_to >= s.valid_from)); return { s, c }; });
+  }
+  function renderTabela(aba) {
+    const main = document.getElementById('calcMain'); const irrf = aba === 'tab_irrf'; const foco = irrf ? 'irrf' : 'inss';
+    const chaves = FOCOS[foco].chaves; const props = lerLista(LS.prop).filter(p => p.status === 'pendente' && chaves.includes(p.calculator_key));
+    const cab = `<div class="calc-card"><h2 class="calc-h">📊 Tabela do ${irrf ? 'IRRF (imposto de renda retido — pessoa física)' : 'INSS (contribuição do segurado)'} — 2021 a 2026</h2><div class="calc-sub">Cada linha vale a partir do mês indicado, e o cálculo escolhe a tabela pela competência (sem retroatividade). O botão abaixo pede à IA para conferir mês a mês nas fontes oficiais: ela <b>propõe</b>, nunca altera — só um administrador aprova, e a aprovação cria uma NOVA versão.</div>
+      <div class="calc-acts" style="margin-top:0"><button class="btn btn-ia-gemini btn-calc-ia" id="calcBtnIa" onclick="calcPesquisarIA('${foco}')" ${est.iaBusy ? 'disabled' : ''}>🤖 Atualizar com IA</button><button class="btn bo" onclick="calcTabImprimir()">🖨️ Imprimir / PDF</button><button class="btn bo" onclick="calcTabExcel()">📊 Excel</button></div><div id="calcIaMsg" style="font-size:12.5px;margin-top:8px;color:var(--slate)"></div></div>
+      ${props.length ? `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">Propostas da IA aguardando decisão</h3>${props.map(propHtml).join('')}</div>` : ''}`;
+    let corpo;
+    if (irrf) corpo = setsTab(chaves).map(irrfCard).join('');
+    else {
+      const L = inssLinhas(); const ref = L.length ? pv2(L[0].s, 'faixas') : [];
+      corpo = `<div class="calc-card"><div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Vigência</th>${ref.map(f => `<th>Até (${pc(f.aliq)})</th>`).join('')}<th>Teto do salário de contribuição</th><th>Contribuinte individual (pró-labore)</th><th>Conjunto</th><th>Situação</th></tr></thead><tbody>${L.map(({ s, c }) => `<tr><td><b>${E(vigTxt(s))}</b></td>${pv2(s, 'faixas').map(f => `<td>${rs(f.ate)}</td>`).join('')}<td>${rs(pv2(s, 'teto'))}</td><td>${c ? pc(pv2(c, 'aliquota')) + ' até ' + rs(pv2(c, 'teto')) : '—'}</td><td>${E(s.id)} v${s.version}</td><td>${situacaoSet(s)}</td></tr>`).join('')}</tbody></table></div><div style="font-size:12px;color:var(--slate);margin-top:8px">As faixas são progressivas: cada alíquota incide só sobre a parte do salário dentro da faixa (nunca o salário inteiro × uma alíquota). O 13º não se soma à remuneração do mês.</div></div>`;
+    }
+    main.innerHTML = cab + '<div id="calcTabConteudo">' + corpo + '</div>';
+  }
+  function tabAoa() {
+    if (est.aba === 'tab_irrf') {
+      const a = [['Vigência', 'Conjunto', 'Faixa', 'Base até (R$)', 'Alíquota (%)', 'Parcela a deduzir (R$)', 'Dependente (R$)', 'Desconto simplificado (R$)', 'Redução Lei 15.270', 'Situação']];
+      setsTab(['irrf_pf']).forEach(s => { const fx = pv2(s, 'faixas'); fx.forEach((f, i) => a.push([vigTxt(s), s.id + ' v' + s.version, (i + 1) + 'ª', f.ate === null ? 'acima' : Number(f.ate), Number(f.aliq), Number(f.ded), Number(pv2(s, 'dependente')), Number(pv2(s, 'desconto_simplificado')), pv2(s, 'redutor_limite1') !== undefined ? 'sim' : 'não existia', semTags(situacaoSet(s))])); });
+      return { nome: 'IRRF 2021-2026', aoa: a, pctCols: [4] };
+    }
+    const L = inssLinhas(); const ref = L.length ? pv2(L[0].s, 'faixas') : [];
+    const a = [['Vigência'].concat(ref.map(f => 'Até (' + pc(f.aliq) + ')')).concat(['Teto (R$)', 'Contribuinte individual (%)', 'CI: teto (R$)', 'Conjunto', 'Situação'])];
+    L.forEach(({ s, c }) => a.push([vigTxt(s)].concat(pv2(s, 'faixas').map(f => Number(f.ate))).concat([Number(pv2(s, 'teto')), c ? Number(pv2(c, 'aliquota')) : '', c ? Number(pv2(c, 'teto')) : '', s.id + ' v' + s.version, semTags(situacaoSet(s))])));
+    return { nome: 'INSS 2021-2026', aoa: a, pctCols: [ref.length + 2] };
+  }
+  window.calcTabExcel = function () { const t = tabAoa(); const wb = XLSX.utils.book_new(); addSheet(wb, t.nome, t.aoa, t); baixarXlsx(wb, t.nome); };
+  window.calcTabImprimir = function () { const t = tabAoa(); const el = document.getElementById('calcTabConteudo'); if (!el) return; abrirImpressao(`<!doctype html><meta charset="utf-8"><title>${E(t.nome)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}table{border-collapse:collapse;width:100%;margin:6px 0 12px}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}.calc-card{border:1px solid #ccc;padding:8px 10px;margin:8px 0;page-break-inside:avoid}.calc-tag{border:1px solid #999;border-radius:3px;padding:0 4px;font-size:10px}.calc-tabgrid{display:grid;grid-template-columns:1fr 1fr;gap:12px}dt{font-size:10px;font-weight:bold;color:#666;margin-top:6px}dd{margin:0}h3{margin:0 0 6px;font-size:14px}</style><h1>${E(t.nome)}</h1><p><small>Calculadoras JJR — ${E(new Date().toLocaleString('pt-BR'))}</small></p>${el.innerHTML}`); };
+
+  window.calcPesquisarIA = async function (foco) {
+    foco = FOCOS[foco] ? foco : '';
     if (est.iaBusy) return; est.iaBusy = true; const msg = document.getElementById('calcIaMsg'), btn = document.getElementById('calcBtnIa');
     if (btn) btn.disabled = true; if (msg) msg.textContent = 'Pesquisando em fontes oficiais… pode levar até um minuto.';
     try {
-      const atuais = C.todosSets().filter(s => s.status === 'ativo').map(s => ({ conjunto: s.id, calculator_key: s.calculator_key, uf: s.uf || null, versao: s.version, vigencia: s.valid_from + ' → ' + (s.valid_to || 'em vigor'), parametros: Object.fromEntries(Object.entries(s.params).map(([k, p]) => [k, p.value])) }));
-      const resp = await fetch(SUPABASE_URL + '/functions/v1/calc-pesquisar-atualizacoes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ hoje: hoje(), conjuntos: atuais }) });
+      const atuais = C.todosSets().filter(s => s.status === 'ativo' && (!foco || FOCOS[foco].chaves.includes(s.calculator_key))).map(s => ({ conjunto: s.id, calculator_key: s.calculator_key, uf: s.uf || null, versao: s.version, vigencia: s.valid_from + ' → ' + (s.valid_to || 'em vigor'), parametros: Object.fromEntries(Object.entries(s.params).map(([k, p]) => [k, p.value])) }));
+      const resp = await fetch(SUPABASE_URL + '/functions/v1/calc-pesquisar-atualizacoes', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ hoje: hoje(), conjuntos: atuais, foco: foco ? FOCOS[foco].txt : '' }) });
       const dados = await resp.json().catch(() => ({}));
       if (!resp.ok || dados.error) throw new Error(dados.error || ('HTTP ' + resp.status));
       const lista = lerLista(LS.prop); let novas = 0;
@@ -470,7 +600,7 @@
         novas++;
       });
       S.s(LS.prop, lista);
-      est.iaBusy = false; renderBases();
+      est.iaBusy = false; renderAbaAtual();
       const m2 = document.getElementById('calcIaMsg'); if (m2) m2.innerHTML = (novas ? `<b>${novas} proposta(s) nova(s)</b> abaixo, aguardando decisão.` : 'Nenhuma mudança nova encontrada.') + (dados.resumo ? ' ' + E(dados.resumo) : '') + (dados.usou_busca_web === false ? ' <span class="calc-tag warn">sem busca na internet — resposta só do conhecimento do modelo, confira nas fontes</span>' : '');
       return;
     } catch (e) { if (msg) msg.innerHTML = '<span style="color:var(--red)">Não foi possível pesquisar: ' + E(e.message || e) + '</span>'; }

@@ -53,6 +53,7 @@
   // ───────────────────────────── bases legais ─────────────────────────────
   // fonte/verificação: itens marcados "informada pelo usuário" foram cadastrados a partir do pedido de 20/10/2026 — SEM conferência independente na norma.
 const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRIA, não oficial); conferir no texto oficial';
+  const V_ASS = 'Cadastrada em 22/10/2026 a partir do conhecimento do assistente, a pedido do usuário; NÃO foi conferida no texto oficial — use o botão "Atualizar com IA" da tela e/ou confira na fonte.';
   const V_USR = 'Cadastrada conforme informação do usuário (20/10/2026); conferir na fonte oficial';
   const CALC_BASES = [
     { id: 'LEI_15270_2025', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '15.270/2025 (de 26/11/2025)', artigo: 'art. 2º: Lei 9.250, art. 3º-A, caput e §§ 1º a 3º', assunto: 'Redução mensal do IRPF a partir de janeiro/2026: rendimentos até R$ 5.000,00 → redução de até R$ 312,89 (imposto zero); de R$ 5.000,01 a R$ 7.350,00 → R$ 978,62 − (0,133145 × rendimentos tributáveis); acima de R$ 7.350,00 → nenhuma. Limitada ao imposto pela tabela (§ 1º). Aplica-se também ao imposto exclusivo na fonte do 13º salário (§ 3º).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Mesma lei: retenção de 10% sobre dividendos acima de R$ 50.000/mês por PF (art. 6º-A, Lei 9.250) — ver a calculadora "Distribuição de lucros".' },
@@ -60,8 +61,18 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { id: 'LEI_9249_10', calcs: ['dist_lucros'], norma: 'Lei 15.270/2025, art. 3º (nova redação do art. 10 da Lei 9.249/1995)', numero: '15.270/2025 — Lei 9.249/1995, art. 10', artigo: 'art. 10, caput (ressalva dos arts. 6º-A e 16-A da Lei 9.250), § 4º e § 5º', assunto: 'Lucros e dividendos pagos, creditados, entregues, empregados ou REMETIDOS AO EXTERIOR: IRRF de 10% (§ 4º), sem piso mensal. Não se sujeitam (§ 5º): I – resultados apurados até 2025 com distribuição aprovada até 31/12/2025, exigíveis e pagos nos termos originalmente previstos; II – pagos a governos estrangeiros (com reciprocidade), fundos soberanos (Lei 11.312, art. 3º, § 5º) e entidades no exterior de previdência. Art. 10-A: crédito opcional ao beneficiário no exterior (não calculado aqui).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-22 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Tributação mínima anual (Lei 9.250, art. 16-A; rendimentos anuais acima de R$ 600.000; alíquota até 10%) é outra apuração e NÃO é calculada aqui.' },
     { id: 'LEI_9250_1995', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao', 'pensao'], norma: 'Lei', numero: '9.250/1995', artigo: 'arts. 4º e 8º', assunto: 'Deduções do IRPF: dependentes, pensão alimentícia, previdência oficial', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Base geral das deduções legais. Artigos a conferir.' },
     { id: 'TAB_IRRF_2026', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Leis 15.191/2025 (art. 2º, nova redação do art. 1º, XII, da Lei 11.482/2007) e 9.250/1995 (art. 4º, III, "i" e § 2º)', numero: '15.191/2025 e 9.250/1995', artigo: 'Lei 15.191 art. 2º; Lei 9.250 art. 4º, III, "i" e § 2º (redação da Lei 14.663/2023)', assunto: 'Tabela progressiva mensal desde maio/2025: até 2.428,80 (0%); até 2.826,65 (7,5% − 182,16); até 3.751,05 (15% − 394,16); até 4.664,68 (22,5% − 675,49); acima (27,5% − 908,73). Dependente R$ 189,59 (desde abril/2015). Desconto simplificado mensal = 25% da faixa de alíquota zero = R$ 607,20.', vig_ini: '2025-05-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9250.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Tudo lido no texto oficial do Planalto. O simplificado de R$ 607,20 é derivado: 25% × R$ 2.428,80 (a lei define o percentual, não o valor).' },
+    { id: 'TAB_IRRF_2015', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '13.149/2015 (tabela de abril/2015) — Lei 11.482/2007, art. 1º', artigo: 'Lei 11.482/2007, art. 1º, na redação da Lei 13.149/2015', assunto: 'Tabela progressiva mensal de abril/2015 até abril/2023: até 1.903,98 (0%); até 2.826,65 (7,5% − 142,80); até 3.751,05 (15% − 354,80); até 4.664,68 (22,5% − 636,13); acima (27,5% − 869,36). Dependente R$ 189,59. Não existia o desconto simplificado mensal.', vig_ini: '2015-04-01', vig_fim: '2023-04-30', fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2015/lei/L13149.htm', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_IRRF_2023', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '14.663/2023 (MP 1.171/2023)', artigo: 'Lei 11.482/2007, art. 1º, na redação da Lei 14.663/2023; Lei 9.250/1995, art. 4º', assunto: 'Tabela progressiva mensal a partir de maio/2023: até 2.112,00 (0%); até 2.826,65 (7,5% − 158,40); até 3.751,05 (15% − 370,40); até 4.664,68 (22,5% − 651,73); acima (27,5% − 884,96). Dependente R$ 189,59. Desconto simplificado mensal R$ 528,00 (25% da faixa isenta).', vig_ini: '2023-05-01', vig_fim: '2024-01-31', fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2023/lei/L14663.htm', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_IRRF_2024', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: 'MP 1.206/2024 (convertida em lei — número a conferir)', artigo: 'Lei 11.482/2007, art. 1º', assunto: 'Tabela progressiva mensal a partir de fevereiro/2024: até 2.259,20 (0%); até 2.826,65 (7,5% − 169,44); até 3.751,05 (15% − 381,44); até 4.664,68 (22,5% − 662,77); acima (27,5% − 896,00). Dependente R$ 189,59. Desconto simplificado mensal R$ 564,80 (25% da faixa isenta).', vig_ini: '2024-02-01', vig_fim: '2025-04-30', fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l11482.htm', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_INSS_2021', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial', numero: 'Portaria do Ministério da Economia de janeiro/2021 (número a conferir)', artigo: 'Anexo (tabela de contribuição do segurado empregado, doméstico e avulso)', assunto: 'Empregado: até 1.100,00 (7,5%); até 2.203,48 (9%); até 3.305,22 (12%); até 6.433,57 (14%) — progressivas; teto R$ 6.433,57.', vig_ini: '2021-01-01', vig_fim: '2021-12-31', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_INSS_2022', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial', numero: 'Portaria Interministerial MTP/ME de janeiro/2022 (número a conferir)', artigo: 'Anexo (tabela de contribuição do segurado empregado, doméstico e avulso)', assunto: 'Empregado: até 1.212,00 (7,5%); até 2.427,35 (9%); até 3.641,03 (12%); até 7.087,22 (14%) — progressivas; teto R$ 7.087,22.', vig_ini: '2022-01-01', vig_fim: '2022-12-31', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_INSS_2023_01', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial', numero: 'Portaria Interministerial MPS/MF de janeiro/2023 (número a conferir)', artigo: 'Anexo (tabela de contribuição do segurado empregado, doméstico e avulso)', assunto: 'Empregado: até 1.302,00 (7,5%); até 2.571,29 (9%); até 3.856,94 (12%); até 7.507,49 (14%) — progressivas; teto R$ 7.507,49. Vigente de janeiro a abril/2023.', vig_ini: '2023-01-01', vig_fim: '2023-04-30', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_INSS_2023_05', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial', numero: 'Portaria Interministerial MPS/MF de maio/2023 (número a conferir)', artigo: 'Anexo (tabela de contribuição do segurado empregado, doméstico e avulso)', assunto: 'Empregado: até 1.320,00 (7,5%); até 2.571,29 (9%); até 3.856,94 (12%); até 7.507,49 (14%) — progressivas; teto R$ 7.507,49. A 1ª faixa subiu com o salário mínimo de maio/2023.', vig_ini: '2023-05-01', vig_fim: '2023-12-31', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_INSS_2024', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial', numero: 'Portaria Interministerial MPS/MF nº 2, de 11/01/2024 (número a conferir)', artigo: 'Anexo (tabela de contribuição do segurado empregado, doméstico e avulso)', assunto: 'Empregado: até 1.412,00 (7,5%); até 2.666,68 (9%); até 4.000,03 (12%); até 7.786,02 (14%) — progressivas; teto R$ 7.786,02.', vig_ini: '2024-01-01', vig_fim: '2024-12-31', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: null, obs: V_ASS },
+    { id: 'TAB_INSS_2025', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial', numero: 'Portaria Interministerial MPS/MF nº 6, de 10/01/2025 (número a conferir)', artigo: 'Anexo (tabela de contribuição do segurado empregado, doméstico e avulso)', assunto: 'Empregado: até 1.518,00 (7,5%); até 2.793,88 (9%); até 4.190,83 (12%); até 8.157,41 (14%) — progressivas; teto R$ 8.157,41.', vig_ini: '2025-01-01', vig_fim: '2025-12-31', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: null, obs: V_ASS },
     { id: 'TAB_INSS_2026', calcs: ['salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Portaria Interministerial MPS/MF nº 13, de 9/1/2026 (DOU 12/1/2026), Anexo II — tabela publicada pelo INSS', numero: '13/2026', artigo: 'Anexo II', assunto: 'Empregado, doméstico e avulso: até 1.621,00 (7,5%); 1.621,01 a 2.902,84 (9%); 2.902,85 a 4.354,27 (12%); 4.354,28 a 8.475,55 (14%) — alíquotas progressivas; teto R$ 8.475,55. O 13º não se soma à remuneração mensal para enquadramento.', vig_ini: '2026-01-01', vig_fim: '2026-12-31', fonte: 'https://www.gov.br/inss/pt-br/direitos-e-deveres/inscricao-e-contribuicao/tabela-de-contribuicao-mensal', ultima_verificacao: '2026-10-20 (página oficial do INSS, atualizada em 13/1/2026)', obs: 'Faixas e teto lidos na página oficial do INSS, que cita a Portaria 13/2026. O texto da portaria no DOU não foi lido.' },
     { id: 'LEI_8212_1991', calcs: ['pro_labore'], norma: 'Lei', numero: '8.212/1991 e 10.666/2003 (art. 4º: a empresa arrecada e recolhe a contribuição do contribuinte individual)', artigo: 'Lei 8.212 (a conferir); Lei 10.666 art. 4º', assunto: 'Contribuição do contribuinte individual sobre o pró-labore (11%, até o teto). A tabela do INSS lista 11% como alíquota do Plano Simplificado; o desconto de 11% pela empresa não foi conferido no artigo da Lei 8.212', vig_ini: '1991-07-24', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
+    { id: 'LEI_8212_22', calcs: ['comparativo'], norma: 'Lei', numero: '8.212/1991', artigo: 'art. 22, inciso III (contribuição da empresa de 20% sobre as remunerações dos contribuintes individuais que lhe prestam serviço, incluído o pró-labore)', assunto: 'Contribuição previdenciária PATRONAL sobre o pró-labore (20%), devida por empresas em Lucro Real e Presumido; empresas do Simples Nacional (exceto Anexo IV) têm a CPP dentro do DAS', vig_ini: '1991-07-24', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l8212cons.htm', ultima_verificacao: null, obs: 'Alíquota informada pelo conhecimento da lei; NÃO foi conferida por esta calculadora no texto oficial — conferir antes de usar.' },
     { id: 'LEI_9249_1995', calcs: ['lucro_presumido'], norma: 'Lei', numero: '9.249/1995', artigo: 'arts. 15 e 20', assunto: 'Percentuais de presunção do IRPJ (art. 15) e da CSLL (art. 20)', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
     { id: 'LEI_9430_1996', calcs: ['lucro_presumido'], norma: 'Lei', numero: '9.430/1996', artigo: '(regras do Lucro Presumido)', assunto: 'Apuração trimestral, adicional do IRPJ, receitas que integram a base', vig_ini: '1997-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
     { id: 'LC_224_2025', calcs: ['lucro_presumido'], norma: 'Lei Complementar', numero: '224/2025 (de 26/12/2025)', artigo: 'art. 4º, § 4º, VII e § 5º, I e II; art. 14', assunto: 'Acréscimo de 10% sobre os percentuais de presunção, somente sobre a parcela da receita bruta TOTAL que exceder R$ 5.000.000,00 no ano-calendário; limite aplicado proporcionalmente a cada período de apuração, PERMITIDO O AJUSTE NOS PERÍODOS SEGUINTES; acréscimo proporcional às receitas de cada atividade', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp224.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Art. 14: vigência na publicação; efeitos em 1º/1/2026 (IRPJ) e no 1º dia do 4º mês seguinte à publicação = 1º/4/2026 para tributos sujeitos à anterioridade nonagesimal (CSLL). O ajuste "nos períodos seguintes" NÃO está implementado (limite de R$ 1.250.000 por trimestre, sem compensação). Há liminares individuais e ADIs no STF (7920, 7936, 7944, 7982) contestando a majoração; nenhuma decisão do STF suspendendo foi localizada.' },
@@ -89,6 +100,42 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
   const P = (value, unit, description) => ({ value, unit: unit || '', description: description || '' });
   const CALC_SEED_SETS = [
     {
+      id: 'IRRF_2015_04', calculator_key: 'irrf_pf', valid_from: '2015-04-01', valid_to: '2023-04-30', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_IRRF_2015', 'LEI_9250_1995'],
+      params: {
+        faixas: P([{ ate: '1903.98', aliq: '0', ded: '0' }, { ate: '2826.65', aliq: '0.075', ded: '142.80' }, { ate: '3751.05', aliq: '0.15', ded: '354.80' }, { ate: '4664.68', aliq: '0.225', ded: '636.13' }, { ate: null, aliq: '0.275', ded: '869.36' }], 'R$ / taxa', 'Tabela progressiva mensal de abril/2015 a abril/2023'),
+        dependente: P('189.59', 'R$', 'Dedução por dependente'),
+        desconto_simplificado: P('0', 'R$', 'Desconto simplificado mensal (25% da faixa isenta); 0 = não existia na época'),
+      },
+    },
+    {
+      id: 'IRRF_2023_05', calculator_key: 'irrf_pf', valid_from: '2023-05-01', valid_to: '2024-01-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_IRRF_2023', 'LEI_9250_1995'],
+      params: {
+        faixas: P([{ ate: '2112.00', aliq: '0', ded: '0' }, { ate: '2826.65', aliq: '0.075', ded: '158.40' }, { ate: '3751.05', aliq: '0.15', ded: '370.40' }, { ate: '4664.68', aliq: '0.225', ded: '651.73' }, { ate: null, aliq: '0.275', ded: '884.96' }], 'R$ / taxa', 'Tabela progressiva mensal de maio/2023 a janeiro/2024'),
+        dependente: P('189.59', 'R$', 'Dedução por dependente'),
+        desconto_simplificado: P('528.00', 'R$', 'Desconto simplificado mensal (25% da faixa isenta); 0 = não existia na época'),
+      },
+    },
+    {
+      id: 'IRRF_2024_02', calculator_key: 'irrf_pf', valid_from: '2024-02-01', valid_to: '2025-04-30', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_IRRF_2024', 'LEI_9250_1995'],
+      params: {
+        faixas: P([{ ate: '2259.20', aliq: '0', ded: '0' }, { ate: '2826.65', aliq: '0.075', ded: '169.44' }, { ate: '3751.05', aliq: '0.15', ded: '381.44' }, { ate: '4664.68', aliq: '0.225', ded: '662.77' }, { ate: null, aliq: '0.275', ded: '896.00' }], 'R$ / taxa', 'Tabela progressiva mensal de fevereiro/2024 a abril/2025'),
+        dependente: P('189.59', 'R$', 'Dedução por dependente'),
+        desconto_simplificado: P('564.80', 'R$', 'Desconto simplificado mensal (25% da faixa isenta); 0 = não existia na época'),
+      },
+    },
+    {
+      id: 'IRRF_2025_05', calculator_key: 'irrf_pf', valid_from: '2025-05-01', valid_to: '2025-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_IRRF_2026', 'LEI_9250_1995'],
+      params: {
+        faixas: P([{ ate: '2428.80', aliq: '0', ded: '0' }, { ate: '2826.65', aliq: '0.075', ded: '182.16' }, { ate: '3751.05', aliq: '0.15', ded: '394.16' }, { ate: '4664.68', aliq: '0.225', ded: '675.49' }, { ate: null, aliq: '0.275', ded: '908.73' }], 'R$ / taxa', 'Tabela progressiva mensal de maio a dezembro/2025 (a de 2026 repete as faixas e acrescenta a redução da Lei 15.270)'),
+        dependente: P('189.59', 'R$', 'Dedução por dependente'),
+        desconto_simplificado: P('607.20', 'R$', 'Desconto simplificado mensal (25% da faixa isenta); 0 = não existia na época'),
+      },
+    },
+    {
       id: 'IRRF_2026', calculator_key: 'irrf_pf', valid_from: '2026-01-01', valid_to: '2026-12-31', version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (pedido do usuário)',
       bases: ['TAB_IRRF_2026', 'LEI_15270_2025', 'LEI_9250_1995'],
       params: {
@@ -107,6 +154,84 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
         redutor_coef2: P('0.133145', 'fator', 'Coeficiente do redutor entre limite1 e limite2'),
         redutor_aplica_13: P(true, 'bool', 'A redução também se aplica ao imposto exclusivo na fonte do 13º salário (Lei 9.250, art. 3º-A, § 3º, incluído pela Lei 15.270/2025)'),
       },
+    },
+    {
+      id: 'INSS_2021', calculator_key: 'inss_empregado', valid_from: '2021-01-01', valid_to: '2021-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_INSS_2021'],
+      params: {
+        faixas: P([{ ate: '1100.00', aliq: '0.075' }, { ate: '2203.48', aliq: '0.09' }, { ate: '3305.22', aliq: '0.12' }, { ate: '6433.57', aliq: '0.14' }], 'R$ / taxa', 'Faixas progressivas — calculadas faixa a faixa, nunca salário × alíquota única'),
+        teto: P('6433.57', 'R$', 'Teto do salário de contribuição'),
+      },
+    },
+    {
+      id: 'INSS_CI_2021', calculator_key: 'inss_contribuinte_individual', valid_from: '2021-01-01', valid_to: '2021-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['LEI_8212_1991', 'TAB_INSS_2021'],
+      params: { aliquota: P('0.11', 'taxa', 'Retenção do contribuinte individual (pró-labore)'), teto: P('6433.57', 'R$', 'Teto do RGPS (base máxima)') },
+    },
+    {
+      id: 'INSS_2022', calculator_key: 'inss_empregado', valid_from: '2022-01-01', valid_to: '2022-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_INSS_2022'],
+      params: {
+        faixas: P([{ ate: '1212.00', aliq: '0.075' }, { ate: '2427.35', aliq: '0.09' }, { ate: '3641.03', aliq: '0.12' }, { ate: '7087.22', aliq: '0.14' }], 'R$ / taxa', 'Faixas progressivas — calculadas faixa a faixa, nunca salário × alíquota única'),
+        teto: P('7087.22', 'R$', 'Teto do salário de contribuição'),
+      },
+    },
+    {
+      id: 'INSS_CI_2022', calculator_key: 'inss_contribuinte_individual', valid_from: '2022-01-01', valid_to: '2022-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['LEI_8212_1991', 'TAB_INSS_2022'],
+      params: { aliquota: P('0.11', 'taxa', 'Retenção do contribuinte individual (pró-labore)'), teto: P('7087.22', 'R$', 'Teto do RGPS (base máxima)') },
+    },
+    {
+      id: 'INSS_2023_01', calculator_key: 'inss_empregado', valid_from: '2023-01-01', valid_to: '2023-04-30', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_INSS_2023_01'],
+      params: {
+        faixas: P([{ ate: '1302.00', aliq: '0.075' }, { ate: '2571.29', aliq: '0.09' }, { ate: '3856.94', aliq: '0.12' }, { ate: '7507.49', aliq: '0.14' }], 'R$ / taxa', 'Faixas progressivas — calculadas faixa a faixa, nunca salário × alíquota única'),
+        teto: P('7507.49', 'R$', 'Teto do salário de contribuição'),
+      },
+    },
+    {
+      id: 'INSS_CI_2023_01', calculator_key: 'inss_contribuinte_individual', valid_from: '2023-01-01', valid_to: '2023-04-30', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['LEI_8212_1991', 'TAB_INSS_2023_01'],
+      params: { aliquota: P('0.11', 'taxa', 'Retenção do contribuinte individual (pró-labore)'), teto: P('7507.49', 'R$', 'Teto do RGPS (base máxima)') },
+    },
+    {
+      id: 'INSS_2023_05', calculator_key: 'inss_empregado', valid_from: '2023-05-01', valid_to: '2023-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_INSS_2023_05'],
+      params: {
+        faixas: P([{ ate: '1320.00', aliq: '0.075' }, { ate: '2571.29', aliq: '0.09' }, { ate: '3856.94', aliq: '0.12' }, { ate: '7507.49', aliq: '0.14' }], 'R$ / taxa', 'Faixas progressivas — calculadas faixa a faixa, nunca salário × alíquota única'),
+        teto: P('7507.49', 'R$', 'Teto do salário de contribuição'),
+      },
+    },
+    {
+      id: 'INSS_CI_2023_05', calculator_key: 'inss_contribuinte_individual', valid_from: '2023-05-01', valid_to: '2023-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['LEI_8212_1991', 'TAB_INSS_2023_05'],
+      params: { aliquota: P('0.11', 'taxa', 'Retenção do contribuinte individual (pró-labore)'), teto: P('7507.49', 'R$', 'Teto do RGPS (base máxima)') },
+    },
+    {
+      id: 'INSS_2024', calculator_key: 'inss_empregado', valid_from: '2024-01-01', valid_to: '2024-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_INSS_2024'],
+      params: {
+        faixas: P([{ ate: '1412.00', aliq: '0.075' }, { ate: '2666.68', aliq: '0.09' }, { ate: '4000.03', aliq: '0.12' }, { ate: '7786.02', aliq: '0.14' }], 'R$ / taxa', 'Faixas progressivas — calculadas faixa a faixa, nunca salário × alíquota única'),
+        teto: P('7786.02', 'R$', 'Teto do salário de contribuição'),
+      },
+    },
+    {
+      id: 'INSS_CI_2024', calculator_key: 'inss_contribuinte_individual', valid_from: '2024-01-01', valid_to: '2024-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['LEI_8212_1991', 'TAB_INSS_2024'],
+      params: { aliquota: P('0.11', 'taxa', 'Retenção do contribuinte individual (pró-labore)'), teto: P('7786.02', 'R$', 'Teto do RGPS (base máxima)') },
+    },
+    {
+      id: 'INSS_2025', calculator_key: 'inss_empregado', valid_from: '2025-01-01', valid_to: '2025-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['TAB_INSS_2025'],
+      params: {
+        faixas: P([{ ate: '1518.00', aliq: '0.075' }, { ate: '2793.88', aliq: '0.09' }, { ate: '4190.83', aliq: '0.12' }, { ate: '8157.41', aliq: '0.14' }], 'R$ / taxa', 'Faixas progressivas — calculadas faixa a faixa, nunca salário × alíquota única'),
+        teto: P('8157.41', 'R$', 'Teto do salário de contribuição'),
+      },
+    },
+    {
+      id: 'INSS_CI_2025', calculator_key: 'inss_contribuinte_individual', valid_from: '2025-01-01', valid_to: '2025-12-31', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
+      bases: ['LEI_8212_1991', 'TAB_INSS_2025'],
+      params: { aliquota: P('0.11', 'taxa', 'Retenção do contribuinte individual (pró-labore)'), teto: P('8157.41', 'R$', 'Teto do RGPS (base máxima)') },
     },
     {
       id: 'INSS_2026', calculator_key: 'inss_empregado', valid_from: '2026-01-01', valid_to: '2026-12-31', version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (pedido do usuário)',
@@ -214,6 +339,13 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       },
     },
     {
+      id: 'COMPARATIVO_PF_2021', calculator_key: 'comparativo', valid_from: '2021-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026)',
+      bases: ['LEI_8212_22'],
+      params: {
+        patronal_pro_labore: P('0.20', 'taxa', 'Contribuição patronal sobre o pró-labore (Lei 8.212, art. 22, III) — Lucro Real e Presumido; não conferida no texto oficial'),
+      },
+    },
+    {
       id: 'PLR_ATE_ABR_2025', calculator_key: 'plr', valid_from: '2025-01-01', valid_to: '2025-04-30', version: 1, status: 'ativo', created_at: NOW0, created_by: 'seed (tabela da Receita Federal)',
       bases: ['PLR_TABELA'],
       params: { faixas: P([{ ate: '7640.80', aliq: '0', ded: '0' }, { ate: '9922.28', aliq: '0.075', ded: '573.06' }, { ate: '13167.00', aliq: '0.15', ded: '1317.23' }, { ate: '16380.38', aliq: '0.225', ded: '2304.76' }, { ate: null, aliq: '0.275', ded: '3123.78' }], 'R$ / taxa', 'Tabela anual da PLR — janeiro a abril de 2025') },
@@ -301,7 +433,9 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     const bruto = Math.max(0, qRound(qSub(mulQ(base, aliq), Q(parc))));
     // redutor (2026): limitado ao próprio imposto, nunca negativo
     let reducao = 0, redDesc = 'sem redução';
-    const aplicaRed = inp.aplicaRedutor !== false;
+    const temRedutor = pv(set, 'redutor_limite1') !== undefined;
+    const aplicaRed = inp.aplicaRedutor !== false && temRedutor;
+    if (!temRedutor) redDesc = 'não existia na competência (a redução da Lei 15.270 vale a partir de 01/2026)';
     if (aplicaRed) {
       const l1 = cents(pv(set, 'redutor_limite1')), l2 = cents(pv(set, 'redutor_limite2'));
       if (rend <= l1) { reducao = Math.min(bruto, cents(pv(set, 'redutor_max1'))); redDesc = 'rendimentos até ' + brl(l1) + ': redução de até ' + brl(cents(pv(set, 'redutor_max1'))) + ', limitada ao imposto'; }
@@ -309,7 +443,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
         const r = max0(qRound(qSub(Q(cents(pv(set, 'redutor_const2'))), mulQ(rend, dec(pv(set, 'redutor_coef2'))))));
         reducao = Math.min(bruto, r); redDesc = brl(cents(pv(set, 'redutor_const2'))) + ' − (' + pv(set, 'redutor_coef2') + ' × ' + brl(rend) + ') = ' + brl(r) + (r > bruto ? ' (limitada ao imposto)' : '');
       } else redDesc = 'rendimentos acima de ' + brl(l2) + ': sem redução';
-    } else redDesc = 'redutor não aplicado nesta verba';
+    } else if (temRedutor) redDesc = 'redutor não aplicado nesta verba';
     const final = bruto - reducao;
     if (mem) {
       mem.t('IRRF — competência ' + String(dataISO).slice(0, 7) + ' (conjunto ' + set.id + ' v' + set.version + ')');
@@ -324,7 +458,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       mem.l('Base × alíquota ' + (Number(fx.aliq) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + '%', qRound(mulQ(base, aliq)), '×');
       mem.l('(−) Parcela a deduzir', parc, '−');
       mem.s('Imposto pela tabela', bruto);
-      mem.l('(−) Redução 2026 — ' + redDesc, reducao, '−');
+      if (temRedutor) mem.l('(−) Redução 2026 — ' + redDesc, reducao, '−'); else mem.n('Redução da Lei 15.270: ' + redDesc);
       mem.tot('IRRF a reter', final);
     }
     return { ok: true, valor: final, imposto_tabela: bruto, reducao, base, modo, deducao: ded, aliquota: fx.aliq, set };
@@ -958,6 +1092,74 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     return { ok: true, resultado: { base: pl, teorico, limite, maxDedutivel: maxJcp, pago, irrf, liquido: pago - irrf, dedutivel, economia: econ }, memoria: mem.L, parametros: [refSet(sB), refSet(sI)], bases: basesDe([sB, sI]), avisos };
   }
 
+  // ───────────────────────────── COMPARATIVO — pagamento a pessoa física (pedido do usuário 22/10/2026) ─────────────────────────────
+  // O usuário informa um valor; calcula como Mútuo, JCP, Distribuição de lucros e Pró-labore (reaproveitando as calculadoras de cada uma) e ordena do mais ao menos vantajoso TRIBUTARIAMENTE.
+  // Critério: tributos líquidos totais ÷ custo líquido da empresa, onde
+  //   custo líquido da empresa = valor + encargos da empresa − economia de IRPJ/CSLL;  tributos líquidos = custo líquido − líquido que o sócio recebe.
+  function calcComparativo(inp) {
+    const d = data1(inp.competencia), valor = cents(inp.valor), mem = Mem(), avisos = [];
+    if (!(valor > 0)) return ERR('Informe o valor a pagar à pessoa física.');
+    const regime = inp.regime || 'lucro_real';
+    if (!['lucro_real', 'lucro_presumido', 'simples'].includes(regime)) return ERR('Regime da empresa inválido.');
+    const sC = acharSet('comparativo', d); if (!sC) return ERR(ERRO_PARAM, { detalhe: 'Comparativo — competência ' + d.slice(0, 7) });
+    const sets = [sC], subs = [], ok = [], fora = [];
+    const aliqPat = dec(pv(sC, 'patronal_pro_labore'));
+    const sB = acharSet('jcp_base', d), sI = acharSet('jcp_irrf', d); if (sB) sets.push(sB); if (sI) sets.push(sI);
+    const econPct = r => (regime === 'lucro_real' && sB) ? mulC(r, dec(pv(sB, 'aliquota_irpj'))) + mulC(r, dec(pv(sB, 'aliquota_csll'))) : 0;
+    const add = (key, nome, o) => { ok.push(Object.assign({ key, nome, bruto: valor }, o)); };
+    // 1) Pró-labore
+    { const r = calcProLabore({ competencia: inp.competencia, proLabore: inp.valor, dependentes: inp.dependentes });
+      if (!r.ok) fora.push({ nome: 'Pró-labore', motivo: r.erro + (r.detalhe ? ' — ' + r.detalhe : '') });
+      else { subs.push(r);
+        const pat = regime === 'simples' ? 0 : mulC(valor, aliqPat), econ = econPct(valor + pat);
+        add('pro_labore', 'Pró-labore', { socioTributos: r.resultado.inss + r.resultado.irrf, liquidoSocio: r.resultado.liquido, empresaEncargos: pat, empresaEconomia: econ, detalhe: 'INSS do sócio ' + brl(r.resultado.inss) + ' + IRRF ' + brl(r.resultado.irrf) + (pat ? ' + patronal da empresa ' + brl(pat) : '') + (econ ? ' − economia IRPJ/CSLL ' + brl(econ) : '') }); } }
+    // 2) JCP
+    if (regime === 'simples') fora.push({ nome: 'JCP', motivo: 'Empresa do Simples Nacional: o JCP não se aplica (a dedução do art. 9º da Lei 9.249 é para quem apura IRPJ/CSLL sobre o lucro).' });
+    else if (!sI || !sB) fora.push({ nome: 'JCP', motivo: ERRO_PARAM + ' (IRRF/TJLP da competência ' + d.slice(0, 7) + ')' });
+    else {
+      const lim = cents(inp.limiteJCP), irrf = mulC(valor, dec(pv(sI, 'aliquota')));
+      const dedutivel = regime === 'lucro_real' ? (lim > 0 ? Math.min(valor, lim) : valor) : 0, econ = econPct(dedutivel);
+      add('jcp', 'JCP — Juros sobre Capital Próprio', { socioTributos: irrf, liquidoSocio: valor - irrf, empresaEncargos: 0, empresaEconomia: econ, detalhe: 'IRRF ' + (Number(pv(sI, 'aliquota')) * 100) + '% = ' + brl(irrf) + (econ ? ' − economia IRPJ/CSLL ' + brl(econ) + ' sobre ' + brl(dedutivel) + ' dedutível' : ' (JCP não dedutível neste regime — sem economia)') });
+      if (lim > 0 && valor > lim) avisos.push('JCP: o valor (' + brl(valor) + ') passa do máximo dedutível informado (' + brl(lim) + '); só o máximo gera economia de IRPJ/CSLL.');
+      if (!(lim > 0)) avisos.push('JCP: não foi verificado se o valor cabe no limite legal (TJLP × patrimônio líquido, e 50% do lucro/reservas). Informe o "máximo dedutível do JCP" ou use a calculadora JCP antes de decidir.');
+    }
+    // 3) Distribuição de lucros
+    { const r = calcDistLucros({ competencia: inp.competencia, beneficiario: 'pf_residente', modo: 'bruto', valorBruto: inp.valor });
+      if (!r.ok) fora.push({ nome: 'Distribuição de lucros', motivo: r.erro + (r.detalhe ? ' — ' + r.detalhe : '') });
+      else { subs.push(r); add('dist_lucros', 'Distribuição de lucros', { socioTributos: r.resultado.ir, liquidoSocio: r.resultado.liquido, empresaEncargos: 0, empresaEconomia: 0, detalhe: r.resultado.ir ? 'IRRF 10% sobre o total do mês = ' + brl(r.resultado.ir) : 'Até R$ 50.000,00 no mês: sem retenção' }); } }
+    // 4) Mútuo (empresa empresta à pessoa física)
+    { const r = calcMutuo({ mutuante: 'PJ', mutuario: 'PF', principal: inp.valor, dataLiberacao: d, dataVencimento: inp.dataVencimentoMutuo, taxaJuros: inp.taxaJurosMutuo });
+      if (!r.ok) fora.push({ nome: 'Mútuo', motivo: r.erro + (r.detalhe ? ' — ' + r.detalhe : '') });
+      else if (r.resultado.iof == null) fora.push({ nome: 'Mútuo', motivo: 'IOF não calculado para esta data (o IOF cadastrado vale a partir de 11/06/2025).' });
+      else { subs.push(r); add('mutuo', 'Mútuo', { socioTributos: r.resultado.iof, liquidoSocio: valor - r.resultado.iof, empresaEncargos: 0, empresaEconomia: 0, naoRemuneracao: true, detalhe: 'IOF ' + brl(r.resultado.iof) + ' (suposto descontado do valor liberado) — o valor precisa ser DEVOLVIDO' + (r.resultado.juros ? ', com juros de ' + brl(r.resultado.juros) : '') }); } }
+    if (!ok.length) return ERR('Nenhuma das quatro formas pôde ser calculada.', { detalhe: fora.map(f => f.nome + ': ' + f.motivo).join(' | ') });
+    ok.forEach(o => { o.custoEmpresa = valor + o.empresaEncargos - o.empresaEconomia; o.tributosLiquidos = o.custoEmpresa - o.liquidoSocio; o.cargaBp = Math.round(o.tributosLiquidos * 10000 / o.custoEmpresa); });
+    // ordem: menor (tributos líquidos ÷ custo) primeiro — comparação exata por produto cruzado
+    const ordem = ok.slice().sort((a, b) => { const x = BigInt(a.tributosLiquidos) * BigInt(b.custoEmpresa), y = BigInt(b.tributosLiquidos) * BigInt(a.custoEmpresa); return x < y ? -1 : x > y ? 1 : 0; });
+    ordem.forEach((o, i) => { o.posicao = i + 1; });
+    mem.t('Valor a pagar à pessoa física'); mem.l('Valor bruto pago/creditado', valor); mem.txt('Regime da empresa', { lucro_real: 'Lucro Real', lucro_presumido: 'Lucro Presumido', simples: 'Simples Nacional' }[regime]);
+    ordem.forEach(o => {
+      mem.t(o.posicao + 'º — ' + o.nome); mem.l('Líquido que o sócio recebe', o.liquidoSocio, '+'); mem.l('Tributos retidos do sócio', o.socioTributos, '−');
+      if (o.empresaEncargos) mem.l('Encargos da empresa (contribuição patronal)', o.empresaEncargos, '+');
+      if (o.empresaEconomia) mem.l('(−) Economia de IRPJ/CSLL da empresa', o.empresaEconomia, '−');
+      mem.s('Custo líquido da empresa', o.custoEmpresa); mem.s('Tributos líquidos totais (custo − líquido do sócio)', o.tributosLiquidos);
+      mem.txt('Carga tributária efetiva', (o.cargaBp / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '% do custo da empresa'); mem.n(o.detalhe);
+    });
+    fora.forEach(f => mem.n('Fora da comparação — ' + f.nome + ': ' + f.motivo));
+    avisos.unshift('O ranking compara apenas a carga TRIBUTÁRIA (tributos líquidos ÷ custo da empresa). Não avalia a adequação jurídica: cada forma exige seus requisitos (lucros apurados e escrituração para distribuir; serviço efetivamente prestado para o pró-labore; PL e limites para o JCP).');
+    if (ok.some(o => o.key === 'mutuo')) avisos.push('Mútuo NÃO é remuneração: é empréstimo e tem que ser devolvido, com juros e contrato. Usá-lo para pagar o sócio sem devolução pode ser descaracterizado pelo Fisco (distribuição disfarçada). Por isso ele tende a aparecer como o mais barato, mas não resolve a necessidade de remunerar. Os juros recebidos pela empresa são receita dela (não calculados aqui).');
+    if (ok.some(o => o.key === 'pro_labore')) avisos.push('Pró-labore: o INSS do sócio é limitado ao teto; a contribuição patronal de 20% é aplicada sobre o valor total (Lucro Real/Presumido) — conferir a base legal; no Simples Nacional a CPP está no DAS (exceto Anexo IV) e não foi somada.');
+    if (regime === 'lucro_real') avisos.push('Economia de IRPJ/CSLL estimada pela alíquota de 15% + 9%, sem o adicional de 10% do IRPJ e supondo que a empresa tenha lucro tributável para absorver a despesa.');
+    else avisos.push('Regime ' + (regime === 'simples' ? 'Simples Nacional' : 'Lucro Presumido') + ': pró-labore e JCP não geram economia de IRPJ/CSLL (a base é a receita), por isso a diferença entre as formas é menor.');
+    if (regime === 'lucro_presumido') avisos.push('Lucro Presumido: sem escrituração contábil completa, a distribuição isenta fica limitada à base presumida menos os tributos.');
+    const params = [], vistos = new Set();
+    sets.forEach(x => { if (!vistos.has(x.id)) { vistos.add(x.id); params.push(refSet(x)); } });
+    subs.forEach(r => (r.parametros || []).forEach(q => { if (!vistos.has(q.id)) { vistos.add(q.id); params.push(q); } }));
+    const bases = [], bv = new Set();
+    basesDe(sets).concat(subs.flatMap(r => r.bases || [])).forEach(b => { if (!bv.has(b.id)) { bv.add(b.id); bases.push(b); } });
+    return { ok: true, resultado: { ranking: ordem, indisponiveis: fora, melhor: ordem[0].nome, pior: ordem[ordem.length - 1].nome, valor }, memoria: mem.L, parametros: params, bases, avisos };
+  }
+
   // ───────────────────────────── catálogo ─────────────────────────────
   const CATALOGO = [
     { key: 'irrf_pf', cat: 'FEDERAL', nome: 'IRRF — Pessoa Física', fn: calcIRRF },
@@ -971,6 +1173,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { key: 'mutuo', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Mútuo — IOF / juros / IRRF', fn: calcMutuo },
     { key: 'jcp', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'JCP — Juros sobre Capital Próprio', fn: calcJCP },
     { key: 'dist_lucros', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Distribuição de lucros — IRRF 10%', fn: calcDistLucros },
+    { key: 'comparativo', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'COMPARATIVO', fn: calcComparativo },
     { key: 'lucro_presumido', cat: 'TRIBUTÁRIO PJ', nome: 'Lucro Presumido — IRPJ e CSLL', fn: calcLucroPresumido },
     { key: 'itcmd', cat: 'ESTADUAL', nome: 'ITCMD — Doação e Causa mortis', fn: calcITCMD },
   ];
