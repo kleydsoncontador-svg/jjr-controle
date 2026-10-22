@@ -25095,7 +25095,9 @@ async function _lancctbProcessarFopag(){
       const h=String(l.historico_bancario||'');
       if(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|DIFEREN)/i.test(h)) return false;
       const d=String(cpf||'').replace(/\D/g,''); const cpfTxt=d.length===11?` (CPF ${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)})`:'';
-      const base=h.replace(/^\s*\[SISPAG ABERTO - [^\]]*\]\s*/,'');
+      // 22/10/2026 (Kajuna, 49 extratos com 2–3 marcas empilhadas, ex.: "[PESSOA … ARTHUR] [PESSOA … BRUNO] SISPAG SALARIOS"): a linha chegava aqui com "[SISPAG ABERTO - X]" na frente (passa na trava acima), tirava só essa
+      // marca e deixava por baixo a marca de pessoa de uma rodada anterior. Agora tira TODAS as marcas de pessoa/SISPAG ABERTO do começo — fica só a pessoa identificada agora.
+      let base=h; for(let i=0;i<20;i++){ const b=base.replace(/^\s*\[(?:SISPAG ABERTO|PESSOA IDENTIFICADA)[^\]]*\]\s*/i,''); if(b===base) break; base=b; }
       const novo=`[${rotulo} - CONTA A DEFINIR - ${nome}${cpfTxt}] ${base}`.trim();
       const { error } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:novo }).eq('id',l.id);
       if(error) return false; l.historico_bancario=novo; return true;
@@ -31404,7 +31406,9 @@ async function _lancctbAbrirSispagViaFluxo({eid,contaId,pendencias,fluxoTodo,usa
   const nrm=t=>_convMpRemoverAcentos(String(t||'').toUpperCase());
   // Pedido do usuário 21/10/2026 (Kajuna, Caixinha "SALARIO ANDRÉ PACHECO" R$ 687,00 aberto em 3 pessoas + diferença): só é SISPAG (lote de vários) quando o histórico traz SISPAG. "SALARIO <NOME>" com a pessoa no histórico é pagamento INDIVIDUAL — nunca se divide.
   // SISPAG é o nome do Itaú para o lote de pagamentos a empregados e sócios — só linha com SISPAG no histórico é aberta por pessoa (nada de Caixinha/outros bancos).
-  const sispag=(pendencias||[]).filter(l=>l.valor_saida>0&&/SISPAG/.test(nrm(l.historico_bancario))&&!(fluxoTodo||[]).some(f=>String(f.lancamento_extrato_id)===String(l.id)));
+  // 22/10/2026: pedaço JÁ aberto por pessoa ([SISPAG ABERTO - X]) ou já marcado ([PESSOA IDENTIFICADA…]/[SÓCIO…]/[DIFERENÇA … PESSOA NÃO IDENTIFICADA]) nunca é reaberto — quando o vínculo com o Fluxo era solto numa rodada seguinte ele voltava a ser "SISPAG sem Fluxo" e ganhava outra marca por cima da anterior.
+  const _jaAberto=h=>/^\s*\[(?:SISPAG ABERTO|PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|DIFERENÇA FOLHA[^\]]*PESSOA NÃO IDENTIFICADA)/i.test(String(h||''));
+  const sispag=(pendencias||[]).filter(l=>l.valor_saida>0&&/SISPAG/.test(nrm(l.historico_bancario))&&!_jaAberto(l.historico_bancario)&&!(fluxoTodo||[]).some(f=>String(f.lancamento_extrato_id)===String(l.id)));
   const motivos=[];
   if(!sispag.length) return { abertos:0, motivos:['nenhum SISPAG SALARIOS pendente sem Fluxo amarrado nesta conta/período'] };
   const pessoasPorMes={};
