@@ -306,7 +306,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     const f = F[est.key]; const main = document.getElementById('calcMain');
     main.innerHTML = `<div class="calc-card"><h2 class="calc-h">${E(f.titulo)}</h2><div class="calc-sub">${E(f.desc)}</div>
       <div class="calc-grid" id="calcForm">${f.campos.map(campoHtml).join('')}</div>
-      <div class="calc-acts"><button class="btn bp" onclick="calcCalcular()">Calcular</button><button class="btn bo" onclick="calcLimpar()">Limpar</button></div></div>
+      <div class="calc-acts"><button class="btn bp" onclick="calcCalcular()">Calcular</button><button class="btn bo" onclick="calcLimpar()">Limpar</button><button class="btn bo" onclick="calcImprimir()">🖨️ Imprimir / PDF</button><button class="btn bo" onclick="calcExcel()">📊 Excel</button></div></div>
       <div id="calcResultado"></div>`;
     if (f.campos.some(c => c.t === 'atividades')) { if (!est.ativ.length) est.ativ = [{ tipo: 'comercio', receita: '' }]; renderAtiv(); }
     if (f.campos.some(c => c.t === 'herdeiros')) { if (!est.herd.length) est.herd = [{ nome: '', quinhao: '' }]; renderHerd(); }
@@ -423,7 +423,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
       <h1>${E(titulo)}</h1><p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${resumoHtml(f, r)}<h3>Memória de cálculo</h3>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
   }
   function abrirImpressao(html) { const w = window.open('', '_blank'); if (!w) { toast('Libere pop-ups para imprimir.', 'err'); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(() => w.print(), 300); }
-  window.calcImprimir = function () { const r = est.ultimo; if (!r || !r.ok) return; abrirImpressao(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'), F[est.key])); };
+  window.calcImprimir = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para poder imprimir.', 'err'); return; } abrirImpressao(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'), F[est.key])); };
 
   // ───── Excel (todas as calculadoras, o cálculo salvo e as tabelas) — SheetJS (XLSX) já carregado no site ─────
   const numR = v => typeof v === 'number' ? v / 100 : v;               // centavos → reais
@@ -457,7 +457,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     if ((r.avisos || []).length) addSheet(wb, 'Avisos', [['Avisos']].concat(r.avisos.map(a => [a])));
     return wb;
   }
-  window.calcExcel = function () { const r = est.ultimo; if (!r || !r.ok) return; baixarXlsx(montarWorkbook(F[est.key].titulo, F[est.key], r, est.ultimoInp, new Date().toLocaleString('pt-BR')), F[est.key].titulo); };
+  window.calcExcel = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para gerar o Excel.', 'err'); return; } baixarXlsx(montarWorkbook(F[est.key].titulo, F[est.key], r, est.ultimoInp, new Date().toLocaleString('pt-BR')), F[est.key].titulo); };
   function dadosHist(id) { const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return null; return { h, f: F[h.calc], r: { ok: true, resultado: h.resultado, memoria: h.memoria, parametros: h.parametros, bases: (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean), avisos: h.avisos || [] } }; }
   window.calcHistImprimir = function (id) { const d = dadosHist(id); if (!d) return; abrirImpressao(htmlImpressao(d.h.titulo, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.f)); };
   window.calcHistExcel = function (id) { const d = dadosHist(id); if (!d) return; baixarXlsx(montarWorkbook(d.h.titulo, d.f, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR')), d.h.titulo); };
