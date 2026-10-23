@@ -27175,7 +27175,7 @@ async function _lancctbCorrigirParcelasPorFluxo(){
   try{
     const _temJ=await _lancctbFluxoColunasJuros();
     const { data: fluxoRows } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,data,documento_numero,parcela,valor_saida,valor_entrada'+(_temJ?',valor_juros,valor_desconto,valor_multa':''))
+      .select('id,data,documento_numero,parcela,cnpj_cpf,valor_saida,valor_entrada'+(_temJ?',valor_juros,valor_desconto,valor_multa':''))
       .eq('empresa_eid',eid).not('documento_numero','is',null),'data'));
     const grupos={};
     (fluxoRows||[]).forEach(f=>{
@@ -27187,7 +27187,9 @@ async function _lancctbCorrigirParcelasPorFluxo(){
       const pago=f.valor_saida||f.valor_entrada||0;
       if(!(pago>0)) return; // Kajuna 22/10/2026: linha do Fluxo com valor 0 (título pago por abatimento, ou valor mal lido) virava parcela de R$ 0,00 e jogava o resto da NF numa parcela de saldo — 186 parcelas zeradas em 58 NFs
       const base=Math.round((pago-(Number(f.valor_juros)||0)-(Number(f.valor_multa)||0)+(Number(f.valor_desconto)||0))*100)/100;
-      (grupos[nfNum]=grupos[nfNum]||[]).push({parcNum, data:f.data, valor:base>0?base:pago});
+      // 23/10/2026: com CPF/CNPJ no Fluxo, o grupo é nº da NF + CNPJ do emitente (fornecedor com nome fantasia × razão social do XML; mesmo número de NF em fornecedores diferentes não se mistura)
+      const _cnF=String(f.cnpj_cpf||'').replace(/\D/g,''); const chaveG=_cnF.length===14?nfNum+'|'+_cnF:nfNum;
+      (grupos[chaveG]=grupos[chaveG]||[]).push({parcNum, data:f.data, valor:base>0?base:pago});
     });
     const nfNumeros=Object.keys(grupos);
     if(!nfNumeros.length){
@@ -27196,9 +27198,13 @@ async function _lancctbCorrigirParcelasPorFluxo(){
     }
     let divididas=0, puladas=0;
     let _di=0;
-    for(const nfNum of nfNumeros){
+    for(const chaveG of nfNumeros){
+      const nfNum=chaveG.split('|')[0], cnpjG=chaveG.split('|')[1]||'';
       _di++; if(statusEl) statusEl.textContent=`Dividindo parcelas ${_di}/${nfNumeros.length}…`;
-      const { data: nfs } = await _supaClient.from('notas_fiscais').select('id,numero,valor_total').eq('empresa_eid',eid).eq('numero',nfNum);
+      const { data: nfsTodas } = await _supaClient.from('notas_fiscais').select('id,numero,valor_total,cnpj_emitente').eq('empresa_eid',eid).eq('numero',nfNum);
+      // com CNPJ no Fluxo: acha a NF pelo número + CNPJ do emitente (resolve número repetido entre fornecedores); sem NF desse emitente, cai no comportamento antigo (número único)
+      const _doCnpj=cnpjG?(nfsTodas||[]).filter(n=>String(n.cnpj_emitente||'').replace(/\D/g,'')===cnpjG):[];
+      const nfs=cnpjG&&_doCnpj.length?_doCnpj:nfsTodas;
       if(!nfs||nfs.length!==1){ puladas++; continue; } // não achou, ou número ambíguo (mais de 1 NF)
       const nfId=nfs[0].id, valorTotalNf=nfs[0].valor_total||0;
       const { data: parcelasAtuais } = await _supaClient.from('notas_fiscais_parcelas').select('id,numero_parcela,valor_parcela,status_conciliacao,data_vencimento').eq('nf_id',nfId);
@@ -27210,7 +27216,7 @@ async function _lancctbCorrigirParcelasPorFluxo(){
       // parte no Fluxo (ex.: parcela 2 de R$ 539,48 com R$ 300 pagos) → essa parcela fica com o valor pago e o saldo vira a próxima (3), +30 dias. Nunca mexe em parcela já conciliada.
       if(parcelasAtuais&&parcelasAtuais.length>=2){
         const ult=parcelasAtuais.slice().sort((a,b)=>a.numero_parcela-b.numero_parcela).slice(-1)[0];
-        const linhaUlt=(grupos[nfNum]||[]).filter(l=>l.parcNum===ult.numero_parcela).sort((a,b)=>a.data<b.data?1:-1)[0];
+        const linhaUlt=(grupos[chaveG]||[]).filter(l=>l.parcNum===ult.numero_parcela).sort((a,b)=>a.data<b.data?1:-1)[0];
         if(ult.status_conciliacao==='pendente'&&linhaUlt&&Number(ult.valor_parcela)-linhaUlt.valor>=0.01){
           const saldo=Math.round((Number(ult.valor_parcela)-linhaUlt.valor)*100)/100;
           const d=new Date((linhaUlt.data||new Date().toISOString().slice(0,10))+'T00:00:00'); d.setDate(d.getDate()+30);
@@ -27220,7 +27226,7 @@ async function _lancctbCorrigirParcelasPorFluxo(){
         }
       }
       if(!parcelasAtuais||parcelasAtuais.length!==1||parcelasAtuais[0].status_conciliacao!=='pendente'){ puladas++; continue; }
-      const linhas=grupos[nfNum].slice().sort((a,b)=>a.parcNum-b.parcNum);
+      const linhas=grupos[chaveG].slice().sort((a,b)=>a.parcNum-b.parcNum);
       // Pedido do usuário 09/09/2026: "se no fluxo indica parcela 1, e o
       // valor não bate com o da NF do XML, deveria abrir parcela também —
       // é como se sobrasse saldo da NF pra 30 dias à frente do vencimento
