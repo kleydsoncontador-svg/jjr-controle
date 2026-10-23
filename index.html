@@ -40576,6 +40576,8 @@ async function _lancctbFluxoLerArquivo(){
       if((cabCsv.match(/;/g)||[]).length>=2&&(cabCsv.match(/;/g)||[]).length>(cabCsv.match(/,/g)||[]).length){ wb={SheetNames:['CSV'],Sheets:{CSV:XLSX.utils.aoa_to_sheet(matrizCsv)}}; }
     }
     if(!wb) wb=XLSX.read(buf,{type:'array',cellDates:true});
+    { const abasMb=_fxmbDetectarAbas(wb);   // Excel com 1 aba por banco (aba BC ignorada) — conta ligada automaticamente
+      if(abasMb.length){ _fxmb=_fxmbMontar(wb,abasMb,file.name); status.textContent=`${abasMb.length} aba(s) de banco encontradas — confira a conta de cada uma.`; document.getElementById('lancctbFluxoImportMappingArea').innerHTML=_fxmbPreviewHtml(); document.getElementById('lancctbFluxoImportLerBtn').style.display='none'; return; } }
     if(wb.SheetNames.length>1){
       // Pedido do usuário 08/09/2026: Excel com mais de 1 aba (ex: uma aba
       // por conta bancária) não deve assumir a 1ª sozinho — pergunta quais
@@ -40592,6 +40594,89 @@ async function _lancctbFluxoLerArquivo(){
     console.error(e);
     status.textContent='Erro ao ler arquivo: '+e.message;
   }
+}
+// ─── Fluxo de Caixa em EXCEL com 1 ABA POR BANCO (Nasa Truck #250 — pedido do usuário 23/10/2026) ─────────────────────────────────────────────────────────────────
+// Colunas: Cod de Movimentação | Data de Pagamento | Tipo de Movimentação (Entrada/Saída) | Valor | Descrição | Número da NF | Categoria de Pagamento | Forma de Pagamento.
+// Cada aba é um banco (o nome da aba acha a conta bancária da empresa); a aba "BC" (listas de apoio) é ignorada. O sinal do Valor varia (−/+/"R$ -400,00"): quem manda é o TIPO.
+// Gravação: valor_entrada/valor_saida pelo tipo; Descrição → descricao; Categoria → "Descrição da conta"; Forma de pagamento → unidade; aba → Banco (port_nom); Cod+data+valor → chave de importação (não duplica ao reimportar).
+// Nº da NF: só número puro ("436", "NFS 131" → 131); "447/ 142" (dois documentos) vira "447 e 142" para NÃO ser lido como NF/parcela; "0", "-" e "Sem emissão…" ficam em branco.
+let _fxmb=null;
+const _fxmbNorm=s=>_convMpRemoverAcentos(String(s==null?'':s).toLowerCase()).replace(/\s+/g,' ').trim();
+function _fxmbDetectarAbas(wb){
+  return wb.SheetNames.filter(n=>{
+    if(_fxmbNorm(n)==='bc') return false;
+    const m=XLSX.utils.sheet_to_json(wb.Sheets[n],{header:1,raw:true,defval:'',range:0}); const cab=(m[0]||[]).map(_fxmbNorm);
+    return cab.some(x=>/^cod de movimenta/.test(x))&&cab.some(x=>/^data de pagamento/.test(x))&&cab.some(x=>/^tipo de movimenta/.test(x))&&cab.some(x=>/^valor/.test(x));
+  });
+}
+function _fxmbValor(v){
+  if(typeof v==='number') return Math.abs(v);
+  let t=String(v==null?'':v).replace(/R\$/gi,'').replace(/\s/g,'').replace(/^[-−]/,'').replace(/[-−]/g,''); if(!t) return NaN;
+  if(t.indexOf(',')>=0) t=t.replace(/\./g,'').replace(',','.');
+  const n=parseFloat(t); return isNaN(n)?NaN:Math.abs(n);
+}
+function _fxmbData(v){
+  if(v instanceof Date&&!isNaN(v)){ const d=new Date(v.getTime()+12*3600e3); /* +12h absorve o desvio de fuso do SheetJS */ return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0'); }
+  const t=String(v==null?'':v).trim(); let m=t.match(/^(\d{2})\/(\d{2})\/(\d{4})/); if(m) return m[3]+'-'+m[2]+'-'+m[1];
+  m=t.match(/^(\d{4})-(\d{2})-(\d{2})/); return m?m[1]+'-'+m[2]+'-'+m[3]:null;
+}
+function _fxmbDocNf(v){
+  const t=String(v==null?'':v).trim(); if(!t||/^[-–0]+$/.test(t)||/sem emiss/i.test(t)) return null;
+  if(/^\d+$/.test(t)) return t.replace(/^0+(?=\d)/,'');
+  const mp=t.match(/(\d{2,})\s*\/\s*(\d{2,})/); if(mp) return mp[1]+' e '+mp[2];
+  const m1=t.match(/^(?:NFS?-?e?\s*)?(\d{2,})$/i); return m1?m1[1]:null;
+}
+function _fxmbContaDaAba(nomeAba,agencias){
+  const t=_fxmbNorm(nomeAba).replace(/[^a-z0-9 ]/g,''); const toks=t.split(' ').filter(x=>x.length>=3);
+  const achadas=(agencias||[]).filter(a=>{ const b=_fxmbNorm(a.banco_nome).replace(/[^a-z0-9 ]/g,''); return b.includes(t)||toks.some(k=>b.includes(k)); });
+  return achadas.length?achadas[0]:null;
+}
+function _fxmbMontar(wb,abas,nomeArquivo){
+  const ags=(_lancctbUltimasAgencias||[]).filter(a=>a.ativo!==false);
+  const resumo=[], registros=[];
+  abas.forEach(nome=>{
+    const m=XLSX.utils.sheet_to_json(wb.Sheets[nome],{header:1,raw:true,defval:'',cellDates:true}); const cab=(m[0]||[]).map(_fxmbNorm);
+    const ix=re=>cab.findIndex(x=>re.test(x));
+    const c={cod:ix(/^cod de movimenta/),data:ix(/^data de pagamento/),tipo:ix(/^tipo de movimenta/),valor:ix(/^valor/),desc:ix(/^descri/),nf:ix(/^numero da nf/),cat:ix(/^categoria/),forma:ix(/^forma de pagamento/)};
+    const conta=_fxmbContaDaAba(nome,ags); let n=0,ent=0,sai=0,descartadas=0;
+    m.slice(1).forEach((r,k)=>{
+      const cod=String(r[c.cod]||'').trim(), data=_fxmbData(r[c.data]), valor=_fxmbValor(r[c.valor]), tp=_fxmbNorm(r[c.tipo]);
+      if(!cod&&!data&&isNaN(valor)) return;                      // linha em branco formatada
+      const tipo=/^ent/.test(tp)?'E':(/^sa/.test(tp)?'S':null);
+      if(!data||!(valor>0)||!tipo||!cod){ descartadas++; return; }
+      const reg={ aba:nome.trim(), data, descricao:String(r[c.desc]||'').trim()||null, valor_entrada:tipo==='E'?valor:0, valor_saida:tipo==='S'?valor:0,
+        documento_numero:_fxmbDocNf(r[c.nf]), categoria:String(r[c.cat]||'').trim()||null, forma:String(r[c.forma]||'').trim()||null, cod, linha:k+2 };
+      registros.push(reg); n++; if(tipo==='E') ent+=valor; else sai+=valor;
+    });
+    resumo.push({ aba:nome, abaTxt:nome.trim(), n, ent:Math.round(ent*100)/100, sai:Math.round(sai*100)/100, descartadas, contaId:conta?String(conta.id):'' });
+  });
+  return { resumo, registros, arquivo:nomeArquivo };
+}
+function _fxmbPreviewHtml(){
+  const R=_fxmb; const ags=(_lancctbUltimasAgencias||[]);
+  const opts=sel=>'<option value="">— Qualquer conta —</option>'+ags.map(a=>`<option value="${a.id}" ${String(a.id)===String(sel)?'selected':''}>${esc((_lancctbNomeBancoExibicao(a.banco_nome)||a.banco_nome||'')+(typeof _lancctbAgCcTxt==='function'?_lancctbAgCcTxt(a):''))}</option>`).join('');
+  const tot=R.resumo.reduce((a,x)=>a+x.n,0);
+  return `<div style="font-size:12.5px;font-weight:600;margin-bottom:6px">Fluxo com 1 aba por banco — a aba "BC" foi ignorada. Confira a conta de cada aba:</div>
+    <div style="overflow-x:auto"><table class="data" style="width:100%;font-size:12px"><thead><tr><th>Aba</th><th style="text-align:right">Lançamentos</th><th style="text-align:right">Entradas</th><th style="text-align:right">Saídas</th><th>Conta bancária</th></tr></thead><tbody>${R.resumo.map((x,i)=>`<tr><td><b>${esc(x.abaTxt)}</b>${x.descartadas?` <span style="color:#dc2626;font-size:11px">(${x.descartadas} linha(s) sem data/valor/tipo ignoradas)</span>`:''}</td><td style="text-align:right">${x.n}</td><td style="text-align:right">R$ ${_fmt(x.ent)}</td><td style="text-align:right">R$ ${_fmt(x.sai)}</td><td><select class="si" id="fxmbConta_${i}" style="min-width:230px;${x.contaId?'':'border-color:#dc2626'}">${opts(x.contaId)}</select>${x.contaId?'':' <span style="color:#dc2626;font-size:11px">sem conta casada — escolha</span>'}</td></tr>`).join('')}</tbody></table></div>
+    <div class="ma" style="margin-top:12px"><button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button><button class="btn bp" onclick="confirmarLancctbFluxoMultiBanco()">✓ Importar ${tot} lançamento(s)</button></div>`;
+}
+async function confirmarLancctbFluxoMultiBanco(){
+  const R=_fxmb; if(!R||!R.registros.length){ toast('Nada para importar.','err'); return; }
+  const eid=_lancctbEidAtual; const contaPorAba={}; R.resumo.forEach((x,i)=>{ contaPorAba[x.aba.trim()]=document.getElementById('fxmbConta_'+i)?.value||null; });
+  const ags=Object.fromEntries((_lancctbUltimasAgencias||[]).map(a=>[String(a.id),a]));
+  const { data: existentes } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('chave_importacao').eq('empresa_eid',eid).not('chave_importacao','is',null).like('chave_importacao','fxmb|%'));
+  const ja=new Set((existentes||[]).map(e=>e.chave_importacao));
+  const linhas=R.registros.map(r=>{ const conta=contaPorAba[r.aba]; const a=conta?ags[String(conta)]:null;
+    return { empresa_eid:eid, conta_bancaria_id:conta?parseInt(conta,10):null, data:r.data, descricao:r.descricao, valor_entrada:r.valor_entrada, valor_saida:r.valor_saida,
+      documento_numero:r.documento_numero, port_nom:a?(_lancctbNomeBancoExibicao(a.banco_nome)||r.aba):r.aba, unidade:r.forma, descricao_conta_origem:r.categoria, arquivo_origem:R.arquivo,
+      chave_importacao:'fxmb|'+eid+'|'+r.cod+'|'+r.data+'|'+Math.round((r.valor_entrada||r.valor_saida)*100) }; });
+  const novos=linhas.filter(l=>!ja.has(l.chave_importacao)); const puladas=linhas.length-novos.length;
+  if(!novos.length){ toast('Todos os lançamentos deste arquivo já tinham sido importados.','err'); return; }
+  for(let k=0;k<novos.length;k+=400){ const { error } = await _supaClient.from('fluxo_caixa_lancamentos').insert(novos.slice(k,k+400)); if(error){ toast('Erro ao importar: '+error.message,'err'); return; } }
+  toast(`${novos.length} lançamento(s) importado(s)${puladas?` — ${puladas} já existiam e foram ignorados`:''}`,'ok');
+  closeModal('mLancctbUpload');
+  try{ await _lancctbFluxoAposImportar(novos.map(r=>r.data)); }catch(e){}
+  _lancctbFluxoPagina=0; renderLancctbFluxoCaixa();
 }
 function _lancctbFluxoSelecaoAbasHtml(nomes){
   // Pedido do usuário 08/09/2026: arquivo real com 1 aba por mês
