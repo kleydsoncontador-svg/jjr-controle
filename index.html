@@ -40089,6 +40089,7 @@ async function renderLancctbFluxoCaixa(){
   }
     return q;
   };
+  window._fxAplicarFiltros=_aplicarFiltrosFluxo; // a exclusão usa EXATAMENTE os mesmos filtros da tela
   q=_aplicarFiltrosFluxo(q);
   // Mudou QUALQUER filtro (mês, banco, status, coluna…): a seleção anterior não vale mais (achado do usuário 23/10/2026: ∑ sel. seguia contando linhas de um filtro antigo)
   { const _sigFx=JSON.stringify([_lancctbFluxoContaSel,_lancctbFluxoPortNegocioFiltro,_lancctbFluxoStatus,_lancctbFluxoFiltroDescricao,_lancctbFluxoFiltroCliente,_lancctbFluxoFiltroCnpj,_lancctbFluxoFiltroNumero,_lancctbFluxoFiltroUnidade,_lancctbFluxoFiltroDescconta,_lancctbFluxoFiltroTipo,_lancctbFluxoFiltroData,_lancctbFluxoFiltroPortNomTxt,_lancctbFluxoFiltroValor,_lancctbFluxoMes]);
@@ -40234,7 +40235,7 @@ async function renderLancctbFluxoCaixa(){
         <td style="padding:7px 6px;text-align:right;font-size:11.5px;color:${Number(l.valor_desconto)>0?'var(--teal)':'var(--slate)'}">${Number(l.valor_desconto)>0?_fmt(l.valor_desconto):'—'}</td>
         <td style="padding:7px 6px;text-align:right;font-size:11.5px;color:${Number(l.valor_multa)>0?'#dc2626':'var(--slate)'}">${Number(l.valor_multa)>0?_fmt(l.valor_multa):'—'}</td>
         <td style="padding:7px 10px;text-align:right;font-weight:600;color:${l.valor_saida>0?'#dc2626':'var(--teal)'}">R$ ${_fmt(valor)}</td>
-        <td style="padding:7px 10px;text-align:center"><span style="color:${associado?'var(--teal)':'#D97706'};font-weight:600;font-size:11px">${associado?'associado':'não associado'}</span></td>
+        <td style="padding:7px 10px;text-align:center">${associado?`<button type="button" onclick="abrirLancctbFluxoAssociado(${l.id})" title="Abrir o lançamento do Registro Contábil ligado a esta linha (e desassociar, se quiser)" style="background:none;border:none;border-bottom:1px dashed var(--teal);padding:0;cursor:pointer;color:var(--teal);font-weight:600;font-size:11px">associado</button>`:`<span style="color:#D97706;font-weight:600;font-size:11px">não associado</span>`}</td>
         <td style="padding:7px 10px;text-align:center"><input type="checkbox" ${selecionado?'checked':''} onchange="_lancctbFluxoToggleSel(${l.id},${valor||0},this.checked)" style="cursor:pointer;width:18px;height:18px"></td>
       </tr>`;
     });
@@ -40423,6 +40424,78 @@ async function _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaida,campoV,
 // status_associado/lancamento_extrato_id) — NÃO desfaz um lançamento
 // contábil já gravado no Registro Contábil (isso é feito por lá, excluindo
 // o lançamento; aqui é só a ligação do Fluxo com a conta/lançamento).
+// ─── Clicar em "associado" no Fluxo → abre o lançamento do Registro (extrato) ligado, com opção de desassociar (pedido do usuário 23/10/2026) ──────────────────────────────────
+// Mostra o lançamento do extrato (data, histórico, valor, status), TODAS as linhas do Fluxo ligadas a ele (marque uma ou várias para desassociar) e os lançamentos contábeis, se houver.
+// Extrato ainda PENDENTE: desassociar só solta as linhas do Fluxo (o lançamento continua pendente no Registro). Extrato CONCILIADO: desassociar desconcilia o lançamento inteiro (estorna o contábil, devolve NF/comprovante/Fluxo
+// para pendente) — nunca apaga nada (linhas contábeis ficam estornadas), igual ao botão de desconciliar do Registro.
+let _fxAssoc=null;
+// Desconcilia um lançamento do extrato SEM depender do cache do Registro (mesma lógica de _lancctbDesconciliarCore): estorna o contábil (estornado=true, nunca apaga) e devolve NF/comprovante/Fluxo/aplicação para pendente.
+async function _fxDesconciliarExtratoPorId(extratoId){
+  const { data: ex } = await _supaClient.from('lancamentos_extrato').select('id,valor_saida').eq('id',extratoId).maybeSingle(); if(!ex) return false;
+  const { data: ctb } = await _supaClient.from('lancamentos_contabeis').select('nf_parcela_id,comprovante_id').eq('lancamento_extrato_id',extratoId).eq('estornado',false);
+  const tabelaComprovante=(ex.valor_saida||0)>0?'comprovantes_bancarios':'comprovantes_recebimento';
+  const idsNf=[...new Set((ctb||[]).map(l=>l.nf_parcela_id).filter(Boolean))], idsComp=[...new Set((ctb||[]).map(l=>l.comprovante_id).filter(Boolean))];
+  if(idsNf.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsNf);
+  if(idsComp.length) await _supaClient.from(tabelaComprovante).update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComp);
+  await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+  await _supaClient.from('aplicacoes_financeiras_movimentos').update({lancamento_extrato_id:null}).eq('lancamento_extrato_id',extratoId);
+  const { error } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).eq('lancamento_extrato_id',extratoId).eq('estornado',false); if(error) throw new Error(error.message);
+  await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).eq('id',extratoId);
+  return true;
+}
+async function abrirLancctbFluxoAssociado(fluxoId){
+  const eid=_lancctbEidAtual;
+  const { data: f } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,documento_numero,parcela,valor_saida,valor_entrada,conta_bancaria_id,status_associado,lancamento_extrato_id').eq('id',fluxoId).single();
+  if(!f){ toast('Linha do Fluxo não encontrada.','err'); return; }
+  let extrato=null, irmaos=[], ctb=[];
+  if(f.lancamento_extrato_id){
+    const r1=await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,historico_bancario,valor_saida,valor_entrada,status_conciliacao,conta_bancaria_id').eq('id',f.lancamento_extrato_id).maybeSingle(); extrato=r1.data;
+    const r2=await _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,documento_numero,parcela,valor_saida,valor_entrada').eq('lancamento_extrato_id',f.lancamento_extrato_id).order('data').order('id'); irmaos=r2.data||[];
+    const r3=await _supaClient.from('lancamentos_contabeis').select('id,tipo,valor,historico,classificacao,nf_parcela_id,comprovante_id').eq('lancamento_extrato_id',f.lancamento_extrato_id).eq('estornado',false); ctb=r3.data||[];
+  }
+  _fxAssoc={ fluxoId, f, extrato, irmaos, ctb, eid };
+  _fxAssocRender();
+}
+function _fxAssocRender(){
+  const A=_fxAssoc; if(!A) return; let ov=document.getElementById('fxAssocOverlay');
+  if(!ov){ ov=document.createElement('div'); ov.id='fxAssocOverlay'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px'; ov.onclick=e=>{ if(e.target===ov) fecharLancctbFluxoAssociado(); }; document.body.appendChild(ov); }
+  const e=A.extrato, conc=e&&e.status_conciliacao==='conciliado'; const val=x=>(Number(x.valor_saida)||0)>0?Number(x.valor_saida):Number(x.valor_entrada)||0;
+  const corpo=A.f.lancamento_extrato_id?`
+    <div style="font-size:12px;font-weight:700;color:var(--slate);letter-spacing:.04em;margin-bottom:4px">LANÇAMENTO DO REGISTRO CONTÁBIL / EXTRATO</div>
+    ${e?`<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12.5px">
+      <div><b>${e.data_pagamento?new Date(e.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</b> — <b style="color:${(e.valor_saida||0)>0?'#dc2626':'var(--teal)'}">R$ ${_fmt(e.valor_saida||e.valor_entrada)}</b> — <span style="font-weight:700;color:${conc?'var(--teal)':'#D97706'}">${conc?'CONCILIADO':'PENDENTE'}</span></div>
+      <div style="margin-top:4px;color:var(--slate)">${esc(e.historico_bancario||'')}</div></div>`:'<div style="color:#dc2626;margin-bottom:12px">O lançamento do extrato ligado não foi encontrado (já foi apagado?). Você pode soltar esta linha do Fluxo.</div>'}
+    <div style="font-size:12px;font-weight:700;color:var(--slate);letter-spacing:.04em;margin-bottom:4px">LINHAS DO FLUXO LIGADAS A ELE (marque as que quer desassociar)</div>
+    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;max-height:220px;overflow:auto">${A.irmaos.map(x=>`<label style="display:flex;gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px;cursor:pointer"><input type="checkbox" class="fxAssocCk" value="${x.id}" ${x.id===A.fluxoId?'checked':''}><span style="flex:1">${x.data?new Date(x.data+'T00:00:00').toLocaleDateString('pt-BR'):''} · <b>${esc(x.cliente_fornecedor_nome||x.descricao||'')}</b> · doc ${esc(String(x.documento_numero||'—'))}${x.parcela?' · parcela '+x.parcela:''}</span><b>R$ ${_fmt(val(x))}</b></label>`).join('')||'<div style="padding:8px 10px;color:var(--slate)">Nenhuma linha.</div>'}</div>
+    ${A.ctb.length?`<div style="font-size:12px;font-weight:700;color:var(--slate);letter-spacing:.04em;margin-bottom:4px">LANÇAMENTOS CONTÁBEIS GERADOS</div><div style="border:1px solid var(--border);border-radius:8px;margin-bottom:12px;max-height:150px;overflow:auto">${A.ctb.map(c=>`<div style="display:flex;gap:8px;padding:5px 10px;border-bottom:1px solid var(--border);font-size:12px"><span style="width:18px;font-weight:700">${esc(c.tipo||'')}</span><span style="flex:1">${esc(c.historico||'')}</span><b>R$ ${_fmt(c.valor)}</b></div>`).join('')}</div>`:''}
+    <div style="font-size:12px;color:var(--slate);margin-bottom:12px">${conc?'⚠ Este lançamento está <b>conciliado</b>: desassociar vai <b>desconciliar</b> o lançamento inteiro (estorna o contábil e devolve NF/comprovante/Fluxo para pendente). Nada é apagado.':'O lançamento do extrato continua <b>pendente</b> no Registro Contábil; só as linhas marcadas do Fluxo voltam para "não associado".'}</div>`
+    :`<div style="font-size:13px;margin-bottom:12px">Esta linha está associada <b>só a um banco</b> (não há lançamento do extrato ligado). Você pode soltá-la.</div>`;
+  ov.innerHTML=`<div style="background:var(--white);border:1px solid var(--border);border-radius:12px;padding:18px 20px;width:min(760px,96vw);max-height:92vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><h3 style="margin:0;font-size:16px">🔗 Linha associada do Fluxo</h3><button class="btn bo bsm" onclick="fecharLancctbFluxoAssociado()">Fechar</button></div>
+    ${corpo}
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap"><button class="btn bo" onclick="fecharLancctbFluxoAssociado()">Cancelar</button><button class="btn bp" style="background:#dc2626;border-color:#dc2626" onclick="confirmarLancctbFluxoAssociadoDesassociar()">↩ Desassociar ${A.f.lancamento_extrato_id?'marcadas':'esta linha'}</button></div></div>`;
+}
+function fecharLancctbFluxoAssociado(){ const ov=document.getElementById('fxAssocOverlay'); if(ov) ov.remove(); _fxAssoc=null; }
+async function confirmarLancctbFluxoAssociadoDesassociar(){
+  const A=_fxAssoc; if(!A) return; const eid=A.eid;
+  let ids=A.f.lancamento_extrato_id?[...document.querySelectorAll('.fxAssocCk:checked')].map(c=>parseInt(c.value,10)):[A.fluxoId];
+  if(!ids.length){ toast('Marque ao menos uma linha.','err'); return; }
+  const conc=A.extrato&&A.extrato.status_conciliacao==='conciliado';
+  if(conc){
+    if(_lancctbExclusaoBloqueada(eid,A.extrato.data_pagamento,'o lançamento contábil deste lançamento (desconciliar)')) return;
+    if(!confirm('Este lançamento está CONCILIADO. Desassociar vai DESCONCILIAR o lançamento inteiro (estorna o contábil e devolve NF/comprovante/Fluxo para pendente). Continuar?')) return;
+    try{
+      await _fxDesconciliarExtratoPorId(A.extrato.id);
+      toast('Lançamento desconciliado — voltou para pendente no Registro Contábil.','ok');
+    }catch(e){ toast('Erro ao desconciliar: '+e.message,'err'); return; }
+  } else {
+    if(!confirm(`Desassociar ${ids.length} linha(s) do Fluxo? Elas voltam para "não associado"${A.extrato?'; o lançamento do extrato continua pendente no Registro Contábil':''}.`)) return;
+    const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',ids);
+    if(error){ toast('Erro ao desassociar: '+error.message,'err'); return; }
+    toast(`${ids.length} linha(s) desassociada(s) do Fluxo.`,'ok');
+  }
+  fecharLancctbFluxoAssociado(); renderLancctbFluxoCaixa();
+}
 async function desassociarLancctbFluxoEmLote(){
   let ids=[];
   if(_lancctbFluxoSelecionarTodosMode){
@@ -42189,7 +42262,7 @@ function excluirLancctbFluxoConta(qtd){
   } else partesEscopo.push('de todas as contas/sem conta vinculada');
   if(_lancctbFluxoMes) partesEscopo.push(`de <strong>${new Date(_lancctbFluxoMes+'-01T00:00:00').toLocaleDateString('pt-BR',{month:'long',year:'numeric'})}</strong>`);
   document.getElementById('lancctbConfirmarExclusaoTexto').innerHTML=
-    `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> lançamento(s) de fluxo de caixa ${partesEscopo.join(' ')}. Lançamentos já associados não desfazem a conciliação, só removem o registro do Fluxo. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
+    `Isso vai <strong>apagar permanentemente</strong> os <strong>${qtd}</strong> lançamento(s) de fluxo de caixa ${partesEscopo.join(' ')}. Lançamentos do Fluxo <b>já associados são desassociados antes</b>: se estiverem ligados a um lançamento <b>conciliado</b>, ele é desconciliado (estorna o contábil e devolve NF/comprovante para pendente); se o lançamento estiver pendente, só solta o vínculo. Essa ação não pode ser desfeita.<br><br>Pra confirmar, digite o número <strong>${qtd}</strong>:`;
   document.getElementById('lancctbConfirmarExclusaoInput').value='';
   openModal('mLancctbConfirmarExclusao');
 }
@@ -42205,20 +42278,25 @@ async function _lancctbExecutarExclusaoFluxo(){
     const ultimoDia=new Date(ano,mes,0).getDate();
     mesDe=`${_lancctbFluxoMes}-01`; mesAte=`${_lancctbFluxoMes}-${String(ultimoDia).padStart(2,'0')}`;
   }
-  const { data: idsRows } = await _lancctbFetchTudo(()=>{
-    let q=_supaClient.from('fluxo_caixa_lancamentos').select('id').eq('empresa_eid',_lancctbEidAtual);
-    if(_lancctbFluxoContaSel) q=q.eq('conta_bancaria_id',_lancctbFluxoContaSel);
-    if(mesDe) q=q.gte('data',mesDe).lte('data',mesAte);
-    if(_lancctbFluxoStatus) q=q.eq('status_associado',_lancctbFluxoStatus);
-    return q;
-  });
+  // 23/10/2026: a exclusão usa EXATAMENTE os filtros da tela (antes só conta/mês/status — apagava mais do que o filtro mostrava) e, ANTES de apagar, desassocia: linhas ligadas a um lançamento CONCILIADO
+  // desconciliam esse lançamento (estorna o contábil e devolve NF/comprovante para pendente); ligadas a um lançamento pendente só soltam o vínculo.
+  if(typeof window._fxAplicarFiltros!=='function'){ toast('Atualize a tela do Fluxo antes de excluir.','err'); btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente'; return; }
+  const { data: idsRows } = await _lancctbFetchTudo(()=>window._fxAplicarFiltros(_supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id').eq('empresa_eid',_lancctbEidAtual)));
   const ids=(idsRows||[]).map(r=>r.id);
+  if(ids.length!==Number(_lancctbExclusaoFluxoQtd)){ toast(`A consulta achou ${ids.length} lançamento(s), mas a tela mostrava ${_lancctbExclusaoFluxoQtd}. Nada foi excluído — atualize a tela e tente de novo.`,'err'); btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente'; return; }
+  const extratosLig=[...new Set((idsRows||[]).map(r=>r.lancamento_extrato_id).filter(Boolean))]; let desconc=0;
+  if(extratosLig.length){
+    const conc=[]; for(let k=0;k<extratosLig.length;k+=300){ const { data } = await _supaClient.from('lancamentos_extrato').select('id,status_conciliacao,data_pagamento').in('id',extratosLig.slice(k,k+300)); (data||[]).forEach(e=>{ if(e.status_conciliacao==='conciliado') conc.push(e); }); }
+    if(conc.length&&_lancctbExclusaoBloqueada(_lancctbEidAtual,conc.map(e=>e.data_pagamento),'os lançamentos contábeis ligados a estas linhas do Fluxo (desconciliar)')){ btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente'; return; }
+    for(let i=0;i<conc.length;i++){ btn.textContent=`Desconciliando ${i+1}/${conc.length}…`; try{ await _fxDesconciliarExtratoPorId(conc[i].id); desconc++; }catch(e){ toast('Erro ao desconciliar: '+e.message+' — nada mais foi excluído.','err'); btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente'; return; } }
+    await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
+  }
   const { error } = ids.length
     ? await _lancctbEmLotesDb(ids,200,lote=>_supaClient.from('fluxo_caixa_lancamentos').delete().in('id',lote))
     : { error:null };
   btn.disabled=false; btn.textContent='🗑️ Excluir permanentemente';
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
-  toast(`${_lancctbExclusaoFluxoQtd} lançamento(s) excluído(s)`,'ok');
+  toast(`${_lancctbExclusaoFluxoQtd} lançamento(s) excluído(s)${desconc?` — ${desconc} lançamento(s) do Registro Contábil desconciliado(s) e devolvido(s) para pendente`:''}`,'ok');
   closeModal('mLancctbConfirmarExclusao');
   _lancctbFluxoPagina=0;
   renderLancctbFluxoCaixa();
