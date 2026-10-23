@@ -39990,6 +39990,7 @@ async function renderLancctbFluxoCaixa(){
     <div style="display:flex;gap:6px">
       <button class="action-btn action-btn-excel" onclick="exportarLancctbFluxoExcel()">📊 Gerar Excel</button>
       <button class="btn bo bsm" title="Linhas que ficaram 'associado' só por terem sido amarradas a um banco (sem ligação com o extrato) voltam para 'não associado', mantendo o banco" onclick="_lancctbFluxoLiberarSoBanco()">🔓 Liberar só-banco</button>
+      ${_fxcnpjEids().includes(String(eid))?'<button class="btn bo bsm" title="Preenche o CPF/CNPJ em branco só quando há evidência segura (NF de entrada com o mesmo número/nome/valor, ou fornecedor já aprovado no cadastro). Nunca sobrescreve nem mexe em outras colunas." onclick="fluxoPreencherCnpjManual()">🏷️ Preencher CPF/CNPJ</button>':''}
       <button class="btn bo bsm" title="Corrige o número de documento/NF de lançamentos JÁ importados que vieram com letras/prefixo junto (ex: AG893503 → 893503) — não mexe em quem já está limpo" onclick="_lancctbFluxoLimparNumeros()">🧹 Corrigir números</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbFluxoConta(${count||0})" ${count?'':'disabled'}>🗑️ Excluir estes lançamentos</button>
       <button class="btn bp bsm" onclick="abrirLancctbFluxoImportModal()">⬆ Importar Fluxo de Caixa</button>
@@ -40731,6 +40732,87 @@ function _cpfpToggleTodos(marcar){
 // Pedido do usuário (19/10/2026): "Corrigir Data Parcela" e "Dividir Parcelas via Fluxo" saem da tela e passam a rodar SOZINHOS assim que o Fluxo de Caixa é importado
 // ("sem precisar processar… sem intervenção humana"). Roda só sobre o período do que acabou de entrar, direto nas funções (sem pergunta nem escolha de conta) e nunca derruba a importação se algo falhar.
 let _lancctbFluxoAutoRodando=false;
+
+// ─── CPF/CNPJ do Fluxo de Caixa — cadastro persistente de fornecedores (pedido do usuário 23/10/2026, Kajuna #238) ───────────────────────────────────────────────────────
+// Guardado no banco (dados_app, nunca na memória do chat):
+//   fluxo_fornecedores_cnpj  = { "<eid>": { aliases: { "<NOME NORMALIZADO>": {cnpj, razao, status:'aprovado'|'sugerido'|'a_validar', fonte, grupo, validado_em, cnpj_referencia} }, pendentes: { "<NOME NORMALIZADO>": {nome, qtd, motivo, atualizado_em} } } }
+//   fluxo_cnpj_historico     = { "<eid>": [ {id, novo, metodo, evidencia, ts, usuario} ] }   (auditoria por lançamento)
+//   fluxo_cnpj_auto_eids     = [238]   (empresas com preenchimento automático; o resto não é tocado)
+// REGRAS (instruções do usuário): só preenche com identificação SEGURA — 1) NF de entrada/serviço tomado com o MESMO número, nome compatível e parcela/valor iguais, com UM único CNPJ de emitente (a filial certa vem do XML);
+// 2) alias com status 'aprovado' (nome do Fluxo → CNPJ já conferido). Nunca sobrescreve CPF/CNPJ já preenchido; nunca mexe em valor, data, banco, número, parcela, conta, status ou associação; CNPJ só entra com os 2 dígitos verificadores válidos.
+const FXCNPJ_KEY='fluxo_fornecedores_cnpj', FXCNPJ_LOG='fluxo_cnpj_historico', FXCNPJ_EIDS='fluxo_cnpj_auto_eids';
+function _fxcnpjNorm(n){ return _convMpRemoverAcentos(String(n||'').toUpperCase()).replace(/\s*\([^)]*\)\s*$/,'').replace(/[^A-Z0-9 ]/g,' ').replace(/\s+/g,' ').trim(); }
+function _fxcnpjValido(c){
+  c=String(c||'').replace(/\D/g,''); if(c.length!==14||/^(\d)\1+$/.test(c)) return false;
+  const dv=(b,pesos)=>{ let t=0; for(let i=0;i<pesos.length;i++) t+=(+b[i])*pesos[i]; const r=t%11; return r<2?0:11-r; };
+  const d1=dv(c,[5,4,3,2,9,8,7,6,5,4,3,2]), d2=dv(c,[6,5,4,3,2,9,8,7,6,5,4,3,2]);
+  return d1===+c[12]&&d2===+c[13];
+}
+function _fxcnpjEids(){ try{ const v=S.g(FXCNPJ_EIDS); return Array.isArray(v)&&v.length?v.map(String):['238']; }catch(e){ return ['238']; } }
+function _fxcnpjRegistro(eid){ try{ const t=S.g(FXCNPJ_KEY); const r=(t&&typeof t==='object'&&!Array.isArray(t))?t[String(eid)]:null; return r&&typeof r==='object'?r:{aliases:{},pendentes:{}}; }catch(e){ return {aliases:{},pendentes:{}}; } }
+function _fxcnpjSalvarRegistro(eid,reg){ const t=(S.g(FXCNPJ_KEY)&&typeof S.g(FXCNPJ_KEY)==='object'&&!Array.isArray(S.g(FXCNPJ_KEY)))?Object.assign({},S.g(FXCNPJ_KEY)):{}; t[String(eid)]=reg; S.s(FXCNPJ_KEY,t); }
+// Preenche o CPF/CNPJ em branco das SAÍDAS do Fluxo da empresa. opcoes.simular=true só calcula (nada é gravado). Devolve o relatório.
+async function _fxcnpjPreencher(eid,opcoes){
+  opcoes=opcoes||{}; const simular=!!opcoes.simular; eid=String(eid);
+  if(!_fxcnpjEids().includes(eid)) return null;
+  const reg=_fxcnpjRegistro(eid); reg.aliases=reg.aliases||{}; reg.pendentes={};
+  // 1) lançamentos do Fluxo sem documento (todas as páginas)
+  const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
+    .select('id,data,documento_numero,parcela,cliente_fornecedor_nome,valor_saida,cnpj_cpf').eq('empresa_eid',eid).gt('valor_saida',0).or('cnpj_cpf.is.null,cnpj_cpf.eq.'));
+  const sem=(linhas||[]).filter(l=>!String(l.cnpj_cpf||'').replace(/\D/g,''));
+  // 2) NFs de compra (NF-e entrada e serviço tomado) com suas parcelas — a evidência documental
+  const { data: nfs } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('id,numero,cnpj_emitente,nome_emitente,valor_total,tipo').eq('empresa_eid',eid).eq('direcao','compra'));
+  const { data: parcs } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas').select('nf_id,numero_parcela,valor_parcela').eq('empresa_eid',eid));
+  const parcPorNf=new Map(); (parcs||[]).forEach(p=>{ if(!parcPorNf.has(p.nf_id)) parcPorNf.set(p.nf_id,[]); parcPorNf.get(p.nf_id).push(p); });
+  const idxNum=new Map(); const addIdx=(k,nf)=>{ if(!k) return; if(!idxNum.has(k)) idxNum.set(k,[]); idxNum.get(k).push(nf); };
+  (nfs||[]).forEach(nf=>{ const n=String(nf.numero||'').replace(/\D/g,'').replace(/^0+/,''); addIdx(n,nf); const m=n.match(/^(\d{2})0{3,}(\d+)$/); if(m) addIdx(m[2],nf); /* NFS-e: AA + zeros + sequencial */ });
+  const alvos=[], pend=new Map(); const porCnpj=new Map(); let porNf=0, porAlias=0; const evid=[];
+  const vizinho=(a,b)=>Math.abs((Number(a)||0)-(Number(b)||0))<=0.02;
+  for(const l of sem){
+    const nomeN=_fxcnpjNorm(l.cliente_fornecedor_nome);
+    const ref=String(l.documento_numero||'').split('/')[0].replace(/\D/g,'').replace(/^0+/,'');
+    let cnpj=null, metodo=null, evidencia=null, motivo='sem NF com o mesmo número, nome e valor';
+    if(ref){
+      const ok=(idxNum.get(ref)||[]).filter(nf=>{
+        if(!_lancctbNomeCompativel([l.cliente_fornecedor_nome||''],nf.nome_emitente||'')) return false;
+        const ps=parcPorNf.get(nf.id)||[];
+        return ps.some(p=>vizinho(p.valor_parcela,l.valor_saida))||(!ps.length&&vizinho(nf.valor_total,l.valor_saida));
+      });
+      const docs=[...new Set(ok.map(nf=>String(nf.cnpj_emitente||'').replace(/\D/g,'')).filter(d=>d.length===14))];
+      if(docs.length===1&&_fxcnpjValido(docs[0])){ cnpj=docs[0]; metodo='nf'; evidencia='NF '+ok[0].numero+' — emitente '+(ok[0].nome_emitente||'')+' ('+docs[0]+')'; }
+      else if(docs.length>1) motivo='NFs com o mesmo número e CNPJs de emitente diferentes: '+docs.join(', ');
+    }
+    if(!cnpj&&nomeN){
+      const al=reg.aliases[nomeN];
+      if(al&&al.status==='aprovado'&&_fxcnpjValido(al.cnpj)){ cnpj=String(al.cnpj).replace(/\D/g,''); metodo='alias'; evidencia='alias aprovado: '+(al.razao||nomeN)+(al.fonte?' ('+al.fonte+')':''); }
+      else if(al&&al.cnpj_referencia&&al.status!=='aprovado') motivo='CNPJ de referência só da matriz — estabelecimento a validar ('+al.cnpj_referencia+')';
+    }
+    if(cnpj){ alvos.push({id:l.id,cnpj,metodo,evidencia}); if(!porCnpj.has(cnpj)) porCnpj.set(cnpj,[]); porCnpj.get(cnpj).push(l.id); if(metodo==='nf') porNf++; else porAlias++; }
+    else { const k=nomeN||'(SEM NOME)'; const o=pend.get(k)||{nome:l.cliente_fornecedor_nome||'',qtd:0,motivo}; o.qtd++; pend.set(k,o); }
+  }
+  pend.forEach((o,k)=>{ reg.pendentes[k]={nome:o.nome,qtd:o.qtd,motivo:o.motivo,atualizado_em:new Date().toISOString().slice(0,10)}; });
+  const rel={examinados:(linhas||[]).length,semDocumento:sem.length,preenchidos:alvos.length,porNf,porAlias,pendentes:pend.size,linhasPendentes:sem.length-alvos.length,detalhe:alvos};
+  if(simular) return rel;
+  // 3) grava SÓ o cnpj_cpf (em lote por CNPJ), nunca sobrescrevendo um valor existente
+  for(const [cnpj,ids] of porCnpj){
+    for(let k=0;k<ids.length;k+=150){ const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({cnpj_cpf:cnpj}).in('id',ids.slice(k,k+150)).or('cnpj_cpf.is.null,cnpj_cpf.eq.'); if(error){ console.error('CNPJ do Fluxo — erro ao gravar:',error); rel.erro=error.message; return rel; } }
+  }
+  // 4) aprende aliases SUGERIDOS (nome do Fluxo → CNPJ da NF) para revisão; só 'aprovado' preenche sozinho
+  const porNome=new Map(); alvos.filter(a=>a.metodo==='nf').forEach(a=>{ const l=sem.find(x=>x.id===a.id); const k=_fxcnpjNorm(l&&l.cliente_fornecedor_nome); if(!k) return; if(!porNome.has(k)) porNome.set(k,new Set()); porNome.get(k).add(a.cnpj); });
+  porNome.forEach((set,k)=>{ if(set.size===1&&!reg.aliases[k]) reg.aliases[k]={cnpj:[...set][0],razao:'',status:'sugerido',fonte:'NF de entrada (XML)',validado_em:new Date().toISOString().slice(0,10)}; });
+  _fxcnpjSalvarRegistro(eid,reg);
+  const log=(S.g(FXCNPJ_LOG)&&typeof S.g(FXCNPJ_LOG)==='object'&&!Array.isArray(S.g(FXCNPJ_LOG)))?Object.assign({},S.g(FXCNPJ_LOG)):{}; const quem=(typeof currentUser!=='undefined'&&currentUser&&(currentUser.nome||currentUser.login))||'';
+  const ts=new Date().toISOString(); log[eid]=(log[eid]||[]).concat(alvos.map(a=>({id:a.id,novo:a.cnpj,metodo:a.metodo,evidencia:a.evidencia,ts,usuario:quem}))).slice(-30000);
+  S.s(FXCNPJ_LOG,log);
+  return rel;
+}
+async function fluxoPreencherCnpjManual(){
+  const eid=_lancctbEidAtual; if(!_fxcnpjEids().includes(String(eid))){ toast('O preenchimento automático de CPF/CNPJ só está ligado nas empresas autorizadas.','err'); return; }
+  toast('Procurando CPF/CNPJ pelas notas fiscais e pelo cadastro de fornecedores…','info');
+  const r=await _fxcnpjPreencher(eid); if(!r) return;
+  toast(`${r.preenchidos} lançamento(s) preenchido(s) (${r.porNf} pela NF, ${r.porAlias} pelo cadastro) — ${r.linhasPendentes} sem identificação segura (${r.pendentes} fornecedor(es) pendentes)`,r.preenchidos?'ok':'info');
+  renderLancctbFluxoCaixa();
+}
 async function _lancctbFluxoAposImportar(datas){
   if(_lancctbFluxoAutoRodando) return; _lancctbFluxoAutoRodando=true;
   const de0=_lancctbRegistroDataDe, ate0=_lancctbRegistroDataAte, toast0=window.toast;
@@ -40738,6 +40820,7 @@ async function _lancctbFluxoAposImportar(datas){
   try{
     const ds=(datas||[]).filter(d=>/^\d{4}-\d{2}-\d{2}/.test(String(d||''))).map(d=>String(d).slice(0,10)).sort();
     if(ds.length){ _lancctbRegistroDataDe=ds[0]; _lancctbRegistroDataAte=ds[ds.length-1]; }
+    try{ await _fxcnpjPreencher(_lancctbEidAtual); }catch(e){ console.warn('CPF/CNPJ do Fluxo (automático):',e); }
     try{ await _lancctbCorrigirParcelasPorFluxo(); }catch(e){ console.warn('Dividir parcelas via Fluxo (automático):',e); }
     try{ await _lancctbCorrigirDataParcelaExistente(); }catch(e){ console.warn('Corrigir Data Parcela (automático):',e); }
   } finally {
