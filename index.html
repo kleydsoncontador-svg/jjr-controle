@@ -40766,13 +40766,17 @@ async function _fxcnpjPreencher(eid,opcoes){
   const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
     .select('id,data,documento_numero,parcela,cliente_fornecedor_nome,valor_saida,cnpj_cpf'+(_temJ?',valor_juros,valor_multa,valor_desconto':'')).eq('empresa_eid',eid).gt('valor_saida',0).or('cnpj_cpf.is.null,cnpj_cpf.eq.'));
   const sem=(linhas||[]).filter(l=>!String(l.cnpj_cpf||'').replace(/\D/g,''));
+  // CNPJs JÁ comprovados por nome de fornecedor (linhas do Fluxo com documento + nome do emitente das NFs): se um nome tem UM único CNPJ, as linhas dele sem nota também recebem (pedido do usuário 23/10/2026 — ajuda a amarrar no Processar Fluxo)
+  const { data: comDoc } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,cliente_fornecedor_nome,cnpj_cpf').eq('empresa_eid',eid).gt('valor_saida',0).not('cnpj_cpf','is',null).neq('cnpj_cpf',''));
+  const cnpjPorNome=new Map(); const addCn=(n,c)=>{ n=_fxcnpjNorm(n); c=String(c||'').replace(/\D/g,''); if(!n||c.length!==14||!_fxcnpjValido(c)) return; if(!cnpjPorNome.has(n)) cnpjPorNome.set(n,new Map()); cnpjPorNome.get(n).set(c,(cnpjPorNome.get(n).get(c)||0)+1); };
+  (comDoc||[]).forEach(x=>addCn(x.cliente_fornecedor_nome,x.cnpj_cpf));
   // 2) NFs de compra (NF-e entrada e serviço tomado) com suas parcelas — a evidência documental
   const { data: nfs } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('id,numero,cnpj_emitente,nome_emitente,valor_total,tipo').eq('empresa_eid',eid).eq('direcao','compra'));
   const { data: parcs } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas').select('nf_id,numero_parcela,valor_parcela').eq('empresa_eid',eid));
   const parcPorNf=new Map(); (parcs||[]).forEach(p=>{ if(!parcPorNf.has(p.nf_id)) parcPorNf.set(p.nf_id,[]); parcPorNf.get(p.nf_id).push(p); });
   const idxNum=new Map(); const addIdx=(k,nf)=>{ if(!k) return; if(!idxNum.has(k)) idxNum.set(k,[]); idxNum.get(k).push(nf); };
   (nfs||[]).forEach(nf=>{ const n=String(nf.numero||'').replace(/\D/g,'').replace(/^0+/,''); addIdx(n,nf); const m=n.match(/^(\d{2})0{3,}(\d+)$/); if(m) addIdx(m[2],nf); /* NFS-e: AA + zeros + sequencial */ });
-  const alvos=[], pend=new Map(); const porCnpj=new Map(); let porNf=0, porAlias=0, porRev=0; const evid=[];
+  const alvos=[], pend=new Map(); const porCnpj=new Map(); let porNf=0, porAlias=0, porRev=0, porUnico=0; const evid=[];
   const vizinho=(a,b)=>Math.abs((Number(a)||0)-(Number(b)||0))<=0.02;
   // valores que a parcela da NF pode ter no Fluxo: o pago, o pago + desconto (a NF traz o valor cheio), com juros/multa, e a NF dividida em N parcelas iguais (o Fluxo às vezes parcela diferente do XML)
   const valoresFx=l=>{ const s=Number(l.valor_saida)||0, j=Number(l.valor_juros)||0, m=Number(l.valor_multa)||0, d=Number(l.valor_desconto)||0; return [...new Set([s,s+d,s-d,s-j-m+d,s+j+m-d,s+d-j-m].map(x=>Math.round(x*100)/100))]; };
@@ -40806,11 +40810,16 @@ async function _fxcnpjPreencher(eid,opcoes){
       if(al&&al.status==='aprovado'&&_fxcnpjValido(al.cnpj)){ cnpj=String(al.cnpj).replace(/\D/g,''); metodo='alias'; evidencia='alias aprovado: '+(al.razao||nomeN)+(al.fonte?' ('+al.fonte+')':''); }
       else if(al&&al.cnpj_referencia&&al.status!=='aprovado') motivo='CNPJ de referência só da matriz — estabelecimento a validar ('+al.cnpj_referencia+')';
     }
-    if(cnpj){ alvos.push({id:l.id,cnpj,metodo,evidencia}); if(!porCnpj.has(cnpj)) porCnpj.set(cnpj,[]); porCnpj.get(cnpj).push(l.id); if(metodo==='nf') porNf++; else if(metodo==='nf_numero') porRev++; else porAlias++; }
+    if(!cnpj&&nomeN){
+      const mp=cnpjPorNome.get(nomeN);
+      if(mp&&mp.size===1){ const [c,q]=[...mp.entries()][0]; cnpj=c; metodo='fornecedor_unico'; evidencia='único CNPJ comprovado para este nome ('+q+' lançamento(s) com documento): '+c; }
+      else if(mp&&mp.size>1) motivo='nome com mais de um CNPJ comprovado (filiais): '+[...mp.keys()].join(', ');
+    }
+    if(cnpj){ alvos.push({id:l.id,cnpj,metodo,evidencia}); if(!porCnpj.has(cnpj)) porCnpj.set(cnpj,[]); porCnpj.get(cnpj).push(l.id); if(metodo==='nf') porNf++; else if(metodo==='nf_numero') porRev++; else if(metodo==='fornecedor_unico') porUnico++; else porAlias++; }
     else { const k=nomeN||'(SEM NOME)'; const o=pend.get(k)||{nome:l.cliente_fornecedor_nome||'',qtd:0,motivo}; o.qtd++; pend.set(k,o); }
   }
   pend.forEach((o,k)=>{ reg.pendentes[k]={nome:o.nome,qtd:o.qtd,motivo:o.motivo,atualizado_em:new Date().toISOString().slice(0,10)}; });
-  const rel={examinados:(linhas||[]).length,semDocumento:sem.length,preenchidos:alvos.length,porNf,porAlias,porRev,pendentes:pend.size,linhasPendentes:sem.length-alvos.length,detalhe:alvos};
+  const rel={examinados:(linhas||[]).length,semDocumento:sem.length,preenchidos:alvos.length,porNf,porAlias,porRev,porUnico,pendentes:pend.size,linhasPendentes:sem.length-alvos.length,detalhe:alvos};
   if(simular) return rel;
   // 3) grava SÓ o cnpj_cpf (em lote por CNPJ), nunca sobrescrevendo um valor existente
   for(const [cnpj,ids] of porCnpj){
