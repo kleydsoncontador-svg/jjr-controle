@@ -28709,10 +28709,24 @@ async function salvarLancctbAgencia(){
   renderLancctbAgencias();
 }
 async function excluirLancctbAgencia(id){
-  if(!confirm('Excluir esta Agência Bancária?'))return;
+  // 23/10/2026: ao excluir a conta corrente, as linhas do Fluxo de Caixa amarradas a ela são DESASSOCIADAS (voltam a "não associado", sem conta). Linhas ligadas a um lançamento já CONCILIADO
+  // não são mexidas aqui (isso desconcilia o Registro) — o aviso diz quantas são e como tratar (clicar em "associado" no Fluxo).
+  const { data: fxConta } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id').eq('conta_bancaria_id',id));
+  const lig=(fxConta||[]); const idsExt=[...new Set(lig.map(x=>x.lancamento_extrato_id).filter(Boolean))]; const conc=new Set();
+  for(let k=0;k<idsExt.length;k+=300){ const { data } = await _supaClient.from('lancamentos_extrato').select('id,status_conciliacao').in('id',idsExt.slice(k,k+300)); (data||[]).forEach(e=>{ if(e.status_conciliacao==='conciliado') conc.add(e.id); }); }
+  const soltar=lig.filter(x=>!(x.lancamento_extrato_id&&conc.has(x.lancamento_extrato_id))), presas=lig.length-soltar.length;
+  if(!confirm('Excluir esta Agência Bancária?'+(lig.length?`
+
+${soltar.length} linha(s) do Fluxo de Caixa amarradas a esta conta serão DESASSOCIADAS (voltam a "não associado", sem conta).`+(presas?`
+${presas} linha(s) estão ligadas a lançamentos já CONCILIADOS e NÃO serão mexidas — para soltá-las, clique em "associado" no Fluxo.`:''):'')))return;
   const { error } = await _supaClient.from('agencias_bancarias').update({ativo:false}).eq('id',id);
   if(error){ toast('Erro ao excluir: '+error.message,'err'); return; }
-  toast('Agência removida','ok');
+  let soltas=0;
+  if(soltar.length){
+    const r=await _lancctbEmLotesDb(soltar.map(x=>x.id),200,lote=>_supaClient.from('fluxo_caixa_lancamentos').update({conta_bancaria_id:null,status_associado:'nao_associado',lancamento_extrato_id:null}).in('id',lote));
+    if(r&&r.error) toast('Agência removida, mas houve erro ao desassociar o Fluxo: '+r.error.message,'err'); else soltas=soltar.length;
+  }
+  toast('Agência removida'+(soltas?` — ${soltas} linha(s) do Fluxo desassociada(s)`:'')+(presas?` — ${presas} ligada(s) a lançamento conciliado ficaram como estavam`:''),'ok');
   renderLancctbAgencias();
 }
 function exportarLancctbAgenciasExcel(){
