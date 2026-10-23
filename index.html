@@ -38812,6 +38812,77 @@ function _itauParsearPixV2(linhas, texto, ehQrCode){
   return r;
 }
 
+// ── 3. LAYOUT "RÓTULO | VALOR" EM 2 PÁGINAS (Sispag — Nasa Truck #250, 07/2026) ─────────────────────────────────────────────────────────────────
+// O comprovante vem com os rótulos à esquerda (x≈21) e o valor encostado à direita, SEM dois-pontos, repartido em 2 páginas ("1 de 2" / "2 de 2"): na 1ª ficam pagador/recebedor e dados da
+// transação, na 2ª a data de pagamento, os valores e o "transação efetuada em…". Cada DOCUMENTO (as páginas juntas) vira 1 registro — antes cada página virava um registro e nada era lido.
+async function _itauExtrairParesPagina(page){
+  var content=await page.getTextContent(); var linhas=[];
+  content.items.forEach(function(it){
+    var str=String(it.str||'').trim(); if(!str) return;
+    var y=Math.round(it.transform[5]||0); var l=linhas.find(function(q){ return Math.abs(q.y-y)<=2; });
+    if(!l){ l={y:y,itens:[]}; linhas.push(l); }
+    l.itens.push({x:it.transform[4]||0,str:str});
+  });
+  linhas.sort(function(a,b){ return b.y-a.y; });
+  var pares=[], titulo=null, marcador=null, secao='', textoLinhas=[], pendenteLabel=null;
+  linhas.forEach(function(l){
+    l.itens.sort(function(a,b){ return a.x-b.x; });
+    var esq=l.itens.filter(function(i){ return i.x<150; }).map(function(i){ return i.str; }).join(' ').trim();
+    var dir=l.itens.filter(function(i){ return i.x>=150; }).map(function(i){ return i.str; }).join(' ').trim();
+    textoLinhas.push(esq&&dir?esq+': '+dir:(esq||dir));
+    if(!esq&&/^\d+ de \d+$/.test(dir)){ marcador=dir; return; }
+    if(/^\d+ de \d+$/.test(esq)&&!dir){ marcador=esq; return; }
+    if(!titulo){ titulo=esq||dir; return; }
+    if(esq&&!dir){
+      if(/^dados d/i.test(esq)){ secao=_itauNorm(esq); pendenteLabel=null; return; }
+      if(/^\d{20,}$/.test(esq.replace(/\s/g,''))&&pendenteLabel){ pares.push({secao:secao,label:pendenteLabel,valor:esq.replace(/\s/g,'')}); pendenteLabel=null; return; }
+      pendenteLabel=_itauNorm(esq); return;
+    }
+    if(esq&&dir){ pares.push({secao:secao,label:_itauNorm(esq),valor:dir}); pendenteLabel=null; return; }
+    // só valor à direita sem rótulo: ignora
+  });
+  return { titulo:titulo, marcador:marcador, pares:pares, texto:textoLinhas.join('\n') };
+}
+function _itauParsearSispagColunas(pares, texto, titulo){
+  var r=_itauRegistroVazio(); var tit=_itauNorm(titulo||'');
+  var get=function(secRe,labRe){ for(var i=0;i<pares.length;i++){ if(secRe.test(pares[i].secao)&&labRe.test(pares[i].label)) return pares[i].valor; } return null; };
+  var qualquer=function(labRe){ for(var i=0;i<pares.length;i++){ if(labRe.test(pares[i].label)) return pares[i].valor; } return null; };
+  var dinheiro=function(v){ return v==null?null:_itauParseValorBR(String(v).replace(/R\$\s*/i,'')); };
+  r.ctrl=qualquer(/^controle$/)||null;
+  var ehBoleto=/pagamento de boleto/.test(tit);
+  if(ehBoleto){
+    r._tipo='BOLETO_NOVO';
+    var nomeB=get(/beneficiario$/,/^nome$/), razao=get(/beneficiario$/,/^razao social$/), docB=get(/beneficiario$/,/^cpf\/cnpj$/);
+    var nomeF=get(/beneficiario final/,/^nome$/), razaoF=get(/beneficiario final/,/^razao social$/), docF=get(/beneficiario final/,/^cpf\/cnpj$/);
+    r.beneficiary_name=nomeB||null; r.beneficiary_document=docB||null; r.razao_social=razao||null;
+    r.final_beneficiary_name=razaoF||nomeF||null; r.final_beneficiary_document=docF||null;
+    r.cliente_fornecedor_nome=r.final_beneficiary_name||razao||nomeB||null;
+    r.cnpj_cpf=r.final_beneficiary_name?(docF||null):(docB||null);
+    var barras=qualquer(/^codigo de barras$/); r.barcode=barras||null; r.barcode_normalized=barras?String(barras).replace(/\D/g,''):null;
+    r.documento_numero=barras||r.ctrl||null;
+    var dv=qualquer(/^data do vencimento$/), dp=qualquer(/^data do pagamento$/);
+    r.data_vencimento=dv?_itauParseDataBR(dv):null; r.data_pagamento=dp?_itauParseDataBR(dp):_itauDataConfirmacao(texto);
+    r.valor_pago=dinheiro(qualquer(/^valor do pagamento$/));
+    if(r.valor_pago==null) r.valor_pago=dinheiro(qualquer(/^valor do documento$/));
+    if(!r.cliente_fornecedor_nome) r.warnings.push('BENEFICIARY_NOT_FOUND');
+    if(!r.cnpj_cpf) r.warnings.push('BENEFICIARY_DOCUMENT_NOT_FOUND');
+    if(!r.documento_numero) r.warnings.push('DOCUMENT_NOT_FOUND');
+  } else {
+    r._tipo='PIX_TRANSFERENCIA';
+    r.cliente_fornecedor_nome=get(/recebedor/,/^nome do recebedor$/)||qualquer(/^nome do recebedor$/)||null;
+    r.cnpj_cpf=qualquer(/^cpf\/cnpj do recebedor$/)||null;
+    r.beneficiary_name=r.cliente_fornecedor_nome; r.beneficiary_document=r.cnpj_cpf;
+    r.transaction_id=qualquer(/^id da transacao$/)||null;
+    r.valor_pago=dinheiro(qualquer(/^valor$/));
+    var dt=qualquer(/^data da transferencia$/); r.data_pagamento=dt?_itauParseDataBR(dt):_itauDataConfirmacao(texto);
+    r.documento_numero=r.transaction_id||r.ctrl||null;
+    if(!r.cliente_fornecedor_nome) r.warnings.push('BENEFICIARY_NOT_FOUND');
+  }
+  if(r.valor_pago==null) r.warnings.push('VALUE_NOT_FOUND');
+  if(!r.data_pagamento) r.warnings.push('PAYMENT_DATE_NOT_FOUND');
+  return r;
+}
+// Data de confirmação do layout novo: "transação efetuada em DD/MM/AAAA às …"
 // Hash determinístico de dedup (spec): chave por tipo, nunca só fornecedor+valor.
 function _itauHashComprovante(tipo, r){
   var base;
@@ -38825,10 +38896,12 @@ function _itauHashComprovante(tipo, r){
 }
 
 // Nunca retorna null — toda página vira 1 registro, mesmo sem reconhecer nada.
-function _itauParsearPaginaComprovante(linhas, texto, numeroPagina){
-  var tipoNovo=_itauDetectarTipoPagamento(texto);
+function _itauParsearPaginaComprovante(linhas, texto, numeroPagina, sispag){
+  var tipoNovo=sispag?'SISPAG_COLUNAS':_itauDetectarTipoPagamento(texto);
   var tipo, extraido;
-  if(tipoNovo){
+  if(tipoNovo==='SISPAG_COLUNAS'){
+    extraido=_itauParsearSispagColunas(sispag.pares,texto,sispag.titulo); tipo=extraido._tipo;
+  } else if(tipoNovo){
     tipo=tipoNovo;
     if(tipo==='BOLETO_NOVO') extraido=_itauParsearBoletoNovo(linhas,texto);
     else if(tipo==='TRANSFERENCIA_CONTA') extraido=_itauParsearTransferenciaConta(linhas,texto);
@@ -38895,16 +38968,26 @@ function _itauParsearPaginaComprovante(linhas, texto, numeroPagina){
 // Chama onProgresso(paginaAtual, totalPaginas) pra alimentar a UI.
 async function _itauProcessarPdfDeterministico(pdf, onProgresso){
   var registros=[];
+  var paginasJuntadas=0;
   for(var p=1;p<=pdf.numPages;p++){
     if(onProgresso) onProgresso(p,pdf.numPages);
     var page=await pdf.getPage(p);
+    // Layout "rótulo | valor" em N páginas ("1 de 2"): junta as páginas do documento num registro só
+    var pg=await _itauExtrairParesPagina(page);
+    if(pg.titulo&&/^comprovante de /i.test(pg.titulo)&&pg.marcador&&/^1 de \d+$/.test(pg.marcador)&&pg.pares.length>=3){
+      var totalDoc=parseInt(pg.marcador.split(' de ')[1],10); var paresDoc=pg.pares.slice(), textoDoc=pg.texto;
+      for(var kk=1;kk<totalDoc&&p+kk<=pdf.numPages;kk++){ var pk=await _itauExtrairParesPagina(await pdf.getPage(p+kk)); paresDoc=paresDoc.concat(pk.pares); textoDoc+='\n'+pk.texto; }
+      registros.push(_itauParsearPaginaComprovante([],textoDoc,p,{pares:paresDoc,titulo:pg.titulo}));
+      paginasJuntadas+=Math.min(totalDoc,pdf.numPages-p+1)-1; p+=Math.min(totalDoc,pdf.numPages-p+1)-1;
+      continue;
+    }
     var extraida=await _itauExtrairLinhasPagina(page);
     registros.push(_itauParsearPaginaComprovante(extraida.linhas,extraida.texto,p));
     // Cede o event loop de vez em quando pra não travar a interface num
     // PDF de centenas de páginas.
     if(p%20===0) await new Promise(function(r){ setTimeout(r,0); });
   }
-  if(registros.length!==pdf.numPages){
+  if(registros.length!==pdf.numPages-paginasJuntadas){
     throw new Error('Erro crítico: '+registros.length+' registro(s) gerado(s) para '+pdf.numPages+' página(s) — deveriam ser iguais.');
   }
   return registros;
