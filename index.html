@@ -36253,6 +36253,7 @@ async function renderLancctbRegistroContabil(){
 
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
+  const _modoFx=_lancctbRegFxVerde!==_lancctbRegFxVermelho;   // bandeira verde OU vermelha marcada: o filtro vale para TODAS as páginas (carrega até 3.000 do filtro e pagina depois)
   let q=_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao,conta_bancaria_id,origem_importacao,composicao_tributo',{count:'exact'})
     .eq('empresa_eid',eid);
@@ -36308,7 +36309,7 @@ async function renderLancctbRegistroContabil(){
   // linhasSoma usa _lancctbFetchTudoParalelo: para 27k registros faz 28 requests
   // em ondas de 8 simultâneos (~1-2s) em vez de 28 sequenciais (~6s).
   const [{ data: extratoRows, error, count }, { data: linhasSoma }] = await Promise.all([
-    q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to),
+    q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(_modoFx?0:from,_modoFx?2999:to),
     _lancctbFetchTudoParalelo(()=>_qSoma()),
   ]);
   // Página pedida passou do fim (o processamento/exclusão diminuiu os resultados): volta pra página 1 e recarrega — antes só mostrava "Requested range not satisfiable".
@@ -36337,10 +36338,11 @@ async function renderLancctbRegistroContabil(){
             .eq('empresa_eid',eid).eq('estornado',false),
           'lancamento_extrato_id',idsTodosFiltro,()=>window.__regSeq!==_mySeq)
       : Promise.resolve({data:[]}));
+  const _SEL_CTB_REG='id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,informacao_extra,nf_parcela_id,notas_fiscais_parcelas(data_vencimento),plano_contas(numero_conta,descricao)';
   const ctbLinhasRes = await (idsExtrato.length
-      ? _supaClient.from('lancamentos_contabeis')
-          .select('id,lote_id,lancamento_extrato_id,conta_contabil_id,classificacao,tipo,valor,historico,cliente_fornecedor_nome,cnpj_cpf,origem_match,informacao_extra,nf_parcela_id,notas_fiscais_parcelas(data_vencimento),plano_contas(numero_conta,descricao)')
-          .eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true})
+      ? (idsExtrato.length>200
+          ? _lancctbFetchPorIds(()=>_supaClient.from('lancamentos_contabeis').select(_SEL_CTB_REG).eq('empresa_eid',eid).eq('estornado',false),'lancamento_extrato_id',idsExtrato,()=>false)
+          : _supaClient.from('lancamentos_contabeis').select(_SEL_CTB_REG).eq('empresa_eid',eid).eq('estornado',false).in('lancamento_extrato_id',idsExtrato).order('id',{ascending:true}))
       : Promise.resolve({data:[]}));
   let ctbPorExtrato={};
   (ctbLinhasRes.data||[]).forEach(l=>{ (ctbPorExtrato[l.lancamento_extrato_id]=ctbPorExtrato[l.lancamento_extrato_id]||[]).push(l); });
@@ -36385,7 +36387,7 @@ async function renderLancctbRegistroContabil(){
     const _datMinLiv=_datasExtrato.length ? _addDias(_datasExtrato[0],-LANCCTB_MATCH_TOLERANCIA_DIAS) : null;
     const _datMaxLiv=_datasExtrato.length ? _addDias(_datasExtrato[_datasExtrato.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS) : null;
     const [{ data: _flxLig },{ data: _flxLiv }]=await Promise.all([
-      idsExtrato.length ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).in('lancamento_extrato_id',idsExtrato)) : Promise.resolve({data:[]}),
+      idsExtrato.length ? _lancctbFetchPorIds(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid),'lancamento_extrato_id',idsExtrato,()=>false) : Promise.resolve({data:[]}),
       contaAtual && _datMinLiv ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(_todasC?`conta_bancaria_id.is.null,conta_bancaria_id.in.(${agencias.map(a=>a.id).join(',')})`:`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`).gte('data',_datMinLiv).lte('data',_datMaxLiv)) : Promise.resolve({data:[]}),
     ]);
     const fluxoAll=[...(_flxLig||[]),...(_flxLiv||[])];
@@ -36610,6 +36612,8 @@ async function renderLancctbRegistroContabil(){
     const _idFx=item=>!!(item.fluxoSugerido||item.fluxoComposicao||item.fluxoPossivel||item.fluxoConciliado||(item.fluxoConciliadoTodas&&item.fluxoConciliadoTodas.length));
     linhas=linhas.filter(item=>_lancctbRegFxVerde?_idFx(item):!_idFx(item));
   }
+  let countEf=count;
+  if(_modoFx){ countEf=linhas.length; if((count||0)>3000) toast('Bandeira: o filtro olhou os primeiros 3.000 lançamentos do período — refine o período se precisar de todos.','info'); linhas=linhas.slice(from,from+LANCCTB_PAGE_SIZE); }
 
   // Pendências do PERÍODO filtrado na tela (Data De/Até) — é o que decide
   // se o botão "Gerar TXT" fica habilitado. Antes contava a conta INTEIRA
@@ -36619,9 +36623,9 @@ async function renderLancctbRegistroContabil(){
   // 08/2026, mesmo os dois meses sendo períodos independentes de fechamento).
   const { count: pendenciasTotaisConta } = await _pPend;
 
-  window.__lancctbRegCount=count||0;
+  window.__lancctbRegCount=countEf||0;
   _lancctbUltimoRegistro=linhas;
-  const _htmlRegistro=_lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico,todasContas:_todasC});
+  const _htmlRegistro=_lancctbRegistroHtml({agencias,contaAtual,linhas,count:countEf,pendenciasTotaisConta:pendenciasTotaisConta||0,somaEntrada,somaSaida,percAutomatico,todasContas:_todasC});
   _lancctbRegistroCache={eid,html:_htmlRegistro};
   _lancctbSetConteudo(el,_htmlRegistro);
   _lancctbAtivarScrollTopoRegistro();
@@ -37048,7 +37052,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <th style="padding:8px 10px;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">CPF/CNPJ</th>
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Data da Parcela (da NF amarrada a este lançamento)">Data Parcela</th>
       <th style="padding:8px 10px;text-align:center;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Mês da Parcela bate com o mês do pagamento?">Mês Bate?</th>
-      <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Linha do Fluxo de Caixa do cliente que bate valor+data com este lançamento — clique pra associar/criar Regra a partir dela">Fluxo de Caixa</th>
+      <th style="padding:8px 10px;text-align:left;font-size:11px;" title="Linha do Fluxo de Caixa do cliente que bate valor+data com este lançamento — clique pra associar/criar Regra a partir dela"><div>Fluxo de Caixa</div><div style="display:flex;gap:14px;align-items:center;justify-content:center;margin-top:3px"><label title="Bandeira VERDE: só o que foi IDENTIFICADO no Fluxo de Caixa" style="display:flex;align-items:center;gap:2px;cursor:pointer;font-weight:400"><input type="checkbox" ${_lancctbRegFxVerde?'checked':''} onchange="_lancctbRegFxFlag('v',this.checked)"><span style="color:#16a34a;font-size:16px;line-height:1">⚑</span></label><label title="Bandeira VERMELHA: só o que NÃO foi encontrado no Fluxo de Caixa" style="display:flex;align-items:center;gap:2px;cursor:pointer;font-weight:400"><input type="checkbox" ${_lancctbRegFxVermelho?'checked':''} onchange="_lancctbRegFxFlag('r',this.checked)"><span style="color:#dc2626;font-size:16px;line-height:1">⚑</span></label></div></th>
       <th style="padding:8px 6px;text-align:center;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="A NF indicada no Fluxo de Caixa é a mesma NF do Histórico Utilizado?">NF Bate?</th>
       <th style="padding:8px 6px;text-align:center;font-size:11px;white-space:nowrap" title="Parâmetros opcionais: o que o fornecedor do Fluxo deve ou não conter para este histórico bancário">🎛 Parâm.</th>
       <th style="padding:8px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Status</th>
@@ -37074,7 +37078,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
         <option value="sim" ${_lancctbRegistroMesBate==='sim'?'selected':''}>Sim</option>
         <option value="nao" ${_lancctbRegistroMesBate==='nao'?'selected':''}>Não</option>
       </select></th>
-      <th style="padding:4px 6px"><div style="display:flex;flex-direction:column;gap:4px;align-items:stretch"><div style="display:flex;gap:14px;align-items:center;justify-content:center"><label title="Bandeira VERDE: só o que foi IDENTIFICADO no Fluxo de Caixa" style="display:flex;align-items:center;gap:2px;cursor:pointer;font-weight:400"><input type="checkbox" ${_lancctbRegFxVerde?'checked':''} onchange="_lancctbRegFxFlag('v',this.checked)"><span style="color:#16a34a;font-size:16px;line-height:1">⚑</span></label><label title="Bandeira VERMELHA: só o que NÃO foi encontrado no Fluxo de Caixa" style="display:flex;align-items:center;gap:2px;cursor:pointer;font-weight:400"><input type="checkbox" ${_lancctbRegFxVermelho?'checked':''} onchange="_lancctbRegFxFlag('r',this.checked)"><span style="color:#dc2626;font-size:16px;line-height:1">⚑</span></label></div><input class="si" data-filtro="registro-fluxo" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbRegistroFiltroFluxo)}" oninput="_lancctbRegistroFiltroFluxoDebounced(this.value)"></div></th>
+      <th style="padding:4px 6px"><input class="si" data-filtro="registro-fluxo" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbRegistroFiltroFluxo)}" oninput="_lancctbRegistroFiltroFluxoDebounced(this.value)"></th>
       <th style="padding:4px 6px"><select class="si" data-filtro="registro-nf-bate" style="width:100%;font-size:11px" onchange="_lancctbRegistroNfBate=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">
         <option value="" ${!_lancctbRegistroNfBate?'selected':''}>Todos</option>
         <option value="sim" ${_lancctbRegistroNfBate==='sim'?'selected':''}>Sim</option>
