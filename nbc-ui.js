@@ -142,7 +142,9 @@
   // ───────────────────────────── atualização por IA (a IA só PROPÕE; o usuário confirma) ─────────────────────────────
   // Função do Supabase: "nbc-atualizar-norma" (fonte em supabase/functions/nbc-atualizar-norma/index.ts). Enquanto não for publicada, o botão avisa e nada acontece.
   async function consultarIA(sec, itens) {
-    const resp = await fetch(SUPABASE_URL + '/functions/v1/nbc-atualizar-norma', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ hoje: new Date().toISOString().slice(0, 10), secao: sec.nome, fonte_url: sec.url, itens: itens.map(n => ({ codigo: n.codigo, nome: n.nome, revisao: n.revisao || '', dou: n.dou || '' })) }) });
+    let resp;
+    try { resp = await fetch(SUPABASE_URL + '/functions/v1/nbc-atualizar-norma', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ hoje: new Date().toISOString().slice(0, 10), secao: sec.nome, fonte_url: sec.url, itens: itens.map(n => ({ codigo: n.codigo, nome: n.nome, revisao: n.revisao || '', dou: n.dou || '' })) }) }); }
+    catch (e) { throw new Error('Não foi possível chamar a IA: a função "nbc-atualizar-norma" ainda não foi publicada no Supabase (ou está sem conexão). Nada foi alterado.'); }
     if (resp.status === 404) throw new Error('A atualização por IA ainda não foi ativada (a função "nbc-atualizar-norma" não está publicada no Supabase).');
     const dados = await resp.json().catch(() => ({}));
     if (!resp.ok || dados.error) throw new Error(dados.error || ('HTTP ' + resp.status));
