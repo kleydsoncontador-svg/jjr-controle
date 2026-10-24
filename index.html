@@ -31032,6 +31032,32 @@ function _lancctbNfMultiMarcarTodas(marcar){
 }
 // Fluxo de Caixa no modal de Regra: várias linhas marcadas de uma vez (pedido do usuário 18/10/2026).
 let _lancctbFluxoMultiSel=new Map(), _lancctbFluxoMultiAlvoId=null, _lancctbFluxoUltimasCand=[];
+// Chip amarelo "🧩 Composição": mostra SÓ as linhas do Fluxo que o sistema sugere amarrar a este lançamento, e o usuário aceita ou não (pedido do usuário 24/10/2026).
+function abrirLancctbFluxoSugestao(extratoId){
+  const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); const c=item&&item.fluxoComposicao;
+  if(!c||!c.itens){ abrirLancctbRegraModalDeExtratoId(extratoId); return; }
+  const r=item.extrato, valor=r.valor_saida||r.valor_entrada; const ehSaida=(r.valor_saida||0)>0; let ov=document.getElementById('fxSugOverlay'); if(ov) ov.remove();
+  ov=document.createElement('div'); ov.id='fxSugOverlay'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px'; ov.onclick=e=>{ if(e.target===ov) ov.remove(); };
+  const val=f=>ehSaida?(f.valor_saida||0):(f.valor_entrada||0);
+  ov.innerHTML=`<div style="background:var(--white);border:1px solid var(--border);border-radius:12px;padding:18px 20px;width:min(760px,96vw);max-height:92vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.4)">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0;font-size:16px">🧩 Sugestão de amarração com o Fluxo</h3><button class="btn bo bsm" onclick="document.getElementById('fxSugOverlay').remove()">Fechar</button></div>
+    <div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12.5px"><b>${r.data_pagamento?new Date(r.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</b> — <b style="color:${ehSaida?'#dc2626':'var(--teal)'}">R$ ${_fmt(valor)}</b><div style="color:var(--slate);margin-top:3px">${esc(r.historico_bancario||'')}</div></div>
+    <div style="font-size:12px;font-weight:700;color:var(--slate);letter-spacing:.04em;margin-bottom:4px">LINHAS DO FLUXO QUE EU AMARRARIA (${c.itens.length})</div>
+    <div style="border:1px solid var(--border);border-radius:8px;margin-bottom:10px;max-height:300px;overflow:auto">${c.itens.map(f=>`<div style="display:flex;gap:8px;align-items:center;padding:6px 10px;border-bottom:1px solid var(--border);font-size:12px"><span style="width:76px;color:var(--slate)">${f.data?new Date(f.data+'T00:00:00').toLocaleDateString('pt-BR'):''}</span><span style="flex:1"><b>${esc(f.cliente_fornecedor_nome||f.descricao||'')}</b> · doc ${esc(String(f.documento_numero||f.numero||'—'))}${f.parcela?' · parcela '+f.parcela:''}</span><b>R$ ${_fmt(val(f))}</b></div>`).join('')}</div>
+    <div style="font-size:12.5px;margin-bottom:12px">Soma do Fluxo <b>R$ ${_fmt(c.soma)}</b> × Banco <b>R$ ${_fmt(valor)}</b> — diferença <b style="color:${Math.abs(c.delta)<=0.005?'var(--teal)':'#D97706'}">R$ ${_fmt(c.delta)}</b></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap"><button class="btn bo" onclick="document.getElementById('fxSugOverlay').remove();abrirLancctbRegraModalDeExtratoId(${r.id})">Não aceitar — procurar manualmente</button><button class="btn bp" onclick="aceitarLancctbFluxoSugestao(${r.id})">✓ Aceitar e associar ${c.itens.length} linha(s)</button></div></div>`;
+  document.body.appendChild(ov);
+}
+async function aceitarLancctbFluxoSugestao(extratoId){
+  const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); const c=item&&item.fluxoComposicao; if(!c) return;
+  const ids=c.itens.map(f=>f.id);
+  const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extratoId}).in('id',ids);
+  if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
+  try{ const eidM=_lancctbEidAtual, atuais=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); ids.forEach(i=>atuais.add(i)); S.s('lancctb_fluxo_manual_'+eidM,[...atuais]); }catch(e){}  // associação aceita à mão não é desfeita pelo Processar Fluxo
+  document.getElementById('fxSugOverlay')?.remove();
+  toast(`${ids.length} linha(s) do Fluxo associada(s) ao lançamento.`,'ok');
+  try{ renderLancctbRegistroContabil(); }catch(e){}
+}
 function _lancctbFluxoMultiToggle(id,valor,marcado){ if(marcado) _lancctbFluxoMultiSel.set(id,valor); else _lancctbFluxoMultiSel.delete(id); _lancctbFluxoMultiAtualizarBarra(); }
 function _lancctbFluxoMultiMarcarTodas(marcar){
   (_lancctbFluxoUltimasCand||[]).forEach(c=>{ if(marcar) _lancctbFluxoMultiSel.set(c.id,c.v); else _lancctbFluxoMultiSel.delete(c.id); });
@@ -35797,8 +35823,9 @@ function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
   // 1ª fase: só a MARCA exata (se existir mais de uma marca no grupo); 2ª fase: o grupo todo. Em cada fase: diferença exata primeiro (depois 1 centavo a menos / a mais) e, dentro dela, mesma data, ±1, ±2, ±3 e por fim o atraso (até 7 dias).
   const fases=cand.some(c=>c.m===1)&&cand.some(c=>c.m===0)?[cand.filter(c=>c.m===0),cand]:[cand];
   if(cand.length>=2) for(const base of fases){
-    for(const dlt of [0,-1,1,-2,2]){
-      for(const tier of [0,1,2,3,'atraso']){
+    // 24/10/2026 (pedido do usuário): a DATA do Fluxo manda — esgota a mesma data (e ±1, ±2, ±3) com a diferença de centavos aceita ANTES de recorrer a datas anteriores (extrato 28/08 não vai buscar 21/08 se dá pra fechar em 28/08).
+    for(const tier of [0,1,2,3,'atraso']){
+      for(const dlt of [0,-1,1,-2,2]){
         const lim=base.filter(c=>tier==='atraso'?true:c.d<=tier).slice(0,120);
         if(lim.length<2) continue;
         const ix=_lancctbSomaPrioridade(lim.map(c=>c.v),alvo+dlt);
@@ -36647,7 +36674,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     if(String(_lancctbEidAtual)==='163'){ const _agF=(_lancctbRegistroAgenciasCache||[]).find(a=>String(a.id)===String(r.conta_bancaria_id)); if(_lancctbContaSemNfVinculo(_agF)) return '<td style="padding:7px 6px;color:var(--slate)">—</td>'; }
     if(item.fluxoComposicao){
       const c=item.fluxoComposicao, nomeC=(c.itens[0]&&c.itens[0].cliente_fornecedor_nome)||'', tipC=c.itens.map(x=>`${x.documento_numero||x.descricao||''} R$ ${_fmt(x.valor_saida||x.valor_entrada)}`).join(' | ');
-      return `<td style="padding:7px 6px;font-size:9px;white-space:normal;line-height:1.25;word-break:break-word;cursor:pointer;color:#b45309" title="Composição de ${c.itens.length} títulos — Fluxo R$ ${_fmt(c.soma)} × Banco R$ ${_fmt(valor)} (Δ R$ ${_fmt(c.delta)}): ${esc(tipC)}. O Processar Fluxo associa quando a diferença é de até R$ 0,02." onclick="event.stopPropagation();abrirLancctbRegraModalDeExtratoId(${r.id})">🧩 ${esc(nomeC)} — Composição: ${c.itens.length} títulos | Δ R$ ${_fmt(c.delta)}</td>`;
+      return `<td style="padding:7px 6px;font-size:9px;white-space:normal;line-height:1.25;word-break:break-word;cursor:pointer;color:#b45309" title="Composição de ${c.itens.length} títulos — Fluxo R$ ${_fmt(c.soma)} × Banco R$ ${_fmt(valor)} (Δ R$ ${_fmt(c.delta)}): ${esc(tipC)}. O Processar Fluxo associa quando a diferença é de até R$ 0,02." onclick="event.stopPropagation();abrirLancctbFluxoSugestao(${r.id})">🧩 ${esc(nomeC)} — Composição: ${c.itens.length} títulos | Δ R$ ${_fmt(c.delta)}</td>`;
     }
     if(item.fluxoPossivel){
       const pf=item.fluxoPossivel, rotPos=pf.tipo==='intermediario'?'possível intermediário':'possível alias';
