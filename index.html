@@ -23047,7 +23047,7 @@ async function _lancctbProcessarTransferencias(){
       g.E.forEach(e=>{ const x=escolha.get(e.id); if(x&&usadasX.get(x.id)===1){ pares.push({e,s:x}); resolvidas++; } });
       ambiguos+=Math.max(g.E.length,g.X.length)-resolvidas;
     });
-    if(!pares.length){ toast('Nenhuma transferência entre contas encontrada neste período'+(ambiguos?` (${ambiguos} lançamento(s) ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
+    if(!pares.length){ _lancctbEtapaMarcar('transf'); toast('Nenhuma transferência entre contas encontrada neste período'+(ambiguos?` (${ambiguos} lançamento(s) ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
     const total=pares.reduce((s,p)=>s+Number(p.e.valor_entrada),0);
     if(!confirm(`Encontrei ${pares.length} transferência(s) entre contas correntes da empresa (R$ ${_fmt(total)} no total).\n\nCada lado será classificado com a conta ${cPad.numero_conta} - ${cPad.descricao}.\n${ambiguos?`\nFicam de fora ${ambiguos} lançamento(s) ambíguo(s): a quantidade de entradas e saídas do mesmo valor no mesmo dia não bate.\n`:''}\nConfirmar?`)){ fim(); return; }
     let ok=0; const erros=[];
@@ -23066,6 +23066,7 @@ async function _lancctbProcessarTransferencias(){
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).in('id',[e.id,s.id]);
       ok++;
     }
+    if(!erros.length) _lancctbEtapaMarcar('transf');
     toast(`${ok} transferência(s) entre contas classificada(s)${erros.length?` — ${erros.length} com erro: ${erros[0]}`:''}.`,erros.length?'err':'ok');
     renderLancctbRegistroContabil();
   }catch(err){ console.error(err); toast('Erro ao procurar transferências: '+(err.message||err),'err'); }
@@ -35715,13 +35716,40 @@ let _lancctbRegistroAgenciasCache=[];
 // Botões de Processar com "Todas as contas" (pedido do usuário 17/10/2026): cada conta é processada SOZINHA, uma depois da outra — o mesmo que escolher a conta e clicar no botão, só que automático.
 // Nunca roda misturando contas (o motor trabalha com 1 conta por vez: banco do lançamento, Fluxo, comprovantes e regras são da conta). Se uma conta falhar, segue pras outras e avisa no fim.
 let _lancctbRodandoTodas=false;
+// ── Ordem obrigatória dos botões "Processar" (pedido do usuário 24/10/2026) ──────────────────────────────────────────────────────────────────────────────
+// Transf. entre C/C → Processar Fluxo → Processar Pagamentos → Processar Recebimentos → Processar FOPAG → Processar Tributos. Cada botão só roda depois dos anteriores terem sido rodados NAQUELE MÊS
+// (senão uma transferência entre contas é tratada como recebimento/pagamento a fornecedor, ou o Fluxo é consumido fora de ordem). O "já rodei" fica salvo por empresa e mês.
+const LANCCTB_ETAPAS=[{id:'transf',rot:'Transf. entre C/C'},{id:'fluxo',rot:'🔗 Processar Fluxo'},{id:'pagamentos',rot:'🔄 Processar Pagamentos'},{id:'recebimentos',rot:'🔄 Processar Recebimentos'},{id:'fopag',rot:'📋 Processar FOPAG'},{id:'tributos',rot:'🔄 Processar Tributos'}];
+function _lancctbEtapaChave(){ return 'lancctb_etapas_'+_lancctbEidAtual+'_'+(_lancctbRegistroMes||'todos'); }
+function _lancctbEtapaDeBotao(nome,args){
+  if(nome==='_lancctbProcessarFluxo') return 'fluxo';
+  if(nome==='_lancctbProcessarFopag') return 'fopag';
+  if(nome==='_lancctbProcessarTributos') return 'tributos';
+  if(nome==='_lancctbProcessarFonteRegistro') return (args&&args[0]==='comprovantes_pagamento')?'pagamentos':'recebimentos';
+  return '';
+}
+function _lancctbEtapaMarcar(id){ try{ const k=_lancctbEtapaChave(), d={...(S.g(k)||{})}; d[id]=new Date().toISOString(); S.s(k,d); }catch(e){ console.warn('etapa não registrada',e); } }
+function _lancctbEtapaBloqueio(id){
+  const feitas=S.g(_lancctbEtapaChave())||{};
+  for(const et of LANCCTB_ETAPAS){
+    if(et.id===id) return '';
+    if(et.id==='fluxo'&&_lancctbTemFluxoCache[String(_lancctbEidAtual)]===false) continue; // empresa sem Fluxo de Caixa
+    if(!feitas[et.id]) return et.rot;
+  }
+  return '';
+}
 async function _lancctbRodarBotao(nome,args){
   const fn=window[nome];
   if(typeof fn!=='function') return;
-  if(!_lancctbRegistroTodas) return fn.apply(null,args||[]);
+  const _etapa=_lancctbEtapaDeBotao(nome,args);
+  if(_etapa){
+    const falta=_lancctbEtapaBloqueio(_etapa);
+    if(falta){ alert('Antes, processe o botão "'+falta+'" neste mês.\n\nOrdem: Transf. entre C/C → Processar Fluxo → Processar Pagamentos → Processar Recebimentos → Processar FOPAG → Processar Tributos.\n\n(Isso evita, por exemplo, uma transferência entre contas ser tratada como recebimento.)'); return; }
+  }
+  if(!_lancctbRegistroTodas){ const r=await fn.apply(null,args||[]); if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
   if(_lancctbRodandoTodas){ toast('Já tem um processamento de todas as contas em andamento.','info'); return; }
   const ags=(_lancctbRegistroAgenciasCache||[]).slice();
-  if(ags.length<2) return fn.apply(null,args||[]);
+  if(ags.length<2){ const r=await fn.apply(null,args||[]); if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
   const nomeA=a=>`${_lancctbNomeBancoExibicao(a.banco_nome)} Cc ${a.conta_corrente}`;
   if(!confirm(`Processar em TODAS as ${ags.length} contas, uma de cada vez?\n\n${ags.map(nomeA).join('\n')}\n\nCada conta é processada separada das outras (como se você escolhesse a conta e clicasse no botão). Cada uma pode pedir a sua confirmação.`)) return;
   _lancctbRodandoTodas=true;
@@ -35732,6 +35760,7 @@ async function _lancctbRodarBotao(nome,args){
       toast(`Conta ${i+1} de ${ags.length}: ${nomeA(ags[i])}…`,'info');
       try{ await fn.apply(null,args||[]); }catch(e){ console.error(e); erros.push(`${nomeA(ags[i])}: ${e.message||e}`); }
     }
+    if(_etapa&&!erros.length) _lancctbEtapaMarcar(_etapa);
   } finally {
     _lancctbRodandoTodas=false; _lancctbExtratoContaSel=selAntes; _lancctbRegistroTodas=true;
     toast(erros.length?`Terminou com ${erros.length} erro(s): ${erros[0]}`:`Processou as ${ags.length} contas.`,erros.length?'err':'ok');
