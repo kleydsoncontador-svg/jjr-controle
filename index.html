@@ -42698,10 +42698,25 @@ async function _lancctbIgnorarConciliados(eid,padroes){
   if(!padroes.length) return 0;
   const { data: linhas } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,historico_bancario,valor_saida,valor_entrada').eq('empresa_eid',eid).eq('status_conciliacao','conciliado'));
-  const alvo=(linhas||[]).filter(l=>{
+  let alvo=(linhas||[]).filter(l=>{
     const hist=(l.historico_bancario||'').trim().toLowerCase(), ym=(l.data_pagamento||'').slice(0,7);
     return padroes.some(p=>hist.includes(p.padrao.trim().toLowerCase())&&_lancctbIgnorarPadraoBate(p,ym));
   });
+  // Pedido do usuário 24/10/2026: lançamento classificado como transferência entre contas (conta de passagem) é decisão do contador — nenhuma regra/padrão automático desfaz isso.
+  try{
+    const numT=(_lancctbContasPadraoGet(eid)||{}).transf_contas;
+    if(numT&&alvo.length){
+      const { data: cT } = await _supaClient.from('plano_contas').select('id').eq('empresa_eid',eid).eq('numero_conta',String(numT)).maybeSingle();
+      if(cT){
+        const prot=new Set();
+        for(let i=0;i<alvo.length;i+=200){
+          const { data: ct } = await _supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id').eq('conta_contabil_id',cT.id).eq('estornado',false).in('lancamento_extrato_id',alvo.slice(i,i+200).map(l=>l.id));
+          (ct||[]).forEach(x=>prot.add(x.lancamento_extrato_id));
+        }
+        if(prot.size) alvo=alvo.filter(l=>!prot.has(l.id));
+      }
+    }
+  }catch(eP){ console.warn('Proteção de transferência no Ignorar não aplicada:',eP); }
   if(!alvo.length) return 0;
   const soma=alvo.reduce((t,l)=>t+(Number(l.valor_entrada)||0)+(Number(l.valor_saida)||0),0);
   if(!confirm(`${alvo.length} lançamento(s) JÁ CONCILIADOS batem com os padrões de "Ignorar Sempre" (soma R$ ${_fmt(soma)}).\n\nPara ignorá-los preciso desfazer a conciliação: os lançamentos contábeis ligados a eles ficam ESTORNADOS (continuam no histórico) e NF/comprovante/Fluxo amarrados voltam para pendente.\n\nDesfazer a conciliação e ignorar?`)) return 0;
