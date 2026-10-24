@@ -22972,14 +22972,19 @@ function _lancctbTransfNomeChave(nome){
 }
 // Pedido do usuário 18/10/2026: lançamento com NOME, CNPJ ou CPF de fornecedor/cliente (ex.: "PGTO BOLETO F W DISTRIBUIDORA 08.897.417/0006-15", "Transferência Recebida|CLEDIO KONIG TIETBOHL") NUNCA é transferência entre contas
 // da empresa. Só entra no pareamento a linha que (a) traz o nome/CNPJ da PRÓPRIA empresa (ex.: "Magrao Auto Pecas KAJUNA…") ou (b) não identifica ninguém (só texto de banco: TED, transferência entre contas, resgate…).
-function _lancctbTransfLinhaPropria(hist,emp){
+// O histórico traz o CNPJ ou o nome (palavra característica) da PRÓPRIA empresa?
+function _lancctbHistNomeProprio(hist,emp){
   const bruto=String(hist||''); const h=_convNfNorm(bruto); if(!h) return false;
   const cnpjProprio=String((emp&&(emp.cnpjNum||emp.cnpj))||'').replace(/\D/g,'');
-  const dig=bruto.replace(/\D/g,'');
-  if(cnpjProprio.length>=11&&dig.includes(cnpjProprio)) return true;
+  if(cnpjProprio.length>=11&&bruto.replace(/\D/g,'').includes(cnpjProprio)) return true;
   const ger=['LTDA','EIRELI','EPP','COMERCIO','COMERCIAL','SERVICOS','PECAS','DE','DA','DO','DAS','DOS','E','S/A','SA','ME','MEI','INDUSTRIA','EMPRESA','AUTO','MANUTENCOES','LEVES'];
   const proprios=_convNfNorm((emp&&emp.nome)||'').split(' ').filter(t=>t.length>=4&&!ger.includes(t)).slice(0,2);
-  if(proprios.some(t=>h.includes(t))) return true;
+  return proprios.some(t=>h.includes(t));
+}
+function _lancctbTransfLinhaPropria(hist,emp){
+  const bruto=String(hist||''); const h=_convNfNorm(bruto); if(!h) return false;
+  const dig=bruto.replace(/\D/g,'');
+  if(_lancctbHistNomeProprio(hist,emp)) return true;
   // a partir daqui: qualquer sinal de TERCEIRO (fornecedor/cliente/pessoa) tira a linha do pareamento
   if(/\b(BOLETO|PGTO|PAGTO|PAGO|TITULO|COBRANCA|TARIFA|FATURA|DARF|GPS|NF|NOTA|LTDA|EIRELI|EPP|MEI|S\/A)\b/.test(h)) return false;
   if(dig.length>=11) return false; // CNPJ/CPF de terceiro (inteiro ou mascarado)
@@ -23009,7 +23014,11 @@ async function _lancctbProcessarTransferencias(){
     // Pedido do usuário 17/10/2026: "SISPAG SALARIOS nunca será transferência entre contas" — pagamento de folha (salário, pró-labore, férias, 13º, adiantamento) nunca entra no pareamento.
     const _ehFolhaTransf=h=>/SALARIO|PRO[ -]?LABORE|FOLHA|FERIAS|13[ºO°]? ?SAL|ADIANTAMENTO|RESCIS/.test(_convNfNorm(h||''));
     const _empTransf=(S.emps()||[]).find(e=>String(e.eid)===String(eid));
-    const L=(pend||[]).filter(x=>contas.has(x.conta_bancaria_id)&&!_ehFolhaTransf(x.historico_bancario)&&_lancctbTransfLinhaPropria(x.historico_bancario,_empTransf));
+    // Pedido do usuário 24/10/2026 (Kajuna): "pagamentos jogados pra fornecedor que na verdade são transferências entre contas" — a linha também entra se o LADO OPOSTO (mesmo dia e valor, outra conta) traz o nome/CNPJ da própria empresa.
+    const _kT=x=>x.data_pagamento+'|'+Math.round(Number(x.valor_entrada>0?x.valor_entrada:x.valor_saida)*100);
+    const _propE=new Set((pend||[]).filter(x=>Number(x.valor_entrada)>0&&_lancctbHistNomeProprio(x.historico_bancario,_empTransf)).map(_kT));
+    const _propS=new Set((pend||[]).filter(x=>Number(x.valor_saida)>0&&_lancctbHistNomeProprio(x.historico_bancario,_empTransf)).map(_kT));
+    const L=(pend||[]).filter(x=>contas.has(x.conta_bancaria_id)&&!_ehFolhaTransf(x.historico_bancario)&&(_lancctbTransfLinhaPropria(x.historico_bancario,_empTransf)||(Number(x.valor_saida)>0?_propE:_propS).has(_kT(x))));
     const entradas=L.filter(x=>Number(x.valor_entrada)>0), saidas=L.filter(x=>Number(x.valor_saida)>0);
     // Pedido do usuário 16/10/2026: bastou achar, em OUTRO banco da empresa, uma saída do MESMO valor no MESMO dia (não exige mais o nome da empresa no histórico). Pareia por dia+valor:
     // quantidade de entradas = quantidade de saídas (em contas diferentes); se não bater (ex.: 1 entrada de R$ 300 e 2 saídas de R$ 300) é ambíguo e fica pendente.
@@ -33393,6 +33402,29 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     if(!resultado.error) await checarAlertaAutomatico(linhas,l,valor,histBanco,nomeTerceiro);
     return resultado;
   }
+
+  // Pedido do usuário 24/10/2026 (Kajuna): "PIX TRANSF KAJUNA… KAJUNA COMERCIO…" entre contas da PRÓPRIA empresa não é recebimento (a regra "PIX TRANSF" não vale) e há pagamentos que foram
+  // jogados pra fornecedor sendo transferência. Se existe, em OUTRA conta da empresa, o lado oposto (mesmo dia e valor) e o nome/CNPJ da própria empresa aparece em um dos dois históricos,
+  // o lançamento NÃO passa por regra/NF/Fluxo: fica pendente pro botão "Transf. entre C/C" (que pareia os dois lados com a conta de passagem).
+  try{
+    const _empT=(S.emps()||[]).find(e=>String(e.eid)===String(eid));
+    if(_empT&&lancamentos&&lancamentos.length&&_mDmin){
+      const { data: outrasContas } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario')
+        .eq('empresa_eid',eid).neq('conta_bancaria_id',contaId).neq('status_conciliacao','reabsorvido').gte('data_pagamento',_mDmin).lte('data_pagamento',_mDmax));
+      const _kc=(d,v)=>d+'|'+Math.round(Number(v)*100);
+      const oposE=new Map(), oposS=new Map(); // lado oposto: entradas de outras contas / saídas de outras contas
+      (outrasContas||[]).forEach(o=>{ if(Number(o.valor_entrada)>0){ const k=_kc(o.data_pagamento,o.valor_entrada); (oposE.get(k)||oposE.set(k,[]).get(k)).push(o); } else if(Number(o.valor_saida)>0){ const k=_kc(o.data_pagamento,o.valor_saida); (oposS.get(k)||oposS.set(k,[]).get(k)).push(o); } });
+      const _folhaT=h=>/SALARIO|PRO[ -]?LABORE|FOLHA|FERIAS|13[ºO°]? ?SAL|ADIANTAMENTO|RESCIS/.test(_convNfNorm(h||''));
+      const ehTransfPropria=l=>{
+        if(_folhaT(l.historico_bancario)) return false;
+        const ehS=Number(l.valor_saida)>0, k=_kc(l.data_pagamento,ehS?l.valor_saida:l.valor_entrada);
+        const contra=(ehS?oposE:oposS).get(k); if(!contra||!contra.length) return false;
+        return _lancctbHistNomeProprio(l.historico_bancario,_empT)||contra.some(o=>_lancctbHistNomeProprio(o.historico_bancario,_empT));
+      };
+      const ant=lancamentos.length; lancamentos=lancamentos.filter(l=>!ehTransfPropria(l));
+      if(lancamentos.length<ant) log((ant-lancamentos.length)+' lançamento(s) são transferência entre contas da empresa — deixados pro botão "Transf. entre C/C".');
+    }
+  }catch(eT){ console.warn('Filtro de transferência entre contas não aplicado:',eT); }
 
   const resolvidosPorNumeroNf=await tentarPorNumeroNfNoHistorico(lancamentos);
   if(resolvidosPorNumeroNf.size) lancamentos=lancamentos.filter(l=>!resolvidosPorNumeroNf.has(l.id));
