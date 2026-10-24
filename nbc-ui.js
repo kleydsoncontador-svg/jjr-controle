@@ -87,6 +87,25 @@
     N('OTG 2003', 'OTG 2003 – Orientações sobre a aplicação da ITG 2003 (R1) - Entidade Desportiva', 'R1', '', '', ''),
     N('CTG 10', 'Créditos de Carbono (tCO2e), Permissões de emissão (allowances) e Crédito de Descarbonização (CBIO)', '', '16/12/2024', 'OCPC 10', 'Não há'),
   ];
+  const SEED_PMES = [
+    N('ITG 1000', 'Normas aplicáveis e modelos de plano de contas e demonstrações contábeis para microentidade e pequena empresa', '', '26/12/2022', '', ''),
+    N('NBC TG 1000', 'Contabilidade para Pequenas e Médias Empresas', 'R1', '01/11/2016', 'CPC PME R1', 'IFRS for SMEs'),
+    N('NBC TG 1001', 'Dispõe sobre a Contabilidade para Pequenas Empresas', '', '09/12/2021', '', ''),
+    N('NBC TG 1002', 'Dispõe sobre a contabilidade para microentidades', '', '09/12/2021', '', ''),
+    N('CTG 1000', 'Adoção Plena da NBC TG 1000', '', '05/09/2013', '', ''),
+  ];
+  const SEED_ESPECIFICAS = [
+    N('ITG 2000', 'Escrituração Contábil', 'R1', '12/12/2014', '', ''),
+    N('ITG 2001', 'Entidade Fechada de Previdência Complementar', '', '26/12/2022', '', ''),
+    N('ITG 2002', 'Entidade sem Finalidade de Lucros', 'R1', '02/09/2015', '', ''),
+    N('ITG 2003', 'Entidade Desportiva', 'R2', '19/12/2023', '', ''),
+    N('ITG 2004', 'Entidade Cooperativa', '', '29/11/2017', '', ''),
+    N('CTG 2000', 'Aborda como os ajustes das novas práticas contábeis adotadas no Brasil trazidas pela Lei nº 11.638/07 e MP nº 449/08 devem ser tratados', '', '1.159/09', '', ''),
+    N('CTG 2001', 'Define as formalidades da escrituração contábil em forma digital para fins de atendimento ao Sistema Público de Escrituração Digital – SPED', 'R3', '23/08/2017', '', ''),
+    N('CTG 2002', 'Laudo de Avaliação Emitido por Contador', '', '05/12/2018', '', ''),
+    N('NBC T 15', 'Informações de Natureza Social e Ambiental', '', '1.003/04', '', ''),
+    N('NBC TI 01', 'Da Auditoria Interna', '', '986 / 03', '', ''),
+  ];
   const E = s => (typeof esc === 'function' ? esc(s) : String(s == null ? '' : s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])));
   const ehAdmin = () => { try { return !!currentUser && isAdmin(currentUser); } catch (e) { return false; } };
   const hoje = () => new Date().toLocaleDateString('pt-BR');
@@ -96,7 +115,7 @@
   function ler() {
     const d = S.g(KEY);
     const ok = d && typeof d === 'object' && !Array.isArray(d) && d.secoes && typeof d.secoes === 'object';
-    const base = ok ? JSON.parse(JSON.stringify(d)) : { secoes: { completas: JSON.parse(JSON.stringify(SEED_COMPLETAS)), pmes: [], especificas: [] } };
+    const base = ok ? JSON.parse(JSON.stringify(d)) : { secoes: { completas: JSON.parse(JSON.stringify(SEED_COMPLETAS)), pmes: JSON.parse(JSON.stringify(SEED_PMES)), especificas: JSON.parse(JSON.stringify(SEED_ESPECIFICAS)) } };
     SECOES.forEach(s => { if (!Array.isArray(base.secoes[s.id])) base.secoes[s.id] = []; });
     return base;
   }
