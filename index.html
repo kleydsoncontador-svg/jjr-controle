@@ -22972,6 +22972,17 @@ function _lancctbTransfNomeChave(nome){
 }
 // Pedido do usuário 18/10/2026: lançamento com NOME, CNPJ ou CPF de fornecedor/cliente (ex.: "PGTO BOLETO F W DISTRIBUIDORA 08.897.417/0006-15", "Transferência Recebida|CLEDIO KONIG TIETBOHL") NUNCA é transferência entre contas
 // da empresa. Só entra no pareamento a linha que (a) traz o nome/CNPJ da PRÓPRIA empresa (ex.: "Magrao Auto Pecas KAJUNA…") ou (b) não identifica ninguém (só texto de banco: TED, transferência entre contas, resgate…).
+// Históricos que NUNCA são transferência entre contas da empresa (pedido do usuário 24/10/2026, Fast Lube: "Impostos SEFAZ", "Ajuste - Return/Refund Compensation", "Sispag Tributos", "RENDIMENTO CDB AUTOMATICO"
+// foram pareados só porque tinham o mesmo valor/dia): imposto/guia/tributo, ajuste/estorno/reembolso de marketplace, rendimento/aplicação/resgate de CDB e fundos, tarifas, juros, IOF, boleto, fatura, folha.
+function _lancctbHistNuncaTransferencia(h){
+  const t=_convNfNorm(h||'');
+  if(!t) return false;
+  if(/SALARIO|PRO[ -]?LABORE|FOLHA|FERIAS|13[ºO°]? ?SAL|ADIANTAMENTO|RESCIS/.test(t)) return true;
+  if(/(IMPOSTO|IMPOSTOS|TRIBUTO|TRIBUTOS|GNRE|DARF|DAS|GPS|DAE|DARE|SEFAZ|ICMS|ISS|ISSQN|PIS|COFINS|CSLL|IRPJ|IRRF|FGTS|INSS|GUIA|ARRECADACAO|PREFEITURA|RECEITA FEDERAL)/.test(t)) return true;
+  if(/(AJUSTE|REFUND|RETURN|COMPENSATION|ESTORNO|REEMBOLSO|CHARGEBACK|DEVOLUCAO)/.test(t)) return true;
+  if(/(RENDIMENTO|RENDIMENTOS|RENDIM|CDB|CDI|RDB|LCI|LCA|FUNDO|FUNDOS|RESGATE|APLICACAO|APLIC|INVEST|POUPANCA|JUROS|IOF|TARIFA|TARIFAS|TAR|MULTA|ANUIDADE|BOLETO|FATURA|COBRANCA|SEGURO|SISPAG)/.test(t)) return true;
+  return false;
+}
 // Exceção da Regra (pedido do usuário 24/10/2026): "texto que NÃO pode aparecer no histórico bancário". Vários termos separados por vírgula (ou ;) — se qualquer um aparece, a Regra não se aplica ao lançamento.
 function _lancctbExcecaoOk(r,txt){
   const e=String((r&&r.historico_excecao)||'').trim(); if(!e) return true;
@@ -23018,7 +23029,7 @@ async function _lancctbProcessarTransferencias(){
       .select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario')
       .eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('conta_bancaria_id',[...contas.keys()]).order('data_pagamento',{ascending:true}),'data_pagamento'));
     // Pedido do usuário 17/10/2026: "SISPAG SALARIOS nunca será transferência entre contas" — pagamento de folha (salário, pró-labore, férias, 13º, adiantamento) nunca entra no pareamento.
-    const _ehFolhaTransf=h=>/SALARIO|PRO[ -]?LABORE|FOLHA|FERIAS|13[ºO°]? ?SAL|ADIANTAMENTO|RESCIS/.test(_convNfNorm(h||''));
+    const _ehFolhaTransf=h=>_lancctbHistNuncaTransferencia(h); // folha, imposto, ajuste/estorno, rendimento/aplicação, tarifa… nunca são transferência entre contas
     const _empTransf=(S.emps()||[]).find(e=>String(e.eid)===String(eid));
     // Pedido do usuário 24/10/2026 (Kajuna): "pagamentos jogados pra fornecedor que na verdade são transferências entre contas" — a linha também entra se o LADO OPOSTO (mesmo dia e valor, outra conta) traz o nome/CNPJ da própria empresa.
     const _kT=x=>x.data_pagamento+'|'+Math.round(Number(x.valor_entrada>0?x.valor_entrada:x.valor_saida)*100);
@@ -33438,11 +33449,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const _kc=(d,v)=>d+'|'+Math.round(Number(v)*100);
       const oposE=new Map(), oposS=new Map(); // lado oposto: entradas de outras contas / saídas de outras contas
       (outrasContas||[]).forEach(o=>{ if(Number(o.valor_entrada)>0){ const k=_kc(o.data_pagamento,o.valor_entrada); (oposE.get(k)||oposE.set(k,[]).get(k)).push(o); } else if(Number(o.valor_saida)>0){ const k=_kc(o.data_pagamento,o.valor_saida); (oposS.get(k)||oposS.set(k,[]).get(k)).push(o); } });
-      const _folhaT=h=>/SALARIO|PRO[ -]?LABORE|FOLHA|FERIAS|13[ºO°]? ?SAL|ADIANTAMENTO|RESCIS/.test(_convNfNorm(h||''));
+      const _folhaT=h=>_lancctbHistNuncaTransferencia(h);
       const ehTransfPropria=l=>{
         if(_folhaT(l.historico_bancario)) return false;
         const ehS=Number(l.valor_saida)>0, k=_kc(l.data_pagamento,ehS?l.valor_saida:l.valor_entrada);
-        const contra=(ehS?oposE:oposS).get(k); if(!contra||!contra.length) return false;
+        const contra=((ehS?oposE:oposS).get(k)||[]).filter(o=>!_folhaT(o.historico_bancario)); if(!contra.length) return false;
         return _lancctbHistNomeProprio(l.historico_bancario,_empT)||contra.some(o=>_lancctbHistNomeProprio(o.historico_bancario,_empT));
       };
       const ant=lancamentos.length; lancamentos=lancamentos.filter(l=>!ehTransfPropria(l));
