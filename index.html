@@ -35162,6 +35162,16 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
   l.historico_bancario=novoHist; l.composicao_tributo=[item]; composicoesParaAbrir.push(l);
   return 'marcado';
 }
+// O rótulo impresso na GNRE ("ICMS/ST POR APURAÇÃO") nem sempre diz o tipo real: a GNRE do PR 07/2026 (164) de R$ 3.792,03 é, na base, o DIFAL Não Contribuinte. Quando o valor total de UMA UNIDADE+UF+competência
+// fecha com exatidão num único tipo da base de ICMS, é esse o tipo (devolve null se não fecha ou se fecha em mais de um).
+function _lancctbIcmsTipoPorValor(ctx,o){
+  if(!ctx||!o||!o.uf||!o.compet||!(o.valor>0)) return null;
+  const mes=String(o.compet).slice(3)+'-'+String(o.compet).slice(0,2);
+  const por=new Map();
+  (ctx.rows[mes]||[]).filter(r=>r.uf===o.uf&&(!o.unidade||String(r.unidade)===String(o.unidade))).forEach(r=>por.set(r.tipo,(por.get(r.tipo)||0)+Math.round(r.valor*100)));
+  const ach=[...por.entries()].filter(e=>Math.abs(e[1]-Math.round(o.valor*100))<=1).map(e=>e[0]);
+  return ach.length===1?ach[0]:null;
+}
 async function _lancctbIcmsCarregarCtx(eid,pendencias){
   const ctx={ rows:{}, usados:new Set(), mesesTocados:new Set(), total:0, fluxo:{} };
   const meses=new Set();
@@ -35410,6 +35420,12 @@ async function _lancctbProcessarTributos(){
     }
     if(!achou){ if(!l._soExato) semAchado++; continue; }
     const info=_lancctbParsearNomeArquivoTributo(achou.f.nome);
+    // GNRE de ICMS: o tipo real (ST × DIFAL) vem da base de ICMS quando o valor da guia fecha com um único tipo da UF/unidade/competência (ver _lancctbIcmsTipoPorValor).
+    if(achou.extraido&&achou.extraido.gnre&&icmsCtx){ try{
+      const g=achou.extraido.gnre, un=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1];
+      const tr=_lancctbIcmsTipoPorValor(icmsCtx,{uf:g.uf||_lancctbGnreUfDoNome(achou.f.nome),unidade:un,compet:g.referencia||_lancctbExtrairCompetenciaDoNome(achou.f.nome),valor:achou.extraido.valor});
+      if(tr){ g.tipoNome=tr; g.tipoPelaBase=true; }
+    }catch(e){ console.warn('ICMS: tipo da GNRE pela base falhou:',e); } }
     // Divide o extrato quando o pagamento passou do valor do tributo.
     if(achou.diferenca>0.01){
       const valorTributo=Math.round(achou.extraido.valor*100)/100;
