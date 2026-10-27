@@ -140,6 +140,17 @@
 .nbc-txt{margin-top:8px;font-size:11.5px;color:var(--slate);font-style:italic}
 .nbc-hist{font-size:11.5px;margin-top:6px}
 .nbc-hist div{padding:3px 0;border-top:1px dashed var(--border)}
+.nbc-exp{margin-top:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg)}
+.nbc-exp>summary{cursor:pointer;padding:8px 10px;font-size:12.5px;font-weight:700;color:var(--ink);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.nbc-exp-corpo{padding:4px 12px 12px;font-size:12.5px;line-height:1.55;color:var(--ink)}
+.nbc-exp-corpo h4{margin:12px 0 4px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--teal)}
+.nbc-ref{display:inline-block;margin-left:6px;padding:0 7px;border-radius:999px;border:1px solid var(--border);color:var(--slate);font:600 10.5px var(--mono);white-space:nowrap}
+.nbc-badge{padding:1px 8px;border-radius:999px;font:700 10.5px var(--mono);border:1px solid var(--border);color:var(--slate)}
+.nbc-badge.ok{border-color:var(--teal);color:var(--teal);background:var(--teal-bg)}
+.nbc-badge.velha{border-color:#d97706;color:#d97706}
+.nbc-ex{border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin:6px 0;background:var(--white)}
+.nbc-ex b.t{color:var(--ink)}
+.nbc-ex .lc{font:11.5px var(--mono);white-space:pre-wrap;background:var(--bg);border-radius:6px;padding:6px 8px;margin-top:4px;color:var(--ink)}
 .nbc-ov{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9000;display:flex;align-items:center;justify-content:center;padding:16px}
 .nbc-box{background:var(--white);border:1px solid var(--border);border-radius:12px;padding:18px 20px;width:min(560px,96vw);max-height:92vh;overflow:auto;box-shadow:0 12px 40px rgba(0,0,0,.4)}
 .nbc-box label{display:block;font-size:11px;font-weight:700;color:var(--slate);letter-spacing:.03em;margin:8px 0 3px}
@@ -184,8 +195,39 @@
           ${u.antes ? `<div><b>Como era:</b> ${E(u.antes)}</div>` : ''}${u.depois ? `<div><b>Como ficou:</b> ${E(u.depois)}</div>` : ''}${u.resumo ? `<div>${E(u.resumo)}</div>` : ''}${u.fonte ? `<div style="font-size:11px"><a href="${E(u.fonte)}" target="_blank" rel="noopener">fonte</a></div>` : ''}
           ${h.length > 1 ? `<details class="nbc-hist"><summary style="cursor:pointer;color:var(--slate)">Histórico completo (${h.length} substituições)</summary>${h.slice().reverse().map(x => `<div>${E(x.data)} — ${E(x.de || '—')} → ${E(x.para || '—')}${x.resumo ? ': ' + E(x.resumo) : ''}</div>`).join('')}</details>` : ''}</div>`
         : `<div class="nbc-sub vazio">Nenhuma substituição registrada desde o cadastro. Versão vigente: <b>${E(n.revisao || 'sem revisão numerada')}</b>${n.dou ? ' (DOU ' + E(n.dou) + ')' : ''}. Quando a IA achar uma revisão nova, esta caixa mostra como era antes e como ficou.</div>`}
-      <div class="nbc-txt">📄 Texto da norma: ainda não carregado (será incluído numa etapa seguinte).</div>
+      ${expHtml(sec, n, link)}
     </div>`;
+  }
+
+  // ───────────────────── explicação simples + exemplos práticos (por norma) ─────────────────────
+  // Pedido do usuário 26/10/2026: ter a norma completa na revisão mais recente, um texto SIMPLES pra quem não entende de norma (com referência pro item da norma original) e no mínimo 10 exemplos práticos de uso;
+  // e sempre que a revisão mudar, o texto simples e os exemplos são atualizados. Guardado à parte em dados_app 'nbc_exp_<id>' (não pesa a lista principal). A IA só PROPÕE — o usuário confirma antes de salvar.
+  const MIN_EXEMPLOS = 10;
+  const EXP_KEY = id => 'nbc_exp_' + id;
+  function lerExp(id) { const d = S.g(EXP_KEY(id)); return d && typeof d === 'object' && !Array.isArray(d) ? d : null; }
+  function gravarExp(id, d) { S.s(EXP_KEY(id), d); }
+  function expHtml(sec, n, link) {
+    const e = lerExp(n.id); const adm = ehAdmin();
+    if (!e || !((e.pontos && e.pontos.length) || e.resumo)) {
+      return `<details class="nbc-exp"><summary>📖 Explicação simples + ${MIN_EXEMPLOS} exemplos práticos <span class="nbc-badge">ainda não gerada</span></summary><div class="nbc-exp-corpo">
+        <div style="color:var(--slate)">Aqui fica o texto da norma em linguagem simples (com a referência do item na norma original) e pelo menos ${MIN_EXEMPLOS} exemplos práticos de uso. Ela só é gerada quando você pedir — e a IA só propõe, você confirma antes de salvar.</div>
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${adm ? `<button class="btn btn-ia-gemini bsm" onclick="nbcGerarExp('${sec.id}','${E(n.id)}')" ${est.ocupado ? 'disabled' : ''}>✨ Gerar explicação + exemplos (IA)</button>` : ''}<button class="btn bo bsm" onclick="window.open('${E(link)}','_blank','noopener')">↗ Norma completa no CFC</button></div></div></details>`;
+    }
+    const atual = String(e.revisao_base || '') === String(n.revisao || '');
+    const ex = e.exemplos || [];
+    const badge = atual ? `<span class="nbc-badge ok" title="Explicação feita sobre a revisão vigente">baseada na ${E(e.revisao_base || 'versão vigente')} ✓ atual</span>` : `<span class="nbc-badge velha" title="A norma mudou de revisão depois que esta explicação foi gerada">desatualizada — feita na ${E(e.revisao_base || '—')}, vigente ${E(n.revisao || '—')}</span>`;
+    const pontos = (e.pontos || []).map(p => `<div style="margin:6px 0"><b>${E(p.titulo || '')}</b>${p.ref ? `<span class="nbc-ref" title="Onde está na norma original">${E(p.ref)}</span>` : ''}<div>${E(p.texto || '')}</div></div>`).join('');
+    const termos = (e.termos || []).length ? `<h4>Palavras que aparecem na norma</h4>${e.termos.map(t => `<div><b>${E(t.termo || '')}:</b> ${E(t.significado || '')}</div>`).join('')}` : '';
+    const exs = ex.map((x, i) => `<div class="nbc-ex"><b class="t">${i + 1}. ${E(x.titulo || '')}</b>${x.ref ? `<span class="nbc-ref">${E(x.ref)}</span>` : ''}<div><b>Situação:</b> ${E(x.situacao || '')}</div><div><b>Como a norma manda tratar:</b> ${E(x.tratamento || '')}</div>${x.lancamento && x.lancamento !== '—' ? `<div class="lc">${E(x.lancamento)}</div>` : ''}</div>`).join('');
+    return `<details class="nbc-exp"><summary>📖 Explicação simples + exemplos práticos ${badge}<span class="nbc-badge ${ex.length >= MIN_EXEMPLOS ? 'ok' : 'velha'}">${ex.length}/${MIN_EXEMPLOS} exemplos</span></summary><div class="nbc-exp-corpo">
+      ${e.resumo ? `<div style="font-size:13px">${E(e.resumo)}</div>` : ''}${e.objetivo ? `<div style="margin-top:4px;color:var(--slate)"><b>Para que serve:</b> ${E(e.objetivo)}</div>` : ''}
+      ${pontos ? `<h4>Pontos principais <span style="text-transform:none;font-weight:400;color:var(--slate)">(a etiqueta mostra onde está na norma original)</span></h4>${pontos}` : ''}${termos}
+      ${exs ? `<h4>Exemplos práticos</h4>${exs}` : ''}
+      ${e.aviso ? `<div style="margin-top:8px;color:#d97706;font-size:11.5px">⚠ ${E(e.aviso)}</div>` : ''}
+      <div style="margin-top:8px;font-size:11.5px;color:var(--slate)">Gerada em ${E(e.gerado_em || '')}${e.por ? ' por ' + E(e.por) : ''} com apoio de IA e conferida por você. Em caso de dúvida vale sempre a norma original: <a href="${E(link)}" target="_blank" rel="noopener">abrir no CFC</a>.</div>
+      ${e.texto_completo ? `<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--slate)">📄 Texto completo da norma (revisão ${E(e.revisao_base || '')})</summary><div style="white-space:pre-wrap;font-size:12px;max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:4px">${E(e.texto_completo)}</div></details>` : ''}
+      ${adm ? `<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn btn-ia-gemini bsm" onclick="nbcGerarExp('${sec.id}','${E(n.id)}')" ${est.ocupado ? 'disabled' : ''}>${atual ? '🔄 Gerar de novo (IA)' : '🔄 Atualizar explicação para a ' + E(n.revisao || 'versão vigente') + ' (IA)'}</button><button class="btn bo bsm" onclick="nbcExpEditar('${E(n.id)}')">✏️ Editar texto / colar a norma completa</button></div>` : ''}
+    </div></details>`;
   }
   window.nbcAba = function (a) { est.aba = a; est.busca = ''; window.renderNbc(); };
   window.nbcBusca = function (v) { est.busca = v; clearTimeout(window.__nbcT); window.__nbcT = setTimeout(window.renderNbc, 250); };
@@ -212,6 +254,7 @@
       n.historico = (n.historico || []).concat([{ data: hoje(), de: revAnt, para: revNova, dou: n.dou, antes: revAnt ? 'Revisão ' + revAnt : '', depois: revNova ? 'Revisão ' + revNova : '', resumo: txt, fonte: n.url || '', por: (currentUser && (currentUser.nome || currentUser.login)) || '', origem: 'manual' }]);
     }
     gravar(d); document.getElementById('nbcOv')?.remove(); toast('Norma salva.', 'ok'); window.renderNbc();
+    if (id && revAnt !== revNova) setTimeout(() => perguntarRegerar(secId, n), 300);
   };
   window.nbcExcluir = function (secId, id) {
     if (!ehAdmin() || !confirm('Remover esta norma da lista? (o texto/histórico dela também deixa de aparecer)')) return;
@@ -235,19 +278,64 @@
     if (!itens.length) { toast('Nenhuma norma para verificar.', 'err'); return; }
     est.ocupado = true; window.renderNbc(); const msg = () => document.getElementById('nbcMsg'); if (msg()) msg().textContent = 'Consultando o site do CFC pela IA… pode levar até um minuto.';
     try {
-      const r = await consultarIA(sec, itens); const props = (r.propostas || []).filter(p => p && p.codigo && p.revisao_nova); let aplicadas = 0;
+      const r = await consultarIA(sec, itens); const props = (r.propostas || []).filter(p => p && p.codigo && p.revisao_nova); let aplicadas = 0; const regerar = [];
       for (const p of props) {
         const d2 = ler(); const n = d2.secoes[secId].find(x => x.codigo.toLowerCase().replace(/\s+/g, '') === String(p.codigo).toLowerCase().replace(/\s+/g, ''));
         if (!n || String(n.revisao || '') === String(p.revisao_nova)) continue;
         const ok = confirm(n.codigo + ' — ' + n.nome + '\n\nRevisão atual: ' + (n.revisao || '—') + '\nNova revisão encontrada: ' + p.revisao_nova + (p.dou_nova ? ' (DOU ' + p.dou_nova + ')' : '') + '\n\nComo era: ' + (p.antes || '—') + '\nComo ficou: ' + (p.depois || '—') + (p.resumo ? '\n\n' + p.resumo : '') + '\n\nFonte: ' + (p.fonte || 'não informada') + '\n\nAplicar esta atualização?');
         if (!ok) continue;
         n.historico = (n.historico || []).concat([{ data: hoje(), de: n.revisao || '', para: p.revisao_nova, dou: p.dou_nova || '', antes: p.antes || '', depois: p.depois || '', resumo: p.resumo || '', fonte: p.fonte || '', por: (currentUser && (currentUser.nome || currentUser.login)) || '', origem: 'ia' }]);
-        n.revisao = p.revisao_nova; if (p.dou_nova) n.dou = p.dou_nova; gravar(d2); aplicadas++;
+        n.revisao = p.revisao_nova; if (p.dou_nova) n.dou = p.dou_nova; gravar(d2); aplicadas++; regerar.push([secId, n]);
       }
       est.ocupado = false; window.renderNbc();
+      setTimeout(() => regerar.forEach(([sid, nn]) => perguntarRegerar(sid, nn)), 300);
       const m2 = document.getElementById('nbcMsg'); if (m2) m2.innerHTML = (aplicadas ? `<b>${aplicadas} norma(s) atualizada(s).</b> ` : (props.length ? 'Nenhuma atualização aplicada. ' : 'Nenhuma revisão nova encontrada — tudo na última versão. ')) + E(r.resumo || '') + (r.usou_busca_web === false ? ' <span style="color:#a16207">(sem busca na internet — confira nas fontes)</span>' : '');
     } catch (e) { est.ocupado = false; window.renderNbc(); const m3 = document.getElementById('nbcMsg'); if (m3) m3.innerHTML = '<span style="color:var(--red)">' + E(e.message || e) + '</span>'; }
   }
+  async function consultarExp(n) {
+    let resp;
+    try { resp = await fetch(SUPABASE_URL + '/functions/v1/nbc-atualizar-norma', { method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }, body: JSON.stringify({ modo: 'explicar', hoje: new Date().toISOString().slice(0, 10), codigo: n.codigo, nome: n.nome, revisao: n.revisao || '', dou: n.dou || '', cpc: n.cpc || '', iasb: n.iasb || '', fonte_url: n.url || '', min_exemplos: MIN_EXEMPLOS }) }); }
+    catch (e) { throw new Error('Não foi possível chamar a IA (sem conexão ou função não publicada). Nada foi alterado.'); }
+    const dados = await resp.json().catch(() => ({}));
+    if (!resp.ok || dados.error) throw new Error(dados.error || ('HTTP ' + resp.status));
+    return dados;
+  }
+  window.nbcGerarExp = async function (secId, id) {
+    if (!ehAdmin()) { toast('Somente administrador gera a explicação.', 'err'); return; }
+    if (est.ocupado) return; const d = ler(); const n = (d.secoes[secId] || []).find(x => x.id === id); if (!n) return;
+    est.ocupado = true; window.renderNbc(); const msg = document.getElementById('nbcMsg'); if (msg) msg.textContent = 'Gerando a explicação simples e os exemplos de ' + n.codigo + ' pela IA… pode levar até um minuto.';
+    try {
+      const r = await consultarExp(n); const pontos = (r.pontos || []).filter(p => p && (p.titulo || p.texto)), exemplos = (r.exemplos || []).filter(x => x && (x.titulo || x.situacao));
+      if (!pontos.length && !r.resumo) throw new Error('A IA não devolveu conteúdo utilizável. Tente de novo.');
+      const ok = confirm(n.codigo + ' (' + (n.revisao || 'sem revisão numerada') + ')\n\nA IA propôs:\n• ' + pontos.length + ' ponto(s) principal(is)\n• ' + exemplos.length + ' exemplo(s) prático(s)' + (exemplos.length < MIN_EXEMPLOS ? '  ⚠ (menos que os ' + MIN_EXEMPLOS + ' pedidos)' : '') + (r.aviso ? '\n\nAviso da IA: ' + r.aviso : '') + '\n\nSalvar? (você pode ler e editar depois; isso não substitui a norma oficial)');
+      if (ok) {
+        const ant = lerExp(n.id) || {};
+        gravarExp(n.id, { revisao_base: n.revisao || '', gerado_em: hoje(), por: (currentUser && (currentUser.nome || currentUser.name || currentUser.email)) || '', resumo: r.resumo || '', objetivo: r.objetivo || '', pontos, termos: r.termos || [], exemplos, aviso: r.aviso || '', fonte: r.fonte || '', texto_completo: ant.texto_completo || '' });
+        toast('Explicação salva.', 'ok');
+      }
+    } catch (e) { est.ocupado = false; window.renderNbc(); const m4 = document.getElementById('nbcMsg'); if (m4) m4.innerHTML = '<span style="color:var(--red)">' + E(e.message || e) + '</span>'; return; }
+    est.ocupado = false; window.renderNbc();
+    setTimeout(() => { const el = document.getElementById('nbc_' + id); if (el) el.scrollIntoView({ block: 'nearest' }); }, 50);
+  };
+  // revisão mudou: se já existe explicação, oferece refazer pra nova revisão ("sempre que houver atualização, atualiza também esse texto simplificado e seus exemplos")
+  function perguntarRegerar(secId, n) {
+    if (!lerExp(n.id)) return;
+    if (confirm(n.codigo + ' mudou para ' + (n.revisao || 'nova revisão') + '.\n\nA explicação simples e os exemplos foram feitos na revisão anterior. Gerar de novo agora para a revisão vigente?')) window.nbcGerarExp(secId, n.id);
+  }
+  window.nbcExpEditar = function (id) {
+    if (!ehAdmin()) return; const e = lerExp(id) || {};
+    document.getElementById('nbcOv')?.remove(); const ov = document.createElement('div'); ov.id = 'nbcOv'; ov.className = 'nbc-ov'; ov.onclick = x => { if (x.target === ov) ov.remove(); };
+    ov.innerHTML = `<div class="nbc-box" style="width:min(760px,96vw)"><h3 style="margin:0 0 6px;font-size:16px">Editar explicação</h3>
+      <label>RESUMO EM LINGUAGEM SIMPLES</label><textarea class="fi" id="nbcX_resumo" rows="4" style="width:100%;box-sizing:border-box">${E(e.resumo || '')}</textarea>
+      <label>TEXTO COMPLETO DA NORMA (cole aqui o texto oficial da revisão vigente, se quiser guardá-lo)</label><textarea class="fi" id="nbcX_texto" rows="12" style="width:100%;box-sizing:border-box;font-size:12px">${E(e.texto_completo || '')}</textarea>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px"><button class="btn bo" onclick="document.getElementById('nbcOv').remove()">Cancelar</button><button class="btn bp" onclick="nbcExpSalvar('${E(id)}')">Salvar</button></div></div>`;
+    document.body.appendChild(ov);
+  };
+  window.nbcExpSalvar = function (id) {
+    if (!ehAdmin()) return; const e = lerExp(id) || { revisao_base: '', gerado_em: hoje(), pontos: [], exemplos: [], termos: [] };
+    e.resumo = (document.getElementById('nbcX_resumo') || {}).value || ''; e.texto_completo = (document.getElementById('nbcX_texto') || {}).value || '';
+    gravarExp(id, e); document.getElementById('nbcOv')?.remove(); toast('Salvo.', 'ok'); window.renderNbc();
+  };
   window.nbcAtualizarUma = (secId, id) => rodar(secId, [id]);
   window.nbcAtualizarSecao = secId => rodar(secId, null);
 })();
