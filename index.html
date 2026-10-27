@@ -32437,6 +32437,7 @@ async function _lancctbProcessarFluxo(){
   const _aliasFluxo=_lancctbFluxoAliasGet(eid); _lancctbFluxoAliasLista=_aliasFluxo; _lancctbFluxoSugParam=[];
   const _manuaisFluxo=new Set((()=>{ try{ return S.g('lancctb_fluxo_manual_'+eid)||[]; }catch(e){ return []; } })());
   let _agNubFx=null; try{ const { data: _ag } = await _supaClient.from('agencias_bancarias').select('banco_nome').eq('id',contaId).maybeSingle(); _agNubFx=_ag; }catch(e){}
+  _lancctbFluxoBancoAtual=_lancctbBancoDoTexto(_agNubFx&&_agNubFx.banco_nome);
   if(_lancctbContaSemNfVinculo(_agNubFx)){ toast('O Fluxo de Caixa não é usado nas contas Mercado Pago e Shopee/Maree (as Regras já resolvem).','ok'); return; }
   const btn=document.getElementById('lancctbProcessarFluxoBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
@@ -35968,10 +35969,67 @@ const LANCCTB_IDENT_GENERICAS=new Set(('AUTO,PECAS,PCS,PECA,COMERCIO,COMERCIAL,C
 const LANCCTB_IDENT_SOBRENOMES=new Set('SILVA,SANTOS,OLIVEIRA,SOUZA,SOUSA,PEREIRA,COSTA,RODRIGUES,ALVES,LIMA,GOMES,RIBEIRO,MARTINS,CARVALHO,ALMEIDA,LOPES,SOARES,FERNANDES,VIEIRA,BARBOSA,ROCHA,DIAS,NASCIMENTO,ANDRADE,MOREIRA,NUNES,MARQUES,MACHADO,MENDES,FREITAS,CARDOSO,RAMOS,GONCALVES,SANTANA,TEIXEIRA,JUNIOR,FILHO,NETO,SOBRINHO,ROSA,PINTO,CUNHA,MORAES,CAMPOS,BORGES,REIS,MELO,ARAUJO,BATISTA,FARIAS,CORREA,CORREIA,MIRANDA,FREIRE,BARROS,DUARTE'.split(','));
 function _lancctbIdentTokens(txt){ return [...new Set(_lancctbTokensNome(txt).filter(t=>t.length>=3&&!LANCCTB_IDENT_GENERICAS.has(t)))]; }
 function _lancctbIdentCasa(a,b){ return a===b||(a.length>=4&&b.length>=4&&(a.startsWith(b)||b.startsWith(a))); }
+// ── Filtro semântico ANTES do valor (pedido do usuário 27/10/2026, Fast Lube 07/2026) ─────────────────────────────────────────────────────────────
+// "O valor NUNCA vence uma incompatibilidade semântica": UF do tributo, banco, família (tributo/folha/tarifa/aplicação/transferência) e beneficiário de PIX/TED eliminam o candidato antes de qualquer soma.
+// Devolve o MOTIVO do bloqueio (texto) ou null quando o candidato é compatível.
+const LANCCTB_UFS={AC:'ACRE',AL:'ALAGOAS',AP:'AMAPA',AM:'AMAZONAS',BA:'BAHIA',CE:'CEARA',DF:'DISTRITO FEDERAL',ES:'ESPIRITO SANTO',GO:'GOIAS',MA:'MARANHAO',MT:'MATO GROSSO',MS:'MATO GROSSO DO SUL',MG:'MINAS GERAIS',PA:'PARA',PB:'PARAIBA',PR:'PARANA',PE:'PERNAMBUCO',PI:'PIAUI',RJ:'RIO DE JANEIRO',RN:'RIO GRANDE DO NORTE',RS:'RIO GRANDE DO SUL',RO:'RONDONIA',RR:'RORAIMA',SC:'SANTA CATARINA',SP:'SAO PAULO',SE:'SERGIPE',TO:'TOCANTINS'};
+function _lancctbUfDoTexto(texto){
+  const t=' '+_convMpRemoverAcentos(String(texto||'').toUpperCase()).replace(/[^A-Z0-9]+/g,' ')+' ';
+  // nomes por extenso, do mais longo pro mais curto (MATO GROSSO DO SUL antes de MATO GROSSO; "SAO PAULO" etc.)
+  const nomes=Object.entries(LANCCTB_UFS).sort((a,b)=>b[1].length-a[1].length);
+  for(const [uf,nome] of nomes){ if(t.includes(' '+nome+' ')) return uf; }
+  // sigla só junto de palavra de órgão estadual (evita "ES" de "ES TOQUE", "PA" de "PA ")
+  const m=t.match(/ (?:SEFAZ|SEFAZ[- ]?|GNRE|DUA|DAE|GOV|FAZENDA|SECRETARIA|SEFIN|SEFA|DETRAN|ESTADO)(?: [A-Z]+){0,3} (AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO) /)
+    ||t.match(/ (AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO) (?:SEFAZ|GNRE|DUA|DAE|GOV)\b/);
+  return m?m[1]:null;
+}
+function _lancctbFluxoEhOrgaoTributario(f){
+  const t=_convMpRemoverAcentos(`${(f&&f.cliente_fornecedor_nome)||''} ${(f&&f.descricao)||''}`.toUpperCase());
+  return /SEFAZ|SECRETARIA (DE )?(ESTADO )?(DA |DE |DO )?(FAZENDA|FINANCAS|RECEITA)|FAZENDA|RECEITA FEDERAL|\bGNRE\b|\bDARF\b|\bDAS\b|\bDUA\b|\bDAE\b|TESOURO|PREFEITURA|MUNICIPIO|\bGPS\b|\bINSS\b|\bFGTS\b|CAIXA ECONOMICA FEDERAL.*FGTS|IMPOSTO|TRIBUT|\bICMS\b|\bISS\b|MINISTERIO DA FAZENDA|SIMPLES NACIONAL/.test(t);
+}
+let _lancctbFluxoBancoAtual='';
+function _lancctbBancoDoTexto(t){
+  t=_convMpRemoverAcentos(String(t||'').toUpperCase());
+  if(/BANCO DO BRASIL|\bBB\b/.test(t)) return 'BB';
+  if(/\bITAU|UNIBANCO/.test(t)) return 'ITAU';
+  if(/SICOOB|SISBR/.test(t)) return 'SICOOB';
+  if(/BRADESCO/.test(t)) return 'BRADESCO';
+  if(/SANTANDER/.test(t)) return 'SANTANDER';
+  if(/CAIXA ECONOMICA/.test(t)) return 'CAIXA';
+  if(/SAFRA/.test(t)) return 'SAFRA';
+  if(/BANRISUL/.test(t)) return 'BANRISUL';
+  if(/NUBANK|NU PAGAMENTOS/.test(t)) return 'NUBANK';
+  return '';
+}
+function _lancctbFluxoBloqueioSemantico(hist,f,bancoConta){
+  const h=_convMpRemoverAcentos(String(hist||'').toUpperCase());
+  // Famílias que NUNCA procuram fornecedor no Fluxo
+  if(/\bTAR(?:IFA)?\b|TAR\/CUSTAS|TARIFA|CUSTAS COBRANCA|\bIOF\b|\bAPL\s+APLIC|APLIC(?:ACAO)?\s+AUT|RESGATE\s+(?:AUT|APLIC)|\bCDB\b|RENDIMENTO/.test(h)&&!/PIX|TED|SISPAG/.test(h)) return 'família incompatível: tarifa/aplicação financeira não procura fornecedor no Fluxo';
+  const ehTrib=_lancctbHistoricoEhTributo(hist), ehFolha=_lancctbHistoricoEhFolha(hist);
+  const orgao=_lancctbFluxoEhOrgaoTributario(f);
+  const textoF=`${(f&&f.descricao)||''} ${(f&&f.cliente_original)||''} ${(f&&f.tipo_receita)||''}`;
+  // Banco: Fluxo que cita outro banco explicitamente não concilia com esta conta (transferência entre C/C tem rotina própria)
+  const bF=_lancctbBancoDoTexto(textoF), bC=bancoConta||_lancctbFluxoBancoAtual;
+  if(bF&&bC&&bF!==bC&&!/TRANSF/.test(h)) return `banco incompatível: Registro ${bC} / Fluxo ${bF}`;
+  if(ehTrib){
+    if(!orgao) return 'família incompatível: histórico é tributo e a linha do Fluxo não é órgão arrecadador';
+    const ufH=_lancctbUfDoTexto(hist);
+    if(ufH){ const ufF=_lancctbUfDoTexto(`${(f&&f.cliente_fornecedor_nome)||''} ${(f&&f.descricao)||''}`); if(ufF&&ufF!==ufH) return `UF incompatível: banco ${ufH} / Fluxo ${ufF}`; }
+    return null;
+  }
+  if(orgao&&!ehFolha&&/^\s*(PIX|TED|DOC|TRANSF)/.test(h)&&_lancctbHistEhTransfNome(hist)) return 'beneficiário incompatível: PIX/TED a pessoa/empresa × órgão arrecadador do Fluxo';
+  if(ehFolha){
+    const cod=(_convMpRemoverAcentos(String(textoF).toUpperCase()).match(/\b([A-Z])\d{2,5}\s*-\s*[A-Z]/)||[])[1];
+    if(cod&&cod!=='A') return `natureza incompatível: folha × natureza ${cod}… do Fluxo`;
+    if(orgao&&!/FGTS|INSS|GPS/.test(h)) return 'família incompatível: folha × órgão arrecadador';
+  }
+  return null;
+}
 function _lancctbFluxoAliasGet(eid){ try{ return S.g('lancctb_fluxo_alias_'+eid)||[]; }catch(e){ return []; } }
 let _lancctbFluxoAliasLista=[];
 // 'ok' (identidade confirmada) | 'neutro' (histórico/Fluxo sem como julgar) | 'rejeita'
 function _lancctbFluxoIdentidade(hist,f,aliases){
+  if(_lancctbFluxoBloqueioSemantico(hist,f)) return 'rejeita'; // semântica antes de identidade/valor
   if(_lancctbHistoricoEhTributo(hist)||_lancctbHistoricoEhFolha(hist)) return 'neutro';
   if(_lancctbEhIntermediadora(hist)) return 'neutro'; // intermediadora: o fornecedor real está no Fluxo/NF — o nome do banco não decide
   const docF=String((f&&f.cnpj_cpf)||'').replace(/\D/g,'');
