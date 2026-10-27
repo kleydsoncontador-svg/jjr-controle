@@ -36926,7 +36926,7 @@ async function renderLancctbRegistroContabil(){
     const doc=modo==='doc', t=termo.trim().replace(/[%_,()*]/g,''), td=t.replace(/\D/g,'');
     if(doc?td.length<3:t.length<2) return [];
     const ids=new Set(), alvos=[]; const _T0=performance.now(), _tm={};
-    const add=(v,d,ext)=>{ v=Number(v)||0; if(v>0) alvos.push({c:Math.round(v*100),d:String(d||'').slice(0,10),ext:ext||null}); };
+    const add=(v,d,w)=>{ v=Number(v)||0; if(v>0) alvos.push({c:Math.round(v*100),d:String(d||'').slice(0,10),w:w||3}); };
     const ampliar=(q0,col)=>{ const sd=(d,n)=>{ const x=new Date(d+'T12:00:00'); x.setDate(x.getDate()+n); return x.toISOString().slice(0,10); }; if(_lancctbRegistroDataDe) q0=q0.gte(col,sd(_lancctbRegistroDataDe,-10)); if(_lancctbRegistroDataAte) q0=q0.lte(col,sd(_lancctbRegistroDataAte,10)); return q0; };
     const ord=q0=>q0.order('id',{ascending:true});
     const likeNome=(cols)=>cols.map(c=>`${c}.ilike.%${t}%`).join(',');
@@ -36936,24 +36936,31 @@ async function renderLancctbRegistroContabil(){
     tarefas.push(cron('contabil',_lancctbFetchTudoParalelo(()=>ord(_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id').eq('empresa_eid',eid).eq('estornado',false).ilike(doc?'cnpj_cpf':'cliente_fornecedor_nome',`%${doc?td:t}%`).not('lancamento_extrato_id','is',null),'data')))).then(r=>(r.data||[]).forEach(x=>ids.add(x.lancamento_extrato_id))));
     tarefas.push(cron('histExtrato',_lancctbFetchTudoParalelo(()=>ord(_lancctbAplicarFiltroPeriodo(_sohConta(_supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid',eid).ilike('historico_bancario',`%${doc?td:t}%`)),'data_pagamento')))).then(r=>(r.data||[]).forEach(x=>ids.add(x.id))));
     // 2) Fluxo de Caixa
-    tarefas.push(cron('fluxo',_lancctbFetchTudoParalelo(()=>ord(ampliar(_supaClient.from('fluxo_caixa_lancamentos').select('id,data,valor_saida,valor_entrada,lancamento_extrato_id').eq('empresa_eid',eid).or(doc?likeDoc('cnpj_cpf'):likeNome(['cliente_fornecedor_nome','descricao'])),'data')))).then(r=>(r.data||[]).forEach(f=>{ if(f.lancamento_extrato_id) ids.add(f.lancamento_extrato_id); else add(f.valor_saida||f.valor_entrada,f.data); })));
+    tarefas.push(cron('fluxo',_lancctbFetchTudoParalelo(()=>ord(ampliar(_supaClient.from('fluxo_caixa_lancamentos').select('id,data,valor_saida,valor_entrada,lancamento_extrato_id').eq('empresa_eid',eid).or(doc?likeDoc('cnpj_cpf'):likeNome(['cliente_fornecedor_nome','descricao'])),'data')))).then(r=>(r.data||[]).forEach(f=>{ if(f.lancamento_extrato_id) ids.add(f.lancamento_extrato_id); else add(f.valor_saida||f.valor_entrada,f.data,3); })));
     // 3) parcelas de NF (valor e vencimento da parcela × nome/CNPJ da NF)
-    tarefas.push(cron('nf',_lancctbFetchTudoParalelo(()=>ord(ampliar(_supaClient.from('notas_fiscais_parcelas').select('id,valor_parcela,data_vencimento,notas_fiscais!inner(nome_emitente,nome_destinatario,cnpj_emitente,cnpj_destinatario)').eq('empresa_eid',eid).or(doc?`cnpj_emitente.ilike.%${td}%,cnpj_destinatario.ilike.%${td}%`:likeNome(['nome_emitente','nome_destinatario']),{foreignTable:'notas_fiscais'}),'data_vencimento')))).then(r=>(r.data||[]).forEach(p=>add(p.valor_parcela,p.data_vencimento))));
+    tarefas.push(cron('nf',(async()=>{
+      const { data: nfs } = await _lancctbFetchTudoParalelo(()=>ord(_supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).or(doc?`cnpj_emitente.ilike.%${td}%,cnpj_destinatario.ilike.%${td}%`:likeNome(['nome_emitente','nome_destinatario']))));
+      const nfIds=(nfs||[]).map(n=>n.id).slice(0,1500);
+      for(let i=0;i<nfIds.length;i+=150){
+        const { data: pcs } = await _lancctbFetchTudoParalelo(()=>ord(ampliar(_supaClient.from('notas_fiscais_parcelas').select('id,valor_parcela,data_vencimento').eq('empresa_eid',eid).in('nf_id',nfIds.slice(i,i+150)),'data_vencimento')));
+        (pcs||[]).forEach(p=>add(p.valor_parcela,p.data_vencimento,9));
+      }
+    })()).catch(e=>console.warn('Filtro por sugestão: NFs falharam:',e)));
     // 4) comprovantes de pagamento e de recebimento
     ['comprovantes_bancarios','comprovantes_recebimento'].forEach(tab=>{
-      tarefas.push(cron(tab,_lancctbFetchTudoParalelo(()=>ord(ampliar(_supaClient.from(tab).select('id,valor_pago,data_pagamento,lancamento_extrato_id').eq('empresa_eid',eid).or(doc?likeDoc('cnpj_cpf'):likeNome(['cliente_fornecedor_nome'])),'data_pagamento')))).then(r=>(r.data||[]).forEach(c=>{ if(c.lancamento_extrato_id) ids.add(c.lancamento_extrato_id); else add(c.valor_pago,c.data_pagamento); })));
+      tarefas.push(cron(tab,_lancctbFetchTudoParalelo(()=>ord(ampliar(_supaClient.from(tab).select('id,valor_pago,data_pagamento,lancamento_extrato_id').eq('empresa_eid',eid).or(doc?likeDoc('cnpj_cpf'):likeNome(['cliente_fornecedor_nome'])),'data_pagamento')))).then(r=>(r.data||[]).forEach(c=>{ if(c.lancamento_extrato_id) ids.add(c.lancamento_extrato_id); else add(c.valor_pago,c.data_pagamento,3); })));
     });
     await Promise.all(tarefas.map(p=>p.catch(e=>console.warn('Filtro por sugestão: uma fonte falhou:',e))));
     _tm.fontes=Math.round(performance.now()-_T0); _tm.alvos=alvos.length;
     // 5) extratos pendentes do período/conta de mesmo valor (±1 centavo) e data próxima (±10 dias) de cada fonte
-    const unicos=[...new Map(alvos.map(a=>[a.c+'|'+a.d,a])).values()].slice(0,900);
+    const unicos=[...new Map(alvos.map(a=>[a.c+'|'+a.d+'|'+a.w,a])).values()].slice(0,900);
     const valores=[...new Set(unicos.flatMap(a=>[(a.c-1)/100,a.c/100,(a.c+1)/100]))];
     const diff=(d1,d2)=>Math.abs((new Date(d1+'T12:00:00')-new Date(d2+'T12:00:00'))/86400000);
-    const porValor=new Map(); unicos.forEach(a=>{ if(!porValor.has(a.c)) porValor.set(a.c,[]); porValor.get(a.c).push(a.d); });
+    const porValor=new Map(); unicos.forEach(a=>{ if(!porValor.has(a.c)) porValor.set(a.c,[]); porValor.get(a.c).push({d:a.d,w:a.w}); });
     for(let i=0;i<valores.length;i+=120){
       const lote=valores.slice(i,i+120).join(',');
       const { data } = await _lancctbFetchTudoParalelo(()=>ord(_lancctbAplicarFiltroPeriodo(_sohConta(_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada').eq('empresa_eid',eid).eq('status_conciliacao','pendente').or(`valor_saida.in.(${lote}),valor_entrada.in.(${lote})`)),'data_pagamento')));
-      (data||[]).forEach(e=>{ const c=Math.round((e.valor_saida||e.valor_entrada)*100); for(const cc of [c,c-1,c+1]){ const ds=porValor.get(cc); if(ds&&ds.some(d=>d&&diff(d,e.data_pagamento)<=10)){ ids.add(e.id); break; } } });
+      (data||[]).forEach(e=>{ const c=Math.round((e.valor_saida||e.valor_entrada)*100); for(const cc of [c,c-1,c+1]){ const ds=porValor.get(cc); if(ds&&ds.some(x=>x.d&&diff(x.d,e.data_pagamento)<=x.w)){ ids.add(e.id); break; } } });
     }
     _tm.total=Math.round(performance.now()-_T0); _tm.lotes=Math.ceil(valores.length/120); _tm.ids=ids.size; console.info('[filtro por sugestão]',modo,termo,JSON.stringify(_tm)); window.__filtroSug=_tm;
     return [...ids];
@@ -37004,7 +37011,7 @@ async function renderLancctbRegistroContabil(){
 
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
-  const _modoFx=(_lancctbRegFxVerde!==_lancctbRegFxVermelho)||_clienteMem||_cnpjMem||_lancctbRegistroFiltroFluxo.trim()!==''; // com Cliente/CNPJ a lista já vem restrita aos candidatos (poucas linhas): calcular as sugestões é rápido;   // bandeira verde OU vermelha marcada, ou filtro por Cliente/CNPJ/Fluxo (olham sugestões): o filtro vale para TODAS as páginas (carrega até 3.000 do filtro e pagina depois)
+  const _modoFx=(_lancctbRegFxVerde!==_lancctbRegFxVermelho)||_lancctbRegistroFiltroFluxo.trim()!==''; // com Cliente/CNPJ a lista já vem restrita aos candidatos (poucas linhas): calcular as sugestões é rápido;   // bandeira verde OU vermelha marcada, ou filtro por Cliente/CNPJ/Fluxo (olham sugestões): o filtro vale para TODAS as páginas (carrega até 3.000 do filtro e pagina depois)
   let q=_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao,conta_bancaria_id,origem_importacao,composicao_tributo',{count:'exact'})
     .eq('empresa_eid',eid);
@@ -37367,23 +37374,6 @@ async function renderLancctbRegistroContabil(){
   if(_lancctbRegistroFiltroFluxo.trim()){
     const t=_lancctbRegistroFiltroFluxo.trim().toLowerCase();
     linhas=linhas.filter(item=>{ const f=item.fluxoSugerido||item.fluxoConciliado; return ((f?.cliente_fornecedor_nome||'')+' '+(f?.descricao||'')+' '+(f?.documento_numero||'')).toLowerCase().includes(t); });
-  }
-  if(_clienteMem||_cnpjMem){
-    const N=x=>_convMpRemoverAcentos(String(x||'').toUpperCase());
-    const tC=N(_lancctbRegistroClienteBusca).trim(), tD=String(_lancctbRegistroCnpjBusca).replace(/\D/g,''), tDtxt=N(_lancctbRegistroCnpjBusca).trim();
-    linhas=linhas.filter(item=>{
-      const fxs=[item.fluxoSugerido,item.fluxoConciliado,...(item.fluxoConciliadoTodas||[]),...((item.fluxoComposicao&&item.fluxoComposicao.itens)||[]),item.fluxoPossivel&&item.fluxoPossivel.f].filter(Boolean);
-      const nf=item.parcelaSugerida&&item.parcelaSugerida.notas_fiscais, cp=item.comprovanteSugerido, hb=item.extrato&&item.extrato.historico_bancario;
-      if(_clienteMem){
-        const nomes=[...(item.ctb||[]).map(c=>c.cliente_fornecedor_nome),...fxs.map(f=>f.cliente_fornecedor_nome),nf&&nf.nome_emitente,nf&&nf.nome_destinatario,cp&&cp.cliente_fornecedor_nome,hb];
-        if(!N(nomes.filter(Boolean).join(' | ')).includes(tC)) return false;
-      }
-      if(_cnpjMem){
-        const dj=[...(item.ctb||[]).map(c=>c.cnpj_cpf),...fxs.map(f=>f.cnpj_cpf),nf&&nf.cnpj_emitente,nf&&nf.cnpj_destinatario,cp&&cp.cnpj_cpf,hb].filter(Boolean).join(' | ');
-        if(!(tD&&dj.replace(/\D/g,'').includes(tD))&&!N(dj).includes(tDtxt)) return false;
-      }
-      return true;
-    });
   }
   if(_lancctbRegistroNfBate) linhas=linhas.filter(item=>_lancctbRegistroNfBateDoItem(item).estado===_lancctbRegistroNfBate);
   if(_lancctbRegFxVerde!==_lancctbRegFxVermelho){   // só uma bandeira marcada filtra; as duas (ou nenhuma) mostram tudo
