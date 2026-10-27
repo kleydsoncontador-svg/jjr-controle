@@ -36906,37 +36906,27 @@ async function renderLancctbRegistroContabil(){
       .eq('empresa_eid',eid).or(`numero_conta.ilike.%${t}%,classificacao.ilike.%${t}%,descricao.ilike.%${t}%`));
     const contaIds=(contasAlvo||[]).map(c=>c.id);
     if(!contaIds.length) return [];
-    const { data: linhasAlvo } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id')
-      .eq('empresa_eid',eid).eq('estornado',false).eq('tipo',tipo).in('conta_contabil_id',contaIds).not('lancamento_extrato_id','is',null));
+    const { data: linhasAlvo } = await _lancctbFetchTudoParalelo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id')
+      .eq('empresa_eid',eid).eq('estornado',false).eq('tipo',tipo).in('conta_contabil_id',contaIds).not('lancamento_extrato_id','is',null),'data').order('id',{ascending:true}));
     return [...new Set((linhasAlvo||[]).map(l=>l.lancamento_extrato_id))];
   }
   // Filtro por Histórico Utilizado/Cliente-Fornecedor/CPF-CNPJ: mesma ideia
   // de idsPorConta, mas direto num campo de texto de lancamentos_contabeis.
   async function idsPorCampoCtb(termo,campo){
     const t=termo.trim().replace(/[%_]/g,'');
-    const { data: linhasAlvo } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id')
-      .eq('empresa_eid',eid).eq('estornado',false).ilike(campo,`%${t}%`).not('lancamento_extrato_id','is',null));
-    const ids=new Set((linhasAlvo||[]).map(l=>l.lancamento_extrato_id));
-    // Linha pendente ainda não tem lançamento contábil: o Cliente/Fornecedor, o CNPJ e o histórico que aparecem nela
-    // vêm do texto do extrato — então o filtro também procura no Histórico Bancário (achado 27/10/2026, Fast Lube).
-    if(campo==='cliente_fornecedor_nome'||campo==='cnpj_cpf'||campo==='historico'){
-      const tb=campo==='cnpj_cpf'?t.replace(/\D/g,''):t;
-      if(tb){
-        const { data: exts } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id')
-          .eq('empresa_eid',eid).ilike('historico_bancario',`%${tb}%`));
-        (exts||[]).forEach(x=>ids.add(x.id));
-      }
-    }
-    return [...ids];
+    // Só o período da tela (antes varria a empresa inteira) e em ondas paralelas — era a causa dos filtros lentos (27/10/2026).
+    const { data: linhasAlvo } = await _lancctbFetchTudoParalelo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id')
+      .eq('empresa_eid',eid).eq('estornado',false).ilike(campo,`%${t}%`).not('lancamento_extrato_id','is',null),'data').order('id',{ascending:true}));
+    return [...new Set((linhasAlvo||[]).map(l=>l.lancamento_extrato_id))];
   }
   // Filtro "Mês da Parcela bate com Mês de Pagamento?": só considera linhas
   // com NF amarrada (nf_parcela_id preenchido) — embute data_vencimento da
   // parcela e data_pagamento do próprio extrato pra comparar mês/ano dos
   // dois direto no banco, sem precisar buscar tudo em memória.
   async function idsPorMesBate(alvo){
-    const { data: linhasComParcela } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis')
+    const { data: linhasComParcela } = await _lancctbFetchTudoParalelo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_contabeis')
       .select('lancamento_extrato_id,notas_fiscais_parcelas(data_vencimento),lancamentos_extrato(data_pagamento)')
-      .eq('empresa_eid',eid).eq('estornado',false).not('nf_parcela_id','is',null).not('lancamento_extrato_id','is',null));
+      .eq('empresa_eid',eid).eq('estornado',false).not('nf_parcela_id','is',null).not('lancamento_extrato_id','is',null),'data').order('id',{ascending:true}));
     const ids=new Set();
     (linhasComParcela||[]).forEach(l=>{
       const dv=l.notas_fiscais_parcelas?.data_vencimento, dp=l.lancamentos_extrato?.data_pagamento;
@@ -36946,14 +36936,17 @@ async function renderLancctbRegistroContabil(){
     });
     return [...ids];
   }
+  // Cliente/Fornecedor e CPF/CNPJ: o que aparece na linha pendente é uma SUGESTÃO calculada na tela (Fluxo, NF ou comprovante), não um dado gravado — então esses dois filtros
+  // rodam em memória sobre as linhas já montadas (até 3.000 do período, todas as páginas) e olham o lançamento gravado, a sugestão e o histórico do banco. Achado 27/10/2026 (THAMARA).
+  const _clienteMem=_lancctbRegistroClienteBusca.trim()!=='', _cnpjMem=_lancctbRegistroCnpjBusca.trim()!=='';
   let idsPorContaD=null, idsPorContaC=null, idsPorHistUsado=null, idsPorCliente=null, idsPorCnpj=null, idsPorMes2=null, idsPorIa=null;
-  if(_lancctbRegistroContaDBusca.trim()) idsPorContaD=await idsPorConta(_lancctbRegistroContaDBusca,'D');
-  if(_lancctbRegistroContaCBusca.trim()) idsPorContaC=await idsPorConta(_lancctbRegistroContaCBusca,'C');
-  if(_lancctbRegistroHistoricoUsadoBusca.trim()) idsPorHistUsado=await idsPorCampoCtb(_lancctbRegistroHistoricoUsadoBusca,'historico');
-  if(_lancctbRegistroClienteBusca.trim()) idsPorCliente=await idsPorCampoCtb(_lancctbRegistroClienteBusca,'cliente_fornecedor_nome');
-  if(_lancctbRegistroCnpjBusca.trim()) idsPorCnpj=await idsPorCampoCtb(_lancctbRegistroCnpjBusca,'cnpj_cpf');
-  if(_lancctbRegistroMesBate) idsPorMes2=await idsPorMesBate(_lancctbRegistroMesBate);
-  if(_lancctbRegistroIaBusca.trim()) idsPorIa=await idsPorCampoCtb(_lancctbRegistroIaBusca,'informacao_extra');
+  await Promise.all([ // em paralelo (antes: uma varredura de cada vez)
+    _lancctbRegistroContaDBusca.trim()?idsPorConta(_lancctbRegistroContaDBusca,'D').then(r=>{ idsPorContaD=r; }):null,
+    _lancctbRegistroContaCBusca.trim()?idsPorConta(_lancctbRegistroContaCBusca,'C').then(r=>{ idsPorContaC=r; }):null,
+    _lancctbRegistroHistoricoUsadoBusca.trim()?idsPorCampoCtb(_lancctbRegistroHistoricoUsadoBusca,'historico').then(r=>{ idsPorHistUsado=r; }):null,
+    _lancctbRegistroMesBate?idsPorMesBate(_lancctbRegistroMesBate).then(r=>{ idsPorMes2=r; }):null,
+    _lancctbRegistroIaBusca.trim()?idsPorCampoCtb(_lancctbRegistroIaBusca,'informacao_extra').then(r=>{ idsPorIa=r; }):null,
+  ].filter(Boolean));
   let idsInterseccao=null;
   [idsPorContaD,idsPorContaC,idsPorHistUsado,idsPorCliente,idsPorCnpj,idsPorMes2,idsPorIa].forEach(lista=>{
     if(!lista) return;
@@ -36968,7 +36961,7 @@ async function renderLancctbRegistroContabil(){
 
   const from=_lancctbRegistroPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
-  const _modoFx=_lancctbRegFxVerde!==_lancctbRegFxVermelho;   // bandeira verde OU vermelha marcada: o filtro vale para TODAS as páginas (carrega até 3.000 do filtro e pagina depois)
+  const _modoFx=(_lancctbRegFxVerde!==_lancctbRegFxVermelho)||_clienteMem||_cnpjMem||_lancctbRegistroFiltroFluxo.trim()!=='';   // bandeira verde OU vermelha marcada, ou filtro por Cliente/CNPJ/Fluxo (olham sugestões): o filtro vale para TODAS as páginas (carrega até 3.000 do filtro e pagina depois)
   let q=_supaClient.from('lancamentos_extrato')
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,status_conciliacao,conta_bancaria_id,origem_importacao,composicao_tributo',{count:'exact'})
     .eq('empresa_eid',eid);
@@ -37323,13 +37316,30 @@ async function renderLancctbRegistroContabil(){
     const t=_lancctbRegistroFiltroFluxo.trim().toLowerCase();
     linhas=linhas.filter(item=>{ const f=item.fluxoSugerido||item.fluxoConciliado; return ((f?.cliente_fornecedor_nome||'')+' '+(f?.descricao||'')+' '+(f?.documento_numero||'')).toLowerCase().includes(t); });
   }
+  if(_clienteMem||_cnpjMem){
+    const N=x=>_convMpRemoverAcentos(String(x||'').toUpperCase());
+    const tC=N(_lancctbRegistroClienteBusca).trim(), tD=String(_lancctbRegistroCnpjBusca).replace(/\D/g,''), tDtxt=N(_lancctbRegistroCnpjBusca).trim();
+    linhas=linhas.filter(item=>{
+      const fxs=[item.fluxoSugerido,item.fluxoConciliado,...(item.fluxoConciliadoTodas||[]),...((item.fluxoComposicao&&item.fluxoComposicao.itens)||[]),item.fluxoPossivel&&item.fluxoPossivel.f].filter(Boolean);
+      const nf=item.parcelaSugerida&&item.parcelaSugerida.notas_fiscais, cp=item.comprovanteSugerido, hb=item.extrato&&item.extrato.historico_bancario;
+      if(_clienteMem){
+        const nomes=[...(item.ctb||[]).map(c=>c.cliente_fornecedor_nome),...fxs.map(f=>f.cliente_fornecedor_nome),nf&&nf.nome_emitente,nf&&nf.nome_destinatario,cp&&cp.cliente_fornecedor_nome,hb];
+        if(!N(nomes.filter(Boolean).join(' | ')).includes(tC)) return false;
+      }
+      if(_cnpjMem){
+        const dj=[...(item.ctb||[]).map(c=>c.cnpj_cpf),...fxs.map(f=>f.cnpj_cpf),nf&&nf.cnpj_emitente,nf&&nf.cnpj_destinatario,cp&&cp.cnpj_cpf,hb].filter(Boolean).join(' | ');
+        if(!(tD&&dj.replace(/\D/g,'').includes(tD))&&!N(dj).includes(tDtxt)) return false;
+      }
+      return true;
+    });
+  }
   if(_lancctbRegistroNfBate) linhas=linhas.filter(item=>_lancctbRegistroNfBateDoItem(item).estado===_lancctbRegistroNfBate);
   if(_lancctbRegFxVerde!==_lancctbRegFxVermelho){   // só uma bandeira marcada filtra; as duas (ou nenhuma) mostram tudo
     const _idFx=item=>!!(item.fluxoSugerido||item.fluxoComposicao||item.fluxoPossivel||item.fluxoConciliado||(item.fluxoConciliadoTodas&&item.fluxoConciliadoTodas.length));
     linhas=linhas.filter(item=>_lancctbRegFxVerde?_idFx(item):!_idFx(item));
   }
   let countEf=count;
-  if(_modoFx){ countEf=linhas.length; if((count||0)>3000) toast('Bandeira: o filtro olhou os primeiros 3.000 lançamentos do período — refine o período se precisar de todos.','info'); linhas=linhas.slice(from,from+LANCCTB_PAGE_SIZE); }
+  if(_modoFx){ countEf=linhas.length; if((count||0)>3000) toast('O filtro olhou os primeiros 3.000 lançamentos do período — refine o período se precisar de todos.','info'); linhas=linhas.slice(from,from+LANCCTB_PAGE_SIZE); }
 
   // Pendências do PERÍODO filtrado na tela (Data De/Até) — é o que decide
   // se o botão "Gerar TXT" fica habilitado. Antes contava a conta INTEIRA
