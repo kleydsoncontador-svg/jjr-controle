@@ -34915,25 +34915,40 @@ function _lancctbGnreUfDoNome(nome){ const m=String(nome||'').match(/GNRE[^-]*?\
 // Guardado em tabelas/dados do app (nunca Storage): 1 chave por empresa e competência — 'lancctb_icms_<eid>_<AAAA-MM>' = {rows:[...]}.
 const LANCCTB_ICMS_TIPOS={difal:'ICMS-DIFAL Não Contribuinte',st:'ICMS Substituição Tributária',ant:'ICMS-ST Antecipação Total'};
 let _lancctbIcmsMes='';
+let _lancctbIcmsMesInicial=false;
 let _lancctbIcmsFiltro='';
 let _lancctbIcmsRowsMes=[];
 let _lancctbIcmsFiltroTimer=null;
 function _lancctbIcmsNum(s){ return Math.round(parseFloat(String(s).replace(/\./g,'').replace(',','.'))*100)/100; }
 function _lancctbIcmsChave(eid,mes){ return 'lancctb_icms_'+eid+'_'+mes; }
 function _lancctbIcmsMesesGet(eid){ try{ return S.g('lancctb_icms_meses_'+eid)||[]; }catch(e){ return []; } }
-// Gravação COMPACTA (matrizes, ~50 bytes por NF): o DIFAL sozinho passa de 10 mil NFs por mês e a base inteira mora em dados do app, que carrega junto com o site.
-function _lancctbIcmsLer(eid,mes){
-  try{
-    const v=S.g(_lancctbIcmsChave(eid,mes)); if(!v||!Array.isArray(v.r)) return [];
-    const compet=mes.slice(5)+'/'+mes.slice(0,4);
-    return v.r.map(a=>{ const r={tipo:v.t[a[0]],uf:a[1],unidade:a[2],doc:a[3],data:'20'+a[4].slice(0,2)+'-'+a[4].slice(2,4)+'-'+a[4].slice(4,6),cod:a[5]||'',valor:a[6],dev:!!a[7],cliente:a[8]||'',ext:a[9]||null,compet,mes,fcp:0};
-      r.id=[r.tipo,r.uf,r.unidade,r.doc,compet].join('|')+(r.dev?'|dev':''); return r; });
-  }catch(e){ return []; }
+// Gravação COMPACTA e em BLOCOS (matrizes, ~50 bytes por NF, até 2.500 NFs por chave): o DIFAL sozinho passa de 10 mil NFs por mês, uma chave de ~1 MB pode falhar na gravação em nuvem.
+// 'lancctb_icms_<eid>_<mês>' guarda o cabeçalho {v:3,t:[tipos],n:blocos}; os blocos ficam em '…_b0', '…_b1'… Formato antigo (v:2, tudo numa chave só) continua sendo lido.
+const LANCCTB_ICMS_BLOCO=2500;
+function _lancctbIcmsLinhaDecodificar(a,tipos,mes,compet){
+  const r={tipo:tipos[a[0]],uf:a[1],unidade:a[2],doc:a[3],data:'20'+a[4].slice(0,2)+'-'+a[4].slice(2,4)+'-'+a[4].slice(4,6),cod:a[5]||'',valor:a[6],dev:!!a[7],cliente:a[8]||'',ext:a[9]||null,compet,mes,fcp:0};
+  r.id=[r.tipo,r.uf,r.unidade,r.doc,compet].join('|')+(r.dev?'|dev':''); return r;
 }
+function _lancctbIcmsLerInfo(eid,mes){
+  try{
+    const v=S.g(_lancctbIcmsChave(eid,mes)); if(!v) return {rows:[],faltam:0};
+    const compet=mes.slice(5)+'/'+mes.slice(0,4);
+    if(v.v===3&&Array.isArray(v.t)){
+      const rows=[]; let faltam=0;
+      for(let i=0;i<(v.n||0);i++){ const bl=S.g(_lancctbIcmsChave(eid,mes)+'_b'+i); if(!bl||!Array.isArray(bl.r)){ faltam++; continue; } bl.r.forEach(a=>rows.push(_lancctbIcmsLinhaDecodificar(a,v.t,mes,compet))); }
+      return {rows,faltam};
+    }
+    if(Array.isArray(v.r)) return {rows:v.r.map(a=>_lancctbIcmsLinhaDecodificar(a,v.t,mes,compet)),faltam:0};
+  }catch(e){ console.error('ICMS: erro ao ler a base de '+mes,e); }
+  return {rows:[],faltam:0};
+}
+function _lancctbIcmsLer(eid,mes){ return _lancctbIcmsLerInfo(eid,mes).rows; }
 function _lancctbIcmsSalvar(eid,mes,rows){
   const tipos=[...new Set(rows.map(r=>r.tipo))];
   const r=rows.map(x=>[tipos.indexOf(x.tipo),x.uf,String(x.unidade),String(x.doc),String(x.data||'').replace(/-/g,'').slice(2),x.cod||'',x.valor,x.dev?1:0,x.cliente||'',x.ext||0]);
-  S.s(_lancctbIcmsChave(eid,mes),{v:2,t:tipos,r});
+  const n=Math.ceil(r.length/LANCCTB_ICMS_BLOCO);
+  for(let i=0;i<n;i++) S.s(_lancctbIcmsChave(eid,mes)+'_b'+i,{r:r.slice(i*LANCCTB_ICMS_BLOCO,(i+1)*LANCCTB_ICMS_BLOCO)}); // blocos primeiro, cabeçalho por último
+  S.s(_lancctbIcmsChave(eid,mes),{v:3,t:tipos,n});
   const ms=new Set(_lancctbIcmsMesesGet(eid));
   if(!ms.has(mes)){ ms.add(mes); S.s('lancctb_icms_meses_'+eid,[...ms].sort()); }
 }
@@ -35036,21 +35051,44 @@ async function _lancctbIcmsAnexar(files){
       r.rows.forEach(x=>{ if(!porMes.has(x.mes)) porMes.set(x.mes,[]); porMes.get(x.mes).push(x); });
     }catch(e){ console.error('ICMS: erro ao ler '+f.name,e); naoLidos.push(f.name); }
   }
-  let novos=0, atualizados=0, comNome=0;
+  let novos=0, atualizados=0, comNome=0, naoConferiu=false; const resumoMes=[];
   for(const [mes,novas] of porMes){
     const atuais=_lancctbIcmsLer(eid,mes); const idx=new Map(atuais.map(r=>[r.id,r]));
     novas.forEach(x=>{ const ex=idx.get(x.id); if(ex){ ex.valor=x.valor; ex.fcp=x.fcp; ex.data=x.data; ex.cod=x.cod; atualizados++; } else { atuais.push(x); idx.set(x.id,x); novos++; } });
     if(st) st.textContent=`Buscando o nome dos clientes nas NFs de saída (${mes})…`;
     comNome+=await _lancctbIcmsPreencherClientes(eid,atuais);
     _lancctbIcmsSalvar(eid,mes,atuais);
+    const conf=_lancctbIcmsLerInfo(eid,mes); resumoMes.push(`${mes.slice(5)}/${mes.slice(0,4)}: ${conf.rows.length} NFs${(conf.faltam||conf.rows.length!==atuais.length)?' ⚠ NÃO conferiu':''}`);
+    if(conf.faltam||conf.rows.length!==atuais.length) naoConferiu=true;
   }
   if(st) st.textContent='';
   if(porMes.size&&!porMes.has(_lancctbIcmsMes)) _lancctbIcmsMes=[...porMes.keys()].sort().slice(-1)[0];
-  toast(`ICMS: ${lidos} relatório(s) lido(s) — ${novos} NF(s) nova(s)${atualizados?`, ${atualizados} atualizada(s)`:''}, ${comNome} com nome do cliente achado nas NFs de saída.${naoLidos.length?' Não consegui ler: '+naoLidos.join(', ')+'.':''}${avisos.length?' ⚠ '+avisos.length+' conferência(s) de total não fecharam (veja o console).':''}`,(naoLidos.length||avisos.length)?'err':'ok');
+  toast(`ICMS salvo — ${resumoMes.join(' · ')||'nada novo'}. ${lidos} relatório(s) lido(s), ${novos} NF(s) nova(s)${atualizados?`, ${atualizados} atualizada(s)`:''}, ${comNome} com nome do cliente achado nas NFs de saída.${naoLidos.length?' Não consegui ler: '+naoLidos.join(', ')+'.':''}${avisos.length?' ⚠ '+avisos.length+' conferência(s) de total não fecharam (veja o console).':''}`,(naoLidos.length||avisos.length||naoConferiu)?'err':'ok');
   if(avisos.length) console.warn('ICMS — conferências que não fecharam:\n'+avisos.join('\n'));
   renderLancctbIcms();
 }
-function _lancctbIcmsMudarMes(v){ if(v) _lancctbIcmsMes=v; renderLancctbIcms(); }
+function _lancctbIcmsExcel(){
+  const todas=_lancctbIcmsRowsMes.slice().sort((a,b)=>String(a.data).localeCompare(String(b.data))||String(a.doc).localeCompare(String(b.doc),'pt',{numeric:true}));
+  if(!todas.length){ toast('Nada para exportar neste filtro.','err'); return; }
+  const header=['Data','Tipo de imposto','Competência','NF','Cliente/Fornecedor','Cód. cliente','Unidade','UF','Valor do imposto','Devolução','No extrato'];
+  const rows=todas.map(r=>[r.data?new Date(r.data+'T00:00:00').toLocaleDateString('pt-BR'):'',r.tipo,r.compet,r.doc,r.cliente||'',r.cod||'',r.unidade,r.uf,r.valor,r.dev?'Sim':'',r.ext?'Sim':'']);
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([header,...rows]),'ICMS por NF');
+  const nomeEmp=String(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_');
+  XLSX.writeFile(wb,`ICMS_por_NF_${nomeEmp}_${_lancctbIcmsMes||'todos'}.xlsx`);
+}
+// Exclui a base de ICMS do(s) mês(es) na tela. Nunca S.s(k,null): grava vazia. Período finalizado: mesma trava das demais exclusões.
+function _lancctbIcmsExcluir(){
+  const eid=_lancctbEidAtual; const meses=_lancctbIcmsMes?[_lancctbIcmsMes]:_lancctbIcmsMesesGet(eid);
+  if(!_lancctbIcmsRowsMes.length){ toast('Nenhum relatório de ICMS pra excluir.','err'); return; }
+  if(_lancctbExclusaoBloqueada(eid,_lancctbIcmsMes||meses[meses.length-1],'os relatórios de ICMS')) return;
+  const usados=_lancctbIcmsRowsMes.filter(r=>r.ext).length;
+  if(!confirm('Excluir a base de ICMS de '+(_lancctbIcmsMes?_lancctbIcmsMes.slice(5)+'/'+_lancctbIcmsMes.slice(0,4):'TODOS os meses')+' ('+_lancctbIcmsRowsMes.length+' NFs)?'+(usados?' '+usados+' NF(s) já foram usadas pra identificar pagamentos no extrato; esses lançamentos NÃO mudam.':'')+' Depois é só anexar os PDFs de novo.')) return;
+  meses.forEach(m=>{ const h=S.g(_lancctbIcmsChave(eid,m)); const n=(h&&h.v===3)?(h.n||0):0; for(let i=0;i<n;i++) S.s(_lancctbIcmsChave(eid,m)+'_b'+i,{r:[]}); S.s(_lancctbIcmsChave(eid,m),{v:3,t:[],n:0}); });
+  toast('Base de ICMS excluída.','ok'); renderLancctbIcms();
+}
+function _lancctbIcmsMudarMes(v){ _lancctbIcmsMes=v||''; renderLancctbIcms(); } // '' = todos os meses
 function _lancctbIcmsFiltroDebounced(v){
   _lancctbIcmsFiltro=v; clearTimeout(_lancctbIcmsFiltroTimer);
   _lancctbIcmsFiltroTimer=setTimeout(_lancctbIcmsPintarTabela,250);
@@ -35080,26 +35118,33 @@ function _lancctbIcmsPintarTabela(){
 }
 async function renderLancctbIcms(){
   const el=document.getElementById('lancctbConteudoAba'); const eid=_lancctbEidAtual;
-  if(!_lancctbIcmsMes) _lancctbIcmsMes=S.fechAtual()||_cronHoje().slice(0,7);
-  _lancctbIcmsRowsMes=_lancctbIcmsLer(eid,_lancctbIcmsMes);
+  if(!_lancctbIcmsMesInicial){ _lancctbIcmsMesInicial=true; const ms0=_lancctbIcmsMesesGet(eid); const fa=S.fechAtual()||_cronHoje().slice(0,7); _lancctbIcmsMes=ms0.includes(fa)?fa:(ms0.length?ms0[ms0.length-1]:fa); } // abre no fechamento atual, ou no último mês que tem relatório
+  const mesesLer=_lancctbIcmsMes?[_lancctbIcmsMes]:_lancctbIcmsMesesGet(eid); let faltamBlocos=0;
+  _lancctbIcmsRowsMes=[]; mesesLer.forEach(m=>{ const inf=_lancctbIcmsLerInfo(eid,m); faltamBlocos+=inf.faltam; inf.rows.forEach(r=>_lancctbIcmsRowsMes.push(r)); });
   const resumo=new Map();
   _lancctbIcmsRowsMes.forEach(r=>{ const k=[r.tipo,r.uf,r.unidade].join('|'); const x=resumo.get(k)||{tipo:r.tipo,uf:r.uf,unidade:r.unidade,n:0,total:0}; x.n++; x.total+=r.valor||0; resumo.set(k,x); });
   const resumoHtml=[...resumo.values()].sort((a,b)=>a.tipo.localeCompare(b.tipo)||String(a.unidade).localeCompare(String(b.unidade))||a.uf.localeCompare(b.uf))
     .map(x=>`<tr><td style="padding:3px 10px">${esc(x.tipo)}</td><td style="padding:3px 10px;text-align:center">${esc(x.unidade)}</td><td style="padding:3px 10px;text-align:center">${esc(x.uf)}</td><td style="padding:3px 10px;text-align:right">${x.n}</td><td style="padding:3px 10px;text-align:right;font-variant-numeric:tabular-nums">R$ ${_fmt(x.total)}</td></tr>`).join('');
   el.innerHTML=`
-  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
-    <span style="font-size:12px;color:var(--slate)">Competência:</span>
-    <input class="si" type="month" value="${esc(_lancctbIcmsMes)}" onchange="_lancctbIcmsMudarMes(this.value)" style="width:150px">
-    <input type="file" id="lancctbIcmsInput" accept=".pdf,application/pdf" multiple style="display:none" onchange="_lancctbIcmsAnexar(this.files);this.value=''">
-    <button class="btn" style="background:var(--teal);color:#fff" onclick="document.getElementById('lancctbIcmsInput').click()" title="Anexe os relatórios do Domínio: Demonstrativo do ICMS DIFAL Não Contribuinte, da Substituição Tributária e da Antecipação Total — de cada unidade (163, 164, 185)">📎 Anexar relatórios de ICMS (PDF)</button>
-    <input class="si" placeholder="🔎 filtrar (NF, cliente, UF, valor…)" value="${esc(_lancctbIcmsFiltro)}" oninput="_lancctbIcmsFiltroDebounced(this.value)" style="flex:1;min-width:200px;max-width:340px">
-    <span id="lancctbIcmsContagem" style="font-size:12px;color:var(--slate)"></span><span id="lancctbIcmsStatus" style="font-size:12px;color:var(--slate)"></span>
+  <input type="file" id="lancctbIcmsInput" accept=".pdf,application/pdf" multiple style="display:none" onchange="_lancctbIcmsAnexar(this.files);this.value=''">
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+    <input class="si" placeholder="🔍 NF, cliente, UF, tipo ou valor..." value="${esc(_lancctbIcmsFiltro)}" oninput="_lancctbIcmsFiltroDebounced(this.value)" style="flex:1;min-width:220px">
   </div>
+  <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:14px">
+    ${_lancctbMesPickerHtml(_lancctbIcmsMes,'_lancctbIcmsMudarMes')}
+    <div style="display:flex;gap:6px;align-items:center">
+      <span id="lancctbIcmsContagem" style="font-size:12px;color:var(--slate)"></span><span id="lancctbIcmsStatus" style="font-size:12px;color:var(--slate)"></span>
+      <button class="action-btn action-btn-excel" onclick="_lancctbIcmsExcel()">📊 Gerar Excel</button>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="_lancctbIcmsExcluir()" ${_lancctbIcmsRowsMes.length?'':'disabled'}>🗑️ Excluir estes relatórios</button>
+      <button class="btn bp bsm" onclick="document.getElementById('lancctbIcmsInput').click()" title="Anexe os relatórios do Domínio: Demonstrativo do ICMS DIFAL Não Contribuinte, da Substituição Tributária e da Antecipação Total — de cada unidade (163, 164, 185)">⬆ Upload de Relatórios ICMS</button>
+    </div>
+  </div>
+  ${faltamBlocos?`<div style="background:#FEE2E2;color:#7F1D1D;border:1px solid #DC2626;border-radius:8px;padding:8px 12px;margin-bottom:10px;font-size:12.5px">⚠ ${faltamBlocos} bloco(s) desta base não carregaram (a gravação em nuvem pode ter falhado). Anexe os PDFs de novo pra completar.</div>`:''}
   <div style="font-size:12px;color:var(--slate);margin-bottom:10px;line-height:1.5">Esta base é usada pelo <b>Processar Tributos</b>: pagamento de GNRE/DUA/SEFAZ com <b>UF</b> e <b>valor exato</b> de uma NF (ou da soma das NFs do mês da mesma UF) é identificado com o tipo do imposto, a competência, a NF e a unidade. DIFAL usa a coluna “Valor total DIFAL”; Substituição Tributária, “Valor do imposto”. A competência vale o mês do relatório (o pagamento costuma sair no mês seguinte).</div>
   ${resumoHtml?`<details style="margin-bottom:10px" open><summary style="cursor:pointer;font-size:12.5px;font-weight:600">Resumo do mês por tipo, unidade e UF</summary>
     <table style="border-collapse:collapse;font-size:12px;margin-top:6px"><thead><tr style="color:var(--slate)"><th style="padding:3px 10px;text-align:left">Tipo</th><th style="padding:3px 10px">Unidade</th><th style="padding:3px 10px">UF</th><th style="padding:3px 10px;text-align:right">NFs</th><th style="padding:3px 10px;text-align:right">Total</th></tr></thead><tbody>${resumoHtml}</tbody></table></details>`:''}
   <div style="overflow:auto;max-height:calc(100vh - 380px)" id="lancctbIcmsTabela"></div>
-  ${_lancctbIcmsRowsMes.length?'':`<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhum relatório de ICMS nesta competência. Clique em “Anexar relatórios de ICMS” e escolha os PDFs do Domínio.</div>`}`;
+  ${_lancctbIcmsRowsMes.length?'':`<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhum relatório de ICMS nesta competência. Clique em “Upload de Relatórios ICMS” e escolha os PDFs do Domínio.</div>`}`;
   _lancctbIcmsPintarTabela();
 }
 // Procura, entre as NFs da base, a que o pagamento do extrato quitou. Sem UF no histórico só aceita se TODOS os candidatos forem do mesmo tipo/UF/unidade; ambíguo → null (fica pendente).
