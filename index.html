@@ -34921,24 +34921,27 @@ let _lancctbIcmsRowsMes=[];
 let _lancctbIcmsFiltroTimer=null;
 function _lancctbIcmsNum(s){ return Math.round(parseFloat(String(s).replace(/\./g,'').replace(',','.'))*100)/100; }
 function _lancctbIcmsChave(eid,mes){ return 'lancctb_icms_'+eid+'_'+mes; }
+// Unidade (163/164/185) de cada CNPJ do relatório: o site acha pelo cadastro de empresas; o que não achar o usuário informa uma vez (clicando na unidade na tabela) e fica guardado aqui.
+// Chaves: os 14 dígitos do CNPJ ou o rótulo "CNPJ 0003-65" (linhas já carregadas antes do cadastro).
+function _lancctbIcmsUnidadesMapa(eid){ try{ return S.g('lancctb_icms_unidades_'+eid)||{}; }catch(e){ return {}; } }
 function _lancctbIcmsMesesGet(eid){ try{ return S.g('lancctb_icms_meses_'+eid)||[]; }catch(e){ return []; } }
 // Gravação COMPACTA e em BLOCOS (matrizes, ~50 bytes por NF, até 2.500 NFs por chave): o DIFAL sozinho passa de 10 mil NFs por mês, uma chave de ~1 MB pode falhar na gravação em nuvem.
 // 'lancctb_icms_<eid>_<mês>' guarda o cabeçalho {v:3,t:[tipos],n:blocos}; os blocos ficam em '…_b0', '…_b1'… Formato antigo (v:2, tudo numa chave só) continua sendo lido.
 const LANCCTB_ICMS_BLOCO=2500;
-function _lancctbIcmsLinhaDecodificar(a,tipos,mes,compet){
-  const r={tipo:tipos[a[0]],uf:a[1],unidade:a[2],doc:a[3],data:'20'+a[4].slice(0,2)+'-'+a[4].slice(2,4)+'-'+a[4].slice(4,6),cod:a[5]||'',valor:a[6],dev:!!a[7],cliente:a[8]||'',ext:a[9]||null,compet,mes,fcp:0};
+function _lancctbIcmsLinhaDecodificar(a,tipos,mes,compet,mapaUn){
+  const r={tipo:tipos[a[0]],uf:a[1],unidade:(mapaUn&&mapaUn[a[2]])||a[2],doc:a[3],data:'20'+a[4].slice(0,2)+'-'+a[4].slice(2,4)+'-'+a[4].slice(4,6),cod:a[5]||'',valor:a[6],dev:!!a[7],cliente:a[8]||'',ext:a[9]||null,compet,mes,fcp:0};
   r.id=[r.tipo,r.uf,r.unidade,r.doc,compet].join('|')+(r.dev?'|dev':''); return r;
 }
 function _lancctbIcmsLerInfo(eid,mes){
   try{
     const v=S.g(_lancctbIcmsChave(eid,mes)); if(!v) return {rows:[],faltam:0};
-    const compet=mes.slice(5)+'/'+mes.slice(0,4);
+    const compet=mes.slice(5)+'/'+mes.slice(0,4), mapaUn=_lancctbIcmsUnidadesMapa(eid);
     if(v.v===3&&Array.isArray(v.t)){
       const rows=[]; let faltam=0;
-      for(let i=0;i<(v.n||0);i++){ const bl=S.g(_lancctbIcmsChave(eid,mes)+'_b'+i); if(!bl||!Array.isArray(bl.r)){ faltam++; continue; } bl.r.forEach(a=>rows.push(_lancctbIcmsLinhaDecodificar(a,v.t,mes,compet))); }
+      for(let i=0;i<(v.n||0);i++){ const bl=S.g(_lancctbIcmsChave(eid,mes)+'_b'+i); if(!bl||!Array.isArray(bl.r)){ faltam++; continue; } bl.r.forEach(a=>rows.push(_lancctbIcmsLinhaDecodificar(a,v.t,mes,compet,mapaUn))); }
       return {rows,faltam};
     }
-    if(Array.isArray(v.r)) return {rows:v.r.map(a=>_lancctbIcmsLinhaDecodificar(a,v.t,mes,compet)),faltam:0};
+    if(Array.isArray(v.r)) return {rows:v.r.map(a=>_lancctbIcmsLinhaDecodificar(a,v.t,mes,compet,mapaUn)),faltam:0};
   }catch(e){ console.error('ICMS: erro ao ler a base de '+mes,e); }
   return {rows:[],faltam:0};
 }
@@ -34953,7 +34956,7 @@ function _lancctbIcmsSalvar(eid,mes,rows){
   if(!ms.has(mes)){ ms.add(mes); S.s('lancctb_icms_meses_'+eid,[...ms].sort()); }
 }
 // Texto de cada página (pdf.js) → linhas {tipo,uf,comp,mes,unidade,cnpj,doc,data,cod,valor,fcp}. Valida por UF: a soma das NFs tem que fechar com o "Total Geral" impresso.
-function _lancctbIcmsAnalisarTexto(paginas,emps){
+function _lancctbIcmsAnalisarTexto(paginas,emps,mapaUn){
   const D=String.raw`(\d{1,3}(?:\.\d{3})*,\d{2})`;
   const reDifal=new RegExp(String.raw`NF-?e:\s*(\d+)\s+(\d{2})/(\d{2})/(\d{4})\s+(\d+)\s+`+[D,D,D,D,D,D,D].join(String.raw`\s+`),'g');
   const reSt=new RegExp(String.raw`NF-?e:\s*(\d+)\s+(\d{2})/(\d{2})/(\d{4})\s+`+[D,D,D,D,D,D].join(String.raw`\s+`),'g');
@@ -34977,7 +34980,7 @@ function _lancctbIcmsAnalisarTexto(paginas,emps){
     if(!cab.tipo||!cab.uf||!cab.comp||!cab.cnpj) return;
     const digs=cab.cnpj.replace(/\D/g,'');
     const emp=(emps||[]).find(e=>String(e.cnpj||'').replace(/\D/g,'')===digs);
-    const unidade=emp&&emp.eid?String(emp.eid):('CNPJ '+cab.cnpj.slice(-7));
+    const unidade=(mapaUn&&(mapaUn[digs]||mapaUn['CNPJ '+cab.cnpj.slice(-7)]))||(emp&&emp.eid?String(emp.eid):('CNPJ '+cab.cnpj.slice(-7)));
     const mes=cab.comp.slice(3)+'-'+cab.comp.slice(0,2);
     const tipoNome=LANCCTB_ICMS_TIPOS[cab.tipo];
     const iTot=t.search(/Total Sa[ií]das:/);
@@ -35045,7 +35048,7 @@ async function _lancctbIcmsAnexar(files){
     if(st) st.textContent=`Lendo ${f.name}…`;
     try{
       const paginas=await _lancctbIcmsLerPdf(f);
-      const r=_lancctbIcmsAnalisarTexto(paginas,S.emps());
+      const r=_lancctbIcmsAnalisarTexto(paginas,S.emps(),_lancctbIcmsUnidadesMapa(eid));
       if(!r.rows.length){ naoLidos.push(f.name); continue; }
       lidos++; avisos=avisos.concat(r.avisos);
       r.rows.forEach(x=>{ if(!porMes.has(x.mes)) porMes.set(x.mes,[]); porMes.get(x.mes).push(x); });
@@ -35066,6 +35069,14 @@ async function _lancctbIcmsAnexar(files){
   toast(`ICMS salvo — ${resumoMes.join(' · ')||'nada novo'}. ${lidos} relatório(s) lido(s), ${novos} NF(s) nova(s)${atualizados?`, ${atualizados} atualizada(s)`:''}, ${comNome} com nome do cliente achado nas NFs de saída.${naoLidos.length?' Não consegui ler: '+naoLidos.join(', ')+'.':''}${avisos.length?' ⚠ '+avisos.length+' conferência(s) de total não fecharam (veja o console).':''}`,(naoLidos.length||avisos.length||naoConferiu)?'err':'ok');
   if(avisos.length) console.warn('ICMS — conferências que não fecharam:\n'+avisos.join('\n'));
   renderLancctbIcms();
+}
+function _lancctbIcmsDefinirUnidade(rotulo){
+  const eid=_lancctbEidAtual; const cod=prompt('Qual é o código da unidade do '+rotulo+'? (ex.: 164)','');
+  if(cod===null) return; const c=String(cod).trim(); if(!/^[0-9]{1,6}$/.test(c)){ toast('Informe só o número da unidade (ex.: 164).','err'); return; }
+  const mapa={..._lancctbIcmsUnidadesMapa(eid)}; mapa[rotulo]=c; S.s('lancctb_icms_unidades_'+eid,mapa);
+  // regrava os meses já carregados com a unidade nova (ids e filtros passam a usar o código)
+  _lancctbIcmsMesesGet(eid).forEach(m=>{ const inf=_lancctbIcmsLerInfo(eid,m); if(inf.rows.length&&!inf.faltam) _lancctbIcmsSalvar(eid,m,inf.rows); });
+  toast('Unidade '+c+' gravada para '+rotulo+'.','ok'); renderLancctbIcms();
 }
 function _lancctbIcmsExcel(){
   const todas=_lancctbIcmsRowsMes.slice().sort((a,b)=>String(a.data).localeCompare(String(b.data))||String(a.doc).localeCompare(String(b.doc),'pt',{numeric:true}));
@@ -35109,7 +35120,7 @@ function _lancctbIcmsPintarTabela(){
       <td style="padding:6px 10px">${esc(r.tipo)}</td>
       <td style="padding:6px 10px;font-family:var(--mono)">${esc(r.doc)}</td>
       <td style="padding:6px 10px">${r.cliente?esc(r.cliente):`<span style="color:var(--slate)">${r.cod?'Cód. '+esc(r.cod)+' (NF de saída não importada)':'—'}</span>`}</td>
-      <td style="padding:6px 10px;text-align:center">${esc(r.unidade)}</td>
+      <td style="padding:6px 10px;text-align:center">${/^[0-9]+$/.test(String(r.unidade))?esc(r.unidade):`<a href="#" style="color:var(--teal)" title="Clique pra informar o código desta unidade (ex.: 164) — fica gravado" onclick="_lancctbIcmsDefinirUnidade('${esc(r.unidade)}');return false">${esc(r.unidade)}</a>`}</td>
       <td style="padding:6px 10px;text-align:center">${esc(r.uf)}</td>
       <td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap">R$ ${_fmt(r.valor)}${r.dev?' <span style="color:var(--slate);font-size:11px">devolução</span>':''}</td>
       <td style="padding:6px 10px;text-align:center">${r.ext?'<span style="color:var(--green)" title="Identificado num pagamento do extrato">✔</span>':'<span style="color:var(--slate)">—</span>'}</td></tr>`).join('')||'<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--slate)">Nenhuma NF neste filtro.</td></tr>'}</tbody></table>
