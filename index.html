@@ -22587,6 +22587,7 @@ const LANCCTB_ABAS=[
   {id:'extrato', label:'Extrato Bancário'},
   {id:'fluxo-caixa', label:'Fluxo de Caixa'},
   {id:'aplicacoes', label:'Aplicações Financeiras'},
+  {id:'icms', label:'ICMS'}, // oculta por padrão (liga no ⚙️): base de DIFAL/ST por NF que o Processar Tributos usa pra reconhecer pagamentos de ICMS
   {id:'plano', label:'Plano de Contas'},
   {id:'regras', label:'Regras'},
   {id:'agencias', label:'Agência Bancária'},
@@ -23185,7 +23186,7 @@ function _lancctbSalvarContaPadrao(k,input){
   input.value=num+' - '+window.__lancctbContasPadraoMapa.get(num).descricao;
   toast('Conta padrão salva.','ok');
 }
-function _lancctbAbasOcultasGet(eid){ return S.g('lancctb_abas_ocultas_'+eid)||[]; }
+function _lancctbAbasOcultasGet(eid){ const v=(S.g('lancctb_abas_ocultas_'+eid)||[]).filter(x=>x!=='icms'); if(!S.g('lancctb_icms_aba_'+eid)) v.push('icms'); return v; } // 'icms' só aparece quando o usuário liga a aba (flag própria)
 function _lancctbAbasOcultasSet(eid,lista){ S.s('lancctb_abas_ocultas_'+eid,lista); }
 function renderLancctbAbas(){
   const container=document.getElementById('lancctbAbas');
@@ -23223,6 +23224,7 @@ function _lancctbToggleAbaVisivel(id,visivel){
     if(!ocultas.includes(id)) ocultas=[...ocultas,id];
   }
   _lancctbAbasOcultasSet(eid,ocultas);
+  if(id==='icms') S.s('lancctb_icms_aba_'+eid,visivel?1:0);
   if(!visivel&&_lancctbAbaAtiva===id){
     const primeira=LANCCTB_ABAS.find(a=>!ocultas.includes(a.id));
     if(primeira){ _lancctbAbaAtiva=primeira.id; renderLancctbConteudo(); }
@@ -23369,6 +23371,7 @@ function renderLancctbConteudo(){
   if(_lancctbAbaAtiva==='aplicacoes'){ renderLancctbAplicacoes(); return; }
   if(_lancctbAbaAtiva==='regras'){ renderLancctbRegras(); return; }
   if(_lancctbAbaAtiva==='registro'){ renderLancctbRegistroContabil(); return; }
+  if(_lancctbAbaAtiva==='icms'){ renderLancctbIcms(); return; }
   if(_lancctbAbaAtiva==='rufato-conciliacao'){ renderLancctbRufato(); return; }
   el.innerHTML=`<div style="text-align:center;color:var(--slate);padding:60px 20px">
     <div style="font-size:2rem;margin-bottom:8px">🚧</div>
@@ -34884,6 +34887,288 @@ async function _lancctbPreLerGuiasTributos(eid,pendencias,cacheLeituraPdf,cacheP
   try{ await Promise.all(Array.from({length:Math.min(3,total)},trabalhador)); }
   finally { await _lancctbOcrPoolEnxugar(); }
 }
+// ═══ ICMS por NF (DIFAL Não Contribuinte / Substituição Tributária) — pedido do usuário 27/10/2026 (Fast Lube) ═══════════════════════════════════════════════════════
+// O contador anexa os relatórios do Domínio (por UF, por NF) na aba "ICMS". Processar Tributos usa essa base pra reconhecer os pagamentos de ICMS do extrato (GNRE/DUA/SEFAZ),
+// que são muitos e pequenos: valor exato + UF do histórico → identifica tipo, competência, NF e unidade (163/164/185). DIFAL: coluna "Valor total DIFAL"; ST: coluna "Valor do imposto".
+// Guardado em tabelas/dados do app (nunca Storage): 1 chave por empresa e competência — 'lancctb_icms_<eid>_<AAAA-MM>' = {rows:[...]}.
+const LANCCTB_ICMS_TIPOS={difal:'ICMS-DIFAL Não Contribuinte',st:'ICMS Substituição Tributária',ant:'ICMS-ST Antecipação Total'};
+let _lancctbIcmsMes='';
+let _lancctbIcmsFiltro='';
+let _lancctbIcmsRowsMes=[];
+let _lancctbIcmsFiltroTimer=null;
+function _lancctbIcmsNum(s){ return Math.round(parseFloat(String(s).replace(/\./g,'').replace(',','.'))*100)/100; }
+function _lancctbIcmsChave(eid,mes){ return 'lancctb_icms_'+eid+'_'+mes; }
+function _lancctbIcmsMesesGet(eid){ try{ return S.g('lancctb_icms_meses_'+eid)||[]; }catch(e){ return []; } }
+// Gravação COMPACTA (matrizes, ~50 bytes por NF): o DIFAL sozinho passa de 10 mil NFs por mês e a base inteira mora em dados do app, que carrega junto com o site.
+function _lancctbIcmsLer(eid,mes){
+  try{
+    const v=S.g(_lancctbIcmsChave(eid,mes)); if(!v||!Array.isArray(v.r)) return [];
+    const compet=mes.slice(5)+'/'+mes.slice(0,4);
+    return v.r.map(a=>{ const r={tipo:v.t[a[0]],uf:a[1],unidade:a[2],doc:a[3],data:'20'+a[4].slice(0,2)+'-'+a[4].slice(2,4)+'-'+a[4].slice(4,6),cod:a[5]||'',valor:a[6],dev:!!a[7],cliente:a[8]||'',ext:a[9]||null,compet,mes,fcp:0};
+      r.id=[r.tipo,r.uf,r.unidade,r.doc,compet].join('|')+(r.dev?'|dev':''); return r; });
+  }catch(e){ return []; }
+}
+function _lancctbIcmsSalvar(eid,mes,rows){
+  const tipos=[...new Set(rows.map(r=>r.tipo))];
+  const r=rows.map(x=>[tipos.indexOf(x.tipo),x.uf,String(x.unidade),String(x.doc),String(x.data||'').replace(/-/g,'').slice(2),x.cod||'',x.valor,x.dev?1:0,x.cliente||'',x.ext||0]);
+  S.s(_lancctbIcmsChave(eid,mes),{v:2,t:tipos,r});
+  const ms=new Set(_lancctbIcmsMesesGet(eid));
+  if(!ms.has(mes)){ ms.add(mes); S.s('lancctb_icms_meses_'+eid,[...ms].sort()); }
+}
+// Texto de cada página (pdf.js) → linhas {tipo,uf,comp,mes,unidade,cnpj,doc,data,cod,valor,fcp}. Valida por UF: a soma das NFs tem que fechar com o "Total Geral" impresso.
+function _lancctbIcmsAnalisarTexto(paginas,emps){
+  const D=String.raw`(\d{1,3}(?:\.\d{3})*,\d{2})`;
+  const reDifal=new RegExp(String.raw`NF-?e:\s*(\d+)\s+(\d{2})/(\d{2})/(\d{4})\s+(\d+)\s+`+[D,D,D,D,D,D,D].join(String.raw`\s+`),'g');
+  const reSt=new RegExp(String.raw`NF-?e:\s*(\d+)\s+(\d{2})/(\d{2})/(\d{4})\s+`+[D,D,D,D,D,D].join(String.raw`\s+`),'g');
+  const rows=[], avisos=[];
+  let cab={tipo:null,uf:null,comp:null,cnpj:null,cred:false}, acum=0;
+  (paginas||[]).forEach(txt=>{
+    const t=String(txt||'').replace(/\s+/g,' ');
+    const mUf=t.match(/UF (DESTINO|FAVORECIDA) ([A-Z]{2})\b/);
+    const mComp=t.match(/Compet[êe]ncia:\s*(\d{2})\/(\d{4})/);
+    const mCnpj=t.match(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/);
+    if(mComp) cab.comp=mComp[1]+'/'+mComp[2];
+    if(mCnpj) cab.cnpj=mCnpj[1];
+    if(mUf){
+      const chaveAnt=[cab.tipo,cab.uf,cab.comp,cab.cnpj].join('|');
+      cab.uf=mUf[2];
+      if(/DEMONSTRATIVO DO ICMS DIFAL/i.test(t)) cab.tipo='difal';
+      else if(/ANTECIPA[ÇC][ÃA]O TOTAL/i.test(t)) cab.tipo='ant';
+      else if(/SUBSTITUI[ÇC][ÃA]O TRIBUT/i.test(t)) cab.tipo='st';
+      if([cab.tipo,cab.uf,cab.comp,cab.cnpj].join('|')!==chaveAnt){ acum=0; cab.cred=false; } // a mesma UF pode ocupar várias páginas, cada uma repete o cabeçalho
+    }
+    if(!cab.tipo||!cab.uf||!cab.comp||!cab.cnpj) return;
+    const digs=cab.cnpj.replace(/\D/g,'');
+    const emp=(emps||[]).find(e=>String(e.cnpj||'').replace(/\D/g,'')===digs);
+    const unidade=emp&&emp.eid?String(emp.eid):('CNPJ '+cab.cnpj.slice(-7));
+    const mes=cab.comp.slice(3)+'-'+cab.comp.slice(0,2);
+    const tipoNome=LANCCTB_ICMS_TIPOS[cab.tipo];
+    const iTot=t.search(/Total Sa[ií]das:/);
+    // O que entra depois da divisória são DEVOLUÇÕES (crédito): reduzem o que a SEFAZ cobra (ex.: MG 59.741,52 − 857,46 = 58.884,06), então entram com valor NEGATIVO.
+    const iSplit=cab.tipo==='difal'?iTot:t.search(/CR[ÉE]DITOS PELAS ENTRADAS/i);
+    const tDeb=cab.cred?'':(iSplit>=0?t.slice(0,iSplit):t), tCred=cab.cred?t:(iSplit>=0?t.slice(iSplit):'');
+    const lerRows=(seg,neg)=>{
+      const re=cab.tipo==='difal'?reDifal:reSt; re.lastIndex=0; let m, soma=0;
+      while((m=re.exec(seg))){
+        const val=cab.tipo==='difal'?_lancctbIcmsNum(m[11]):_lancctbIcmsNum(m[8]);
+        const fcp=cab.tipo==='difal'?_lancctbIcmsNum(m[12]):0;
+        soma+=val; if(val<=0) continue;
+        rows.push({tipo:tipoNome,uf:cab.uf,compet:cab.comp,mes,unidade,cnpj:cab.cnpj,doc:m[1],data:m[4]+'-'+m[3]+'-'+m[2],cod:cab.tipo==='difal'?m[5]:'',valor:neg?-val:val,fcp:neg?-fcp:fcp,dev:!!neg});
+      }
+      return soma;
+    };
+    acum+=lerRows(tDeb,false);
+    lerRows(tCred,true);
+    if(iSplit>=0) cab.cred=true;
+    if(iTot>=0){
+      const mt=t.match(/Total Sa[ií]das:\s*(?:\d\s+)?((?:\d{1,3}(?:\.\d{3})*,\d{2}\s*){3,})/);
+      if(mt){ const nums=mt[1].trim().split(/\s+/).map(_lancctbIcmsNum); const esperado=cab.tipo==='difal'?nums[4]:nums[2];
+        if(esperado!=null&&Math.abs(esperado-acum)>0.01) avisos.push(`${tipoNome} ${cab.uf} ${cab.comp} (${unidade}): soma das NFs ${acum.toFixed(2)} ≠ Total Saídas ${esperado.toFixed(2)}`); }
+      acum=0;
+    }
+  });
+  rows.forEach(r=>{ r.id=[r.tipo,r.uf,r.unidade,r.doc,r.compet].join('|')+(r.dev?'|dev':''); });
+  return {rows,avisos};
+}
+// pdf.js entrega os itens fora de ordem (campos da mesma linha em ordem invertida): monta as linhas pela posição (y de cima pra baixo, x da esquerda pra direita).
+function _lancctbIcmsTextoPagina(items){
+  const its=(items||[]).filter(i=>String(i.str).trim()!=='').map(i=>({s:String(i.str).trim(),x:i.transform[4],y:i.transform[5]}));
+  its.sort((a,b)=>b.y-a.y||a.x-b.x);
+  const linhas=[];
+  its.forEach(it=>{ const u=linhas[linhas.length-1]; if(u&&Math.abs(u.y-it.y)<=2.5) u.it.push(it); else linhas.push({y:it.y,it:[it]}); });
+  return linhas.map(l=>l.it.sort((a,b)=>a.x-b.x).map(i=>i.s).join(' ')).join('\n');
+}
+async function _lancctbIcmsLerPdf(file){
+  const pdf=await pdfjsLib.getDocument({data:await file.arrayBuffer()}).promise;
+  const paginas=[];
+  for(let p=1;p<=pdf.numPages;p++){ const pg=await pdf.getPage(p); const tc=await pg.getTextContent(); paginas.push(_lancctbIcmsTextoPagina(tc.items)); }
+  return paginas;
+}
+// Cliente: o relatório só traz o código. O nome vem das NFs de SAÍDA já importadas (mesmo número, empresa da unidade).
+async function _lancctbIcmsPreencherClientes(eid,rows){
+  const faltam=rows.filter(r=>!r.cliente&&r.doc&&r.tipo!==LANCCTB_ICMS_TIPOS.ant&&/^\d+$/.test(String(r.unidade)));
+  if(!faltam.length||!_supaClient) return 0;
+  const eids=[...new Set(faltam.map(r=>String(r.unidade)))];
+  const nums=[...new Set(faltam.map(r=>String(r.doc)))];
+  const mapa=new Map();
+  for(let i=0;i<nums.length;i+=150){
+    try{
+      const { data } = await _supaClient.from('notas_fiscais').select('numero,nome_destinatario,empresa_eid').in('empresa_eid',eids).eq('direcao','venda').in('numero',nums.slice(i,i+150));
+      (data||[]).forEach(n=>{ const k=String(n.empresa_eid)+'|'+String(n.numero).replace(/^0+/,''); if(n.nome_destinatario&&!mapa.has(k)) mapa.set(k,n.nome_destinatario); });
+    }catch(e){ console.warn('ICMS: busca do cliente nas NFs de saída falhou:',e); }
+  }
+  let n=0; faltam.forEach(r=>{ const nome=mapa.get(String(r.unidade)+'|'+String(r.doc).replace(/^0+/,'')); if(nome){ r.cliente=nome; n++; } });
+  return n;
+}
+async function _lancctbIcmsAnexar(files){
+  const eid=_lancctbEidAtual; const lista=Array.from(files||[]); if(!lista.length) return;
+  const st=document.getElementById('lancctbIcmsStatus');
+  const porMes=new Map(); let avisos=[], lidos=0, naoLidos=[];
+  for(const f of lista){
+    if(st) st.textContent=`Lendo ${f.name}…`;
+    try{
+      const paginas=await _lancctbIcmsLerPdf(f);
+      const r=_lancctbIcmsAnalisarTexto(paginas,S.emps());
+      if(!r.rows.length){ naoLidos.push(f.name); continue; }
+      lidos++; avisos=avisos.concat(r.avisos);
+      r.rows.forEach(x=>{ if(!porMes.has(x.mes)) porMes.set(x.mes,[]); porMes.get(x.mes).push(x); });
+    }catch(e){ console.error('ICMS: erro ao ler '+f.name,e); naoLidos.push(f.name); }
+  }
+  let novos=0, atualizados=0, comNome=0;
+  for(const [mes,novas] of porMes){
+    const atuais=_lancctbIcmsLer(eid,mes); const idx=new Map(atuais.map(r=>[r.id,r]));
+    novas.forEach(x=>{ const ex=idx.get(x.id); if(ex){ ex.valor=x.valor; ex.fcp=x.fcp; ex.data=x.data; ex.cod=x.cod; atualizados++; } else { atuais.push(x); idx.set(x.id,x); novos++; } });
+    if(st) st.textContent=`Buscando o nome dos clientes nas NFs de saída (${mes})…`;
+    comNome+=await _lancctbIcmsPreencherClientes(eid,atuais);
+    _lancctbIcmsSalvar(eid,mes,atuais);
+  }
+  if(st) st.textContent='';
+  if(porMes.size&&!porMes.has(_lancctbIcmsMes)) _lancctbIcmsMes=[...porMes.keys()].sort().slice(-1)[0];
+  toast(`ICMS: ${lidos} relatório(s) lido(s) — ${novos} NF(s) nova(s)${atualizados?`, ${atualizados} atualizada(s)`:''}, ${comNome} com nome do cliente achado nas NFs de saída.${naoLidos.length?' Não consegui ler: '+naoLidos.join(', ')+'.':''}${avisos.length?' ⚠ '+avisos.length+' conferência(s) de total não fecharam (veja o console).':''}`,(naoLidos.length||avisos.length)?'err':'ok');
+  if(avisos.length) console.warn('ICMS — conferências que não fecharam:\n'+avisos.join('\n'));
+  renderLancctbIcms();
+}
+function _lancctbIcmsMudarMes(v){ if(v) _lancctbIcmsMes=v; renderLancctbIcms(); }
+function _lancctbIcmsFiltroDebounced(v){
+  _lancctbIcmsFiltro=v; clearTimeout(_lancctbIcmsFiltroTimer);
+  _lancctbIcmsFiltroTimer=setTimeout(_lancctbIcmsPintarTabela,250);
+}
+function _lancctbIcmsPintarTabela(){
+  const el=document.getElementById('lancctbIcmsTabela'); if(!el) return;
+  const t=_convMpRemoverAcentos(String(_lancctbIcmsFiltro||'').toUpperCase()).trim();
+  const todas=_lancctbIcmsRowsMes.slice().sort((a,b)=>String(a.data).localeCompare(String(b.data))||String(a.doc).localeCompare(String(b.doc),'pt',{numeric:true}));
+  const rows=t?todas.filter(r=>_convMpRemoverAcentos(`${r.tipo} ${r.doc} ${r.cliente||''} ${r.cod||''} ${r.unidade} ${r.uf} ${_fmt(r.valor)}`.toUpperCase()).includes(t)):todas;
+  const LIM=700;
+  el.innerHTML=`<table style="width:100%;border-collapse:collapse;font-size:12.5px">
+    <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0">
+      <th style="padding:7px 10px;text-align:left">Data</th><th style="padding:7px 10px;text-align:left">Tipo de imposto</th><th style="padding:7px 10px;text-align:left">NF</th>
+      <th style="padding:7px 10px;text-align:left">Fornecedor/Cliente</th><th style="padding:7px 10px;text-align:center">Unidade</th><th style="padding:7px 10px;text-align:center">UF</th>
+      <th style="padding:7px 10px;text-align:right">Valor do imposto</th><th style="padding:7px 10px;text-align:center">No extrato</th></tr></thead>
+    <tbody>${rows.slice(0,LIM).map(r=>`<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:6px 10px;white-space:nowrap">${esc(String(r.data||'').split('-').reverse().join('/'))}</td>
+      <td style="padding:6px 10px">${esc(r.tipo)}</td>
+      <td style="padding:6px 10px;font-family:var(--mono)">${esc(r.doc)}</td>
+      <td style="padding:6px 10px">${r.cliente?esc(r.cliente):`<span style="color:var(--slate)">${r.cod?'Cód. '+esc(r.cod)+' (NF de saída não importada)':'—'}</span>`}</td>
+      <td style="padding:6px 10px;text-align:center">${esc(r.unidade)}</td>
+      <td style="padding:6px 10px;text-align:center">${esc(r.uf)}</td>
+      <td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap">R$ ${_fmt(r.valor)}${r.dev?' <span style="color:var(--slate);font-size:11px">devolução</span>':''}</td>
+      <td style="padding:6px 10px;text-align:center">${r.ext?'<span style="color:var(--green)" title="Identificado num pagamento do extrato">✔</span>':'<span style="color:var(--slate)">—</span>'}</td></tr>`).join('')||'<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--slate)">Nenhuma NF neste filtro.</td></tr>'}</tbody></table>
+    ${rows.length>LIM?`<div style="padding:8px;color:var(--slate);font-size:12px">Mostrando ${LIM} de ${rows.length} — use o filtro pra achar as demais.</div>`:''}`;
+  const c=document.getElementById('lancctbIcmsContagem'); if(c) c.textContent=`${rows.length} NF(s) · R$ ${_fmt(rows.reduce((s,r)=>s+(r.valor||0),0))}`;
+}
+async function renderLancctbIcms(){
+  const el=document.getElementById('lancctbConteudoAba'); const eid=_lancctbEidAtual;
+  if(!_lancctbIcmsMes) _lancctbIcmsMes=S.fechAtual()||_cronHoje().slice(0,7);
+  _lancctbIcmsRowsMes=_lancctbIcmsLer(eid,_lancctbIcmsMes);
+  const resumo=new Map();
+  _lancctbIcmsRowsMes.forEach(r=>{ const k=[r.tipo,r.uf,r.unidade].join('|'); const x=resumo.get(k)||{tipo:r.tipo,uf:r.uf,unidade:r.unidade,n:0,total:0}; x.n++; x.total+=r.valor||0; resumo.set(k,x); });
+  const resumoHtml=[...resumo.values()].sort((a,b)=>a.tipo.localeCompare(b.tipo)||String(a.unidade).localeCompare(String(b.unidade))||a.uf.localeCompare(b.uf))
+    .map(x=>`<tr><td style="padding:3px 10px">${esc(x.tipo)}</td><td style="padding:3px 10px;text-align:center">${esc(x.unidade)}</td><td style="padding:3px 10px;text-align:center">${esc(x.uf)}</td><td style="padding:3px 10px;text-align:right">${x.n}</td><td style="padding:3px 10px;text-align:right;font-variant-numeric:tabular-nums">R$ ${_fmt(x.total)}</td></tr>`).join('');
+  el.innerHTML=`
+  <div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
+    <span style="font-size:12px;color:var(--slate)">Competência:</span>
+    <input class="si" type="month" value="${esc(_lancctbIcmsMes)}" onchange="_lancctbIcmsMudarMes(this.value)" style="width:150px">
+    <input type="file" id="lancctbIcmsInput" accept=".pdf,application/pdf" multiple style="display:none" onchange="_lancctbIcmsAnexar(this.files);this.value=''">
+    <button class="btn" style="background:var(--teal);color:#fff" onclick="document.getElementById('lancctbIcmsInput').click()" title="Anexe os relatórios do Domínio: Demonstrativo do ICMS DIFAL Não Contribuinte, da Substituição Tributária e da Antecipação Total — de cada unidade (163, 164, 185)">📎 Anexar relatórios de ICMS (PDF)</button>
+    <input class="si" placeholder="🔎 filtrar (NF, cliente, UF, valor…)" value="${esc(_lancctbIcmsFiltro)}" oninput="_lancctbIcmsFiltroDebounced(this.value)" style="flex:1;min-width:200px;max-width:340px">
+    <span id="lancctbIcmsContagem" style="font-size:12px;color:var(--slate)"></span><span id="lancctbIcmsStatus" style="font-size:12px;color:var(--slate)"></span>
+  </div>
+  <div style="font-size:12px;color:var(--slate);margin-bottom:10px;line-height:1.5">Esta base é usada pelo <b>Processar Tributos</b>: pagamento de GNRE/DUA/SEFAZ com <b>UF</b> e <b>valor exato</b> de uma NF (ou da soma das NFs do mês da mesma UF) é identificado com o tipo do imposto, a competência, a NF e a unidade. DIFAL usa a coluna “Valor total DIFAL”; Substituição Tributária, “Valor do imposto”. A competência vale o mês do relatório (o pagamento costuma sair no mês seguinte).</div>
+  ${resumoHtml?`<details style="margin-bottom:10px" open><summary style="cursor:pointer;font-size:12.5px;font-weight:600">Resumo do mês por tipo, unidade e UF</summary>
+    <table style="border-collapse:collapse;font-size:12px;margin-top:6px"><thead><tr style="color:var(--slate)"><th style="padding:3px 10px;text-align:left">Tipo</th><th style="padding:3px 10px">Unidade</th><th style="padding:3px 10px">UF</th><th style="padding:3px 10px;text-align:right">NFs</th><th style="padding:3px 10px;text-align:right">Total</th></tr></thead><tbody>${resumoHtml}</tbody></table></details>`:''}
+  <div style="overflow:auto;max-height:calc(100vh - 380px)" id="lancctbIcmsTabela"></div>
+  ${_lancctbIcmsRowsMes.length?'':`<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhum relatório de ICMS nesta competência. Clique em “Anexar relatórios de ICMS” e escolha os PDFs do Domínio.</div>`}`;
+  _lancctbIcmsPintarTabela();
+}
+// Procura, entre as NFs da base, a que o pagamento do extrato quitou. Sem UF no histórico só aceita se TODOS os candidatos forem do mesmo tipo/UF/unidade; ambíguo → null (fica pendente).
+function _lancctbIcmsAcharPagamento(l,ctx){
+  const hist=String(l.historico_bancario||'');
+  if(!_lancctbHistoricoEhTributo(hist)) return null; // só histórico que NORMALMENTE é tributo (Sispag Tributos, Impostos GNRE…) — nunca Sispag Fornecedores/PIX comum
+  const h=_convMpRemoverAcentos(hist.toUpperCase());
+  if(!/GNRE|\bDUA\b|\bDAE\b|SEFAZ|\bGOV\b|FAZENDA|ICMS|TRIBUTOS|IMPOSTOS/.test(h)) return null;
+  if(/DARF|RECEITA FEDERAL|\bGPS\b|FGTS|\bDAS\b|SIMPLES|\bINSS\b|ISS\b/.test(h)) return null;
+  const ufH=_lancctbUfDoTexto(hist);
+  const cents=Math.round((l.valor_saida||0)*100); if(cents<=0) return null;
+  const [a,m]=String(l.data_pagamento||'').split('-').map(Number); if(!a||!m) return null;
+  const mesAdd=k=>{ let y=a,mm=m+k; while(mm<1){mm+=12;y--;} while(mm>12){mm-=12;y++;} return y+'-'+String(mm).padStart(2,'0'); };
+  const fx=(ctx.fluxo&&ctx.fluxo[l.id])||[], nfsFx=new Set(fx.map(x=>x.nf).filter(Boolean));
+  for(const k of [-1,0,-2]){
+    const mes=mesAdd(k);
+    const livres=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&(!ufH||r.uf===ufH));
+    let sing=livres.filter(r=>Math.round(r.valor*100)===cents);
+    // ajuda do Fluxo de Caixa: a NF que a linha do Fluxo ligada a este extrato cita desempata candidatos iguais
+    if(sing.length>1&&nfsFx.size){ const f2=sing.filter(r=>nfsFx.has(String(r.doc).replace(/^0+/,''))); if(f2.length) sing=f2; }
+    if(sing.length){
+      if(new Set(sing.map(r=>r.tipo+'|'+r.uf+'|'+r.unidade)).size>1) return {ambiguo:true};
+      sing.sort((x,y)=>String(x.data).localeCompare(String(y.data))||String(x.doc).localeCompare(String(y.doc),'pt',{numeric:true}));
+      return {rows:[sing[0]],mes};
+    }
+    const gs=new Map(); livres.forEach(r=>{ const key=r.tipo+'|'+r.uf+'|'+r.unidade; if(!gs.has(key)) gs.set(key,[]); gs.get(key).push(r); });
+    const ach=[...gs.values()].filter(g=>g.length>=2&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents);
+    if(ach.length===1) return {rows:ach[0],mes};
+    if(ach.length>1) return {ambiguo:true};
+  }
+  // Último recurso — Fluxo de Caixa: as NFs citadas pelas linhas do Fluxo ligadas a este pagamento (e a UF delas), conferidas contra a base: a soma tem que fechar o valor do banco.
+  if(nfsFx.size){
+    const ufsFx=new Set(fx.map(x=>x.uf).filter(Boolean));
+    const todas=[]; for(const k of [-1,0,-2]) (ctx.rows[mesAdd(k)]||[]).forEach(r=>{ if((!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&(!ufH||r.uf===ufH)&&(!ufsFx.size||ufsFx.has(r.uf))) todas.push(r); });
+    if(todas.length&&new Set(todas.map(r=>r.tipo+'|'+r.uf+'|'+r.unidade)).size===1&&Math.abs(todas.reduce((s,r)=>s+Math.round(r.valor*100),0)-cents)<=1) return {rows:todas,mes:todas[0].mes};
+  }
+  return null;
+}
+async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir}){
+  const r=_lancctbIcmsAcharPagamento(l,ctx);
+  if(!r) return null; if(r.ambiguo) return 'ambiguo';
+  const rows=r.rows, r0=rows[0], tipo=r0.tipo;
+  const rotulo=rows.length===1?`${tipo} ref. ${r0.compet} NF ${r0.doc} UF ${r0.uf} UN ${r0.unidade}`:`${tipo} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${rows.length} NFs)`;
+  const valor=Math.round((l.valor_saida||0)*100)/100;
+  const semMarca=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
+  const desfazer=()=>{ rows.forEach(x=>{ if(x.ext===l.id) x.ext=null; ctx.usados.delete(x.id); }); };
+  rows.forEach(x=>{ ctx.usados.add(x.id); x.ext=l.id; }); rows.forEach(x=>ctx.mesesTocados.add(x.mes));
+  const histItem=`Pagamento ref. ${rotulo}`;
+  const regra=(regras||[]).find(g=>(!g.agencia_bancaria_id||String(g.agencia_bancaria_id)===String(contaId))&&g.historico_gatilho&&String(g.historico_gatilho).toLowerCase()===tipo.toLowerCase()&&g.plano_contas);
+  if(regra){
+    const linhas=[
+      { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:histItem, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+      { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:histItem, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+    ];
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(error){ console.error('ICMS: erro ao gerar o lançamento:',error); desfazer(); return null; }
+    await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado', historico_bancario:`[${rotulo}] ${semMarca}`.trim() }).eq('id',l.id);
+    return 'resolvido';
+  }
+  // Sem Regra ainda (1ª vez deste tipo): identifica na própria linha e abre a classificação — a Regra criada (gatilho = tipo do imposto) resolve os próximos sozinha.
+  const item={ codigo:null, denominacao:tipo, valor, resumo:rotulo, competencia:r0.compet, gatilho:tipo, historico:histItem };
+  const novoHist=`[${rotulo}] ${semMarca}`.trim();
+  const { error: eU } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:novoHist, origem_importacao:'tributo_composicao', composicao_tributo:[item] }).eq('id',l.id);
+  if(eU){ console.error('ICMS: erro ao identificar o pagamento:',eU); desfazer(); return null; }
+  l.historico_bancario=novoHist; l.composicao_tributo=[item]; composicoesParaAbrir.push(l);
+  return 'marcado';
+}
+async function _lancctbIcmsCarregarCtx(eid,pendencias){
+  const ctx={ rows:{}, usados:new Set(), mesesTocados:new Set(), total:0, fluxo:{} };
+  const meses=new Set();
+  (pendencias||[]).forEach(l=>{ const [a,m]=String(l.data_pagamento||'').split('-').map(Number); if(!a||!m) return; for(let k=-2;k<=0;k++){ let y=a,mm=m+k; while(mm<1){mm+=12;y--;} meses.add(y+'-'+String(mm).padStart(2,'0')); } });
+  meses.forEach(mes=>{ const r=_lancctbIcmsLer(eid,mes); if(r.length){ ctx.rows[mes]=r; ctx.total+=r.length; } });
+  if(ctx.total&&_supaClient){
+    const ids=(pendencias||[]).map(l=>l.id);
+    for(let i=0;i<ids.length;i+=200){
+      try{
+        const { data } = await _supaClient.from('fluxo_caixa_lancamentos').select('descricao,cliente_fornecedor_nome,numero,documento_numero,lancamento_extrato_id').eq('empresa_eid',eid).in('lancamento_extrato_id',ids.slice(i,i+200));
+        (data||[]).forEach(f=>{
+          const d=String(f.descricao||''); const mNf=d.match(/\bNF\s*(\d+)/i);
+          const nf=String(f.numero||f.documento_numero||(mNf&&mNf[1])||'').replace(/\D/g,'').replace(/^0+/,'');
+          const mUf=d.match(/(?:PARTILHADO|ICMS|DIFAL)\s*\/\s*([A-Z]{2})\b/i);
+          const uf=mUf?mUf[1].toUpperCase():_lancctbUfDoTexto(f.cliente_fornecedor_nome||'');
+          (ctx.fluxo[f.lancamento_extrato_id]=ctx.fluxo[f.lancamento_extrato_id]||[]).push({nf,uf});
+        });
+      }catch(e){ console.warn('ICMS: leitura do Fluxo ligado aos extratos falhou:',e); }
+    }
+  }
+  return ctx;
+}
+function _lancctbIcmsPersistirCtx(eid,ctx){ ctx.mesesTocados.forEach(mes=>{ try{ _lancctbIcmsSalvar(eid,mes,ctx.rows[mes]||[]); }catch(e){ console.error('ICMS: não consegui gravar o mês '+mes,e); } }); }
+
 async function _lancctbProcessarTributos(){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   // Achado real 15/09/2026 (Accurare, TFE 27/07 duplicada 2x): o botão só
@@ -34966,6 +35251,8 @@ async function _lancctbProcessarTributos(){
   // automaticamente ao final, em vez de deixar só pendente esperando o
   // contador achar o ícone de lápis na tabela.
   const composicoesParaAbrir=[];
+  let icmsRes=0, icmsMarc=0, icmsAmb=0; let icmsCtx=null;
+  try{ icmsCtx=await _lancctbIcmsCarregarCtx(eid,pendencias); if(!icmsCtx.total) icmsCtx=null; }catch(e){ console.warn('ICMS: base não carregou:',e); icmsCtx=null; }
   try{ await _lancctbPreLerGuiasTributos(eid,pendencias,cacheLeituraPdf,cachePorMes,statusEl); }
   catch(e){ console.error('Leitura antecipada das guias falhou (o laço lê uma a uma):',e); }
   for(let i=0;i<pendencias.length;i++){
@@ -35095,6 +35382,14 @@ async function _lancctbProcessarTributos(){
       }
     }
     if(!achou&&folga){ achou={f:folga.f,extraido:folga.extraido,diferenca:folga.diferenca}; arquivosUsados.add(folga.chaveArquivo); }
+    // Ordem (pedido do usuário 27/10/2026): 1º a pasta Tributos do Mês (acima); só se ela não resolveu entra a base de ICMS por NF (aba ICMS): valor exato + UF do histórico
+    // (ou soma das NFs da UF no mês, já líquida de devoluções) identifica tipo, competência, NF e unidade.
+    if(!achou&&icmsCtx&&!l._soExato){
+      const ri=await _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx:icmsCtx,composicoesParaAbrir});
+      if(ri==='resolvido'){ resolvidos++; icmsRes++; continue; }
+      if(ri==='marcado'){ tributosDivididos++; icmsMarc++; continue; }
+      if(ri==='ambiguo') icmsAmb++;
+    }
     if(!achou){ if(!l._soExato) semAchado++; continue; }
     const info=_lancctbParsearNomeArquivoTributo(achou.f.nome);
     // Divide o extrato quando o pagamento passou do valor do tributo.
@@ -35284,6 +35579,7 @@ async function _lancctbProcessarTributos(){
     await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
     resolvidos++;
   }
+  if(icmsCtx){ _lancctbIcmsPersistirCtx(eid,icmsCtx); if(icmsRes||icmsMarc||icmsAmb) toast(`ICMS (base por NF): ${icmsRes} pagamento(s) classificado(s) por Regra, ${icmsMarc} identificado(s) aguardando a Regra do tipo${icmsAmb?`, ${icmsAmb} ambíguo(s) (mais de uma NF/UF com o mesmo valor — deixados pendentes)`:''}.`,'ok'); }
   if(btn) btn.disabled=false;
   if(statusEl) statusEl.textContent='';
   const detalheSemAchado=semAchado?` (${semPdfNaPasta} sem NENHUM PDF na pasta do mês pra esta empresa — confira o nome do arquivo/pasta; ${semAchado-semPdfNaPasta} tinham PDF mas nenhum bateu o valor)`:'';
