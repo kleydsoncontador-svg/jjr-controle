@@ -26541,7 +26541,7 @@ async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
   // FGTS Digital escaneado: o que é pago é o "Total da Guia" (FGTS + consignado), não o 1º "Total…"
   const mGuia=textoOcr.match(/total\s*da\s*guia:?\s*(?:R\$\s*)?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
   if(mGuia&&/fgts/i.test(textoOcr)) return { valor:_lancctbParseValorBR2(mGuia[1]), composicao:null, competencia:null, viaOcr:true };
-  if(mTotal) return { valor:_lancctbParseValorBR2(mTotal[1]), composicao:null, competencia:null, viaOcr:true };
+  if(mTotal){ const gn=_lancctbGnreDoTexto(textoOcr); return { valor:_lancctbParseValorBR2(mTotal[1]), composicao:null, competencia:(gn&&gn.referencia)||null, viaOcr:true, ...(gn?{gnre:gn}:{}) }; }
   // Guia de pagamento/boleto municipal escaneado (ex: ISS retido da Prefeitura de Ibirité): "(=) VALOR COBRADO" (já com
   // juros/multa) ou, na falta dele, "(=) VALOR DO DOCUMENTO" — pedido do usuário 03/10/2026 ("precisa ler, mesmo sendo imagem").
   const posGuia=_lancctbOcrValorGuiaMunicipal(porPagina[0].itens);
@@ -34887,6 +34887,23 @@ async function _lancctbPreLerGuiasTributos(eid,pendencias,cacheLeituraPdf,cacheP
   try{ await Promise.all(Array.from({length:Math.min(3,total)},trabalhador)); }
   finally { await _lancctbOcrPoolEnxugar(); }
 }
+// GNRE (Guia Nacional de Recolhimento de Tributos Estaduais — "Emissão de GNRE on-line", só imagem): lê UF favorecida, código da receita, período de referência e o tipo do ICMS pelas
+// "Informações Complementares" (ex.: "ICMS/ST POR APURAÇÃO - MES REF. 07/2026" → Substituição Tributária; DIFAL/consumidor final → DIFAL Não Contribuinte). Pedido do usuário 27/10/2026.
+function _lancctbGnreDoTexto(texto){
+  const t=String(texto||'').replace(/\s+/g,' ');
+  if(!/GNRE|Guia Nacional de Recolhimento/i.test(t)) return null;
+  const mUf=t.match(/UF\s*Favorecida\s*:?\s*([A-Z]{2})\b/);
+  const mCod=t.match(/C[óo]digo\s*da\s*Receita\s*:?\s*(?:\S+\s+){0,2}?(\d{6})\b/i)||t.match(/\b(100\d{3}|10\d{4})\b/);
+  const mRef=t.match(/Per[íi]odo\s*de\s*Refer[êe]ncia\s*:?\s*(?:\S+\s+){0,2}?(\d{2}\/\d{4})/i);
+  const mInfo=t.match(/Informa[çc][õo]es\s*Complementares:?\s*(.{0,90})/i);
+  const info=mInfo?mInfo[1]:t;
+  let tipo=null;
+  if(/DIFAL|DIFERENCIAL|CONSUMIDOR\s*FINAL|N[ÃA]O\s*CONTRIBUINTE/i.test(info)) tipo='difal';
+  else if(/ICMS\s*\/?\s*ST|SUBSTITUI[ÇC][ÃA]O\s*TRIBUT/i.test(info)) tipo='st';
+  return { uf:mUf?mUf[1]:null, codigo:mCod?mCod[1]:null, referencia:mRef?mRef[1]:null, tipo, tipoNome:tipo?LANCCTB_ICMS_TIPOS[tipo]:null };
+}
+// UF da guia pelo nome do arquivo ("… GNRE 07.2026 PR - vencimento …") quando o OCR não a trouxe
+function _lancctbGnreUfDoNome(nome){ const m=String(nome||'').match(/GNRE[^-]*?\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b/); return m?m[1]:null; }
 // ═══ ICMS por NF (DIFAL Não Contribuinte / Substituição Tributária) — pedido do usuário 27/10/2026 (Fast Lube) ═══════════════════════════════════════════════════════
 // O contador anexa os relatórios do Domínio (por UF, por NF) na aba "ICMS". Processar Tributos usa essa base pra reconhecer os pagamentos de ICMS do extrato (GNRE/DUA/SEFAZ),
 // que são muitos e pequenos: valor exato + UF do histórico → identifica tipo, competência, NF e unidade (163/164/185). DIFAL: coluna "Valor total DIFAL"; ST: coluna "Valor do imposto".
@@ -35302,6 +35319,7 @@ async function _lancctbProcessarTributos(){
         cacheLeituraPdf[chaveArquivo]=extraido;
       }
       if(!extraido) continue;
+      { const ufG=(extraido.gnre&&extraido.gnre.uf)||_lancctbGnreUfDoNome(f.nome), ufP=_lancctbUfDoTexto(l.historico_bancario); if(ufG&&ufP&&ufG!==ufP) continue; } // UF é filtro duro: pagamento "…SEFAZ ES" nunca casa com GNRE do PR
       if(!_lancctbJurisdicaoCompativel(l.historico_bancario,f.nome,extraido)) continue; // esfera diferente (ex.: histórico "PREF MUN" × DAE de ICMS estadual): nunca casa
       // Bate exato (±2,00) OU o pagamento é MAIOR que o tributo por até 30%
       // — nesse 2º caso o lançamento é dividido: valor exato do tributo +
@@ -35431,7 +35449,8 @@ async function _lancctbProcessarTributos(){
     // lido do PDF): "CP DESCONTADA SEGURADO", "DAS", "PIS", "COFINS"…
     const _nlR=_lancctbNomeTributoLegivel(info.descricao);
     const _parcG=achou.extraido&&achou.extraido.parcelamento;
-    const palheiroGuia=[info.descricao,_nlR.nomeCompleto,_nlR.token,...((achou.extraido&&achou.extraido.composicao)||[]).flatMap(c=>[c.denominacao,String(c.denominacao||'').split(' - ')[0],String(c.denominacao||'').split(' - ')[0]+' cód. '+c.codigo,c.denominacao+' cód. '+c.codigo])].filter(Boolean).join(' | ').toLowerCase();
+    const _gnG=achou.extraido&&achou.extraido.gnre;
+    const palheiroGuia=[info.descricao,_nlR.nomeCompleto,_nlR.token,...(_gnG&&_gnG.tipoNome?[_gnG.tipoNome]:[]),...((achou.extraido&&achou.extraido.composicao)||[]).flatMap(c=>[c.denominacao,String(c.denominacao||'').split(' - ')[0],String(c.denominacao||'').split(' - ')[0]+' cód. '+c.codigo,c.denominacao+' cód. '+c.codigo])].filter(Boolean).join(' | ').toLowerCase();
     const guiaComVariosItens=!!(achou.extraido&&achou.extraido.composicao&&achou.extraido.composicao.length>=2);
     const _regrasDaGuia=guiaComVariosItens?[]:regras.filter(r=>{
       if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
@@ -35503,7 +35522,8 @@ async function _lancctbProcessarTributos(){
         // (nome do arquivo), com o histórico "Pagamento ref. DAS <competência>"
         // atualizando a competência sozinho (historico_fixo).
         const compet1=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao)||'';
-        const nomeGuia=(_lancctbNomeTributoLegivel(info.descricao).nomeCompleto||info.descricao||'').trim();
+        const _gn1=achou.extraido&&achou.extraido.gnre, _un1=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1];
+        const nomeGuia=(_gn1&&_gn1.tipoNome?`${_gn1.tipoNome}${_gn1.uf||_lancctbGnreUfDoNome(achou.f.nome)?' UF '+(_gn1.uf||_lancctbGnreUfDoNome(achou.f.nome)):''}${_un1?' UN '+_un1:''}`:(_lancctbNomeTributoLegivel(info.descricao).nomeCompleto||info.descricao||'')).trim();
         // Pedido do usuário 25/09/2026: o gatilho é o que CONSTA NA GUIA (denominação
         // do imposto dentro do PDF, ex: "CP DESCONTADA SEGURADO"; DAS/TFE sem
         // código: o nome do tributo), nunca um pedaço do nome do arquivo ("Guia",
@@ -35512,7 +35532,7 @@ async function _lancctbProcessarTributos(){
         const nlg=_lancctbNomeTributoLegivel(info.descricao);
         // Guia de PARCELAMENTO com número impresso: o gatilho é "Parcelamento <nº>" — o nome do arquivo muda todo mês ("32ª Parcela… 09.2026" → "33ª…"), o número do parcelamento não.
         const parc1=achou.extraido&&achou.extraido.parcelamento;
-        const gatilhoGuia=parc1?('Parcelamento '+parc1.numero):((c0g?String(c0g.denominacao).split(' - ')[0].trim():(nlg.token||nomeGuia))||nomeGuia);
+        const gatilhoGuia=parc1?('Parcelamento '+parc1.numero):(_gn1&&_gn1.tipoNome?_gn1.tipoNome:(c0g?String(c0g.denominacao).split(' - ')[0].trim():(nlg.token||nomeGuia))||nomeGuia);
         const semMarca1=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
         // DARF de 1 imposto (ex: CP DESCONTADA SEGURADO cód. 1099): o nome vem
         // da denominação DENTRO do PDF, com código — igual à guia composta
