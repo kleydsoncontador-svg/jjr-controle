@@ -31893,11 +31893,14 @@ function _lancctbEscolherFluxoLigado(lista,r){
 async function _lancctbExtratosLigadosConciliados(fluxoLinhas,ignorarIds){
   const ids=[...new Set((fluxoLinhas||[]).map(f=>f.lancamento_extrato_id).filter(x=>x&&!(ignorarIds&&ignorarIds.has(x))))];
   const conc=new Set();
-  for(let i=0;i<ids.length;i+=150){
-    try{
-      const { data } = await _supaClient.from('lancamentos_extrato').select('id,status_conciliacao').in('id',ids.slice(i,i+150));
-      (data||[]).forEach(x=>{ if(x.status_conciliacao==='conciliado') conc.add(x.id); });
-    }catch(e){ console.warn('status dos extratos ligados ao Fluxo:',e); }
+  const lotes=[]; for(let i=0;i<ids.length;i+=150) lotes.push(ids.slice(i,i+150));
+  for(let g=0;g<lotes.length;g+=8){ // 8 lotes por vez (antes: um de cada vez, ~8 s com 5 mil linhas)
+    await Promise.all(lotes.slice(g,g+8).map(async lote=>{
+      try{
+        const { data } = await _supaClient.from('lancamentos_extrato').select('id,status_conciliacao').in('id',lote);
+        (data||[]).forEach(x=>{ if(x.status_conciliacao==='conciliado') conc.add(x.id); });
+      }catch(e){ console.warn('status dos extratos ligados ao Fluxo:',e); }
+    }));
   }
   return conc;
 }
@@ -37223,14 +37226,26 @@ async function renderLancctbRegistroContabil(){
       // pendente, sugere a NF pendente mais próxima por valor+data (mesma
       // lógica de tolerância do resto do módulo) e já mostra Data
       // Parcela/Mês Bate como PALPITE (itálico), antes de confirmar.
-      _lancctbFetchTudoParalelo(()=>{
-        let q=_supaClient.from('notas_fiscais_parcelas')
-          .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,data_emissao)')
-          .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
-        if(_dMinPnd) q=q.gte('data_vencimento',_dMinPnd);
-        if(_dMaxPnd) q=q.lte('data_vencimento',_dMaxPnd);
-        return q;
-      }),
+      (async()=>{
+        // 27/10/2026 (filtros lentíssimos): com linhas espalhadas pelo mês a janela de datas trazia ~75 mil parcelas (27 s). A sugestão de NF compara valor_parcela com o valor do banco (±0,02), então
+        // só as parcelas de valor igual a algum pagamento mostrado interessam — o resultado na tela é idêntico.
+        const _cents=new Set(); pendentes.forEach(it=>{ const c=Math.round((it.extrato.valor_saida||it.extrato.valor_entrada||0)*100); if(c>0) for(let d=-2;d<=2;d++) _cents.add(c+d); });
+        const _vals=[..._cents].map(c=>(c/100).toFixed(2));
+        const partes=[]; for(let i=0;i<_vals.length;i+=200) partes.push(_vals.slice(i,i+200));
+        const out=[]; let erro=null;
+        for(let g=0;g<partes.length;g+=6){
+          const rs=await Promise.all(partes.slice(g,g+6).map(part=>_lancctbFetchTudoParalelo(()=>{
+            let q=_supaClient.from('notas_fiscais_parcelas')
+              .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,data_emissao)')
+              .eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('valor_parcela',part);
+            if(_dMinPnd) q=q.gte('data_vencimento',_dMinPnd);
+            if(_dMaxPnd) q=q.lte('data_vencimento',_dMaxPnd);
+            return q;
+          })));
+          rs.forEach(r=>{ if(r.error) erro=r.error; (r.data||[]).forEach(x=>out.push(x)); });
+        }
+        return { data:out, error:erro };
+      })(),
       // Pedido do usuário 09/09/2026: "preciso ter a coluna Fluxo de Caixa,
       // pois posso criar regra por ela, tentando associar ao fluxo, pra
       // aqueles que ainda não estão conciliados" — mostra se já existe uma
