@@ -142,6 +142,26 @@
 .nbc-hist div{padding:3px 0;border-top:1px dashed var(--border)}
 .nbc-exp{margin-top:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg)}
 .nbc-exp>summary{cursor:pointer;padding:8px 10px;font-size:12.5px;font-weight:700;color:var(--ink);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.mm-wrap{overflow-x:auto;padding:10px 4px 18px}
+.mm-n{display:flex;align-items:center}
+.mm-kids{margin-left:26px;display:flex;flex-direction:column;gap:8px;border-left:2px solid var(--border);padding-left:0}
+.mm-kids>.mm-n{position:relative;padding-left:26px}
+.mm-kids>.mm-n::before{content:'';position:absolute;left:0;top:50%;width:26px;border-top:2px solid var(--border)}
+.mm-n.fechado>.mm-kids{display:none}
+.mm-box{max-width:330px;min-width:90px;padding:7px 10px;border:1.5px solid var(--border);border-radius:8px;background:var(--white,#fff);color:var(--ink);font-size:12.5px;line-height:1.4;cursor:default;position:relative}
+.mm-box.tem{cursor:pointer;padding-right:22px}
+.mm-box.tem::after{content:'−';position:absolute;right:7px;top:6px;color:var(--slate);font-weight:700}
+.mm-n.fechado>.mm-box.tem::after{content:'+'}
+.mm-box .d{display:block;margin-top:3px;font-size:11.5px;color:var(--slate);font-weight:400}
+.mm-raiz>.mm-box{background:var(--ink);color:var(--white,#fff);border-color:var(--ink);font-weight:700;font-size:13.5px;max-width:300px}
+.mm-raiz>.mm-box .d{color:inherit;opacity:.85}
+.mm-box.sim{background:#16653422;border-color:#16a34a;font-weight:700;min-width:0}
+.mm-box.nao{background:#dc262622;border-color:#dc2626;font-weight:700;min-width:0}
+.mm-box.res{background:#0d94881f;border-color:var(--teal);font-weight:700}
+.mm-box.nota{background:#d9770622;border-color:#d97706}
+.mm-box.alerta{background:#dc262622;border-color:#dc2626}
+.mm-box b{font-weight:700}
+.nbc-mm-btn{margin:0}
 .nbc-exp-abrir{margin-top:10px;width:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;text-align:left;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:12.5px;font-weight:700}
 .nbc-exp-abrir:hover{border-color:var(--teal)}
 .nbc-exp-corpo{padding:4px 12px 12px;font-size:12.5px;line-height:1.55;color:var(--ink)}
@@ -164,6 +184,7 @@
   window.renderNbc = function () {
     css(); const root = document.getElementById('nbcRoot'); if (!root) return;
     const d = ler(); const sec = SECOES.find(s => s.id === est.aba) || SECOES[0]; const todas = d.secoes[sec.id];
+    if (est.verMapa) { const sm = SECOES.find(z => z.id === est.verMapa.secId) || sec; const nm = (d.secoes[sm.id] || []).find(z => z.id === est.verMapa.id); if (nm) { root.innerHTML = paginaMapa(sm, nm); return; } est.verMapa = null; }
     if (est.ver) { const sv = SECOES.find(z => z.id === est.ver.secId) || sec; const nv = (d.secoes[sv.id] || []).find(z => z.id === est.ver.id); if (nv) { root.innerHTML = paginaExp(sv, nv); return; } est.ver = null; }
     const t = est.busca.trim().toLowerCase();
     const lista = t ? todas.filter(n => [n.codigo, n.nome, n.cpc, n.iasb, n.revisao].join(' ').toLowerCase().includes(t)) : todas;
@@ -246,11 +267,47 @@
   window.nbcVoltarExp = function () { const v = est.ver; est.ver = null; window.renderNbc(); setTimeout(() => { const el = v && document.getElementById('nbc_' + v.id); if (el) el.scrollIntoView({ block: 'center' }); else window.scrollTo(0, est.scroll || 0); }, 30); };
   function paginaExp(sec, n) {
     const link = n.url || sec.url; const x = expPartes(sec, n, link);
-    return `<div class="nbc-card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><button class="btn bo bsm" onclick="nbcVoltarExp()">← Voltar às normas (${E(sec.nome)})</button></div>
+    return `<div class="nbc-card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><button class="btn bo bsm" onclick="nbcVoltarExp()">← Voltar às normas (${E(sec.nome)})</button><button class="btn bp bsm nbc-mm-btn" onclick="nbcVerMapa('${sec.id}','${E(n.id)}')">🧠 Mapa mental desta norma</button></div>
       <div><span class="nbc-cod">${E(n.codigo)}</span>${n.revisao ? `<span class="nbc-rev">${E(n.revisao)}</span>` : ''}</div><div class="nbc-nome">${E(n.nome)}</div>
       <div class="nbc-sub" style="margin-bottom:8px">${[n.dou ? 'DOU ' + E(n.dou) : '', n.cpc ? E(n.cpc) : '', n.iasb ? E(n.iasb) : ''].filter(Boolean).join(' · ')}</div>
       <div class="nbc-exp"><div style="font-weight:600;margin-bottom:6px">${x.sum}</div>${x.corpo}</div>
       <div style="margin-top:12px"><button class="btn bo bsm" onclick="nbcVoltarExp()">← Voltar às normas (${E(sec.nome)})</button></div></div>`;
+  }
+  // ───────────────────────────── mapa mental ─────────────────────────────
+  // Mapa curado (window.NBC_MAPAS[codigo], arquivo nbc-mapas.js) ou, se não existir, um mapa GERADO da explicação publicada (pontos, palavras e exemplos).
+  function mapaAuto(n) {
+    const e = lerExp(n.id, n.codigo); if (!e) return null;
+    const cut = (t, k) => { t = String(t || ''); return t.length > k ? t.slice(0, k - 1).trim() + '…' : t; };
+    const f = [];
+    if (e.objetivo) f.push({ t: 'Para que serve', f: [{ t: cut(e.objetivo, 220) }] });
+    if ((e.pontos || []).length) f.push({ t: 'Pontos principais', f: e.pontos.map(p => ({ t: p.titulo || '', d: cut(p.texto, 240) })) });
+    if ((e.termos || []).length) f.push({ t: 'Palavras-chave', f: e.termos.map(x => ({ t: x.termo || '', d: cut(x.significado, 200) })) });
+    if ((e.exemplos || []).length) f.push({ t: 'Exemplos práticos', f: e.exemplos.map((x, i) => ({ t: (i + 1) + '. ' + (x.titulo || ''), d: cut(x.tratamento, 200) })) });
+    return { auto: true, raiz: { t: n.codigo + ' — ' + n.nome, d: e.resumo ? cut(e.resumo, 260) : '', f } };
+  }
+  function mmNo(nd, nivel, aberto) {
+    const f = nd.f || [], abre = aberto(nivel, nd);
+    return `<div class="mm-n ${nivel === 0 ? 'mm-raiz' : ''} ${f.length && !abre ? 'fechado' : ''}"><div class="mm-box ${f.length ? 'tem' : ''} ${nd.k || ''}" ${f.length ? 'onclick="nbcMmToggle(this)"' : ''}>${E(nd.t)}${nd.d ? `<span class="d">${E(nd.d)}</span>` : ''}</div>${f.length ? `<div class="mm-kids">${f.map(x => mmNo(x, nivel + 1, aberto)).join('')}</div>` : ''}</div>`;
+  }
+  window.nbcMmToggle = function (box) { box.parentElement.classList.toggle('fechado'); };
+  window.nbcMmTudo = function (abrir) { document.querySelectorAll('#nbcMapa .mm-n').forEach(x => { if (x.querySelector(':scope>.mm-kids')) x.classList.toggle('fechado', !abrir); }); };
+  window.nbcVerMapa = function (secId, id) { est.verMapa = { secId, id }; window.renderNbc(); window.scrollTo(0, 0); };
+  window.nbcVoltarDoMapa = function () { est.verMapa = null; window.renderNbc(); window.scrollTo(0, 0); };
+  window.nbcMapaImprimir = function () {
+    const el = document.getElementById('nbcMapa'); if (!el) return; const w = window.open('', '_blank'); if (!w) { toast('Libere pop-ups para imprimir.', 'err'); return; }
+    w.document.write('<!doctype html><meta charset="utf-8"><title>Mapa mental</title><style>:root{--border:#bbb;--ink:#111;--slate:#555;--teal:#0d9488;--white:#fff}body{font-family:Arial,sans-serif;margin:16px}' + CSS.split('.mm-wrap')[1].split('.nbc-exp-abrir')[0].replace(/^/, '.mm-wrap') + '</style><h2>' + E((document.getElementById('nbcMapaTitulo') || {}).textContent || '') + '</h2>' + el.innerHTML);
+    w.document.close(); w.focus(); setTimeout(() => w.print(), 300);
+  };
+  function paginaMapa(sec, n) {
+    const m = (window.NBC_MAPAS && window.NBC_MAPAS[n.codigo]) || mapaAuto(n);
+    const voltar = `<button class="btn bo bsm" onclick="nbcVoltarDoMapa()">← Voltar à explicação da norma</button><button class="btn bo bsm" onclick="nbcVoltarDoMapa();nbcVoltarExp()">← Voltar às normas (${E(sec.nome)})</button>`;
+    if (!m) return `<div class="nbc-card"><div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">${voltar}</div><div class="nbc-nome">${E(n.codigo)} — ${E(n.nome)}</div><div class="nbc-sub vazio">Esta norma ainda não tem explicação publicada, então ainda não há mapa mental. Assim que a explicação entrar, o mapa aparece aqui.</div></div>`;
+    const aberto = m.auto ? (nv => nv < 2) : (nv => nv < 4);
+    return `<div class="nbc-card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">${voltar}<span style="flex:1"></span><button class="btn bo bsm" onclick="nbcMmTudo(true)">Expandir tudo</button><button class="btn bo bsm" onclick="nbcMmTudo(false)">Recolher tudo</button><button class="btn bo bsm" onclick="nbcMapaImprimir()">🖨️ Imprimir / PDF</button></div>
+      <div id="nbcMapaTitulo" class="nbc-nome">🧠 Mapa mental — ${E(n.codigo)} · ${E(n.nome)}</div>
+      <div class="nbc-sub" style="margin-bottom:8px">${m.auto ? 'Mapa gerado automaticamente a partir da explicação desta norma (pontos, palavras e exemplos). Clique nos quadros com + / − para abrir e fechar os ramos.' : 'Mapa elaborado pelo escritório' + (m.autor ? ' — ' + E(m.autor) : '') + '. Clique nos quadros com + / − para abrir e fechar os ramos.'}</div>
+      <div id="nbcMapa" class="mm-wrap">${mmNo(m.raiz, 0, aberto)}</div>
+      <div style="margin-top:8px;font-size:11.5px;color:var(--slate)">Material de apoio ao estudo. Em caso de dúvida vale sempre o texto da norma original.</div></div>`;
   }
   window.nbcAba = function (a) { est.aba = a; est.busca = ''; window.renderNbc(); };
   window.nbcBusca = function (v) { est.busca = v; clearTimeout(window.__nbcT); window.__nbcT = setTimeout(window.renderNbc, 250); };
