@@ -33079,8 +33079,12 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   // (C) NFs citadas pelo Fluxo de Caixa (pagamento antecipado, valor diferente do banco): entram pelo NÚMERO da NF, só as pendentes que ainda não vieram por valor
   if(!_pulaParcelasNf&&parcelas){ try{
     const numsFx=[...(fluxoCaixaPonteBase||[]),...(fluxoCaixa||[])].map(f=>String(f.numero||f.documento_numero||'').split('/')[0].replace(/\D/g,'').replace(/^0+/,'')).filter(Boolean);
-    const extra=await _lancctbFetchParcelasPorNumeros(eid,numsFx); const jaTem=new Set(parcelas.map(x=>x.id)); extra.forEach(x=>{ if(!jaTem.has(x.id)){ jaTem.add(x.id); parcelas.push(x); } });
+    const extra=await _lancctbFetchParcelasPorNumeros(eid,numsFx); const jaTem=new Set(parcelas.map(x=>x.id)); extra.forEach(x=>{ if(!jaTem.has(x.id)){ jaTem.add(x.id); x._fx=true; parcelas.push(x); } });
   }catch(e){ console.warn('Parcelas das NFs citadas pelo Fluxo:',e); } }
+  // Índice das parcelas por VALOR (centavos): o motor testava as ~60 mil parcelas contra CADA lançamento (minutos). Candidata = valor a até 3 centavos do lançamento, ou parcela "livre" (NFS-e/NF com retenção — o valor líquido
+  // difere do bruto — e as citadas pelo Fluxo, que podem ter valor diferente do banco).
+  const parcelasIdx=(()=>{ const m=new Map(), fixas=[]; (parcelas||[]).forEach(p=>{ const c=Math.round((Number(p.valor_parcela)||0)*100); if(!m.has(c)) m.set(c,[]); m.get(c).push(p); const nf=p.notas_fiscais; if(p._fx||(nf&&(nf.tipo==='nfse'||nf.iss_valor>0||nf.pis_valor>0||nf.cofins_valor>0||nf.csll_valor>0||nf.irrf_valor>0))) fixas.push(p); }); return {m,fixas}; })();
+  const _parcCand=valorL=>{ const c=Math.round(valorL*100), out=[]; for(let d=-3;d<=3;d++){ const a=parcelasIdx.m.get(c+d); if(a) for(const x of a) out.push(x); } for(const x of parcelasIdx.fixas) out.push(x); return out; };
   log('Carregando regras e contas (etapa 3 de 3)…');
   // Regra criada com gatilho de FLUXO DE CAIXA (fluxo_*_gatilho) só vale quando o Fluxo associado também bate — ou seja, só no "Processar Fluxo (Regras)".
   // Aqui (matching geral) ela é ignorada: antes aplicava só o gatilho do extrato e pegava todo lançamento parecido (achado 03/10/2026, regra ACORDO).
@@ -34220,7 +34224,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // se ela não existir nas NFs importadas, o lançamento fica PENDENTE (pra criar a Regra via Fluxo) — nunca vai pra outra NF só porque o valor/data bate.
     const nfsDoFluxoLigado=new Set((fluxoCaixaPonteBase||[]).filter(f=>String(f.lancamento_extrato_id)===String(l.id)).map(f=>String(f.numero||f.documento_numero||'').split('/')[0].replace(/\D/g,'').replace(/^0+/,'')).filter(Boolean));
     const nfBateFluxoLigado=p=>!nfsDoFluxoLigado.size||nfsDoFluxoLigado.has(String(p.notas_fiscais&&p.notas_fiscais.numero||'').replace(/\D/g,'').replace(/^0+/,''));
-    const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_lancctbHistoricoSemNF(l.historico_bancario))?[]:parcelas.filter(p=>{
+    const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_lancctbHistoricoSemNF(l.historico_bancario))?[]:_parcCand(valor).filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       if(!nfBateFluxoLigado(p)) return false;
       if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
