@@ -491,10 +491,20 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   window.calcHistExcel = function (id) { const d = dadosHist(id); if (!d) return; baixarXlsx(montarWorkbook(d.h.titulo, d.f, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.h.empresa), d.h.titulo); };
 
   // ───────────────────────────── histórico ─────────────────────────────
+  // linhas do histórico, com filtro por coluna (contém, sem diferenciar maiúsculas/acentos)
+  function histCols(h) { return [new Date(h.ts).toLocaleString('pt-BR'), h.empresa ? ((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) : '', h.titulo || '', h.por || '', (h.parametros || []).map(p => p.id + ' v' + p.version).join(', ')]; }
+  function histNorm(t) { return String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
+  function histLinhas(lista) {
+    const flt = (est.histFlt || []).map(histNorm);
+    const vis = lista.filter(h => { const c = histCols(h); return flt.every((f, i) => !f || histNorm(c[i]).includes(f)); });
+    if (!vis.length) return '<tr><td colspan="6" style="color:var(--slate)">Nenhum cálculo com esses filtros.</td></tr>';
+    return vis.map(h => { const c = histCols(h); return `<tr><td>${E(c[0])}</td><td>${E(c[1]) || '—'}</td><td>${E(c[2])}</td><td>${E(c[3])}</td><td>${E(c[4]) || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`; }).join('');
+  }
+  window.calcHistFiltro = function (i, v) { est.histFlt = est.histFlt || []; est.histFlt[i] = v; const tb = document.getElementById('calcHistTbody'); if (tb) tb.innerHTML = histLinhas(lerLista(LS.hist)); };
   function renderHistorico() {
     const main = document.getElementById('calcMain'); const lista = lerLista(LS.hist); // 'ocultar' foi removido: o que estava oculto volta a aparecer; só 'excluir' tira da lista
     main.innerHTML = `<div class="calc-card"><h2 class="calc-h">🗂️ Cálculos salvos</h2><div class="calc-sub">Cada cálculo guarda a entrada, o resultado, a memória e a versão dos parâmetros usada. Reabrir mostra exatamente o que foi calculado na época — não recalcula.</div>
-      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Empresa</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr></thead><tbody>${lista.map(h => `<tr><td>${E(new Date(h.ts).toLocaleString('pt-BR'))}</td><td>${h.empresa ? E((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) : '—'}</td><td>${E(h.titulo)}</td><td>${E(h.por)}</td><td>${(h.parametros || []).map(p => E(p.id) + ' v' + p.version).join(', ') || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`).join('')}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
+      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Empresa</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr><tr>${[0, 1, 2, 3, 4].map(i => `<th style="padding:2px 4px"><input class="fi" style="font-size:11px;padding:3px 6px;width:100%;min-width:70px" placeholder="filtrar…" value="${E((est.histFlt || [])[i] || '')}" oninput="calcHistFiltro(${i},this.value)"></th>`).join('')}<th></th></tr></thead><tbody id="calcHistTbody">${histLinhas(lista)}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
   }
   window.calcHistAbrir = function (id) {
     const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return;
