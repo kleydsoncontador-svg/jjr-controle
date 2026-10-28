@@ -579,9 +579,12 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       const o = { maj, E: 0, disp: lim, nota: [] };
       if (!maj) return o;
       const firstQ = ano > desde.ano ? 1 : desde.trimestre;
-      const nAtiv = inp.trimestresAtividade ? parseInt(inp.trimestresAtividade, 10) : (5 - firstQ); const AL = nAtiv * lim;
+      // Data de abertura (opcional): trimestres anteriores ao da abertura não geram limite nem sobra (art. 15, § 9º — conta TRIMESTRES em atividade, não meses; o trimestre da abertura conta inteiro).
+      let firstQ2 = firstQ; const ab = String(inp.dataAbertura || '').match(/^(\d{4})-(\d{2})-\d{2}/);
+      if (ab && parseInt(ab[1], 10) === ano) { const qAb = Math.floor((parseInt(ab[2], 10) - 1) / 3) + 1; if (qAb > firstQ2) { firstQ2 = qAb; o.nota.push('Empresa aberta em ' + ab[0].split('-').reverse().join('/') + ': o limite anual conta só os trimestres em atividade, a partir do ' + qAb + 'º trimestre (art. 15, § 9º).'); } }
+      const nAtiv = inp.trimestresAtividade ? parseInt(inp.trimestresAtividade, 10) : (5 - firstQ2); const AL = nAtiv * lim;
       const prior = []; let faltam = false;
-      for (let q = firstQ; q < tri; q++) { const v = (inp.receitasAnteriores || [])[q - 1]; if (v === undefined || v === null || v === '') { faltam = true; prior.push(null); } else prior.push(cents(v)); }
+      for (let q = firstQ2; q < tri; q++) { const v = (inp.receitasAnteriores || [])[q - 1]; if (v === undefined || v === null || v === '') { faltam = true; prior.push(null); } else prior.push(cents(v)); }
       const comp = !!inp.compensarSobraLimite && !faltam;
       let pool = 0; const Ek = [];
       prior.forEach(R => { if (R === null) { Ek.push(null); return; } const av = lim + (comp ? pool : 0); Ek.push(max0(R - av)); pool = comp ? max0(av - R) : 0; });

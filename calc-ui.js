@@ -130,6 +130,7 @@
       { k: 'ra2', l: 'Receita bruta total do 2º trimestre (R$)', t: 'money', quando: v => parseInt(v.trimestre, 10) > 2 },
       { k: 'ra3', l: 'Receita bruta total do 3º trimestre (R$)', t: 'money', quando: v => parseInt(v.trimestre, 10) > 3 },
       { k: 'compensarSobraLimite', l: 'Considerar a sobra de limite dos trimestres anteriores (IN RFB 2.305, art. 15, § 4º — opcional)', t: 'bool', def: false, quando: v => parseInt(v.trimestre, 10) > 1 },
+      { k: 'dataAbertura', l: 'Data de abertura da empresa (opcional) — só importa se foi aberta no mesmo ano; trimestres antes da abertura não geram limite', t: 'date', def: '' },
       { k: 'trimestresAtividade', l: 'Trimestres em atividade no ano (início/encerramento — § 9º) — vazio = padrão', t: 'int', def: '', quando: v => parseInt(v.trimestre, 10) > 3 },
       { k: 'receitasFinanceiras', l: 'Receitas financeiras (R$) — somadas integralmente', t: 'money' }, { k: 'ganhosCapital', l: 'Ganhos de capital (R$) — somados integralmente', t: 'money' }, { k: 'outrasAdicoes', l: 'Outras adições integrais (R$)', t: 'money' },
       { k: 'irrfCompensar', l: 'IRRF a compensar (R$)', t: 'money' }, { k: 'csllRetida', l: 'CSLL retida a compensar (R$)', t: 'money' },
