@@ -45,7 +45,7 @@
     dividaOnerosa: { raiz: '2', re: /EMPR[ÉE]STIMO|FINANCIAMENTO/i, analitica: true }
   };
 
-  const cfgGet = eid => { try { const c = S.g(KEY(eid)); return c && typeof c === 'object' ? c : null; } catch (e) { return null; } };
+  const cfgGet = eid => { try { const c = S.g(KEY(eid)); return c && typeof c === 'object' && c.contas ? c : null; } catch (e) { return null; } };
   const cfgSet = (eid, c) => S.s(KEY(eid), c);
   const brl = c => 'R$ ' + C().brl(Math.round(c));
   const f2 = (v, mx) => v.toLocaleString('pt-BR', { minimumFractionDigits: Math.min(2, mx), maximumFractionDigits: mx });
@@ -90,6 +90,7 @@
     const contas = await contasDoPeriodo(eid, pe); if (!contas || !contas.length) throw new Error('Este balancete não tem contas salvas.');
     const m = mapa(contas), val = {}, origem = [], avisos = [];
     VARS.forEach(v => { const r = valorVar(m, (cfg.contas || {})[v.k] || [], v.nat); val[v.k] = r.cents; origem.push({ v, r }); if (r.faltam.length) avisos.push('“' + v.l + '”: conta(s) ' + r.faltam.join(', ') + ' não existe(m) neste balancete.'); });
+    ['disponivel', 'clientes', 'estoques', 'imobilizado'].forEach(k => { if (val[k] < 0) avisos.push('Saldo CREDOR em “' + VARS.find(v => v.k === k).l + '” (' + brl(val[k]) + '): confira os lançamentos, pois isso distorce os índices (por exemplo, a liquidez seca fica maior que a corrente).'); });
     const need = ['ativoCirculante', 'ativoNaoCirculante', 'passivoCirculante', 'patrimonioLiquido'];
     for (const k of need) if (!((cfg.contas || {})[k] || []).length) throw new Error('Defina as contas de: ' + VARS.find(v => v.k === k).l);
     // resultado do exercício ainda não apurado = contas 3 (receitas) − contas 4 (custos e despesas) do balancete
@@ -101,6 +102,7 @@
     const ll = lair - val.irCsll;
     if (Math.abs(ll - resBal) > 100) avisos.push('O lucro calculado com as contas definidas (' + brl(ll) + ') difere do resultado do balancete (receitas − custos e despesas = ' + brl(resBal) + '). Há conta de resultado fora do mapa: revise as contas de resultado.');
     const plAj = val.patrimonioLiquido + resBal;
+    if (plAj <= 0) avisos.push('Patrimônio líquido ajustado (PL + resultado do exercício) = ' + brl(plAj) + ': passivo a descoberto. Os índices que dividem pelo PL (grau de endividamento, ROE, imobilização do PL, Kanitz) não se aplicam.');
     const outrosAnc = val.ativoNaoCirculante - (val.rlp + val.investimentos + val.imobilizado + val.intangivel);
     const at = val.ativoCirculante + val.ativoNaoCirculante;
     const mes = Number(pe.slice(5, 7)), dias = 30 * mes;
