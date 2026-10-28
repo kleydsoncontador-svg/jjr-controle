@@ -142,6 +142,8 @@
 .nbc-hist div{padding:3px 0;border-top:1px dashed var(--border)}
 .nbc-exp{margin-top:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg)}
 .nbc-exp>summary{cursor:pointer;padding:8px 10px;font-size:12.5px;font-weight:700;color:var(--ink);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.nbc-exp-abrir{margin-top:10px;width:100%;display:flex;gap:8px;align-items:center;flex-wrap:wrap;text-align:left;cursor:pointer;padding:8px 10px;border:1px solid var(--border);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:12.5px;font-weight:700}
+.nbc-exp-abrir:hover{border-color:var(--teal)}
 .nbc-exp-corpo{padding:4px 12px 12px;font-size:12.5px;line-height:1.55;color:var(--ink)}
 .nbc-exp-corpo h4{margin:12px 0 4px;font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:var(--teal)}
 .nbc-ref{display:inline-block;margin-left:6px;padding:0 7px;border-radius:999px;border:1px solid var(--border);color:var(--slate);font:600 10.5px var(--mono);white-space:nowrap}
@@ -162,6 +164,7 @@
   window.renderNbc = function () {
     css(); const root = document.getElementById('nbcRoot'); if (!root) return;
     const d = ler(); const sec = SECOES.find(s => s.id === est.aba) || SECOES[0]; const todas = d.secoes[sec.id];
+    if (est.ver) { const sv = SECOES.find(z => z.id === est.ver.secId) || sec; const nv = (d.secoes[sv.id] || []).find(z => z.id === est.ver.id); if (nv) { root.innerHTML = paginaExp(sv, nv); return; } est.ver = null; }
     const t = est.busca.trim().toLowerCase();
     const lista = t ? todas.filter(n => [n.codigo, n.nome, n.cpc, n.iasb, n.revisao].join(' ').toLowerCase().includes(t)) : todas;
     root.innerHTML = `
@@ -211,12 +214,12 @@
     const c = window.NBC_CONTEUDO && window.NBC_CONTEUDO[codigo]; return c || (d && typeof d === 'object' ? d : null);
   }
   function gravarExp(id, d) { S.s(EXP_KEY(id), d); }
-  function expHtml(sec, n, link) {
+  function expPartes(sec, n, link) {
     const e = lerExp(n.id, n.codigo); const adm = ehAdmin();
     if (!e || !((e.pontos && e.pontos.length) || e.resumo)) {
-      return `<details class="nbc-exp"><summary>📖 Explicação simples + ${MIN_EXEMPLOS} exemplos práticos <span class="nbc-badge">em preparação</span></summary><div class="nbc-exp-corpo">
+      return { sum: `📖 Explicação simples + ${MIN_EXEMPLOS} exemplos práticos <span class="nbc-badge">em preparação</span>`, corpo: `<div class="nbc-exp-corpo">
         <div style="color:var(--slate)">Aqui fica o texto da norma em linguagem simples (com a referência do item na norma original) e pelo menos ${MIN_EXEMPLOS} exemplos práticos de uso. Esta norma ainda não tem a explicação publicada — ela está na fila de elaboração.</div>
-        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn bo bsm" onclick="window.open('${E(link)}','_blank','noopener')">↗ Norma completa no CFC</button></div></div></details>`;
+        <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap"><button class="btn bo bsm" onclick="window.open('${E(link)}','_blank','noopener')">↗ Norma completa no CFC</button></div></div>` };
     }
     const atual = String(e.revisao_base || '') === String(n.revisao || '');
     const ex = e.exemplos || [];
@@ -224,7 +227,7 @@
     const pontos = (e.pontos || []).map(p => `<div style="margin:6px 0"><b>${E(p.titulo || '')}</b>${p.ref ? `<span class="nbc-ref" title="Onde está na norma original">${E(p.ref)}</span>` : ''}<div>${E(p.texto || '')}</div></div>`).join('');
     const termos = (e.termos || []).length ? `<h4>Palavras que aparecem na norma</h4>${e.termos.map(t => `<div><b>${E(t.termo || '')}:</b> ${E(t.significado || '')}</div>`).join('')}` : '';
     const exs = ex.map((x, i) => `<div class="nbc-ex"><b class="t">${i + 1}. ${E(x.titulo || '')}</b>${x.ref ? `<span class="nbc-ref">${E(x.ref)}</span>` : ''}<div><b>Situação:</b> ${E(x.situacao || '')}</div><div><b>Como a norma manda tratar:</b> ${E(x.tratamento || '')}</div>${x.lancamento && x.lancamento !== '—' ? `<div class="lc">${E(x.lancamento)}</div>` : ''}</div>`).join('');
-    return `<details class="nbc-exp"><summary>📖 Explicação simples + exemplos práticos ${badge}<span class="nbc-badge ${ex.length >= MIN_EXEMPLOS ? 'ok' : 'velha'}">${ex.length}/${MIN_EXEMPLOS} exemplos</span></summary><div class="nbc-exp-corpo">
+    return { sum: `📖 Explicação simples + exemplos práticos ${badge}<span class="nbc-badge ${ex.length >= MIN_EXEMPLOS ? 'ok' : 'velha'}">${ex.length}/${MIN_EXEMPLOS} exemplos</span>`, corpo: `<div class="nbc-exp-corpo">
       ${e.resumo ? `<div style="font-size:13px">${E(e.resumo)}</div>` : ''}${e.objetivo ? `<div style="margin-top:4px;color:var(--slate)"><b>Para que serve:</b> ${E(e.objetivo)}</div>` : ''}
       ${pontos ? `<h4>Pontos principais <span style="text-transform:none;font-weight:400;color:var(--slate)">(a etiqueta mostra onde está na norma original)</span></h4>${pontos}` : ''}${termos}
       ${exs ? `<h4>Exemplos práticos</h4>${exs}` : ''}
@@ -232,7 +235,22 @@
       <div style="margin-top:8px;font-size:11.5px;color:var(--slate)">Elaborada em ${E(e.gerado_em || '')}${e.autor ? ' por ' + E(e.autor) : (e.por ? ' por ' + E(e.por) : '')}. É uma explicação de apoio, não substitui a norma: em caso de dúvida vale sempre a norma original — <a href="${E(link)}" target="_blank" rel="noopener">abrir no CFC</a>.</div>
       ${e.texto_completo ? `<details style="margin-top:8px"><summary style="cursor:pointer;color:var(--slate)">📄 Texto completo da norma (revisão ${E(e.revisao_base || '')})</summary><div style="white-space:pre-wrap;font-size:12px;max-height:420px;overflow:auto;border:1px solid var(--border);border-radius:6px;padding:8px;margin-top:4px">${E(e.texto_completo)}</div></details>` : ''}
       ${adm ? `<div style="margin-top:10px;display:flex;gap:6px;flex-wrap:wrap">${PERMITE_GERAR_IA ? `<button class="btn btn-ia-gemini bsm" onclick="nbcGerarExp('${sec.id}','${E(n.id)}')" ${est.ocupado ? 'disabled' : ''}>🔄 Gerar de novo (IA)</button>` : ''}<button class="btn bo bsm" onclick="nbcExpEditar('${E(n.id)}','${E(n.codigo)}')">✏️ Editar resumo / colar a norma completa</button></div>` : ''}
-    </div></details>`;
+    </div>` };
+  }
+  // No card só aparece uma barra que ABRE UMA TELA PRÓPRIA com a explicação (botão de voltar para as normas) — evita encher a lista de texto.
+  function expHtml(sec, n, link) {
+    const x = expPartes(sec, n, link);
+    return `<button type="button" class="nbc-exp-abrir" onclick="nbcVerExp('${sec.id}','${E(n.id)}')">${x.sum} <span style="margin-left:auto;color:var(--slate)">abrir ›</span></button>`;
+  }
+  window.nbcVerExp = function (secId, id) { est.scroll = window.scrollY || 0; est.ver = { secId, id }; window.renderNbc(); window.scrollTo(0, 0); };
+  window.nbcVoltarExp = function () { const v = est.ver; est.ver = null; window.renderNbc(); setTimeout(() => { const el = v && document.getElementById('nbc_' + v.id); if (el) el.scrollIntoView({ block: 'center' }); else window.scrollTo(0, est.scroll || 0); }, 30); };
+  function paginaExp(sec, n) {
+    const link = n.url || sec.url; const x = expPartes(sec, n, link);
+    return `<div class="nbc-card"><div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><button class="btn bo bsm" onclick="nbcVoltarExp()">← Voltar às normas (${E(sec.nome)})</button></div>
+      <div><span class="nbc-cod">${E(n.codigo)}</span>${n.revisao ? `<span class="nbc-rev">${E(n.revisao)}</span>` : ''}</div><div class="nbc-nome">${E(n.nome)}</div>
+      <div class="nbc-sub" style="margin-bottom:8px">${[n.dou ? 'DOU ' + E(n.dou) : '', n.cpc ? E(n.cpc) : '', n.iasb ? E(n.iasb) : ''].filter(Boolean).join(' · ')}</div>
+      <div class="nbc-exp"><div style="font-weight:600;margin-bottom:6px">${x.sum}</div>${x.corpo}</div>
+      <div style="margin-top:12px"><button class="btn bo bsm" onclick="nbcVoltarExp()">← Voltar às normas (${E(sec.nome)})</button></div></div>`;
   }
   window.nbcAba = function (a) { est.aba = a; est.busca = ''; window.renderNbc(); };
   window.nbcBusca = function (v) { est.busca = v; clearTimeout(window.__nbcT); window.__nbcT = setTimeout(window.renderNbc, 250); };
