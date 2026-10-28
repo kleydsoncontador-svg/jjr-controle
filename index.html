@@ -25608,6 +25608,17 @@ async function _lancctbProcessarFopag(){
     // Pedido do usuário 19/10/2026 ("identificação forte"): CPF inteiro, CPF mascarado ou PRIMEIRO nome + outro nome como palavras inteiras; mais de uma pessoa possível = ninguém (não chuta).
     // O casamento antigo (2 palavras de 4+ letras em qualquer posição) trocava "LUIS EUGENIO RODRIGUES DA SILVA" por "ANDRE LUIS DA SILVA" e "Lucas Older" por "LUCIANO MAINARDO".
     const identificaPessoa=(historico,candidatos)=>{ const r=_lancctbPessoasForteNoTexto(historico,candidatos); return r.length===1?r[0]:null; };
+    // Pedido do usuário 28/10/2026: o pagamento individual de folha (ex.: Robson) ficava sem Cliente/Fornecedor, sem CPF e sem amarrar o comprovante bancário.
+    // Acha o comprovante PENDENTE com o mesmo valor, até 6 dias antes (agendamento), da MESMA pessoa; só devolve se for único.
+    const acharComprovanteDaPessoa=async(l,p,valor)=>{
+      try{
+        const d0=new Date(l.data_pagamento+'T00:00:00'); d0.setDate(d0.getDate()-6);
+        const { data: cs } = await _supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id')
+          .eq('empresa_eid',eid).eq('status_conciliacao','pendente').gte('data_pagamento',d0.toISOString().slice(0,10)).lte('data_pagamento',l.data_pagamento);
+        const c=(cs||[]).filter(x=>Math.abs(Number(x.valor_pago)-valor)<=0.005&&(!x.conta_bancaria_id||String(x.conta_bancaria_id)===String(contaId))&&identificaPessoa((x.cliente_fornecedor_nome||'')+' '+(x.cnpj_cpf||''),[p]));
+        return c.length===1?c[0]:null;
+      }catch(e){ console.warn('Comprovante da pessoa (FOPAG):',e); return null; }
+    };
 
     // Fluxo de Caixa do cliente (quando existe) — algumas empresas põem o
     // NOME do empregado na coluna "cliente/fornecedor" ou "descrição" do
@@ -26028,13 +26039,16 @@ async function _lancctbProcessarFopag(){
         diferencasAbertas++;
       }
 
+      const compPessoa=await acharComprovanteDaPessoa(l,p,liquido);
+      const terceiro={ cliente_fornecedor_nome:(compPessoa&&compPessoa.cliente_fornecedor_nome)||p.nome||null, cnpj_cpf:(compPessoa&&compPessoa.cnpj_cpf)||p.cpf||null, comprovante_id:compPessoa?compPessoa.id:null };
       const linhas=[
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:liquido, historico:`Pagamento ref. ${_rotP(p,r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
-        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaP.classificacao, conta_contabil_id:contaP.id, tipo:'D', valor:liquido, historico:`Pagamento ref. ${_rotP(p,r.tipo)} ${comp} - ${p.nome}`, lancamento_extrato_id:l.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:liquido, historico:`Pagamento ref. ${_rotP(p,r.tipo)} ${comp} - ${p.nome}`, ...terceiro, lancamento_extrato_id:l.id, origem_match:'regra' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaP.classificacao, conta_contabil_id:contaP.id, tipo:'D', valor:liquido, historico:`Pagamento ref. ${_rotP(p,r.tipo)} ${comp} - ${p.nome}`, ...terceiro, lancamento_extrato_id:l.id, origem_match:'regra' },
       ];
       const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
       if(error){ console.error('Erro FOPAG (individual):',error); semAchado++; continue; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+      if(compPessoa) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',compPessoa.id);
       // Se a identificação veio do Fluxo de Caixa, marca aquela linha como
       // associada (some da lista de "não associados" e aparece na coluna
       // Fluxo do Registro Contábil).
