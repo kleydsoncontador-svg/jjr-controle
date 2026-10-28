@@ -60,6 +60,9 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { id: 'LEI_9250_6A', calcs: ['dist_lucros'], norma: 'Lei 15.270/2025, art. 2º (acrescenta o art. 6º-A à Lei 9.250/1995)', numero: '15.270/2025 (de 26/11/2025) — Lei 9.250/1995, art. 6º-A', artigo: 'art. 6º-A, caput e §§ 1º, 2º e 3º', assunto: 'A partir de janeiro/2026: lucros e dividendos pagos, creditados, empregados ou entregues por uma MESMA pessoa jurídica a uma MESMA pessoa física residente no Brasil, em montante superior a R$ 50.000,00 em um mesmo mês, sofrem retenção do IRPF na fonte à alíquota de 10% sobre o TOTAL do valor pago (§ 1º: vedadas quaisquer deduções); com mais de um pagamento no mês, a retenção é recalculada pelo total do mês (§ 2º). Não se sujeitam (§ 3º): lucros de resultados apurados até 2025, cuja distribuição tenha sido aprovada até 31/12/2025 e que sejam exigíveis nos termos da legislação civil ou empresarial, pagos nos termos originalmente previstos no ato de aprovação.', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-22 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. A lei NÃO diz se a parcela isenta do § 3º conta para o teste de R$ 50.000 no mês (parâmetro isenta_compoe_limite = NÃO) nem se o IRRF é definitivo ou antecipação. A IN RFB 2.299/2025 e o "Perguntas e Respostas" da Receita NÃO foram lidos no texto oficial (só resumo em fonte secundária: a Receita entende que a retenção alcança também sócios de optantes pelo Simples Nacional — há controvérsia pelo art. 14 da LC 123/2006).' },
     { id: 'LEI_9249_10', calcs: ['dist_lucros'], norma: 'Lei 15.270/2025, art. 3º (nova redação do art. 10 da Lei 9.249/1995)', numero: '15.270/2025 — Lei 9.249/1995, art. 10', artigo: 'art. 10, caput (ressalva dos arts. 6º-A e 16-A da Lei 9.250), § 4º e § 5º', assunto: 'Lucros e dividendos pagos, creditados, entregues, empregados ou REMETIDOS AO EXTERIOR: IRRF de 10% (§ 4º), sem piso mensal. Não se sujeitam (§ 5º): I – resultados apurados até 2025 com distribuição aprovada até 31/12/2025, exigíveis e pagos nos termos originalmente previstos; II – pagos a governos estrangeiros (com reciprocidade), fundos soberanos (Lei 11.312, art. 3º, § 5º) e entidades no exterior de previdência. Art. 10-A: crédito opcional ao beneficiário no exterior (não calculado aqui).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-22 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Tributação mínima anual (Lei 9.250, art. 16-A; rendimentos anuais acima de R$ 600.000; alíquota até 10%) é outra apuração e NÃO é calculada aqui.' },
     { id: 'DEC_9580_ART322', calcs: ['bens_usados'], norma: 'Decreto', numero: '9.580/2018 (RIR/2018)', artigo: 'art. 322', assunto: 'Taxa anual de depreciação de bens adquiridos USADOS: fixada pelo MAIOR dos prazos — I) metade da vida útil admissível para o bem novo; ou II) restante da vida útil, considerada em relação à primeira instalação para utilização do bem.', vig_ini: '2018-11-23', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/decreto/D9580.htm', ultima_verificacao: null, obs: 'Texto do artigo conforme a planilha de apoio do escritório (Base Legal). A vida útil admissível do bem novo vem das tabelas de taxas da Receita (IN RFB 1.700/2017, Anexo III) — conferir.' },
+    { id: 'ANALISE_BALANCOS', calcs: ['analise_indices', 'ebitda_eva'], norma: 'Literatura técnica (não há norma legal)', numero: 'Matarazzo — Análise Financeira de Balanços; Assaf Neto — Estrutura e Análise de Balanços; Iudícibus — Análise de Balanços', artigo: 'índices de liquidez, estrutura de capital, rentabilidade e prazos médios', assunto: 'Fórmulas-padrão da análise das demonstrações contábeis (saldos finais; prazos em dias sobre 360 por padrão; pode-se usar saldos médios).', vig_ini: '1970-01-01', vig_fim: null, fonte: 'https://pt.wikipedia.org/wiki/An%C3%A1lise_de_balan%C3%A7os', ultima_verificacao: null, obs: 'Não existe definição legal única: os nomes e fórmulas do sistema Domínio podem diferir em alguns índices (use o botão “Conteúdo…” do Domínio para comparar). Cada índice mostra a fórmula usada.' },
+    { id: 'KANITZ_1974', calcs: ['analise_indices'], norma: 'Modelo estatístico de previsão de insolvência', numero: 'Stephen C. Kanitz (termômetro de insolvência, anos 1970)', artigo: 'FI = 0,05·RP + 1,65·LG + 3,55·LS − 1,06·LC − 0,33·GE', assunto: 'Fator de insolvência: RP = lucro líquido ÷ PL; LG, LS, LC = liquidez geral, seca e corrente; GE = exigível total ÷ PL. Faixas: acima de 0 solvente; de −3 a 0 penumbra; abaixo de −3 insolvente.', vig_ini: '1970-01-01', vig_fim: null, fonte: 'https://pt.wikipedia.org/wiki/Term%C3%B4metro_de_Kanitz', ultima_verificacao: null, obs: 'Há variações de escala na literatura (X1 e X5 em decimal ou em %). Aqui RP e GE entram em decimal. É um modelo estatístico, não uma norma.' },
+    { id: 'EVA_ROIC', calcs: ['ebitda_eva'], norma: 'Literatura de finanças corporativas', numero: 'Stern Stewart (EVA®); Damodaran; Assaf Neto', artigo: 'EBITDA, NOPAT, ROIC, ROCE, WACC e EVA', assunto: 'EBITDA = EBIT + depreciação e amortização; NOPAT = EBIT × (1 − alíquota); capital investido = PL + dívida onerosa − caixa; ROIC = NOPAT ÷ capital investido; ROCE = EBIT ÷ (ativo total − passivo circulante); EVA = NOPAT − WACC × capital investido.', vig_ini: '1990-01-01', vig_fim: null, fonte: 'https://pt.wikipedia.org/wiki/Valor_econ%C3%B4mico_agregado', ultima_verificacao: null, obs: 'EBITDA não é medida das normas contábeis (IFRS/NBC); a CVM define o cálculo para companhias abertas na Resolução CVM 156. As definições de capital investido variam; aqui está a abordagem financeira (PL + dívida líquida).' },
     { id: 'LEI_9250_1995', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao', 'pensao'], norma: 'Lei', numero: '9.250/1995', artigo: 'arts. 4º e 8º', assunto: 'Deduções do IRPF: dependentes, pensão alimentícia, previdência oficial', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Base geral das deduções legais. Artigos a conferir.' },
     { id: 'TAB_IRRF_2026', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Leis 15.191/2025 (art. 2º, nova redação do art. 1º, XII, da Lei 11.482/2007) e 9.250/1995 (art. 4º, III, "i" e § 2º)', numero: '15.191/2025 e 9.250/1995', artigo: 'Lei 15.191 art. 2º; Lei 9.250 art. 4º, III, "i" e § 2º (redação da Lei 14.663/2023)', assunto: 'Tabela progressiva mensal desde maio/2025: até 2.428,80 (0%); até 2.826,65 (7,5% − 182,16); até 3.751,05 (15% − 394,16); até 4.664,68 (22,5% − 675,49); acima (27,5% − 908,73). Dependente R$ 189,59 (desde abril/2015). Desconto simplificado mensal = 25% da faixa de alíquota zero = R$ 607,20.', vig_ini: '2025-05-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9250.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Tudo lido no texto oficial do Planalto. O simplificado de R$ 607,20 é derivado: 25% × R$ 2.428,80 (a lei define o percentual, não o valor).' },
     { id: 'MUTUO_USURA', calcs: ['mutuo', 'comparativo'], norma: 'Decreto (Lei de Usura) e Código Civil', numero: 'Decreto 22.626/1933; Código Civil, art. 591', artigo: 'Decreto 22.626/1933, art. 1º; CC art. 591', assunto: 'Mútuo de PESSOA FÍSICA para PESSOA JURÍDICA: não há piso — o mútuo gratuito (0%) é admitido se previsto expressamente no contrato; teto de 12% ao ano (1% ao mês, juros simples) pela Lei de Usura c/c Código Civil. Entidades imunes/isentas (terceiro setor): referência segura de no máximo 100% da Selic/CDI, para não caracterizar distribuição disfarçada de lucros (Lei 9.532/1997, art. 12, § 2º, "a").', vig_ini: '1933-04-07', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/decreto/d22626.htm', ultima_verificacao: null, obs: 'Regra informada pelo usuário em 22/10/2026; NÃO conferida no texto oficial. Há discussão jurídica: o art. 591 do CC remete ao art. 406 (taxa legal, hoje Selic − IPCA após a Lei 14.905/2024) e a Súmula 596 do STF exclui as instituições financeiras do teto — confirme antes de usar como limite definitivo.' },
@@ -1307,6 +1310,171 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     return { ok: true, resultado: { prazoMeses: meses, taxaAnual: 12 / prazoM, incisoAdotado: incisoII ? 'II' : 'I', mensal, ultima, valor, inicio: ymBr(ini), fim: ymBr(fim), mesesDep, depreciado, saldo }, memoria: mem.L, parametros: [], bases: CALC_BASES.filter(b => b.id === 'DEC_9580_ART322'), avisos };
   }
 
+  // ───────────────────────────── ANÁLISE DAS DEMONSTRAÇÕES — coeficientes (Domínio: Relatórios > Análises > Coeficientes) ─────────────────────────────
+  // Todos os índices com a FÓRMULA mostrada ao lado do resultado. Saldos finais por padrão; "saldos médios" só quando marcado e o saldo anterior foi informado.
+  // Índices cujo nome no Domínio não tem definição pública (a conferir pelo botão "Conteúdo…" do Domínio) estão marcados com nota.
+  function calcAnaliseIndices(inp) {
+    const has = k => inp[k] !== undefined && inp[k] !== null && String(inp[k]).trim() !== '';
+    const c = k => cents(inp[k]);
+    const AC = c('ativoCirculante'), RLP = c('rlp'), INV = c('investimentos'), IMOB = c('imobilizado'), INTG = c('intangivel');
+    const PC = c('passivoCirculante'), ELP = c('elp'), PL = c('patrimonioLiquido');
+    const DISP = c('disponivel'), CLI = c('clientes'), EST = c('estoques'), DA = c('despAntecipadas'), FORN = c('fornecedores');
+    const RL = c('receitaLiquida'), CMV = c('cmv'), LOP = c('lucroOperacional'), LL = c('lucroLiquido');
+    const ANC = RLP + INV + IMOB + INTG, AT = AC + ANC, CT = PC + ELP, PT = CT + PL, PERM = INV + IMOB + INTG;
+    if (!(AT > 0)) return ERR('Informe o ativo (circulante e não circulante).');
+    const dias = has('diasPeriodo') ? parseInt(inp.diasPeriodo, 10) : 360;
+    if (!(dias >= 1 && dias <= 400)) return ERR('Dias do período inválido (use 360, 365, 30…).');
+    const usarMedios = !!inp.usarSaldosMedios;
+    const med = (fim, kAnt) => (usarMedios && has(kAnt)) ? (fim + c(kAnt)) / 2 : fim;
+    const mem = Mem(), avisos = [], indices = [];
+    const f2 = (v, mx) => v.toLocaleString('pt-BR', { minimumFractionDigits: Math.min(2, mx == null ? 4 : mx), maximumFractionDigits: mx == null ? 4 : mx });
+    const fmt = (v, u) => v === null ? 'não se aplica' : (u === 'R$' ? brl(Math.round(v)) : u === '%' ? f2(v, 2) + '%' : u === 'dias' ? f2(v, 1) + ' dias' : f2(v, 4));
+    let grupoAtual = '';
+    const grupo = nome => { grupoAtual = nome; mem.t(nome); };
+    const add = (nome, v, u, formula, nota) => {
+      const val = (v === null || !isFinite(v)) ? null : (u === 'R$' ? Math.round(v) : Math.round(v * 10000) / 10000);
+      indices.push({ grupo: grupoAtual, nome, valor: val, unidade: u, formula, nota: nota || '' });
+      mem.txt(nome + '  =  ' + formula, fmt(val, u)); if (nota) mem.n(nome + ' — ' + nota);
+      return val;
+    };
+    const razao = (n, d) => (d > 0 ? n / d : null);
+    const pctv = (n, d) => (d > 0 ? n / d * 100 : null);
+    if (PL <= 0) avisos.push('Patrimônio líquido zero ou negativo (passivo a descoberto): os índices que dividem pelo PL não se aplicam.');
+    if (AT !== PT) avisos.push('O balanço não fecha: ativo ' + brl(AT) + ' ≠ passivo + PL ' + brl(PT) + ' (diferença ' + brl(AT - PT) + '). Confira os valores informados.');
+
+    grupo('Liquidez');
+    const LG = add('Índice de Liquidez Geral', razao(AC + RLP, CT), 'x', '(Ativo circulante + Realizável a longo prazo) ÷ (Passivo circulante + Passivo não circulante)');
+    const LC = add('Índice de Liquidez Corrente', razao(AC, PC), 'x', 'Ativo circulante ÷ Passivo circulante');
+    const LS = add('Índice de Liquidez Seca', razao(AC - EST, PC), 'x', '(Ativo circulante − Estoques) ÷ Passivo circulante');
+    if (has('despAntecipadas')) add('Liquidez Seca (variante sem despesas antecipadas)', razao(AC - EST - DA, PC), 'x', '(Ativo circulante − Estoques − Despesas antecipadas) ÷ Passivo circulante', 'variante usada em algumas bancas e manuais; não é o índice padrão.');
+    add('Índice de Liquidez Imediata', razao(DISP, PC), 'x', 'Disponível (caixa, bancos e aplicações de liquidez imediata) ÷ Passivo circulante');
+    add('Índice de Solvência Geral', razao(AT, CT), 'x', 'Ativo total ÷ (Passivo circulante + Passivo não circulante)', 'acima de 1 = ativo cobre todas as dívidas; abaixo de 1 = passivo a descoberto.');
+    add('Capital Circulante Líquido (CCL)', AC - PC, 'R$', 'Ativo circulante − Passivo circulante', 'também chamado capital de giro líquido; positivo = folga financeira no curto prazo.');
+
+    grupo('Estrutura de capital e endividamento');
+    add('Índice de Capital de Terceiros', pctv(CT, PT), '%', '(Passivo circulante + Passivo não circulante) ÷ Passivo total (PC + PNC + PL)', 'definição do Domínio não publicada — conferir em “Conteúdo…”. Igual ao Endividamento Geral quando o balanço fecha.');
+    add('Índice de Endividamento Geral', pctv(CT, AT), '%', '(Passivo circulante + Passivo não circulante) ÷ Ativo total');
+    add('Índice de Endividamento Corrente', pctv(PC, AT), '%', 'Passivo circulante ÷ Ativo total', 'definição do Domínio não publicada — conferir em “Conteúdo…”.');
+    add('Índice de Dívida a Curto Prazo (composição do endividamento)', pctv(PC, CT), '%', 'Passivo circulante ÷ (Passivo circulante + Passivo não circulante)');
+    const GE = add('Grau de Endividamento (participação de capitais de terceiros)', razao(CT, PL), 'x', '(Passivo circulante + Passivo não circulante) ÷ Patrimônio líquido', 'é a mesma definição usada no fator de insolvência de Kanitz.');
+    add('Índice de Garantia de Capital de Terceiros', razao(PL, CT), 'x', 'Patrimônio líquido ÷ (Passivo circulante + Passivo não circulante)', 'inverso do Grau de Endividamento.');
+    add('Índice de Capital Próprio sobre Passivo Total', pctv(PL, PT), '%', 'Patrimônio líquido ÷ Passivo total (PC + PNC + PL)', 'definição do Domínio não publicada — conferir em “Conteúdo…”.');
+    add('Índice de Imobilização do Patrimônio Líquido', pctv(PERM, PL), '%', '(Investimentos + Imobilizado + Intangível) ÷ Patrimônio líquido', 'quanto menor, mais capital próprio sobra para o capital de giro.');
+    add('Índice de Imobilização de Recursos Não Correntes', pctv(PERM, PL + ELP), '%', '(Investimentos + Imobilizado + Intangível) ÷ (Patrimônio líquido + Passivo não circulante)', 'acima de 100% = parte do permanente está financiada com dívida de curto prazo.');
+
+    grupo('Rentabilidade e giro');
+    const ATm = med(AT, 'ativoTotalAnt'), PLm = (has('plAnt') ? (PL + c('plAnt')) / 2 : null);
+    add('Índice de Giro do Ativo', razao(RL, ATm), 'x', 'Receita líquida ÷ Ativo total' + (usarMedios && has('ativoTotalAnt') ? ' médio' : ''));
+    add('Margem Operacional', pctv(LOP, RL), '%', 'Lucro operacional ÷ Receita líquida');
+    add('Margem Líquida', pctv(LL, RL), '%', 'Lucro líquido ÷ Receita líquida');
+    add('Rentabilidade do Ativo (ROA)', pctv(LL, ATm), '%', 'Lucro líquido ÷ Ativo total' + (usarMedios && has('ativoTotalAnt') ? ' médio' : ''));
+    const RP = add('Rentabilidade do Patrimônio Líquido (ROE)', pctv(LL, PL), '%', 'Lucro líquido ÷ Patrimônio líquido (saldo final)');
+    add('Retorno sobre o Patrimônio Líquido Médio', PLm === null ? null : pctv(LL, PLm), '%', 'Lucro líquido ÷ [(PL inicial + PL final) ÷ 2]', PLm === null ? 'informe o PL do início do período.' : '');
+
+    grupo('Prazos médios e ciclo (em dias)');
+    const vendas = has('receitaBruta') ? c('receitaBruta') : RL;
+    if (!has('receitaBruta')) avisos.push('Receita bruta não informada: o Prazo Médio de Recebimento usou a receita líquida. Com impostos sobre vendas incluídos nas duplicatas, o prazo real é um pouco maior.');
+    const CLIm = med(CLI, 'clientesAnt'), ESTm = med(EST, 'estoquesAnt'), FORNm = med(FORN, 'fornecedoresAnt');
+    let compras, comprasNota = '';
+    if (has('compras')) compras = c('compras');
+    else if (has('estoquesAnt')) { compras = CMV + EST - c('estoquesAnt'); comprasNota = 'compras calculadas: CMV + estoque final − estoque inicial.'; }
+    else { compras = CMV; comprasNota = 'compras não informadas e sem estoque inicial: usei o CMV como aproximação das compras.'; avisos.push('Compras não informadas: o Prazo Médio de Pagamento usou o CMV como aproximação.'); }
+    const PMR = add('Prazo Médio de Recebimento', razao(CLIm * dias, vendas), 'dias', 'Clientes (duplicatas a receber) ÷ Receita bruta de vendas × ' + dias + ' dias');
+    const PMRE = add('Prazo Médio de Renovação dos Estoques', razao(ESTm * dias, CMV), 'dias', 'Estoques ÷ CMV × ' + dias + ' dias');
+    const PMP = add('Prazo Médio de Pagamento', razao(FORNm * dias, compras), 'dias', 'Fornecedores ÷ Compras × ' + dias + ' dias', comprasNota);
+    if (PMR !== null && PMRE !== null) add('Ciclo Operacional', PMRE + PMR, 'dias', 'Prazo de renovação dos estoques + Prazo de recebimento', 'complemento: tempo entre comprar o estoque e receber do cliente.');
+    add('Ciclo de Caixa (ciclo financeiro)', (PMR !== null && PMRE !== null && PMP !== null) ? PMRE + PMR - PMP : null, 'dias', 'Prazo de renovação dos estoques + Prazo de recebimento − Prazo de pagamento', 'quantos dias a empresa precisa financiar do próprio caixa; negativo = fornecedores financiam todo o ciclo.');
+    if (usarMedios) mem.n('Prazos calculados com saldos médios onde o saldo anterior foi informado.');
+
+    grupo('Fator de insolvência (Kanitz)');
+    let kz = null, faixa = '';
+    if (LG !== null && LS !== null && LC !== null && GE !== null && PL > 0) {
+      // usa os índices EXATOS (sem o arredondamento de 4 casas da exibição)
+      const RPd = LL / PL, lg = (AC + RLP) / CT, ls = (AC - EST) / PC, lc = AC / PC, ge = CT / PL;
+      kz = Math.round((0.05 * RPd + 1.65 * lg + 3.55 * ls - 1.06 * lc - 0.33 * ge) * 10000) / 10000;
+      faixa = kz > 0 ? 'Solvente' : kz >= -3 ? 'Penumbra' : 'Insolvente';
+    }
+    indices.push({ grupo: grupoAtual, nome: 'Fator de Insolvência', valor: kz, unidade: 'x', formula: '0,05·RP + 1,65·LG + 3,55·LS − 1,06·LC − 0,33·GE', nota: 'RP = Lucro líquido ÷ PL; GE = Exigível total ÷ PL (ambos em decimal)' });
+    mem.txt('Fator de Insolvência  =  0,05·RP + 1,65·LG + 3,55·LS − 1,06·LC − 0,33·GE', kz === null ? 'não se aplica' : f2(kz, 4) + ' — ' + faixa);
+    mem.n('RP = Lucro líquido ÷ PL; GE = (PC + PNC) ÷ PL, ambos em decimal. Faixas: acima de 0 solvente; de −3 a 0 penumbra; abaixo de −3 insolvente. Modelo estatístico: indica tendência, não prova insolvência.');
+
+    const pick = (n, u) => { const x = indices.find(i => i.nome === n); return x ? fmt(x.valor, u || x.unidade) : '—'; };
+    const destaques = [['Liquidez corrente', pick('Índice de Liquidez Corrente')], ['Liquidez seca', pick('Índice de Liquidez Seca')], ['Liquidez geral', pick('Índice de Liquidez Geral')], ['Capital circulante líquido', AC - PC],
+      ['Endividamento geral', pick('Índice de Endividamento Geral')], ['Margem líquida', pick('Margem Líquida')], ['ROE', pick('Rentabilidade do Patrimônio Líquido (ROE)')], ['Ciclo de caixa', pick('Ciclo de Caixa (ciclo financeiro)')],
+      ['Fator de insolvência', kz === null ? 'não se aplica' : f2(kz, 2) + ' — ' + faixa]];
+    avisos.unshift('Fórmulas-padrão da análise de balanços (Matarazzo, Assaf Neto, Iudícibus). O sistema Domínio pode nomear ou definir alguns índices de outro jeito: compare pelo botão “Conteúdo…” de lá. A fórmula usada aparece ao lado de cada resultado.');
+    return { ok: true, resultado: { indices, kanitz: { valor: kz, faixa }, destaques, ativoTotal: AT, passivoTotal: PT, dias }, memoria: mem.L, parametros: [], bases: CALC_BASES.filter(b => b.id === 'ANALISE_BALANCOS' || b.id === 'KANITZ_1974'), avisos };
+  }
+
+  // ───────────────────────────── EBITDA, EVA, ROIC, ROCE, ROE, ROA, WACC ─────────────────────────────
+  function calcEbitdaEva(inp) {
+    const has = k => inp[k] !== undefined && inp[k] !== null && String(inp[k]).trim() !== '';
+    const c = k => cents(inp[k]);
+    const num = v => { const t = String(v == null ? '' : v).trim().replace(',', '.'); const x = parseFloat(t); return isFinite(x) ? x : NaN; };
+    const LL = c('lucroLiquido'), IR = c('irCsll'), DF = c('despesasFinanceiras'), RF = c('receitasFinanceiras'), DA = c('depreciacaoAmortizacao');
+    const RL = has('receitaLiquida') ? c('receitaLiquida') : null;
+    const PL = c('patrimonioLiquido'), DIV = c('dividaOnerosa'), CX = c('caixaEquivalentes'), AT = c('ativoTotal'), PC = c('passivoCirculante');
+    const tx = has('aliquota') ? num(inp.aliquota) / 100 : 0.34;
+    if (!(tx >= 0 && tx < 1)) return ERR('Alíquota de IR/CSLL inválida (use de 0 a 99, ex.: 34).');
+    const temEbit = has('ebitInformado');
+    if (!temEbit && !has('lucroLiquido')) return ERR('Informe o lucro líquido (e IR/CSLL, despesas e receitas financeiras) ou informe o EBIT direto.');
+    const mem = Mem(), avisos = [], indices = [];
+    const f2 = (v, mx) => v.toLocaleString('pt-BR', { minimumFractionDigits: Math.min(2, mx == null ? 4 : mx), maximumFractionDigits: mx == null ? 4 : mx });
+    const fmt = (v, u) => v === null ? 'não se aplica' : (u === 'R$' ? brl(Math.round(v)) : u === '%' ? f2(v, 2) + '%' : u === 'pp' ? f2(v, 2) + ' p.p.' : f2(v, 4));
+    let grupoAtual = '';
+    const grupo = nome => { grupoAtual = nome; mem.t(nome); };
+    const add = (nome, v, u, formula, nota) => { const val = (v === null || !isFinite(v)) ? null : (u === 'R$' ? Math.round(v) : Math.round(v * 10000) / 10000); indices.push({ grupo: grupoAtual, nome, valor: val, unidade: u, formula, nota: nota || '' }); mem.txt(nome + '  =  ' + formula, fmt(val, u)); if (nota) mem.n(nome + ' — ' + nota); return val; };
+    const razao = (n, d) => (d > 0 ? n / d : null);
+    const pctv = (n, d) => (d > 0 ? n / d * 100 : null);
+
+    grupo('Resultado operacional');
+    const EBIT = temEbit ? c('ebitInformado') : LL + IR + DF - RF;
+    add('EBIT (resultado antes dos juros e do IR/CSLL)', EBIT, 'R$', temEbit ? 'valor informado' : 'Lucro líquido + IR/CSLL + Despesas financeiras − Receitas financeiras', 'inclui outros resultados não operacionais, se houver; ajuste se quiser só o operacional.');
+    const EBITDA = EBIT + DA;
+    add('EBITDA (LAJIDA)', EBITDA, 'R$', 'EBIT + Depreciação e amortização', 'não é medida das normas contábeis; para companhias abertas, a Resolução CVM 156 define o cálculo divulgável.');
+    if (RL !== null) { add('Margem EBITDA', pctv(EBITDA, RL), '%', 'EBITDA ÷ Receita líquida'); add('Margem EBIT', pctv(EBIT, RL), '%', 'EBIT ÷ Receita líquida'); }
+    const impostoOp = EBIT > 0 ? Math.round(EBIT * tx) : 0;
+    const NOPAT = EBIT - impostoOp;
+    add('NOPAT (lucro operacional após impostos)', NOPAT, 'R$', 'EBIT × (1 − alíquota ' + f2(tx * 100, 2) + '%)', EBIT > 0 ? '' : 'EBIT negativo: sem imposto sobre o resultado operacional.');
+
+    grupo('Capital e retornos');
+    const CI = PL + DIV - CX;
+    add('Capital investido', CI, 'R$', 'Patrimônio líquido + Dívida onerosa (empréstimos e financiamentos) − Caixa e aplicações financeiras', 'abordagem financeira (PL + dívida líquida).');
+    const CE = AT - PC;
+    add('Capital empregado', CE, 'R$', 'Ativo total − Passivo circulante');
+    const ROIC = add('ROIC (retorno sobre o capital investido)', pctv(NOPAT, CI), '%', 'NOPAT ÷ Capital investido');
+    add('ROCE (retorno sobre o capital empregado)', pctv(EBIT, CE), '%', 'EBIT ÷ (Ativo total − Passivo circulante)');
+    add('ROE (retorno sobre o patrimônio líquido)', pctv(LL, PL), '%', 'Lucro líquido ÷ Patrimônio líquido');
+    add('ROA (retorno sobre o ativo)', pctv(LL, AT), '%', 'Lucro líquido ÷ Ativo total');
+
+    grupo('Custo de capital e EVA');
+    const temKe = has('custoCapitalProprio'), temKd = has('custoDivida');
+    let WACC = null, EVA = null;
+    if (temKe && temKd) {
+      const Ke = num(inp.custoCapitalProprio) / 100, Kd = num(inp.custoDivida) / 100, E = PL, D = DIV;
+      if (isFinite(Ke) && isFinite(Kd) && E + D > 0) {
+        WACC = (Ke * E + Kd * (1 - tx) * D) / (E + D);
+        mem.txt('Pesos do capital', 'Próprio ' + f2(E / (E + D) * 100, 2) + '% (PL) · Terceiros ' + f2(D / (E + D) * 100, 2) + '% (dívida onerosa)');
+        add('WACC (custo médio ponderado de capital)', WACC * 100, '%', 'Ke × E/(E+D) + Kd × (1 − alíquota) × D/(E+D)', 'pesos pelo valor contábil; use valores de mercado se tiver.');
+        EVA = NOPAT - WACC * CI;
+        add('EVA (valor econômico agregado)', EVA, 'R$', 'NOPAT − WACC × Capital investido', EVA >= 0 ? 'positivo: o negócio remunerou todo o capital acima do custo.' : 'negativo: o retorno não cobriu o custo do capital.');
+        if (ROIC !== null) add('Spread (ROIC − WACC)', ROIC - WACC * 100, 'pp', 'ROIC − WACC', 'EVA = spread × capital investido.');
+      } else avisos.push('Custos de capital inválidos ou capital zerado: WACC e EVA não calculados.');
+    } else avisos.push('Informe o custo do capital próprio (Ke) e o custo da dívida (Kd) para calcular WACC e EVA.');
+
+    grupo('Alavancagem e cobertura');
+    const DL = DIV - CX;
+    add('Dívida líquida', DL, 'R$', 'Dívida onerosa − Caixa e aplicações financeiras');
+    add('Dívida líquida ÷ EBITDA', EBITDA > 0 ? DL / EBITDA : null, 'x', 'Dívida líquida ÷ EBITDA', EBITDA > 0 ? 'quantos anos de EBITDA seriam necessários para pagar a dívida líquida.' : 'EBITDA não positivo.');
+    add('Cobertura de juros', DF > 0 ? EBIT / DF : null, 'x', 'EBIT ÷ Despesas financeiras');
+
+    const pick = (n) => { const x = indices.find(i => i.nome === n); return x ? fmt(x.valor, x.unidade) : '—'; };
+    const destaques = [['EBITDA', EBITDA], ['EBIT', EBIT], ['NOPAT', NOPAT], ['ROIC', pick('ROIC (retorno sobre o capital investido)')], ['ROCE', pick('ROCE (retorno sobre o capital empregado)')], ['ROE', pick('ROE (retorno sobre o patrimônio líquido)')], ['ROA', pick('ROA (retorno sobre o ativo)')]]
+      .concat(WACC !== null ? [['WACC', f2(WACC * 100, 2) + '%'], ['EVA', EVA]] : []);
+    avisos.unshift('Os resultados dependem das definições adotadas (mostradas ao lado de cada valor). Definições de capital investido e de EBIT variam entre autores; use a mesma em todos os períodos que for comparar.');
+    return { ok: true, resultado: { indices, destaques, ebit: EBIT, ebitda: EBITDA, nopat: NOPAT, eva: EVA, wacc: WACC }, memoria: mem.L, parametros: [], bases: CALC_BASES.filter(b => b.id === 'EVA_ROIC' || b.id === 'ANALISE_BALANCOS'), avisos };
+  }
+
   // ───────────────────────────── catálogo ─────────────────────────────
   const CATALOGO = [
     { key: 'irrf_pf', cat: 'FEDERAL', nome: 'IRRF — Pessoa Física', fn: calcIRRF },
@@ -1318,6 +1486,8 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { key: 'plr', cat: 'TRABALHISTA', nome: 'PLR — tributação exclusiva', fn: calcPLR },
     { key: 'pensao', cat: 'TRABALHISTA', nome: 'Pensão alimentícia', fn: calcPensao },
     { key: 'bens_usados', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'Depreciação de bens usados', fn: calcBensUsados },
+    { key: 'analise_indices', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'Análise contábil — coeficientes', fn: calcAnaliseIndices },
+    { key: 'ebitda_eva', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'EBITDA, EVA, ROIC e ROCE', fn: calcEbitdaEva },
     { key: 'mutuo', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Mútuo — IOF / juros / IRRF', fn: calcMutuo },
     { key: 'jcp', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'JCP — Juros sobre Capital Próprio', fn: calcJCP },
     { key: 'dist_lucros', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Distribuição de lucros — IRRF 10%', fn: calcDistLucros },

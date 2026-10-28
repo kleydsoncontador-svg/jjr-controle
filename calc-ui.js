@@ -70,6 +70,62 @@
     plr: { titulo: 'PLR — tributação exclusiva', desc: 'Tributação exclusiva na fonte pela tabela anual própria da PLR (nunca a do salário nem o redutor mensal). Tabelas cadastradas: janeiro/2025 em diante.', campos: [
       { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual }, { k: 'plrAtual', l: 'PLR atual (R$)', t: 'money' }, { k: 'plrAnterior', l: 'PLR já paga no ano (R$)', t: 'money' }, { k: 'irJaRetido', l: 'IR já retido sobre a PLR do ano (R$)', t: 'money' }, { k: 'pensaoPLR', l: 'Pensão alimentícia judicial correspondente à PLR (R$) — dedutível da base', t: 'money' }],
       resumo: r => [['IR a reter agora', r.ir, 1]] },
+    analise_indices: { titulo: 'Análise contábil — coeficientes (liquidez, endividamento, rentabilidade, prazos)', desc: 'Informe o balanço e a DRE do período: a tela calcula os índices do relatório “Coeficientes de Análises” do Domínio (liquidez, estrutura de capital, imobilização, rentabilidade, giro, prazos médios, ciclo de caixa e fator de insolvência de Kanitz). Cada resultado mostra a fórmula usada. Campos opcionais podem ficar vazios.', campos: [
+      { k: '_s1', t: '_secao', l: 'Ativo' },
+      { k: 'disponivel', l: 'Disponível — caixa, bancos e aplicações de liquidez imediata (R$)', t: 'money' },
+      { k: 'clientes', l: 'Clientes / duplicatas a receber (R$)', t: 'money' },
+      { k: 'estoques', l: 'Estoques (R$)', t: 'money' },
+      { k: 'despAntecipadas', l: 'Despesas antecipadas (R$) — opcional', t: 'money' },
+      { k: 'ativoCirculante', l: 'ATIVO CIRCULANTE — total (R$)', t: 'money' },
+      { k: 'rlp', l: 'Realizável a longo prazo (R$)', t: 'money' },
+      { k: 'investimentos', l: 'Investimentos (R$)', t: 'money' },
+      { k: 'imobilizado', l: 'Imobilizado (R$)', t: 'money' },
+      { k: 'intangivel', l: 'Intangível (R$)', t: 'money' },
+      { k: '_s2', t: '_secao', l: 'Passivo e patrimônio líquido' },
+      { k: 'fornecedores', l: 'Fornecedores (R$)', t: 'money' },
+      { k: 'passivoCirculante', l: 'PASSIVO CIRCULANTE — total (R$)', t: 'money' },
+      { k: 'elp', l: 'PASSIVO NÃO CIRCULANTE (exigível a longo prazo) — total (R$)', t: 'money' },
+      { k: 'patrimonioLiquido', l: 'PATRIMÔNIO LÍQUIDO (R$)', t: 'money' },
+      { k: '_s3', t: '_secao', l: 'Demonstração do resultado (período)' },
+      { k: 'receitaBruta', l: 'Receita bruta de vendas (R$) — para o prazo de recebimento; opcional', t: 'money' },
+      { k: 'receitaLiquida', l: 'Receita líquida de vendas (R$)', t: 'money' },
+      { k: 'cmv', l: 'CMV / CPV — custo das mercadorias ou produtos vendidos (R$)', t: 'money' },
+      { k: 'lucroOperacional', l: 'Lucro operacional (R$)', t: 'money' },
+      { k: 'lucroLiquido', l: 'Lucro líquido do período (R$)', t: 'money' },
+      { k: 'compras', l: 'Compras do período (R$) — opcional (sem isso, calcula pelo estoque inicial ou usa o CMV)', t: 'money' },
+      { k: '_s4', t: '_secao', l: 'Saldos do início do período e prazos (opcionais)' },
+      { k: 'ativoTotalAnt', l: 'Ativo total no início do período (R$)', t: 'money' },
+      { k: 'plAnt', l: 'Patrimônio líquido no início do período (R$) — necessário para o ROE sobre PL médio', t: 'money' },
+      { k: 'estoquesAnt', l: 'Estoques no início do período (R$)', t: 'money' },
+      { k: 'clientesAnt', l: 'Clientes no início do período (R$)', t: 'money' },
+      { k: 'fornecedoresAnt', l: 'Fornecedores no início do período (R$)', t: 'money' },
+      { k: 'usarSaldosMedios', l: 'Usar saldos MÉDIOS (início + fim ÷ 2) no giro, ROA e prazos, onde o saldo inicial foi informado', t: 'bool', def: false },
+      { k: 'diasPeriodo', l: 'Dias do período nos prazos médios (360 = padrão da literatura; 365; 30 para mês)', t: 'int', def: 360 }],
+      resumo: r => r.destaques,
+      extra: res => indicesHtml(res),
+      tabela: res => ({ nome: 'Índices', cab: ['Grupo', 'Índice', 'Fórmula', 'Valor', 'Unidade'], linhas: res.indices.map(i => [i.grupo, i.nome, i.formula, i.valor === null ? 'não se aplica' : (i.unidade === 'R$' ? i.valor / 100 : i.valor), i.unidade === 'x' ? 'vezes' : i.unidade]) }) },
+    ebitda_eva: { titulo: 'EBITDA, EVA, ROIC, ROCE, ROE e ROA', desc: 'Informe o resultado do período, o balanço e o custo do capital. A tela calcula EBIT, EBITDA, NOPAT, capital investido, ROIC, ROCE, ROE, ROA, WACC, EVA, dívida líquida ÷ EBITDA e cobertura de juros, mostrando a fórmula de cada um.', campos: [
+      { k: '_s1', t: '_secao', l: 'Resultado do período' },
+      { k: 'lucroLiquido', l: 'Lucro líquido (R$)', t: 'money' },
+      { k: 'irCsll', l: 'IRPJ e CSLL do período (R$)', t: 'money' },
+      { k: 'despesasFinanceiras', l: 'Despesas financeiras (R$)', t: 'money' },
+      { k: 'receitasFinanceiras', l: 'Receitas financeiras (R$)', t: 'money' },
+      { k: 'depreciacaoAmortizacao', l: 'Depreciação e amortização do período (R$)', t: 'money' },
+      { k: 'ebitInformado', l: 'EBIT já calculado (R$) — opcional; se preencher, substitui a conta acima', t: 'money' },
+      { k: 'receitaLiquida', l: 'Receita líquida (R$) — opcional, para as margens', t: 'money' },
+      { k: 'aliquota', l: 'Alíquota de IR/CSLL sobre o resultado operacional (%) — padrão 34', t: 'pct', def: '34' },
+      { k: '_s2', t: '_secao', l: 'Balanço (fim do período)' },
+      { k: 'patrimonioLiquido', l: 'Patrimônio líquido (R$)', t: 'money' },
+      { k: 'dividaOnerosa', l: 'Dívida onerosa — empréstimos e financiamentos, curto + longo prazo (R$)', t: 'money' },
+      { k: 'caixaEquivalentes', l: 'Caixa e aplicações financeiras (R$)', t: 'money' },
+      { k: 'ativoTotal', l: 'Ativo total (R$)', t: 'money' },
+      { k: 'passivoCirculante', l: 'Passivo circulante (R$)', t: 'money' },
+      { k: '_s3', t: '_secao', l: 'Custo de capital (para WACC e EVA)' },
+      { k: 'custoCapitalProprio', l: 'Custo do capital próprio — Ke (% ao ano)', t: 'pct' },
+      { k: 'custoDivida', l: 'Custo da dívida antes do IR — Kd (% ao ano)', t: 'pct' }],
+      resumo: r => r.destaques,
+      extra: res => indicesHtml(res),
+      tabela: res => ({ nome: 'Indicadores', cab: ['Grupo', 'Indicador', 'Fórmula', 'Valor', 'Unidade'], linhas: res.indices.map(i => [i.grupo, i.nome, i.formula, i.valor === null ? 'não se aplica' : (i.unidade === 'R$' ? i.valor / 100 : i.valor), i.unidade === 'x' ? 'vezes' : i.unidade]) }) },
     bens_usados: { titulo: 'Depreciação de bens usados', desc: 'Bem adquirido USADO (RIR/2018, art. 322): o prazo de depreciação é o MAIOR entre a metade da vida útil do bem novo e a vida útil restante (vida útil − tempo de uso). Mostra a taxa anual, a depreciação mensal, o cronograma por ano e, se o sistema contábil começou a depreciar depois, quantos meses já devem estar depreciados.', campos: [
       { k: 'vidaUtilAnos', l: 'Vida útil do bem NOVO (anos) — tabela de taxas da Receita', t: 'text', def: '' },
       { k: 'usoAnos', l: 'Tempo de uso do bem quando adquirido — anos', t: 'text', def: '0' },
@@ -303,6 +359,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
       ['q_patrimonioLiquido', 'Patrimônio líquido contábil (R$)'], ['q_ajusteAtivos', 'Ajustes de ativos a valor de mercado (R$)'], ['q_ajustePassivos', 'Ajustes de passivos (R$)'], ['q_goodwill', 'Fundo de comércio / goodwill (R$)'], ['q_outraMetodologia', 'OU valor da empresa por outra metodologia (R$)'], ['q_percentualParticipacao', '% de participação transmitida']
     ].map(([k, l]) => `<div class="cf"><label class="fl">${l}</label>${k === 'q_percentualParticipacao' ? sfx(`<input class="fi" id="cf_${k}" inputmode="decimal" value="100">`, '%') : `<input class="fi" id="cf_${k}" inputmode="decimal" placeholder="0,00" ${MASK}>`}</div>`).join('')}</div></div>`;
     if (c.t === 'herdeiros') return '<div class="calc-sec" id="calcHerdBox"></div>';
+    if (c.t === '_secao') return `<div class="cf" style="grid-column:1/-1;margin-top:6px"><h4 style="margin:0;font-size:12.5px;letter-spacing:.04em;text-transform:uppercase;color:var(--teal)">${E(c.l)}</h4></div>`;
     let inp;
     if (c.t === 'bool') return `<div class="cf bool" data-k="${c.k}"><input type="checkbox" id="${id}" ${def ? 'checked' : ''} onchange="calcRefreshQuando()"><label class="fl" for="${id}">${E(c.l)}</label></div>`;
     if (c.t === 'select') inp = `<select class="fi" id="${id}" onchange="calcRefreshQuando()">${c.opts.map(([v, l]) => `<option value="${E(v)}" ${String(def) === String(v) ? 'selected' : ''}>${E(l)}</option>`).join('')}</select>`;
@@ -469,6 +526,18 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
       <div class="calc-acts"><button class="btn bp" onclick="calcSalvar()">💾 Salvar cálculo</button><button class="btn bo" onclick="calcImprimir()">🖨️ Imprimir / PDF</button><button class="btn bo" onclick="calcExcel()">📊 Excel</button></div></div>`;
   }
   // ranking do COMPARATIVO (tela e impressão)
+  // tabela dos índices (nome, fórmula, resultado), agrupada
+  function indicesHtml(res) {
+    const f2 = (v, mx) => v.toLocaleString('pt-BR', { minimumFractionDigits: Math.min(2, mx), maximumFractionDigits: mx });
+    const fv = i => i.valor === null ? '<span style="color:var(--slate)">não se aplica</span>' : (i.unidade === 'R$' ? brl(i.valor) : i.unidade === '%' ? f2(i.valor, 2) + '%' : i.unidade === 'dias' ? f2(i.valor, 1) + ' dias' : i.unidade === 'pp' ? f2(i.valor, 2) + ' p.p.' : f2(i.valor, 4));
+    let g = '', h = '';
+    (res.indices || []).forEach(i => {
+      if (i.grupo !== g) { g = i.grupo; h += `<tr class="titulo"><td colspan="3">${E(g)}</td></tr>`; }
+      h += `<tr><td><b>${E(i.nome)}</b>${i.nota ? `<div style="font-size:11px;color:var(--slate)">${E(i.nota)}</div>` : ''}</td><td style="font-size:11.5px;color:var(--slate)">${E(i.formula)}</td><td class="n"><b>${fv(i)}</b></td></tr>`;
+    });
+    const kz = res.kanitz && res.kanitz.valor !== null && res.kanitz.faixa ? `<div class="calc-aviso" style="margin-top:8px"><b>Fator de insolvência (Kanitz): ${f2(res.kanitz.valor, 2)} — ${E(res.kanitz.faixa)}</b></div>` : '';
+    return `<div class="calc-rank" style="margin:6px 0 12px"><h3 class="calc-h" style="font-size:15px">Todos os resultados, com a fórmula de cada um</h3><div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Índice</th><th>Fórmula</th><th>Resultado</th></tr></thead><tbody>${h}</tbody></table></div>${kz}</div>`;
+  }
   function rankingHtml(res) {
     const pc = bp => (bp / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%'; const n = res.ranking.length;
     return `<div class="calc-rank" style="margin:6px 0 12px"><h3 class="calc-h" style="font-size:15px">Do mais vantajoso ao menos vantajoso (tributariamente)</h3><div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>#</th><th>Forma de pagamento</th><th>Bruto necessário</th><th>Líquido ao sócio</th><th>Tributos do sócio</th><th>Encargos da empresa</th><th>Economia IRPJ/CSLL</th><th>Custo líquido da empresa</th><th>Tributos líquidos</th><th>Carga efetiva</th></tr></thead><tbody>${res.ranking.map((o, i) => `<tr class="${i === 0 ? 'rk-best' : (i === n - 1 && n > 1 ? 'rk-worst' : '')}"><td><b>${o.posicao}º</b></td><td><b>${E(o.nome)}</b>${i === 0 ? ' <span class="calc-tag ok">mais vantajosa</span>' : ''}${i === n - 1 && n > 1 ? ' <span class="calc-tag warn">menos vantajosa</span>' : ''}${o.naoRemuneracao ? ' <span class="calc-tag warn">não é remuneração: tem que devolver</span>' : ''}<div style="font-size:11px;color:#667">${E(o.detalhe)}</div></td><td class="n">${brl(o.bruto)}</td><td class="n">${brl(o.liquidoSocio)}</td><td class="n">${brl(o.socioTributos)}</td><td class="n">${brl(o.empresaEncargos)}</td><td class="n">${brl(o.empresaEconomia)}</td><td class="n">${brl(o.custoEmpresa)}</td><td class="n">${brl(o.tributosLiquidos)}</td><td class="n"><b>${pc(o.cargaBp)}</b></td></tr>`).join('')}</tbody></table></div>${res.indisponiveis.length ? '<div class="calc-aviso">Fora da comparação: ' + res.indisponiveis.map(x => '<b>' + E(x.nome) + '</b> — ' + E(x.motivo)).join(' · ') + '</div>' : ''}<div style="font-size:11.5px;color:#667">Carga efetiva = tributos líquidos ÷ custo líquido da empresa. Negativa = a economia de IRPJ/CSLL da empresa supera o imposto do sócio.</div></div>`;
