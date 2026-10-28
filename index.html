@@ -25666,11 +25666,11 @@ async function _lancctbProcessarFopag(){
     // Marca no começo do histórico quem recebeu (nome/CPF) quando a natureza não está comprovada — conta D vazia, o usuário define depois. Não duplica marca e preserva rótulos de diferença.
     const marcarPessoaIdentificada=async(l,rotulo,nome,cpf)=>{
       const h=String(l.historico_bancario||'');
-      if(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|DIFEREN)/i.test(h)) return false;
+      if(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|DIFEREN(?![^\]]*sem composição identificada))/i.test(h)) return false; // a marca genérica "DIFERENÇA … sem composição identificada" pode ser trocada quando a pessoa passa a ser conhecida
       const d=String(cpf||'').replace(/\D/g,''); const cpfTxt=d.length===11?` (CPF ${d.slice(0,3)}.${d.slice(3,6)}.${d.slice(6,9)}-${d.slice(9)})`:'';
       // 22/10/2026 (Kajuna, 49 extratos com 2–3 marcas empilhadas, ex.: "[PESSOA … ARTHUR] [PESSOA … BRUNO] SISPAG SALARIOS"): a linha chegava aqui com "[SISPAG ABERTO - X]" na frente (passa na trava acima), tirava só essa
       // marca e deixava por baixo a marca de pessoa de uma rodada anterior. Agora tira TODAS as marcas de pessoa/SISPAG ABERTO do começo — fica só a pessoa identificada agora.
-      let base=h; for(let i=0;i<20;i++){ const b=base.replace(/^\s*\[(?:SISPAG ABERTO|PESSOA IDENTIFICADA)[^\]]*\]\s*/i,''); if(b===base) break; base=b; }
+      let base=h; for(let i=0;i<20;i++){ const b=base.replace(/^\s*\[(?:SISPAG ABERTO|PESSOA IDENTIFICADA|DIFEREN[^\]]*sem composição identificada)[^\]]*\]\s*/i,''); if(b===base) break; base=b; }
       const novo=`[${rotulo} - CONTA A DEFINIR - ${nome}${cpfTxt}] ${base}`.trim();
       const { error } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:novo }).eq('id',l.id);
       if(error) return false; l.historico_bancario=novo; return true;
@@ -25691,9 +25691,10 @@ async function _lancctbProcessarFopag(){
     // reserva as ocorrências EXATAS do relatório de maior cobertura (valor repetido não é erro: conta-se ocorrências; quem é quem entre valores iguais nunca é inventado).
     // O que sobra do lote segue pros caminhos antigos. Núcleo puro e testado em fopag-lote.js (tests/fopag-lote.test.js).
     try{
-      const ehSispagSal=h=>{ const n=_norm(h); return /SISPAG/.test(n)&&/SALARIO/.test(n)&&!histTemNomePessoa(h)&&!/^\s*\[(DIFEREN|PESSOA IDENTIFICADA|SÓCIO)/i.test(String(h||'')); };
+      const ehSispagSal=h=>{ const n=_norm(h); return /SISPAG/.test(n)&&/SALARIO/.test(n)&&!histTemNomePessoa(h)&&!/^\s*\[(DIFEREN(?![^\]]*sem composição identificada)|PESSOA IDENTIFICADA|SÓCIO)/i.test(String(h||'')); };
+      const semMarcaGenerica=h=>String(h||'').replace(/^\s*\[DIFEREN[^\]]*sem composição identificada\]\s*/i,'');
       const mapaLotes={};
-      pendencias.forEach(l=>{ if(!ehSispagSal(l.historico_bancario)) return; const k=l.data_pagamento+'|'+_norm(l.historico_bancario); (mapaLotes[k]=mapaLotes[k]||{chave:k,data:l.data_pagamento,linhas:[]}).linhas.push({id:l.id,valor:l.valor_saida}); });
+      pendencias.forEach(l=>{ if(!ehSispagSal(l.historico_bancario)) return; const k=l.data_pagamento+'|'+_norm(semMarcaGenerica(l.historico_bancario)); (mapaLotes[k]=mapaLotes[k]||{chave:k,data:l.data_pagamento,linhas:[]}).linhas.push({id:l.id,valor:l.valor_saida}); });
       const lotesFop=Object.values(mapaLotes).filter(x=>x.linhas.length>=3);
       if(lotesFop.length&&window.JJRFopagLote){
         const consEx0=await carregarConsumidosFolha();
@@ -26058,13 +26059,14 @@ async function _lancctbProcessarFopag(){
         }
       }
       // 28/10/2026 (Super Troca 06/08, adiantamentos de 20/08): pagamento maior que o líquido de ninguém — o COMPROVANTE bancário de mesmo valor diz QUEM recebeu; o líquido dessa pessoa vem do relatório e o resto é diferença.
+      let compIdentTxt=''; // nome/CPF do comprovante bancário de mesmo valor (identifica a pessoa mesmo quando o pagamento é MENOR que o líquido)
       if(!matchIndiv&&/SISPAG/.test(_norm(l.historico_bancario))&&!semFolhaAdiant){
         try{
           const d0c=new Date(l.data_pagamento+'T00:00:00'); d0c.setDate(d0c.getDate()-6);
           const { data: csP } = await _supaClient.from('comprovantes_bancarios').select('id,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id').eq('empresa_eid',eid).eq('status_conciliacao','pendente')
             .gte('valor_pago',l.valor_saida-0.005).lte('valor_pago',l.valor_saida+0.005).gte('data_pagamento',d0c.toISOString().slice(0,10)).lte('data_pagamento',l.data_pagamento);
           const cps=(csP||[]).filter(x=>!x.conta_bancaria_id||String(x.conta_bancaria_id)===String(contaId));
-          if(cps.length===1){ for(const r of relatorios){ const pc=identificaPessoa((cps[0].cliente_fornecedor_nome||'')+' '+(cps[0].cnpj_cpf||''),r.dados.pessoas||[]); if(pc&&calOk(r)&&l.valor_saida>=pc.valor-0.01){ matchIndiv={r,p:pc,comprovante:cps[0]}; break; } } }
+          if(cps.length===1){ compIdentTxt=(cps[0].cliente_fornecedor_nome||'')+' '+(cps[0].cnpj_cpf||''); for(const r of relatorios){ const pc=identificaPessoa((cps[0].cliente_fornecedor_nome||'')+' '+(cps[0].cnpj_cpf||''),r.dados.pessoas||[]); if(pc&&calOk(r)&&l.valor_saida>=pc.valor-0.01){ matchIndiv={r,p:pc,comprovante:cps[0]}; break; } } }
         }catch(e){ console.warn('FOPAG: pessoa pelo comprovante:',e); }
       }
       if(matchIndiv){ const ch=chaveConsumoFolha(matchIndiv.r,matchIndiv.p); if(consEx.has(ch)) matchIndiv=null; else consEx.add(ch); } // a mesma pessoa/tipo/competência só é paga UMA vez (Danilo 44,81 em 06/08 e 28/08 — 21/10/2026)
@@ -26072,7 +26074,7 @@ async function _lancctbProcessarFopag(){
       // (nem pró-labore inequívoco) fica PENDENTE, com a pessoa preservada no histórico e a conta D vazia — o usuário define a conta depois.
       if(!matchIndiv){
         const todasP=[]; relatoriosPessoas.forEach(r=>(r.dados.pessoas||[]).forEach(pp=>{ if(!todasP.some(x=>(x.cpf&&x.cpf===pp.cpf)||x.nome===pp.nome)) todasP.push(pp); }));
-        const fortes=_lancctbPessoasForteNoTexto(textoIdent,todasP), pe=fortes.length===1?fortes[0]:null;
+        const fortes=_lancctbPessoasForteNoTexto(textoIdent+' '+compIdentTxt,todasP), pe=fortes.length===1?fortes[0]:null;
         // Pedido do usuário 20/10/2026: a marca só vale para EMPREGADO identificado da folha desta empresa — nunca para fornecedor, sócio ou pessoa que só aparece no Fluxo.
         if(pe&&pe.tipo==='empregado'){
           if(await marcarPessoaIdentificada(l,'PESSOA IDENTIFICADA',pe.nome,pe.cpf)) pessoasMarcadas++;
