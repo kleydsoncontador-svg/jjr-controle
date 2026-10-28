@@ -25554,7 +25554,8 @@ async function _lancctbProcessarFopag(){
     const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,historico_bancario,composicao_tributo')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)));
-    if(pendencias) for(let q=pendencias.length-1;q>=0;q--){ const ct=pendencias[q].composicao_tributo; if(Array.isArray(ct)&&ct.some(c=>c&&c.origem==='folha')) pendencias.splice(q,1); } // já aberta em líquido + diferença (aguarda a conta da diferença)
+    const abertasFolha=[]; // pagamentos já abertos em líquido + diferença: gravam sozinhos quando todas as partes têm conta (Regra existente)
+    if(pendencias) for(let q=pendencias.length-1;q>=0;q--){ const ct=pendencias[q].composicao_tributo; if(Array.isArray(ct)&&ct.some(c=>c&&c.origem==='folha')){ abertasFolha.push(pendencias[q]); pendencias.splice(q,1); } } // já aberta em líquido + diferença (aguarda a conta da diferença)
     if(!pendencias||!pendencias.length){ toast('Nenhuma pendência de saída no período filtrado nesta conta.','ok'); return; }
     // Pedido do usuário 21/10/2026 (Adelpe, Danilo R$ 44,81 em 06/08 e 28/08): o pagamento MAIS ANTIGO consome primeiro o líquido do relatório — ordem por data.
     pendencias.sort((a,b)=>String(a.data_pagamento).localeCompare(String(b.data_pagamento))||(a.id-b.id));
@@ -25693,6 +25694,29 @@ async function _lancctbProcessarFopag(){
       regrasFolhaParte.forEach(x=>{ const g=_norm(semComp(x.historico_gatilho)); if(g.length>=4&&h.includes(g)&&(!melhor||g.length>melhor.g.length)) melhor={g,id:x.conta_contabil_id}; });
       return melhor?melhor.id:null;
     };
+
+    // Grava o pagamento de folha aberto (1 crédito do banco : N débitos) quando TODAS as partes já têm conta — sem pedir pra salvar (pedido do usuário 28/10/2026: "se eu já criei a regra, não devia pedir pra gravar").
+    const postarFolhaAberta=async(l,partes)=>{
+      const ids=partes.map(x=>x.conta_contabil_id).filter(Boolean);
+      const { data: pcs } = await _supaClient.from('plano_contas').select('id,classificacao').in('id',ids);
+      const clas=new Map((pcs||[]).map(c=>[String(c.id),c.classificacao]));
+      if(partes.some(x=>!clas.has(String(x.conta_contabil_id)))) return false;
+      const histBanco=new Set(partes.map(x=>x.historico)).size<=1?partes[0].historico:'Pagamentos Diversos';
+      const linhasA=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:histBanco, cliente_fornecedor_nome:partes[0].nome||null, cnpj_cpf:partes[0].cpf||null, comprovante_id:partes[0].comprovante_id||null, lancamento_extrato_id:l.id, origem_match:'regra' }];
+      partes.forEach(x=>linhasA.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:clas.get(String(x.conta_contabil_id)), conta_contabil_id:x.conta_contabil_id, tipo:'D', valor:x.valor, historico:x.historico, cliente_fornecedor_nome:x.nome||null, cnpj_cpf:x.cpf||null, comprovante_id:x.comprovante_id||null, lancamento_extrato_id:l.id, origem_match:'regra' }));
+      const { error: eA } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasA });
+      if(eA){ console.error('Erro FOPAG (folha aberta):',eA); return false; }
+      await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+      const idsCp=[...new Set(partes.map(x=>x.comprovante_id).filter(Boolean))];
+      if(idsCp.length) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',idsCp);
+      return true;
+    };
+    // Pagamentos abertos antes (ou abertos agora): se uma Regra já dá a conta de todas as partes, grava sozinho.
+    for(const l of abertasFolha){
+      const partes=(l.composicao_tributo||[]).map(x=>({...x}));
+      for(const x of partes) if(!x.conta_contabil_id) x.conta_contabil_id=await contaPelaRegraDaParte(x.historico);
+      if(partes.every(x=>x.conta_contabil_id)&&Math.abs(partes.reduce((a,x)=>a+Number(x.valor||0),0)-l.valor_saida)<=0.01&&await postarFolhaAberta(l,partes)) resolvidos++;
+    }
 
     // ── PRÉ-PASSO POR LOTE (pedido do usuário 28/10/2026, Fast Lube / Itaú / 07/2026) ──
     // Antes de olhar pagamento por pagamento: agrupa os "Sispag Salários" por data (lote bancário), compara o lote como MULTICONJUNTO de valores com cada relatório da folha e
@@ -26125,6 +26149,7 @@ async function _lancctbProcessarFopag(){
           { origem:'folha', valor:liquido, historico:`Pagamento ref. ${rotP} ${comp} - ${p.nome}`, conta_contabil_id:contaP.id, nome:p.nome, cpf:p.cpf||null, comprovante_id:cpComp?cpComp.id:null },
           { origem:'folha', valor:diferenca, historico:`Diferença folha ${comp} - ${p.nome}`, conta_contabil_id:await contaPelaRegraDaParte(`Diferença folha ${comp} - ${p.nome}`), nome:p.nome, cpf:p.cpf||null, comprovante_id:null },
         ];
+        if(partes.every(x=>x.conta_contabil_id)&&await postarFolhaAberta(l,partes)){ resolvidos++; continue; } // as duas partes já têm conta (líquido + Regra da diferença): grava direto
         const hOrig=String(l.historico_bancario||'').replace(/^\s*(?:\[(?:DIFEREN|FOLHA ABERTA)[^\]]*\]\s*)+/i,'');
         const marca=`[FOLHA ABERTA ${rotP} ${comp} - ${p.nome}: líquido R$ ${_fmt(liquido)} + diferença R$ ${_fmt(diferenca)}] `;
         const { error: eAb } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:marca+hOrig, composicao_tributo:partes }).eq('id',l.id).eq('status_conciliacao','pendente');
