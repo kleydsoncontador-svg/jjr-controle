@@ -23135,6 +23135,7 @@ const LANCCTB_CONTAS_PADRAO_CAMPOS=[
   {k:'descontos_concedidos',label:'Despesas de descontos com boletos (Despesas)'},
   {k:'multas_ativas',label:'Receitas de multas com boletos (Receitas)'},
   {k:'transf_contas',label:'Transferência entre contas correntes (conta de passagem)'},
+  {k:'dif_folha',label:'Diferença de folha (Despesas)'}, // pedido do usuário 28/10/2026: conta da DIFERENÇA do pagamento de folha aberto pelo Processar FOPAG (sem precisar de Regra)
 ];
 
 // ─── Transferência entre contas correntes da MESMA empresa (pedido do usuário 16/10/2026) ───────────────────────────────────────────────
@@ -25686,13 +25687,15 @@ async function _lancctbProcessarFopag(){
     let raizFopagContabil=null;
     try{ if(await _lancctbTemAcessoPastaFopag()) raizFopagContabil=await _lancctbCarregarHandleFopag(); }catch(e){}
     const recibosFeriasUsados=new Set();
-    let regrasFolhaParte=null; // regras de histórico (D) cujo gatilho é um trecho do histórico da PARTE aberta (ex.: "Diferença folha") — escolhidas pelo livrinho de cada parte
+    let contaDifPadrao=null; let regrasFolhaParte=null; // regras de histórico (D) cujo gatilho é um trecho do histórico da PARTE aberta (ex.: "Diferença folha") — escolhidas pelo livrinho de cada parte
     const contaPelaRegraDaParte=async(histParte)=>{
       if(regrasFolhaParte===null){ const { data: rg } = await _supaClient.from('regras_matching').select('historico_gatilho,conta_contabil_id,agencia_bancaria_id,valor_gatilho').eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico').eq('dc','D').is('valor_gatilho',null); regrasFolhaParte=(rg||[]).filter(x=>(!x.agencia_bancaria_id||String(x.agencia_bancaria_id)===String(contaId))&&_norm(x.historico_gatilho).length>=4); }
       const semComp=t=>String(t||'').replace(/\d{2}[-\/]\d{4}/g,' ').replace(/\s+/g,' ').trim();
       const h=_norm(semComp(histParte)); let melhor=null;
       regrasFolhaParte.forEach(x=>{ const g=_norm(semComp(x.historico_gatilho)); if(g.length>=4&&h.includes(g)&&(!melhor||g.length>melhor.g.length)) melhor={g,id:x.conta_contabil_id}; });
-      return melhor?melhor.id:null;
+      if(melhor) return melhor.id;
+      if(/^DIFEREN[CÇ]A FOLHA/.test(h)){ const n=_lancctbContasPadraoGet(eid).dif_folha; if(n){ if(contaDifPadrao===null){ const { data: dp } = await _supaClient.from('plano_contas').select('id').eq('empresa_eid',eid).eq('numero_conta',String(n)).limit(1); contaDifPadrao=(dp&&dp[0])?dp[0].id:0; } if(contaDifPadrao) return contaDifPadrao; } } // Contas padrão → "Diferença de folha"
+      return null;
     };
 
     // Grava o pagamento de folha aberto (1 crédito do banco : N débitos) quando TODAS as partes já têm conta — sem pedir pra salvar (pedido do usuário 28/10/2026: "se eu já criei a regra, não devia pedir pra gravar").
@@ -36336,7 +36339,9 @@ function _lancctbContaPorRegraParte(histParte){
   const c=_lancctbRegrasFolhaParte; if(!c||String(c.eid)!==String(_lancctbEidAtual)) return null;
   const h=_lancctbNormParte(histParte); let melhor=null;
   c.lista.forEach(x=>{ const g=_lancctbNormParte(x.historico_gatilho); if(g.length>=4&&h.includes(g)&&(!melhor||g.length>melhor.g.length)) melhor={g,id:x.conta_contabil_id}; });
-  return melhor?melhor.id:null;
+  if(melhor) return melhor.id;
+  if(/^\s*DIFEREN[CÇ]A FOLHA/i.test(h)){ const n=_lancctbContasPadraoGet(_lancctbEidAtual).dif_folha; if(n){ const o=(_lancctbInlineContasOptions||[]).find(c=>String(c.numero_conta)===String(n)); if(o) return o.id; } } // Contas padrão → "Diferença de folha"
+  return null;
 }
 async function _lancctbCarregarRegrasFolhaParte(){
   const { data } = await _supaClient.from('regras_matching').select('historico_gatilho,conta_contabil_id,agencia_bancaria_id,valor_gatilho').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('tipo_regra','historico').eq('dc','D').is('valor_gatilho',null);
