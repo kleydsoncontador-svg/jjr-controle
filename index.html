@@ -25685,6 +25685,14 @@ async function _lancctbProcessarFopag(){
     let raizFopagContabil=null;
     try{ if(await _lancctbTemAcessoPastaFopag()) raizFopagContabil=await _lancctbCarregarHandleFopag(); }catch(e){}
     const recibosFeriasUsados=new Set();
+    let regrasFolhaParte=null; // regras de histórico (D) cujo gatilho é um trecho do histórico da PARTE aberta (ex.: "Diferença folha") — escolhidas pelo livrinho de cada parte
+    const contaPelaRegraDaParte=async(histParte)=>{
+      if(regrasFolhaParte===null){ const { data: rg } = await _supaClient.from('regras_matching').select('historico_gatilho,conta_contabil_id,agencia_bancaria_id,valor_gatilho').eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico').eq('dc','D').is('valor_gatilho',null); regrasFolhaParte=(rg||[]).filter(x=>(!x.agencia_bancaria_id||String(x.agencia_bancaria_id)===String(contaId))&&_norm(x.historico_gatilho).length>=4); }
+      const semComp=t=>String(t||'').replace(/\d{2}[-\/]\d{4}/g,' ').replace(/\s+/g,' ').trim();
+      const h=_norm(semComp(histParte)); let melhor=null;
+      regrasFolhaParte.forEach(x=>{ const g=_norm(semComp(x.historico_gatilho)); if(g.length>=4&&h.includes(g)&&(!melhor||g.length>melhor.g.length)) melhor={g,id:x.conta_contabil_id}; });
+      return melhor?melhor.id:null;
+    };
 
     // ── PRÉ-PASSO POR LOTE (pedido do usuário 28/10/2026, Fast Lube / Itaú / 07/2026) ──
     // Antes de olhar pagamento por pagamento: agrupa os "Sispag Salários" por data (lote bancário), compara o lote como MULTICONJUNTO de valores com cada relatório da folha e
@@ -26115,7 +26123,7 @@ async function _lancctbProcessarFopag(){
         const rotP=_rotP(p,r.tipo), cpComp=matchIndiv.comprovante||null;
         const partes=[
           { origem:'folha', valor:liquido, historico:`Pagamento ref. ${rotP} ${comp} - ${p.nome}`, conta_contabil_id:contaP.id, nome:p.nome, cpf:p.cpf||null, comprovante_id:cpComp?cpComp.id:null },
-          { origem:'folha', valor:diferenca, historico:`Diferença folha ${comp} - ${p.nome}`, conta_contabil_id:null, nome:p.nome, cpf:p.cpf||null, comprovante_id:null },
+          { origem:'folha', valor:diferenca, historico:`Diferença folha ${comp} - ${p.nome}`, conta_contabil_id:await contaPelaRegraDaParte(`Diferença folha ${comp} - ${p.nome}`), nome:p.nome, cpf:p.cpf||null, comprovante_id:null },
         ];
         const hOrig=String(l.historico_bancario||'').replace(/^\s*(?:\[(?:DIFEREN|FOLHA ABERTA)[^\]]*\]\s*)+/i,'');
         const marca=`[FOLHA ABERTA ${rotP} ${comp} - ${p.nome}: líquido R$ ${_fmt(liquido)} + diferença R$ ${_fmt(diferenca)}] `;
@@ -36298,10 +36306,11 @@ async function _lancctbInlineRegraModal(extratoId,idx){
   const hist=String((document.getElementById(`lancctbInlineHist_${extratoId}_${idx}`)||{}).value||'').trim();
   const base=String(r.historico_bancario||'').replace(/^\s*(?:\[(?:DIFEREN|FOLHA ABERTA|PESSOA IDENTIFICADA|SISPAG ABERTO|SÓCIO\/CONTRIBUINTE)[^\]]*\]\s*)+/i,'').trim()||String(r.historico_bancario||'');
   await abrirLancctbRegraModal(null);
-  document.getElementById('lancctbRegraDescricao').value=base;
+  // O gatilho parte do HISTÓRICO DA LINHA (ex.: "Pagamento ref. salário 08-2026 - RODRIGO VIEIRA" ou "Diferença folha 08-2026 - RODRIGO VIEIRA"): apague o que não deve fazer parte (ex.: deixe só "Diferença folha"). O FOPAG usa a regra nas próximas vezes que abrir essa parte.
+  document.getElementById('lancctbRegraDescricao').value=hist||base;
   document.getElementById('lancctbRegraTipo').value='historico';
   if(typeof _lancctbAtualizarCamposRegra==='function') _lancctbAtualizarCamposRegra();
-  document.getElementById('lancctbRegraHistoricoGatilho').value=base;
+  document.getElementById('lancctbRegraHistoricoGatilho').value=hist||base;
   document.getElementById('lancctbRegraDc').value=(r.valor_saida||0)>0?'D':'C';
   if(contaId) document.getElementById('lancctbRegraContaContabil').value=contaId;
   if(hist){
@@ -36400,7 +36409,20 @@ async function _lancctbRegistroSalvarInline(extratoId){
     await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',r.id);
     const idsCp=[...new Set(comp.map(c=>c.comprovante_id).filter(Boolean))];
     if(idsCp.length) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:r.id}).in('id',idsCp);
-    toast('Pagamento da folha classificado (líquido + diferença).','ok');
+    // Como nos tributos: a conta escolhida pra DIFERENÇA vira Regra (gatilho = histórico da parte sem a competência), e no próximo mês o FOPAG já abre com a conta preenchida.
+    let regrasNovas=0;
+    try{
+      const semComp=t=>String(t||'').replace(/\d{2}[-\/]\d{4}/g,' ').replace(/\s+/g,' ').trim();
+      const { data: exR } = await _supaClient.from('regras_matching').select('historico_gatilho').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('tipo_regra','historico');
+      const jaTem=new Set((exR||[]).map(x=>semComp(x.historico_gatilho).toLowerCase()));
+      for(let ix=0;ix<comp.length;ix++){
+        if(comp[ix].conta_contabil_id) continue; // parte com conta já automática (líquido): sem regra
+        const gat=semComp(comp[ix].historico); if(gat.length<4||jaTem.has(gat.toLowerCase())) continue;
+        const { error: eRg } = await _supaClient.from('regras_matching').insert({ empresa_eid:_lancctbEidAtual, descricao:`[${gat}] ${String(r.historico_bancario||'').replace(/^\s*\[[^\]]*\]\s*/,'')}`.trim(), historico_fixo:linhasContrapartida[ix].historico||null, tipo_regra:'historico', historico_gatilho:gat, valor_gatilho:null, cnpj_cpf_gatilho:null, dc, conta_contabil_id:linhasContrapartida[ix].conta_contabil_id, agencia_bancaria_id:null });
+        if(!eRg){ regrasNovas++; jaTem.add(gat.toLowerCase()); }
+      }
+    }catch(e){ console.warn('Regra da parte de folha:',e); }
+    toast('Pagamento da folha classificado (líquido + diferença).'+(regrasNovas?` Regra criada pra diferença (${regrasNovas}) — nos próximos meses já abre com a conta.`:''),'ok');
     _lancctbInlineExpandidoId=null;
     renderLancctbRegistroContabil();
     return;
