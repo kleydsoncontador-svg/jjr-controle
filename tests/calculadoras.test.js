@@ -234,5 +234,9 @@ t('mês sem Selic cadastrada: avisa em vez de inventar', () => { const r = mj({ 
 t('CDI cadastrado e série contínua de 01/2021 a 09/2026', () => { const s = C.acharSet('mutuo_juros', '2026-09-01'); const a = s.params.selic_mensal.value, b = s.params.cdi_mensal.value; for (let y = 2021; y <= 2026; y++) for (let m = 1; m <= 12; m++) { const k = y + '-' + String(m).padStart(2, '0'); if (k > '2026-09') break; assert.ok(a[k] !== undefined && b[k] !== undefined, k); } });
 t('COMPARATIVO propaga o aviso de juros do mútuo PJ→PF', () => { const r = C.calcular('comparativo', { competencia: '2026-09', valor: '10000', regime: 'lucro_real', dataVencimentoMutuo: '2026-10-01' }); assert.ok(r.ok); assert.ok(r.avisos.some(x => /^Mútuo: .*ABAIXO/.test(x))); });
 
+t('Comparativo: líquido 100.000.000 → cada forma entrega exatamente o líquido (JCP 1º, Pró-labore último)', () => { const x = C.calcular('comparativo', { competencia: '2026-10-01', valorLiquido: '100000000', regime: 'lucro_real' }); assert.strictEqual(x.ok, true); assert.strictEqual(x.resultado.modo, 'liquido'); x.resultado.ranking.forEach(o => assert.ok(Math.abs(o.liquidoSocio - c('100000000')) <= 1, o.nome + ' ' + o.liquidoSocio)); assert.strictEqual(x.resultado.ranking[0].key, 'jcp'); assert.strictEqual(x.resultado.ranking[3].key, 'pro_labore'); });
+t('Comparativo: bruto continua igual (100.000.000 em todas)', () => { const x = C.calcular('comparativo', { competencia: '2026-10-01', valorBruto: '100000000', regime: 'lucro_real' }); assert.strictEqual(x.resultado.modo, 'bruto'); x.resultado.ranking.forEach(o => assert.strictEqual(o.bruto, c('100000000'))); });
+t('Comparativo: os dois campos preenchidos → erro pedindo só um', () => { const x = C.calcular('comparativo', { competencia: '2026-10-01', valorLiquido: '1000', valorBruto: '1000' }); assert.strictEqual(x.ok, false); });
+
 console.log('\nCalculadoras JJR — ' + ok + ' ok, ' + fail + ' falhas');
 process.exit(fail ? 1 : 0);

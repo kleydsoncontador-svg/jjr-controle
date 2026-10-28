@@ -1158,9 +1158,10 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
   // O usuário informa um valor; calcula como Mútuo, JCP, Distribuição de lucros e Pró-labore (reaproveitando as calculadoras de cada uma) e ordena do mais ao menos vantajoso TRIBUTARIAMENTE.
   // Critério: tributos líquidos totais ÷ custo líquido da empresa, onde
   //   custo líquido da empresa = valor + encargos da empresa − economia de IRPJ/CSLL;  tributos líquidos = custo líquido − líquido que o sócio recebe.
-  function calcComparativo(inp) {
+  function calcComparativoCore(inp) {
     const d = data1(inp.competencia), valor = cents(inp.valor), mem = Mem(), avisos = [];
     if (!(valor > 0)) return ERR('Informe o valor a pagar à pessoa física.');
+    const liqMode = inp.base === 'liquido'; const gv = k => (liqMode && inp._vf && inp._vf[k]) ? inp._vf[k] : valor; const gs = k => (gv(k) / 100).toFixed(2);
     const regime = inp.regime || 'lucro_real';
     if (!['lucro_real', 'lucro_presumido', 'simples'].includes(regime)) return ERR('Regime da empresa inválido.');
     const sC = acharSet('comparativo', d); if (!sC) return ERR(ERRO_PARAM, { detalhe: 'Comparativo — competência ' + d.slice(0, 7) });
@@ -1168,46 +1169,47 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     const aliqPat = dec(pv(sC, 'patronal_pro_labore'));
     const sB = acharSet('jcp_base', d), sI = acharSet('jcp_irrf', d); if (sB) sets.push(sB); if (sI) sets.push(sI);
     const econPct = r => (regime === 'lucro_real' && sB) ? mulC(r, dec(pv(sB, 'aliquota_irpj'))) + mulC(r, dec(pv(sB, 'aliquota_csll'))) : 0;
-    const add = (key, nome, o) => { ok.push(Object.assign({ key, nome, bruto: valor }, o)); };
+    const add = (key, nome, o) => { ok.push(Object.assign({ key, nome, bruto: gv(key) }, o)); };
     // 1) Pró-labore
-    { const r = calcProLabore({ competencia: inp.competencia, proLabore: inp.valor, dependentes: inp.dependentes });
+    { const r = calcProLabore({ competencia: inp.competencia, proLabore: gs('pro_labore'), dependentes: inp.dependentes });
       if (!r.ok) fora.push({ nome: 'Pró-labore', motivo: r.erro + (r.detalhe ? ' — ' + r.detalhe : '') });
       else { subs.push(r);
-        const pat = regime === 'simples' ? 0 : mulC(valor, aliqPat), econ = econPct(valor + pat);
+        const pat = regime === 'simples' ? 0 : mulC(gv('pro_labore'), aliqPat), econ = econPct(gv('pro_labore') + pat);
         add('pro_labore', 'Pró-labore', { socioTributos: r.resultado.inss + r.resultado.irrf, liquidoSocio: r.resultado.liquido, empresaEncargos: pat, empresaEconomia: econ, detalhe: 'INSS do sócio ' + brl(r.resultado.inss) + ' + IRRF ' + brl(r.resultado.irrf) + (pat ? ' + patronal da empresa ' + brl(pat) : '') + (econ ? ' − economia IRPJ/CSLL ' + brl(econ) : '') }); } }
     // 2) JCP
     if (regime === 'simples') fora.push({ nome: 'JCP', motivo: 'Empresa do Simples Nacional: o JCP não se aplica (a dedução do art. 9º da Lei 9.249 é para quem apura IRPJ/CSLL sobre o lucro).' });
     else if (!sI || !sB) fora.push({ nome: 'JCP', motivo: ERRO_PARAM + ' (IRRF/TJLP da competência ' + d.slice(0, 7) + ')' });
     else {
-      const lim = cents(inp.limiteJCP), irrf = mulC(valor, dec(pv(sI, 'aliquota')));
-      const dedutivel = regime === 'lucro_real' ? (lim > 0 ? Math.min(valor, lim) : valor) : 0, econ = econPct(dedutivel);
-      add('jcp', 'JCP — Juros sobre Capital Próprio', { socioTributos: irrf, liquidoSocio: valor - irrf, empresaEncargos: 0, empresaEconomia: econ, detalhe: 'IRRF ' + (Number(pv(sI, 'aliquota')) * 100) + '% = ' + brl(irrf) + (econ ? ' − economia IRPJ/CSLL ' + brl(econ) + ' sobre ' + brl(dedutivel) + ' dedutível' : ' (JCP não dedutível neste regime — sem economia)') });
-      if (lim > 0 && valor > lim) avisos.push('JCP: o valor (' + brl(valor) + ') passa do máximo dedutível informado (' + brl(lim) + '); só o máximo gera economia de IRPJ/CSLL.');
+      const lim = cents(inp.limiteJCP), irrf = mulC(gv('jcp'), dec(pv(sI, 'aliquota')));
+      const dedutivel = regime === 'lucro_real' ? (lim > 0 ? Math.min(gv('jcp'), lim) : gv('jcp')) : 0, econ = econPct(dedutivel);
+      add('jcp', 'JCP — Juros sobre Capital Próprio', { socioTributos: irrf, liquidoSocio: gv('jcp') - irrf, empresaEncargos: 0, empresaEconomia: econ, detalhe: 'IRRF ' + (Number(pv(sI, 'aliquota')) * 100) + '% = ' + brl(irrf) + (econ ? ' − economia IRPJ/CSLL ' + brl(econ) + ' sobre ' + brl(dedutivel) + ' dedutível' : ' (JCP não dedutível neste regime — sem economia)') });
+      if (lim > 0 && gv('jcp') > lim) avisos.push('JCP: o valor (' + brl(gv('jcp')) + ') passa do máximo dedutível informado (' + brl(lim) + '); só o máximo gera economia de IRPJ/CSLL.');
       if (!(lim > 0)) avisos.push('JCP: não foi verificado se o valor cabe no limite legal (TJLP × patrimônio líquido, e 50% do lucro/reservas). Informe o "máximo dedutível do JCP" ou use a calculadora JCP antes de decidir.');
     }
     // 3) Distribuição de lucros
-    { const r = calcDistLucros({ competencia: inp.competencia, beneficiario: 'pf_residente', modo: 'bruto', valorBruto: inp.valor });
+    { const r = calcDistLucros({ competencia: inp.competencia, beneficiario: 'pf_residente', modo: 'bruto', valorBruto: gs('dist_lucros') });
       if (!r.ok) fora.push({ nome: 'Distribuição de lucros', motivo: r.erro + (r.detalhe ? ' — ' + r.detalhe : '') });
       else { subs.push(r); add('dist_lucros', 'Distribuição de lucros', { socioTributos: r.resultado.ir, liquidoSocio: r.resultado.liquido, empresaEncargos: 0, empresaEconomia: 0, detalhe: r.resultado.ir ? 'IRRF 10% sobre o total do mês = ' + brl(r.resultado.ir) : 'Até R$ 50.000,00 no mês: sem retenção' }); } }
     // 4) Mútuo (empresa empresta à pessoa física)
-    { const r = calcMutuo({ mutuante: 'PJ', mutuario: 'PF', principal: inp.valor, dataLiberacao: d, dataVencimento: inp.dataVencimentoMutuo, taxaJuros: inp.taxaJurosMutuo });
+    { const r = calcMutuo({ mutuante: 'PJ', mutuario: 'PF', principal: gs('mutuo'), dataLiberacao: d, dataVencimento: inp.dataVencimentoMutuo, taxaJuros: inp.taxaJurosMutuo });
       if (!r.ok) fora.push({ nome: 'Mútuo', motivo: r.erro + (r.detalhe ? ' — ' + r.detalhe : '') });
       else if (r.resultado.iof == null) fora.push({ nome: 'Mútuo', motivo: 'IOF não calculado para esta data (o IOF cadastrado vale a partir de 11/06/2025).' });
-      else { subs.push(r); (r.resultado.avisosJuros || []).filter(a => !/^Mantenha/.test(a)).forEach(a => avisos.push('Mútuo: ' + a)); add('mutuo', 'Mútuo', { socioTributos: r.resultado.iof, liquidoSocio: valor - r.resultado.iof, empresaEncargos: 0, empresaEconomia: 0, naoRemuneracao: true, detalhe: 'IOF ' + brl(r.resultado.iof) + ' (suposto descontado do valor liberado) — o valor precisa ser DEVOLVIDO' + (r.resultado.juros ? ', com juros de ' + brl(r.resultado.juros) : '') }); } }
+      else { subs.push(r); (r.resultado.avisosJuros || []).filter(a => !/^Mantenha/.test(a)).forEach(a => avisos.push('Mútuo: ' + a)); add('mutuo', 'Mútuo', { socioTributos: r.resultado.iof, liquidoSocio: gv('mutuo') - r.resultado.iof, empresaEncargos: 0, empresaEconomia: 0, naoRemuneracao: true, detalhe: 'IOF ' + brl(r.resultado.iof) + ' (suposto descontado do valor liberado) — o valor precisa ser DEVOLVIDO' + (r.resultado.juros ? ', com juros de ' + brl(r.resultado.juros) : '') }); } }
     if (!ok.length) return ERR('Nenhuma das quatro formas pôde ser calculada.', { detalhe: fora.map(f => f.nome + ': ' + f.motivo).join(' | ') });
-    ok.forEach(o => { o.custoEmpresa = valor + o.empresaEncargos - o.empresaEconomia; o.tributosLiquidos = o.custoEmpresa - o.liquidoSocio; o.cargaBp = Math.round(o.tributosLiquidos * 10000 / o.custoEmpresa); });
+    ok.forEach(o => { o.custoEmpresa = o.bruto + o.empresaEncargos - o.empresaEconomia; o.tributosLiquidos = o.custoEmpresa - o.liquidoSocio; o.cargaBp = Math.round(o.tributosLiquidos * 10000 / o.custoEmpresa); });
     // ordem: menor (tributos líquidos ÷ custo) primeiro — comparação exata por produto cruzado
-    const ordem = ok.slice().sort((a, b) => { const x = BigInt(a.tributosLiquidos) * BigInt(b.custoEmpresa), y = BigInt(b.tributosLiquidos) * BigInt(a.custoEmpresa); return x < y ? -1 : x > y ? 1 : 0; });
+    const ordem = ok.slice().sort((a, b) => { if (liqMode) { const dc = a.custoEmpresa - b.custoEmpresa; if (dc) return dc; } const x = BigInt(a.tributosLiquidos) * BigInt(b.custoEmpresa), y = BigInt(b.tributosLiquidos) * BigInt(a.custoEmpresa); return x < y ? -1 : x > y ? 1 : 0; });
     ordem.forEach((o, i) => { o.posicao = i + 1; });
-    mem.t('Valor a pagar à pessoa física'); mem.l('Valor bruto pago/creditado', valor); mem.txt('Regime da empresa', { lucro_real: 'Lucro Real', lucro_presumido: 'Lucro Presumido', simples: 'Simples Nacional' }[regime]);
+    mem.t(liqMode ? 'Líquido que o sócio deve receber (valor efetivado)' : 'Valor a pagar à pessoa física'); mem.l(liqMode ? 'Líquido desejado ao sócio' : 'Valor bruto pago/creditado', valor); mem.txt('Regime da empresa', { lucro_real: 'Lucro Real', lucro_presumido: 'Lucro Presumido', simples: 'Simples Nacional' }[regime]);
     ordem.forEach(o => {
-      mem.t(o.posicao + 'º — ' + o.nome); mem.l('Líquido que o sócio recebe', o.liquidoSocio, '+'); mem.l('Tributos retidos do sócio', o.socioTributos, '−');
+      mem.t(o.posicao + 'º — ' + o.nome); if (liqMode) mem.l('Valor bruto necessário (para o sócio receber o líquido informado)', o.bruto, '+'); mem.l('Líquido que o sócio recebe', o.liquidoSocio, '+'); mem.l('Tributos retidos do sócio', o.socioTributos, '−');
       if (o.empresaEncargos) mem.l('Encargos da empresa (contribuição patronal)', o.empresaEncargos, '+');
       if (o.empresaEconomia) mem.l('(−) Economia de IRPJ/CSLL da empresa', o.empresaEconomia, '−');
       mem.s('Custo líquido da empresa', o.custoEmpresa); mem.s('Tributos líquidos totais (custo − líquido do sócio)', o.tributosLiquidos);
       mem.txt('Carga tributária efetiva', (o.cargaBp / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '% do custo da empresa'); mem.n(o.detalhe);
     });
     fora.forEach(f => mem.n('Fora da comparação — ' + f.nome + ': ' + f.motivo));
+    if (liqMode) avisos.unshift('Modo LÍQUIDO: o valor informado é o que o sócio recebe em mãos; o bruto de cada forma foi calculado para chegar a ele. O ranking é pelo MENOR CUSTO LÍQUIDO da empresa para entregar esse mesmo líquido.');
     avisos.unshift('O ranking compara apenas a carga TRIBUTÁRIA (tributos líquidos ÷ custo da empresa). Não avalia a adequação jurídica: cada forma exige seus requisitos (lucros apurados e escrituração para distribuir; serviço efetivamente prestado para o pró-labore; PL e limites para o JCP).');
     if (ok.some(o => o.key === 'mutuo')) avisos.push('Mútuo NÃO é remuneração: é empréstimo e tem que ser devolvido, com juros e contrato. Usá-lo para pagar o sócio sem devolução pode ser descaracterizado pelo Fisco (distribuição disfarçada). Por isso ele tende a aparecer como o mais barato, mas não resolve a necessidade de remunerar. Os juros recebidos pela empresa são receita dela (não calculados aqui).');
     if (ok.some(o => o.key === 'pro_labore')) avisos.push('Pró-labore: o INSS do sócio é limitado ao teto; a contribuição patronal de 20% é aplicada sobre o valor total (Lucro Real/Presumido) — conferir a base legal; no Simples Nacional a CPP está no DAS (exceto Anexo IV) e não foi somada.');
@@ -1219,7 +1221,35 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     subs.forEach(r => (r.parametros || []).forEach(q => { if (!vistos.has(q.id)) { vistos.add(q.id); params.push(q); } }));
     const bases = [], bv = new Set();
     basesDe(sets).concat(subs.flatMap(r => r.bases || [])).forEach(b => { if (!bv.has(b.id)) { bv.add(b.id); bases.push(b); } });
-    return { ok: true, resultado: { ranking: ordem, indisponiveis: fora, melhor: ordem[0].nome, pior: ordem[ordem.length - 1].nome, valor }, memoria: mem.L, parametros: params, bases, avisos };
+    return { ok: true, resultado: { ranking: ordem, indisponiveis: fora, melhor: ordem[0].nome, pior: ordem[ordem.length - 1].nome, valor, modo: liqMode ? 'liquido' : 'bruto' }, memoria: mem.L, parametros: params, bases, avisos };
+  }
+
+
+  // Modo "líquido": o usuário informa o que o sócio RECEBE; para cada forma acha-se o bruto que entrega esse líquido (busca binária sobre o próprio motor de cada calculadora).
+  function calcComparativo(inp) {
+    // Dois campos: valorLiquido (o sócio recebe) ou valorBruto (pago/creditado) — preencher só um. 'valor' + 'base' continua aceito (cálculos salvos).
+    const temL = cents(inp.valorLiquido) > 0, temB = cents(inp.valorBruto) > 0;
+    if (temL && temB) return ERR('Preencha só um dos campos: o valor LÍQUIDO (que o sócio recebe) ou o valor BRUTO (pago/creditado).');
+    if (temL) inp = Object.assign({}, inp, { base: 'liquido', valor: inp.valorLiquido });
+    else if (temB) inp = Object.assign({}, inp, { base: 'bruto', valor: inp.valorBruto });
+    if (inp.base !== 'liquido') return calcComparativoCore(inp);
+    const alvo = cents(inp.valor); if (!(alvo > 0)) return ERR('Informe o líquido que o sócio deve receber.');
+    const d = data1(inp.competencia), vf = {};
+    const acha = (fn) => {
+      const l = g => { try { const x = fn(g); return (x === null || x === undefined) ? null : x; } catch (e) { return null; } };
+      const l0 = l(alvo); if (l0 === null) return null; if (l0 >= alvo) return alvo;
+      let lo = alvo, hi = alvo * 2, n = 0; while ((l(hi) === null || l(hi) < alvo) && n++ < 12) { lo = hi; hi *= 2; }
+      if (l(hi) === null || l(hi) < alvo) return null;
+      while (hi - lo > 1) { const m = Math.floor((lo + hi) / 2), lm = l(m); if (lm !== null && lm >= alvo) hi = m; else lo = m; }
+      return hi;
+    };
+    const money = g => (g / 100).toFixed(2);
+    vf.pro_labore = acha(g => { const r = calcProLabore({ competencia: inp.competencia, proLabore: money(g), dependentes: inp.dependentes }); return r.ok ? r.resultado.liquido : null; });
+    vf.dist_lucros = acha(g => { const r = calcDistLucros({ competencia: inp.competencia, beneficiario: 'pf_residente', modo: 'bruto', valorBruto: money(g) }); return r.ok ? r.resultado.liquido : null; });
+    vf.mutuo = acha(g => { const r = calcMutuo({ mutuante: 'PJ', mutuario: 'PF', principal: money(g), dataLiberacao: d, dataVencimento: inp.dataVencimentoMutuo, taxaJuros: inp.taxaJurosMutuo }); return (r.ok && r.resultado.iof != null) ? g - r.resultado.iof : null; });
+    const sI = acharSet('jcp_irrf', d); if (sI) { const al = dec(pv(sI, 'aliquota')); vf.jcp = acha(g => g - mulC(g, al)); }
+    Object.keys(vf).forEach(k => { if (!vf[k]) delete vf[k]; });
+    return calcComparativoCore(Object.assign({}, inp, { _vf: vf }));
   }
 
   // ───────────────────────────── catálogo ─────────────────────────────
