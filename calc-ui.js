@@ -428,7 +428,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   window.calcSalvar = function () {
     const r = est.ultimo; if (!r || !r.ok) return;
     const lista = lerLista(LS.hist); const quem = (currentUser && (currentUser.nome || currentUser.login)) || '';
-    lista.unshift({ id: 'c' + Date.now().toString(36), ts: new Date().toISOString(), por: quem, empresa: empresaAtual(), calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
+    lista.unshift({ id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: new Date().toISOString(), por: quem, empresa: empresaAtual(), calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
     S.s(LS.hist, lista.slice(0, 400)); toast('Cálculo salvo com a versão dos parâmetros usada.', 'ok');
   };
   function resumoHtml(f, r) {
