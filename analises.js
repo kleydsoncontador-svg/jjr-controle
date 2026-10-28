@@ -7,6 +7,9 @@
   const C = () => window.JJRCalc;
   const AN = { aberto: {}, editando: {}, periodo: {}, periodos: {}, chart: {}, resultado: {}, ocupado: {}, medios: {}, carregou: {} };
   const KEY = eid => 'analises_cfg_' + eid;
+  // títulos de grupo: escuros com letra branca no modo claro; CLAROS com letra escura no modo escuro (pedido do usuário 28/10/2026)
+  (function () { if (document.getElementById('anCss')) return; const st = document.createElement('style'); st.id = 'anCss';
+    st.textContent = '.an-grp{background:var(--ink2);color:#fff;font-weight:700;font-size:12px;padding:5px 8px}html.dark-mode .an-grp{background:var(--ink);color:#181D28}'; document.head.appendChild(st); })();
 
   // Variáveis (contas) que alimentam as análises. nat = natureza do saldo que deve ficar positivo (D = devedor, C = credor).
   // padrao = classificação do plano de contas padrão JJR (confira e ajuste: cada empresa pode ter plano diferente).
@@ -153,11 +156,11 @@
   function listaHtml(res) {
     let g = '', h = '';
     res.linhas.forEach((i, n) => {
-      if (i.grupo !== g) { g = i.grupo; h += `<tr><td colspan="3" style="background:var(--ink2);color:#fff;font-weight:700;font-size:12px;padding:5px 8px">${E(g)}</td></tr>`; }
+      if (i.grupo !== g) { g = i.grupo; h += `<tr><td colspan="3" class="an-grp">${E(g)}</td></tr>`; }
       h += `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px"><b>${E(i.nome)}</b>${i.nota ? `<div style="font-size:11px;color:var(--slate)">${E(i.nota)}</div>` : ''}</td><td style="padding:5px 8px;font-size:11.5px;color:var(--slate)">${E(i.formula)}</td><td style="padding:5px 8px;text-align:right;white-space:nowrap"><b>${fv(i.valor, i.unidade)}</b></td></tr>`;
     });
     const kz = res.kanitz && res.kanitz.valor !== null ? `<div style="margin:8px 0;padding:8px 10px;border:1px solid var(--border);border-radius:6px"><b>Fator de insolvência (Kanitz): ${f2(res.kanitz.valor, 2)} — ${E(res.kanitz.faixa)}</b></div>` : '';
-    return kz + `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr><th style="text-align:left;padding:5px 8px">Análise</th><th style="text-align:left;padding:5px 8px">Fórmula</th><th style="text-align:right;padding:5px 8px">Resultado</th></tr></thead><tbody>${h}</tbody></table></div>`;
+    return kz + `<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr><th class="an-grp" style="text-align:left">Análise</th><th class="an-grp" style="text-align:left">Fórmula</th><th class="an-grp" style="text-align:right">Resultado</th></tr></thead><tbody>${h}</tbody></table></div>`;
   }
   function origemHtml(res) {
     const rows = res.origem.map(o => `<tr style="border-top:1px solid var(--border)"><td style="padding:4px 8px">${E(o.v.l)}</td><td style="padding:4px 8px;font-size:11.5px">${o.r.usadas.length ? o.r.usadas.map(u => E(u.cod + ' ' + u.desc)).join('<br>') : '<span style="color:var(--slate)">— sem contas —</span>'}</td><td style="padding:4px 8px;text-align:right;white-space:nowrap">${brl(o.r.cents)}</td></tr>`).join('');
@@ -167,7 +170,7 @@
     const chart = AN.chart[eid] || [], desc = {}; chart.forEach(a => { desc[a.classification] = a.description; });
     let g = '', rows = '';
     VARS.forEach(v => {
-      if (v.g !== g) { g = v.g; rows += `<tr><td colspan="3" style="background:var(--ink2);color:#fff;font-weight:700;font-size:12px;padding:5px 8px">${E(g)}</td></tr>`; }
+      if (v.g !== g) { g = v.g; rows += `<tr><td colspan="3" class="an-grp">${E(g)}</td></tr>`; }
       const cods = cfg && cfg.contas && cfg.contas[v.k] ? cfg.contas[v.k] : (cfg ? [] : v.padrao);
       rows += `<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px;max-width:340px"><b>${E(v.l)}</b><div style="font-size:11px;color:var(--slate)">usada em: ${E(v.uso)}</div></td>
         <td style="padding:5px 8px;min-width:240px"><input class="fi" id="anC_${eid}_${v.k}" value="${E(cods.join(', '))}" placeholder="${v.opc ? 'opcional' : 'ex.: 1.1.1'}" style="font-size:12px" oninput="anCodigosMudou('${eid}','${v.k}')"><div id="anD_${eid}_${v.k}" style="font-size:11px;color:var(--slate);margin-top:2px">${cods.map(c => E(c + ' ' + (desc[c] || ''))).join(' · ')}</div></td>
