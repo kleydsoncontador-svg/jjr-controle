@@ -435,12 +435,13 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     if (!f || !r.resultado) return '';
     return '<table class="calc-tbl"><tbody>' + f.resumo(r.resultado).map(([l, v]) => `<tr><td>${E(l)}</td><td class="v"><b>${fmtV(v)}</b></td></tr>`).join('') + '</tbody></table>' + (f.extra ? f.extra(r.resultado) : '');
   }
-  function htmlImpressao(titulo, r, entrada, quando, f) {
+  function empresaTxt(o) { return o ? ((o.eid ? '#' + o.eid + ' - ' : '') + o.nome) : ''; }
+  function htmlImpressao(titulo, r, entrada, quando, f, empresa) {
     return `<!doctype html><meta charset="utf-8"><title>${E(titulo)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}h3{font-size:14px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}td.v,td.n{text-align:right;font-family:monospace;white-space:nowrap}tr.titulo td{background:#eee;font-weight:bold}tr.total td{font-weight:bold;background:#e3f3f0}tr.rk-best td{background:#e3f3f0}small{color:#666}.calc-tag{border:1px solid #999;border-radius:3px;padding:0 4px;font-size:10px}.calc-aviso{margin:6px 0}</style>
-      <h1>${E(titulo)}</h1><p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${resumoHtml(f, r)}<h3>Memória de cálculo</h3>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
+      <h1>${E(titulo)}</h1>${empresa ? '<p><b>Empresa:</b> ' + E(empresaTxt(empresa)) + '</p>' : ''}<p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${resumoHtml(f, r)}<h3>Memória de cálculo</h3>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
   }
   function abrirImpressao(html) { const w = window.open('', '_blank'); if (!w) { toast('Libere pop-ups para imprimir.', 'err'); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(() => w.print(), 300); }
-  window.calcImprimir = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para poder imprimir.', 'err'); return; } abrirImpressao(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'), F[est.key])); };
+  window.calcImprimir = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para poder imprimir.', 'err'); return; } abrirImpressao(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'), F[est.key], empresaAtual())); };
 
   // ───── Excel (todas as calculadoras, o cálculo salvo e as tabelas) — SheetJS (XLSX) já carregado no site ─────
   const numR = v => typeof v === 'number' ? v / 100 : v;               // centavos → reais
@@ -461,9 +462,9 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     (mem || []).forEach(l => { if (l.k === 'titulo') a.push([l.r]); else if (l.k === 'nota') a.push([l.r]); else if (l.k === 'texto' || l.k === 'inteiro') a.push([l.r, l.v]); else a.push([l.r, numR(l.v), (l.op || '') + (l.nota ? ' ' + l.nota : '') + (l.k === 'subtotal' ? ' (subtotal)' : l.k === 'total' ? ' (TOTAL)' : '')]); });
     return a;
   }
-  function montarWorkbook(titulo, f, r, entrada, quando) {
+  function montarWorkbook(titulo, f, r, entrada, quando, empresa) {
     const wb = XLSX.utils.book_new(); const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {};
-    const res = [[titulo], ['Gerado em', quando], ['Cálculo determinístico, sem IA'], [], ['Resumo', 'Valor']];
+    const res = [[titulo]].concat(empresa ? [['Empresa', empresaTxt(empresa)]] : [], [['Gerado em', quando], ['Cálculo determinístico, sem IA'], [], ['Resumo', 'Valor']]);
     if (f && r.resultado) f.resumo(r.resultado).forEach(([l, v]) => res.push([l, numR(v)]));
     addSheet(wb, 'Resumo', res);
     if (f && f.tabela && r.resultado) { const t = f.tabela(r.resultado); addSheet(wb, t.nome, [t.cab].concat(t.linhas), t); }
@@ -474,10 +475,10 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     if ((r.avisos || []).length) addSheet(wb, 'Avisos', [['Avisos']].concat(r.avisos.map(a => [a])));
     return wb;
   }
-  window.calcExcel = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para gerar o Excel.', 'err'); return; } baixarXlsx(montarWorkbook(F[est.key].titulo, F[est.key], r, est.ultimoInp, new Date().toLocaleString('pt-BR')), F[est.key].titulo); };
+  window.calcExcel = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para gerar o Excel.', 'err'); return; } baixarXlsx(montarWorkbook(F[est.key].titulo, F[est.key], r, est.ultimoInp, new Date().toLocaleString('pt-BR'), empresaAtual()), F[est.key].titulo); };
   function dadosHist(id) { const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return null; return { h, f: F[h.calc], r: { ok: true, resultado: h.resultado, memoria: h.memoria, parametros: h.parametros, bases: (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean), avisos: h.avisos || [] } }; }
-  window.calcHistImprimir = function (id) { const d = dadosHist(id); if (!d) return; abrirImpressao(htmlImpressao(d.h.titulo, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.f)); };
-  window.calcHistExcel = function (id) { const d = dadosHist(id); if (!d) return; baixarXlsx(montarWorkbook(d.h.titulo, d.f, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR')), d.h.titulo); };
+  window.calcHistImprimir = function (id) { const d = dadosHist(id); if (!d) return; abrirImpressao(htmlImpressao(d.h.titulo, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.f, d.h.empresa)); };
+  window.calcHistExcel = function (id) { const d = dadosHist(id); if (!d) return; baixarXlsx(montarWorkbook(d.h.titulo, d.f, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.h.empresa), d.h.titulo); };
 
   // ───────────────────────────── histórico ─────────────────────────────
   function renderHistorico() {
