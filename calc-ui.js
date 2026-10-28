@@ -307,7 +307,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     const root = document.getElementById('calcRoot'); if (!root) return;
     const nav = [];
     C.CATEGORIAS.forEach(cat => {
-      const impl = C.CATALOGO.filter(c => c.cat === cat);
+      const impl = C.CATALOGO.filter(c => c.cat === cat && c.key !== 'analise_indices' && c.key !== 'ebitda_eva'); // movidas para o módulo Análises Contábeis (analises.js)
       if (!impl.length) return;
       nav.push(`<div class="calc-cat">${E(cat)}</div>`);
       impl.forEach(c => nav.push(`<button class="calc-item ${c.key === 'comparativo' ? 'cmp' : ''} ${est.aba === 'calc' && est.key === c.key ? 'on' : ''}" onclick="calcAbrir('${c.key}')">${E(c.nome)}</button>`));

@@ -1320,7 +1320,8 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     const PC = c('passivoCirculante'), ELP = c('elp'), PL = c('patrimonioLiquido');
     const DISP = c('disponivel'), CLI = c('clientes'), EST = c('estoques'), DA = c('despAntecipadas'), FORN = c('fornecedores');
     const RL = c('receitaLiquida'), CMV = c('cmv'), LOP = c('lucroOperacional'), LL = c('lucroLiquido');
-    const ANC = RLP + INV + IMOB + INTG, AT = AC + ANC, CT = PC + ELP, PT = CT + PL, PERM = INV + IMOB + INTG;
+    const OUT = has('outrosAnc') ? c('outrosAnc') : 0;
+    const ANC = RLP + INV + IMOB + INTG + OUT, AT = AC + ANC, CT = PC + ELP, PT = CT + PL, PERM = INV + IMOB + INTG;
     if (!(AT > 0)) return ERR('Informe o ativo (circulante e não circulante).');
     const dias = has('diasPeriodo') ? parseInt(inp.diasPeriodo, 10) : 360;
     if (!(dias >= 1 && dias <= 400)) return ERR('Dias do período inválido (use 360, 365, 30…).');
