@@ -578,7 +578,9 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       const desde = tipo === 'irpj' ? iDesde : cDesde; const maj = tipo === 'irpj' ? majIRPJ : majCSLL;
       const o = { maj, E: 0, disp: lim, nota: [] };
       if (!maj) return o;
-      const firstQ = ano > desde.ano ? 1 : desde.trimestre;
+      let firstQ = ano > desde.ano ? 1 : desde.trimestre;
+      // Interpretação (opcional) da CSLL 2026: a noventena só adia a majoração, não tira a cota do 1º trimestre do limite anual de R$ 5 milhões. Padrão = desligado (limite só dos trimestres com a regra em vigor).
+      if (tipo === 'csll' && inp.cotaPrimeiroTriCsll && ano === desde.ano && firstQ > 1) { firstQ = 1; o.nota.push('CSLL — leitura adotada: a cota do 1º trimestre/' + ano + ' COMPÕE o limite (limite anual de ' + brl(4 * lim) + '), pois a noventena adia a majoração mas não reduz o limite. Interpretação do contador; confirme na IN RFB 2.305/2025, art. 15.'); }
       // Data de abertura (opcional): trimestres anteriores ao da abertura não geram limite nem sobra (art. 15, § 9º — conta TRIMESTRES em atividade, não meses; o trimestre da abertura conta inteiro).
       let firstQ2 = firstQ; const ab = String(inp.dataAbertura || '').match(/^(\d{4})-(\d{2})-\d{2}/);
       if (ab && parseInt(ab[1], 10) === ano) { const qAb = Math.floor((parseInt(ab[2], 10) - 1) / 3) + 1; if (qAb > firstQ2) { firstQ2 = qAb; o.nota.push('Empresa aberta em ' + ab[0].split('-').reverse().join('/') + ': o limite anual conta só os trimestres em atividade, a partir do ' + qAb + 'º trimestre (art. 15, § 9º).'); } }
@@ -673,7 +675,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     mem.l('(−) CSLL retida a compensar', csllRet, '−'); mem.l('(−) Outras antecipações da CSLL', antC, '−');
     const csllSaldo = csll - csllRet - antC; mem.tot(csllSaldo >= 0 ? 'CSLL A PAGAR' : 'CSLL — SALDO NEGATIVO (a compensar)', csllSaldo);
     if (majIRPJ || majCSLL) avisos.push('Há liminares individuais na Justiça Federal e ADIs no STF (7920, 7936, 7944, 7982) contestando a majoração de 10%. O cálculo aplica a lei em vigor; se a empresa tem decisão favorável, a base muda — confira o andamento.');
-    if (ano === 2026) avisos.push('CSLL 2026: limite anual proporcional de ' + brl(cents(pv(set, 'csll_limite_anual_2026'))) + ' (três trimestres sujeitos à nova regra). O 1º trimestre/2026 NÃO tem majoração da CSLL.');
+    if (ano === 2026 && !inp.cotaPrimeiroTriCsll) avisos.push('CSLL 2026: limite anual proporcional de ' + brl(cents(pv(set, 'csll_limite_anual_2026'))) + ' (três trimestres sujeitos à nova regra). O 1º trimestre/2026 NÃO tem majoração da CSLL. Há leitura diversa (a cota do 1º trimestre também comporia o limite): marque a opção "Cota do 1º trimestre compõe o limite da CSLL" para calcular assim.');
     if (alCSLLtab && tipoC === 'comum') avisos.push('CSLL calculada à alíquota da empresa comum. Entidades financeiras e outras atividades têm alíquota própria — não cadastradas.');
     return { ok: true, resultado: { baseIRPJ, irpj: irpjTotal, irpjAPagar: max0(irpjSaldo), irpjSaldo, baseCSLL, csll, csllAPagar: max0(csllSaldo), csllSaldo, majoracaoIRPJ: majIRPJ, majoracaoCSLL: majCSLL }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
   }
