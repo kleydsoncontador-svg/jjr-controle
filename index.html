@@ -22746,24 +22746,39 @@ async function _lancctbFetchLotesParalelo(partes,fabrica,paralelo){
   }
   return {data:todos,error:erro,falhas};
 }
-async function _lancctbFetchParcelasMotor(eid,lancamentos,dmin,dmax){
-  // (A) por MÊS do pagamento: valor igual (±2 centavos) e vencimento entre [1º pagamento − janela de vencimento] e o fim do próprio mês (regra de 24/10/2026: nunca parcela de mês posterior ao do pagamento)
+// CPF no texto (formatado ou 11 dígitos corridos, só com dígito verificador válido) — o BB manda "Pix - Recebido … 45477551836 LUCAS DE …"
+function _lancctbCpfsDoTexto(txt){
+  const t=String(txt||''), out=new Set();
+  const valido=c=>{ if(c.length!==11||/^(\d)\1{10}$/.test(c)) return false; const dv=n=>{ let s=0; for(let i=0;i<n;i++) s+=(+c[i])*(n+1-i); const r=(s*10)%11; return r===10?0:r; }; return dv(9)===+c[9]&&dv(10)===+c[10]; };
+  (t.match(/(?<![0-9])[0-9]{3}[.]?[0-9]{3}[.]?[0-9]{3}-?[0-9]{2}(?![0-9])/g)||[]).forEach(m=>{ const c=m.replace(/[^0-9]/g,''); if(valido(c)) out.add(c); });
+  return [...out];
+}
+// Parcelas de NF pendentes do motor, por DOCUMENTO (CNPJ/CPF): histórico do banco + comprovantes + Fluxo → NFs desse cliente (índice por CNPJ) → parcelas pendentes (índice por nf_id). Rápido e exato.
+// Lançamento sem nenhum documento (ex.: "Cielo Vendas Débito") cai na busca por VALOR do mês (erro/tempo esgotado nesse trecho só é avisado no console). NFS-e (retenção) entram inteiras.
+async function _lancctbFetchParcelasMotor(eid,lancamentos,dmin,dmax,docsExtras){
+  const base=(lo,hi)=>{ let q=_supaClient.from('notas_fiscais_parcelas').select(LANCCTB_SEL_PARCELA_MOTOR).eq('empresa_eid',eid).eq('status_conciliacao','pendente'); if(lo) q=q.gte('data_vencimento',lo); if(hi) q=q.lte('data_vencimento',hi); return q; };
+  const docs=new Set((docsExtras||[]).filter(Boolean)), semDoc=[];
+  (lancamentos||[]).forEach(l=>{ const t=l.historico_bancario||''; const ds=[..._lancctbCnpjsDoTexto(t),..._lancctbCpfsDoTexto(t)]; if(ds.length) ds.forEach(d=>docs.add(d)); else semDoc.push(l); });
+  // (D) por documento
+  const dArr=[...docs], pD=[]; for(let i=0;i<dArr.length;i+=80) pD.push(dArr.slice(i,i+80));
+  const nfsDoc=await _lancctbFetchLotesParalelo(pD,part=>()=>_supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).in('cnpj_destinatario',part).order('id',{ascending:true}),4);
+  const nfsEmi=await _lancctbFetchLotesParalelo(pD,part=>()=>_supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).in('cnpj_emitente',part).order('id',{ascending:true}),4);
+  // NFS-e: retenção (valor líquido ≠ bruto)
+  const nfsSe=await _lancctbFetchPaginas(()=>_supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).eq('tipo','nfse').order('id',{ascending:true}));
+  const ids=[...new Set([...nfsDoc.data,...nfsEmi.data,...(nfsSe.data||[])].map(n=>n.id))], pI=[]; for(let i=0;i<ids.length;i+=200) pI.push(ids.slice(i,i+200));
+  const D=await _lancctbFetchLotesParalelo(pI,part=>()=>base(dmin,dmax).in('nf_id',part).order('id',{ascending:true}),4);
+  // (A) sem documento: por VALOR, mês a mês (pode estourar o tempo em valores muito comuns — só avisa no console)
   const porMes=new Map();
-  (lancamentos||[]).forEach(l=>{ const m=String(l.data_pagamento||'').slice(0,7); if(!m) return; const c=Math.round((l.valor_saida||l.valor_entrada||0)*100); if(c<=0) return; if(!porMes.has(m)) porMes.set(m,{cents:new Set(),dmin:l.data_pagamento,dmax:l.data_pagamento}); const g=porMes.get(m); const tolC=l.valor_saida>0?2:1; for(let d=-tolC;d<=tolC;d++) g.cents.add(c+d); if(l.data_pagamento<g.dmin) g.dmin=l.data_pagamento; if(l.data_pagamento>g.dmax) g.dmax=l.data_pagamento; });
+  semDoc.forEach(l=>{ const m=String(l.data_pagamento||'').slice(0,7); if(!m) return; const c=Math.round((l.valor_saida||l.valor_entrada||0)*100); if(c<=0) return; if(!porMes.has(m)) porMes.set(m,{cents:new Set(),dmin:l.data_pagamento}); const g=porMes.get(m); const tolC=l.valor_saida>0?2:1; for(let d=-tolC;d<=tolC;d++) g.cents.add(c+d); if(l.data_pagamento<g.dmin) g.dmin=l.data_pagamento; });
   const soma=(d,n)=>{ const x=new Date(d+'T12:00:00'); x.setDate(x.getDate()+n); return x.toISOString().slice(0,10); };
   const fimMes=(m)=>{ const [a,b]=m.split('-').map(Number); return new Date(Date.UTC(a,b,0)).toISOString().slice(0,10); };
-  const partes=[];
-  porMes.forEach((g,m)=>{ const vals=[...g.cents].map(c=>(c/100).toFixed(2)); const lo=soma(g.dmin,-LANCCTB_MATCH_JANELA_DIAS_NF), hi=fimMes(m); for(let i=0;i<vals.length;i+=150) partes.push({vals:vals.slice(i,i+150),lo,hi}); });
-  const base=(lo,hi)=>{ let q=_supaClient.from('notas_fiscais_parcelas').select(LANCCTB_SEL_PARCELA_MOTOR).eq('empresa_eid',eid).eq('status_conciliacao','pendente'); if(lo) q=q.gte('data_vencimento',lo); if(hi) q=q.lte('data_vencimento',hi); return q; };
-  const A=await _lancctbFetchLotesParalelo(partes,pt=>()=>base(pt.lo,pt.hi).in('valor_parcela',pt.vals).order('id',{ascending:true}),6);
-  // (B) NFS-e (serviço: é onde há retenção e o valor líquido ≠ bruto): todas as parcelas pendentes delas no intervalo geral. (Filtrar por 'iss_valor>0 OU pis…' varre a tabela inteira e estoura o tempo do banco: 29 s e erro.)
-  const { data: nfsRet } = await _lancctbFetchTudoParalelo(()=>_supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).eq('tipo','nfse').order('id',{ascending:true}));
-  const idsRet=(nfsRet||[]).map(n=>n.id).slice(0,3000), pRet=[]; for(let i=0;i<idsRet.length;i+=150) pRet.push(idsRet.slice(i,i+150));
-  const B=await _lancctbFetchLotesParalelo(pRet,part=>()=>base(dmin,dmax).in('nf_id',part).order('id',{ascending:true}),6);
-  const vistos=new Set(), out=[]; [...A.data,...B.data].forEach(x=>{ if(!vistos.has(x.id)){ vistos.add(x.id); out.push(x); } });
-  const falhas=(A.falhas||0)+(B.falhas||0);
-  if(falhas){ console.warn('Carga de NFs: '+falhas+' trecho(s) falharam'); try{ toast('Atenção: a carga de NFs ficou incompleta ('+falhas+' trecho(s) falharam). Rode de novo.','err'); }catch(e){} }
-  return {data:out,error:falhas?{message:'carga incompleta'}:null};
+  const pA=[]; porMes.forEach((g,m)=>{ const vals=[...g.cents].map(c=>(c/100).toFixed(2)); const lo=soma(g.dmin,-LANCCTB_MATCH_JANELA_DIAS_NF), hi=fimMes(m); for(let i=0;i<vals.length;i+=100) pA.push({vals:vals.slice(i,i+100),lo,hi}); });
+  const A=await _lancctbFetchLotesParalelo(pA,pt=>()=>base(pt.lo,pt.hi).in('valor_parcela',pt.vals).order('id',{ascending:true}),3);
+  const vistos=new Set(), out=[]; [...D.data,...A.data].forEach(x=>{ if(!vistos.has(x.id)){ vistos.add(x.id); out.push(x); } });
+  if(D.falhas) { console.warn('Carga de NFs por documento: '+D.falhas+' trecho(s) falharam'); try{ toast('Atenção: a carga de NFs ficou incompleta ('+D.falhas+' trecho(s) falharam). Rode de novo.','err'); }catch(e){} }
+  if(A.falhas) console.warn('Carga de NFs por valor (lançamentos sem documento): '+A.falhas+' trecho(s) estouraram o tempo');
+  window.__parcMotor={docs:docs.size,semDoc:semDoc.length,nfs:ids.length,porDoc:D.data.length,porValor:A.data.length,total:out.length,falhasDoc:D.falhas||0,falhasValor:A.falhas||0};
+  return {data:out,error:D.falhas?{message:'carga incompleta'}:null};
 }
 // (C) parcelas das NFs citadas pelo Fluxo de Caixa (pagamento antecipado/valor diferente): por número da NF, só pendentes
 async function _lancctbFetchParcelasPorNumeros(eid,nums){
@@ -33027,7 +33042,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(_mDmax) q=q.lte('data_pagamento',_mDmax);
       return q; }),
     // parcelas: filtra por data_vencimento (campo equivalente a data_pagamento)
-    _pulaParcelasNf?Promise.resolve({data:[]}):_lancctbFetchParcelasMotor(eid,lancamentos,_mDminNf,_mDmaxNf),
+    Promise.resolve({data:[]}), // parcelas: carregadas logo abaixo, depois do Promise.all (precisam dos CNPJs dos comprovantes e do Fluxo)
     // regras: pequena, sem filtro de data
     _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
       .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,historico_excecao,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
@@ -33047,6 +33062,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(_mDmax) q=q.lte('data',_mDmax);
       return q; }),
   ]);
+  if(!_pulaParcelasNf&&parcelas){ try{
+    const docsEx=[...(comprovantesPag||[]),...(comprovantesReceb||[]),...(fluxoCaixaPonteBase||[]),...(fluxoCaixa||[])].map(x=>String(x.cnpj_cpf||'').replace(/\D/g,'')).filter(d=>d.length===11||d.length===14);
+    log('Carregando NFs pendentes por CNPJ/CPF…');
+    const rP=await _lancctbFetchParcelasMotor(eid,lancamentos,_mDminNf,_mDmaxNf,docsEx); rP.data.forEach(x=>parcelas.push(x));
+  }catch(e){ console.warn('Carga das parcelas de NF:',e); } }
   // (C) NFs citadas pelo Fluxo de Caixa (pagamento antecipado, valor diferente do banco): entram pelo NÚMERO da NF, só as pendentes que ainda não vieram por valor
   if(!_pulaParcelasNf&&parcelas){ try{
     const numsFx=[...(fluxoCaixaPonteBase||[]),...(fluxoCaixa||[])].map(f=>String(f.numero||f.documento_numero||'').split('/')[0].replace(/\D/g,'').replace(/^0+/,'')).filter(Boolean);
