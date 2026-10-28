@@ -3490,7 +3490,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
   <div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
     <div>
       <div class="ptitle" style="display:flex;align-items:center;gap:8px"><span id="convShopeeTitulo">Shopee - Conciliação</span><button class="icon-btn" onclick="renomearConvShopee()" title="Renomear conversor" style="border:none;background:none;cursor:pointer;color:var(--slate);font-size:.9rem;padding:2px">✎</button></div>
-      <div class="psub" style="margin-top:2px">Concilia o Subtotal de mercadoria diário da Declaração Shopee com as notas fiscais de Venda/Revenda do Livro de Saídas, nota a nota.</div>
+      <div class="psub" style="margin-top:2px">Concilia o Subtotal de mercadoria diário da Declaração Shopee com as NF-e e NFC-e de saída (venda/revenda) importadas no site, nota a nota.</div>
     </div>
   </div>
 
@@ -47209,6 +47209,26 @@ function _convShopeeClassificarCfop(cfop){
   return null;
 }
 
+// NF-e / NFC-e de SAÍDA já importadas no site (substitui o Livro de Saídas em PDF). "Venda" = natureza da operação começando por VENDA
+// (devolução, remessa/retorno de depósito, transferência não entram). NFC-e sem destinatário identificado conta como pessoa física.
+async function _convShopeeCarregarNotasSaida(alvo,diarios){
+  const r=_convShopeeResolveAlvo(alvo);
+  const cnpjDig=String(_convShopeeCnpj(alvo)||'').replace(/\D/g,'');
+  const datas=diarios.map(d=>d.data).sort();
+  const soma=(iso,n)=>{ const x=new Date(iso+'T12:00:00'); x.setDate(x.getDate()+n); return x.toISOString().slice(0,10); };
+  const lo=soma(datas[0],-3), hi=soma(datas[datas.length-1],3);
+  const q=await _lancctbFetchPaginas(()=>_supaClient.from('notas_fiscais').select('numero,serie,tipo,data_emissao,valor_total,nome_destinatario,cnpj_destinatario,cnpj_emitente,natureza_operacao')
+    .eq('empresa_eid',r.eidMatriz).eq('direcao','venda').in('tipo',['nfe','nfce']).gte('data_emissao',lo).lte('data_emissao',hi+'T23:59:59').order('id',{ascending:true}));
+  if(q.error) throw new Error('Não consegui ler as NFs de saída: '+q.error.message);
+  const norm=t=>_convMpRemoverAcentos(String(t||'')).toUpperCase().trim();
+  return (q.data||[]).filter(n=>!cnpjDig||!n.cnpj_emitente||String(n.cnpj_emitente).replace(/\D/g,'')===cnpjDig).map(n=>{
+    const nat=norm(n.natureza_operacao), doc=String(n.cnpj_destinatario||'').replace(/\D/g,'');
+    const [a,m,d]=String(n.data_emissao).slice(0,10).split('-');
+    return {dataEmissao:`${d}/${m}/${a}`,nota:String(n.numero||''),nomeCliente:n.nome_destinatario||'',cnpjCpf:doc,
+      ehPF:doc.length!==14,valorContabil:Number(n.valor_total)||0,tipo:n.tipo,
+      ehVenda:/^VENDA/.test(nat)&&!/DEVOL|RETORNO|REMESSA|TRANSFER/.test(nat)};
+  });
+}
 // ─ extração do Livro de Saídas Fiscal (PDF) ─
 function _convShopeeParseLinhaLivro(itensLinha){
   const textos=itensLinha.map(it=>it.text);
@@ -47357,7 +47377,7 @@ function _convShopeeSubsetSumExato(candidatos,metaReais){
   return usados;
 }
 async function _convShopeeConciliar(diariosShopee,registrosLivro,onProgresso){
-  const vendaRevenda=registrosLivro.filter(r=>_convShopeeClassificarCfop(r.cfop));
+  const vendaRevenda=registrosLivro.filter(r=>r.ehVenda!==undefined?r.ehVenda:_convShopeeClassificarCfop(r.cfop));
   // Pessoa Física primeiro: o subset-sum só usa uma nota PJ quando for
   // estritamente necessário pra fechar a soma exata do dia.
   vendaRevenda.sort((a,b)=>(a.ehPF===b.ehPF)?0:(a.ehPF?-1:1));
@@ -47576,7 +47596,7 @@ function renderConvShopeeProcessForm(alvo,cfg){
   return `<div style="margin-top:10px;padding-top:10px;border-top:1px solid var(--border)" onclick="event.stopPropagation()">
     <div style="display:flex;justify-content:flex-end;margin-bottom:8px"><button class="btn bo bsm" onclick="editarConvShopeeConfig('${alvo}')" style="font-size:11px">&#9998; Editar contas configuradas</button></div>
     <div class="fg"><label class="fl">Declaração de Renda Shopee (PDF) — pode selecionar mais de um arquivo</label><input type="file" id="convShopeeArquivoDecl_${alvo}" accept=".pdf" multiple class="fi"></div>
-    <div class="fg"><label class="fl">Livro de Saídas Fiscal (PDF)</label><input type="file" id="convShopeeArquivoLivro_${alvo}" accept=".pdf" class="fi"></div>
+    <div style="font-size:11px;color:var(--slate);margin:2px 0 6px">As notas são buscadas automaticamente em <strong>NF-e Saída</strong> e <strong>NFC-e Saída</strong> (Lançamentos Contábeis) — importe os XMLs do período antes.</div>
     <button class="btn bp bsm" id="convShopeeBtnProcessar_${alvo}" onclick="processarConvShopee('${alvo}')" style="margin-top:10px">&#9881; Processar Arquivos</button>
     <div id="convShopeeStatus_${alvo}" style="margin-top:8px;font-size:12px"></div>
     <div id="convShopeeResultado_${alvo}">${resultado?renderConvShopeeResultado(alvo,resultado):''}</div>
@@ -47596,10 +47616,8 @@ async function processarConvShopee(alvo){
   const cfg=getConvShopeeConfig(alvo);
   if(!cfg){toast('Configure as contas primeiro','warn');return;}
   const inputDecl=document.getElementById('convShopeeArquivoDecl_'+alvo);
-  const inputLivro=document.getElementById('convShopeeArquivoLivro_'+alvo);
   const filesDecl=inputDecl?Array.from(inputDecl.files):[];
-  const fileLivro=inputLivro?.files[0];
-  if(!filesDecl.length||!fileLivro){toast('Anexe os arquivos (Declaração Shopee e Livro de Saídas)','warn');return;}
+  if(!filesDecl.length){toast('Anexe a Declaração de Renda Shopee','warn');return;}
 
   const btn=document.getElementById('convShopeeBtnProcessar_'+alvo);
   if(btn){btn.disabled=true;btn.textContent='Processando...';}
@@ -47617,11 +47635,13 @@ async function processarConvShopee(alvo){
       return;
     }
 
-    _convShopeeSetStatus(alvo,'Lendo Livro de Saídas (pode levar alguns segundos)...','info');
-    const registrosLivro=await _convShopeeExtrairLivroSaidas(fileLivro,(p,total)=>{
-      if(p%50===0) _convShopeeSetStatus(alvo,`Lendo Livro de Saídas... página ${p} de ${total}`,'info');
-    });
-
+    _convShopeeSetStatus(alvo,'Buscando NF-e e NFC-e de saída do período...','info');
+    const registrosLivro=await _convShopeeCarregarNotasSaida(alvo,diarios);
+    if(!registrosLivro.length){
+      _convShopeeSetStatus(alvo,'Não há NF-e/NFC-e de saída importadas para esse período. Importe os XMLs em Lançamentos Contábeis e processe de novo.','err');
+      _convShopeeResetBotao(alvo);
+      return;
+    }
     _convShopeeSetStatus(alvo,'Conciliando notas fiscais...','info');
     const resultado=await _convShopeeConciliar(diarios,registrosLivro,(i,total)=>{
       _convShopeeSetStatus(alvo,`Conciliando... dia ${i} de ${total}`,'info');
@@ -47646,7 +47666,7 @@ function renderConvShopeeResultado(alvo,resultado){
     ${naoConciliado.length?`<div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0;color:#dc2626"><span>Não conciliado (${naoConciliado.length} dia(s))</span><span>R$ ${_fmt(totalNaoConciliado)}</span></div>`:''}
     <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Subtotal do Frete</span><span>R$ ${_fmt(Math.abs(subtotalFreteTotal))}</span></div>
     <div style="display:flex;justify-content:space-between;font-size:12px;padding:2px 0"><span style="color:var(--slate)">Taxas</span><span>R$ ${_fmt(Math.abs(taxasTotal))}</span></div>
-    ${naoConciliado.length?`<div style="margin-top:8px;font-size:11px;color:#dc2626">⚠ ${naoConciliado.length} dia(s) não encontraram notas correspondentes no Livro de Saídas (nem na data exata, nem em ±2 dias). Essas datas entram no TXT como "NF &lt;?&gt; CLIENTE NAO ENCONTRADO".</div>`:''}
+    ${naoConciliado.length?`<div style="margin-top:8px;font-size:11px;color:#dc2626">⚠ ${naoConciliado.length} dia(s) não encontraram notas correspondentes nas NF-e/NFC-e de saída (nem na data exata, nem em ±2 dias). Essas datas entram no TXT como "NF &lt;?&gt; CLIENTE NAO ENCONTRADO".</div>`:''}
     <div style="margin-top:10px;max-height:260px;overflow-y:auto;border:1px solid var(--border);border-radius:6px">
       <table style="width:100%;font-size:11px;border-collapse:collapse">
         <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0"><th style="padding:4px 6px;text-align:left">Data</th><th style="padding:4px 6px;text-align:left">NF</th><th style="padding:4px 6px;text-align:left">Cliente</th><th style="padding:4px 6px;text-align:right">Valor</th></tr></thead>
