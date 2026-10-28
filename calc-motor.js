@@ -63,6 +63,12 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { id: 'ANALISE_BALANCOS', calcs: ['analise_indices', 'ebitda_eva'], norma: 'Literatura técnica (não há norma legal)', numero: 'Matarazzo — Análise Financeira de Balanços; Assaf Neto — Estrutura e Análise de Balanços; Iudícibus — Análise de Balanços', artigo: 'índices de liquidez, estrutura de capital, rentabilidade e prazos médios', assunto: 'Fórmulas-padrão da análise das demonstrações contábeis (saldos finais; prazos em dias sobre 360 por padrão; pode-se usar saldos médios).', vig_ini: '1970-01-01', vig_fim: null, fonte: 'https://pt.wikipedia.org/wiki/An%C3%A1lise_de_balan%C3%A7os', ultima_verificacao: null, obs: 'Não existe definição legal única: os nomes e fórmulas do sistema Domínio podem diferir em alguns índices (use o botão “Conteúdo…” do Domínio para comparar). Cada índice mostra a fórmula usada.' },
     { id: 'KANITZ_1974', calcs: ['analise_indices'], norma: 'Modelo estatístico de previsão de insolvência', numero: 'Stephen C. Kanitz (termômetro de insolvência, anos 1970)', artigo: 'FI = 0,05·RP + 1,65·LG + 3,55·LS − 1,06·LC − 0,33·GE', assunto: 'Fator de insolvência: RP = lucro líquido ÷ PL; LG, LS, LC = liquidez geral, seca e corrente; GE = exigível total ÷ PL. Faixas: acima de 0 solvente; de −3 a 0 penumbra; abaixo de −3 insolvente.', vig_ini: '1970-01-01', vig_fim: null, fonte: 'https://pt.wikipedia.org/wiki/Term%C3%B4metro_de_Kanitz', ultima_verificacao: null, obs: 'Há variações de escala na literatura (X1 e X5 em decimal ou em %). Aqui RP e GE entram em decimal. É um modelo estatístico, não uma norma.' },
     { id: 'EVA_ROIC', calcs: ['ebitda_eva'], norma: 'Literatura de finanças corporativas', numero: 'Stern Stewart (EVA®); Damodaran; Assaf Neto', artigo: 'EBITDA, NOPAT, ROIC, ROCE, WACC e EVA', assunto: 'EBITDA = EBIT + depreciação e amortização; NOPAT = EBIT × (1 − alíquota); capital investido = PL + dívida onerosa − caixa; ROIC = NOPAT ÷ capital investido; ROCE = EBIT ÷ (ativo total − passivo circulante); EVA = NOPAT − WACC × capital investido.', vig_ini: '1990-01-01', vig_fim: null, fonte: 'https://pt.wikipedia.org/wiki/Valor_econ%C3%B4mico_agregado', ultima_verificacao: null, obs: 'EBITDA não é medida das normas contábeis (IFRS/NBC); a CVM define o cálculo para companhias abertas na Resolução CVM 156. As definições de capital investido variam; aqui está a abordagem financeira (PL + dívida líquida).' },
+    { id: 'GCAP_PF_8981', calcs: ['ganho_capital_pf'], norma: 'Lei', numero: '8.981/1995, art. 21 (redação da Lei 13.259/2016); Lei 9.250/1995, arts. 22 e 23; Lei 11.196/2005, art. 39', artigo: 'alíquotas progressivas do ganho de capital e isenções', assunto: 'Ganho de capital de pessoa física na alienação de bens e direitos: 15% até R$ 5 mi, 17,5% de 5 a 10 mi, 20% de 10 a 30 mi e 22,5% acima de 30 mi (por parcela do ganho). Isenções: bens de pequeno valor (total do mês de bens da mesma natureza até R$ 35.000), único imóvel até R$ 440.000 (sem outra venda de imóvel em 5 anos) e reinvestimento do produto da venda de imóvel residencial em outro imóvel residencial em 180 dias.', vig_ini: '2017-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l13259.htm', ultima_verificacao: null, obs: 'Alíquotas conferidas em fontes secundárias; os limites de R$ 35.000 e R$ 20.000 e as condições das isenções NÃO foram conferidos no texto oficial nesta versão. Não considera o redutor de imóveis adquiridos até 1988 (Lei 11.196, art. 40). Verifique a Solução de Consulta Cosit nº 108/2026, citada por um escritório como restritiva ao reinvestimento (não confirmada na Receita).' },
+    { id: 'GCAP_PJ_9430', calcs: ['ganho_capital_pj'], norma: 'Lei', numero: '9.430/1996, art. 25, II (Lucro Presumido); Lei 9.249/1995, arts. 3º e 15 (alíquotas); Lei 11.727/2008 (CSLL)', artigo: 'ganho de capital integra a base do IRPJ e da CSLL', assunto: 'O ganho de capital da pessoa jurídica (venda de bem do ativo não circulante por valor acima do valor contábil) é somado à base de cálculo do IRPJ e da CSLL: no Lucro Presumido, integralmente na base; no Lucro Real, no resultado do período. IRPJ 15% + adicional de 10% sobre o que passar de R$ 60.000 por trimestre; CSLL 9%.', vig_ini: '2009-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9430.htm', ultima_verificacao: null, obs: 'Não conferida no texto oficial nesta versão. PIS/Cofins: receita da venda de ativo permanente é, em regra, excluída da base (Leis 10.637/02 e 10.833/03, art. 1º, § 3º) — confira o seu caso.' },
+    { id: 'MORA_9430_61', calcs: ['juros_multa_selic'], norma: 'Lei', numero: '9.430/1996, art. 61; Lei 9.065/1995, art. 13', artigo: 'multa de mora e juros de mora sobre tributos federais pagos em atraso', assunto: 'Multa de mora de 0,33% por dia de atraso, limitada a 20%, a partir do primeiro dia após o vencimento até o dia do pagamento. Juros de mora pela Selic: soma das taxas mensais do mês seguinte ao vencimento até o mês anterior ao pagamento, mais 1% no mês do pagamento. Pagamento no mesmo mês do vencimento: só multa (a Receita informa que não há juros).', vig_ini: '1997-01-01', vig_fim: null, fonte: 'https://www.gov.br/receitafederal/pt-br/assuntos/orientacao-tributaria/pagamentos-e-parcelamentos/darf-calculo-e-impressao-programa-sicalc-1/informacoes-uteis-sobre-o-sicalc', ultima_verificacao: null, obs: 'Regra conferida na página da Receita sobre o Sicalc (via busca). Para o valor oficial de um DARF, use o Sicalc. A denúncia espontânea (CTN, art. 138) afasta a multa de mora em certos casos.' },
+    { id: 'LC123_ANEXOS', calcs: ['simples_nacional'], norma: 'Lei Complementar', numero: '123/2006 (Anexos I a V, redação da LC 155/2016)', artigo: 'art. 18 e Anexos I a V', assunto: 'Alíquota efetiva do Simples Nacional = (RBT12 × alíquota nominal − parcela a deduzir) ÷ RBT12; DAS = alíquota efetiva × receita do mês. Fator R (folha dos 12 meses ÷ RBT12) de 28% ou mais: atividades do art. 18, § 5º-I passam do Anexo V para o Anexo III. A repartição entre os tributos (IRPJ, CSLL, Cofins, PIS, CPP, ICMS/ISS/IPI) segue as tabelas dos Anexos; o ISS fica limitado a 5%.', vig_ini: '2018-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp123.htm', ultima_verificacao: null, obs: 'Faixas, alíquotas, deduções e repartição conferidas em duas páginas de terceiros (não no texto da LC 123). Não calcula ICMS e ISS devidos fora do DAS acima do sublimite, nem ICMS-ST, monofásico e retenções além das opções informadas.' },
+    { id: 'LC214_SIMPLES', calcs: ['simples_nacional'], norma: 'Lei Complementar', numero: '214/2025 (art. 41 e seguintes) e LC 123/2006 alterada; Resoluções do CGSN', artigo: 'Simples Nacional na reforma tributária: IBS e CBS', assunto: 'A partir de 2027 o PIS e a Cofins saem do DAS e a CBS entra no lugar; de 2029 a 2032 as parcelas de ICMS e ISS caem 10% ao ano, sendo extintas em 2033 e substituídas pelo IBS. A empresa do Simples pode optar (por semestre) por recolher IBS e CBS pelo regime regular, fora do DAS (“Simples híbrido”): o cliente empresa aproveita crédito de todo o IBS/CBS destacado; no Simples “puro” o cliente só aproveita crédito da parcela de IBS/CBS que está dentro do DAS.', vig_ini: '2027-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp214.htm', ultima_verificacao: null, obs: 'Conferido apenas em artigos de terceiros (fontes divergem sobre o prazo da opção: confira a Resolução CGSN vigente). As alíquotas de referência de CBS e IBS usadas aqui são ESTIMATIVAS, cadastradas como parâmetros editáveis; a neutralidade da tabela do Simples a partir de 2029 é uma premissa deste cálculo.' },
+    { id: 'PLAN_TRIB', calcs: ['planejamento_tributario'], norma: 'Legislação federal do IRPJ, CSLL, PIS e Cofins', numero: 'Lei 9.249/1995; Lei 9.430/1996; Lei 10.637/2002; Lei 10.833/2003; Lei 9.718/1998', artigo: 'comparação Lucro Presumido × Lucro Real (trimestral)', assunto: 'Lucro Presumido: IRPJ e CSLL sobre a base presumida (com a majoração da LC 224/2025 quando aplicável) e PIS 0,65% + Cofins 3% sobre a receita bruta. Lucro Real: IRPJ 15% + adicional de 10% sobre o que passar de R$ 60.000 por trimestre, CSLL 9% e PIS 1,65% + Cofins 7,6% sobre a receita menos os créditos.', vig_ini: '2009-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Não considera ISS, ICMS e IPI (são iguais nos dois regimes), regimes de receitas específicos, retenções, compensação de prejuízos além do limite de 30% informado, nem a reforma tributária. É uma simulação para decidir, não substitui o estudo completo.' },
     { id: 'LEI_9250_1995', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao', 'pensao'], norma: 'Lei', numero: '9.250/1995', artigo: 'arts. 4º e 8º', assunto: 'Deduções do IRPF: dependentes, pensão alimentícia, previdência oficial', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Base geral das deduções legais. Artigos a conferir.' },
     { id: 'TAB_IRRF_2026', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Leis 15.191/2025 (art. 2º, nova redação do art. 1º, XII, da Lei 11.482/2007) e 9.250/1995 (art. 4º, III, "i" e § 2º)', numero: '15.191/2025 e 9.250/1995', artigo: 'Lei 15.191 art. 2º; Lei 9.250 art. 4º, III, "i" e § 2º (redação da Lei 14.663/2023)', assunto: 'Tabela progressiva mensal desde maio/2025: até 2.428,80 (0%); até 2.826,65 (7,5% − 182,16); até 3.751,05 (15% − 394,16); até 4.664,68 (22,5% − 675,49); acima (27,5% − 908,73). Dependente R$ 189,59 (desde abril/2015). Desconto simplificado mensal = 25% da faixa de alíquota zero = R$ 607,20.', vig_ini: '2025-05-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9250.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Tudo lido no texto oficial do Planalto. O simplificado de R$ 607,20 é derivado: 25% × R$ 2.428,80 (a lei define o percentual, não o valor).' },
     { id: 'MUTUO_USURA', calcs: ['mutuo', 'comparativo'], norma: 'Decreto (Lei de Usura) e Código Civil', numero: 'Decreto 22.626/1933; Código Civil, art. 591', artigo: 'Decreto 22.626/1933, art. 1º; CC art. 591', assunto: 'Mútuo de PESSOA FÍSICA para PESSOA JURÍDICA: não há piso — o mútuo gratuito (0%) é admitido se previsto expressamente no contrato; teto de 12% ao ano (1% ao mês, juros simples) pela Lei de Usura c/c Código Civil. Entidades imunes/isentas (terceiro setor): referência segura de no máximo 100% da Selic/CDI, para não caracterizar distribuição disfarçada de lucros (Lei 9.532/1997, art. 12, § 2º, "a").', vig_ini: '1933-04-07', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/decreto/d22626.htm', ultima_verificacao: null, obs: 'Regra informada pelo usuário em 22/10/2026; NÃO conferida no texto oficial. Há discussão jurídica: o art. 591 do CC remete ao art. 406 (taxa legal, hoje Selic − IPCA após a Lei 14.905/2024) e a Súmula 596 do STF exclui as instituições financeiras do teto — confirme antes de usar como limite definitivo.' },
@@ -107,6 +113,72 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
   const NOW0 = '2026-10-20';
   const P = (value, unit, description) => ({ value, unit: unit || '', description: description || '' });
   const CALC_SEED_SETS = [
+    {
+      id: 'GCAP_PF_2017', calculator_key: 'ganho_capital_pf', valid_from: '2017-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-28', created_by: 'seed (pedido do usuário 28/10/2026; alíquotas conferidas em fontes secundárias)',
+      bases: ['GCAP_PF_8981'],
+      params: {
+        faixas: P([{ ate: '5000000', aliq: '0.15' }, { ate: '10000000', aliq: '0.175' }, { ate: '30000000', aliq: '0.20' }, { ate: null, aliq: '0.225' }], 'R$ / taxa', 'Alíquota sobre a parcela do ganho dentro de cada faixa (Lei 8.981, art. 21, redação da Lei 13.259/2016)'),
+        limite_pequeno_valor: P('35000', 'R$', 'Isenção de bens de pequeno valor: total alienado no mês de bens da mesma natureza (Lei 9.250, art. 22, I) — a conferir no texto oficial'),
+        limite_imovel_unico: P('440000', 'R$', 'Isenção do único imóvel: valor da alienação (Lei 9.250, art. 23)'),
+        prazo_reinvestimento_dias: P('180', 'dias', 'Reinvestimento em imóvel residencial (Lei 11.196, art. 39)'),
+      },
+    },
+    {
+      id: 'GCAP_PJ_2009', calculator_key: 'ganho_capital_pj', valid_from: '2009-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-28', created_by: 'seed (pedido do usuário 28/10/2026; não conferida no texto oficial)',
+      bases: ['GCAP_PJ_9430'],
+      params: {
+        aliq_irpj: P('0.15', 'taxa', 'IRPJ'), aliq_adicional: P('0.10', 'taxa', 'Adicional do IRPJ'), limite_adicional_trimestral: P('60000', 'R$', 'R$ 20.000 por mês × 3'), aliq_csll: P('0.09', 'taxa', 'CSLL (pessoa jurídica não financeira)'),
+      },
+    },
+    {
+      id: 'MORA_1997', calculator_key: 'juros_multa_selic', valid_from: '1997-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-28', created_by: 'seed (pedido do usuário 28/10/2026; regra conferida na página do Sicalc)',
+      bases: ['MORA_9430_61'],
+      params: {
+        multa_diaria: P('0.0033', 'taxa', 'Multa de mora por dia de atraso'), multa_maxima: P('0.20', 'taxa', 'Limite da multa de mora'), juros_mes_pagamento: P('0.01', 'taxa', 'Juros de 1% no mês do pagamento'),
+      },
+    },
+    {
+      id: 'PLAN_TRIB_2009', calculator_key: 'planejamento_tributario', valid_from: '2009-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-28', created_by: 'seed (pedido do usuário 28/10/2026; não conferida no texto oficial)',
+      bases: ['PLAN_TRIB'],
+      params: {
+        pis_cumulativo: P('0.0065', 'taxa', 'PIS — regime cumulativo (Lucro Presumido)'), cofins_cumulativo: P('0.03', 'taxa', 'Cofins — regime cumulativo (Lucro Presumido)'),
+        pis_nao_cumulativo: P('0.0165', 'taxa', 'PIS — regime não cumulativo (Lucro Real)'), cofins_nao_cumulativo: P('0.076', 'taxa', 'Cofins — regime não cumulativo (Lucro Real)'),
+        aliq_irpj: P('0.15', 'taxa', 'IRPJ'), aliq_adicional: P('0.10', 'taxa', 'Adicional do IRPJ'), limite_adicional_trimestral: P('60000', 'R$', 'Parcela do lucro sem adicional por trimestre'), aliq_csll: P('0.09', 'taxa', 'CSLL'),
+        limite_compensacao_prejuizo: P('0.30', 'taxa', 'Limite de compensação de prejuízo fiscal e base negativa por período (30% do lucro real)'),
+      },
+    },
+    {
+      id: 'SIMPLES_2018', calculator_key: 'simples_nacional', valid_from: '2018-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-28', created_by: 'seed (pedido do usuário 28/10/2026; tabelas conferidas em duas páginas de terceiros, não na LC 123)',
+      bases: ['LC123_ANEXOS'],
+      params: {
+        limites_rbt12: P(['180000', '360000', '720000', '1800000', '3600000', '4800000'], 'R$', 'Limite superior de cada faixa de receita bruta dos 12 meses'),
+        anexos: P({
+          I:   { nome: 'Anexo I — Comércio', aliq: ['0.04', '0.073', '0.095', '0.107', '0.143', '0.19'], ded: ['0', '5940', '13860', '22500', '87300', '378000'],
+                 rep: [{ irpj: 5.5, csll: 3.5, cofins: 12.74, pis: 2.76, cpp: 41.5, icms: 34 }, { irpj: 5.5, csll: 3.5, cofins: 12.74, pis: 2.76, cpp: 41.5, icms: 34 }, { irpj: 5.5, csll: 3.5, cofins: 12.74, pis: 2.76, cpp: 42, icms: 33.5 }, { irpj: 5.5, csll: 3.5, cofins: 12.74, pis: 2.76, cpp: 42, icms: 33.5 }, { irpj: 5.5, csll: 3.5, cofins: 12.74, pis: 2.76, cpp: 42, icms: 33.5 }, { irpj: 13.5, csll: 10, cofins: 28.27, pis: 6.13, cpp: 42.1 }] },
+          II:  { nome: 'Anexo II — Indústria', aliq: ['0.045', '0.078', '0.10', '0.112', '0.147', '0.30'], ded: ['0', '5940', '13860', '22500', '85500', '720000'],
+                 rep: [{ irpj: 5.5, csll: 3.5, cofins: 11.51, pis: 2.49, cpp: 37.5, ipi: 7.5, icms: 32 }, { irpj: 5.5, csll: 3.5, cofins: 11.51, pis: 2.49, cpp: 37.5, ipi: 7.5, icms: 32 }, { irpj: 5.5, csll: 3.5, cofins: 11.51, pis: 2.49, cpp: 37.5, ipi: 7.5, icms: 32 }, { irpj: 5.5, csll: 3.5, cofins: 11.51, pis: 2.49, cpp: 37.5, ipi: 7.5, icms: 32 }, { irpj: 5.5, csll: 3.5, cofins: 11.51, pis: 2.49, cpp: 37.5, ipi: 7.5, icms: 32 }, { irpj: 8.5, csll: 7.5, cofins: 20.96, pis: 4.54, cpp: 23.5, ipi: 35 }] },
+          III: { nome: 'Anexo III — Serviços (locação, instalação, agências, contabilidade etc.)', aliq: ['0.06', '0.112', '0.135', '0.16', '0.21', '0.33'], ded: ['0', '9360', '17640', '35640', '125640', '648000'],
+                 rep: [{ irpj: 4, csll: 3.5, cofins: 12.82, pis: 2.78, cpp: 43.4, iss: 33.5 }, { irpj: 4, csll: 3.5, cofins: 14.05, pis: 3.05, cpp: 43.4, iss: 32 }, { irpj: 4, csll: 3.5, cofins: 13.64, pis: 2.96, cpp: 43.4, iss: 32.5 }, { irpj: 4, csll: 3.5, cofins: 13.64, pis: 2.96, cpp: 43.4, iss: 32.5 }, { irpj: 4, csll: 3.5, cofins: 12.82, pis: 2.78, cpp: 43.4, iss: 33.5 }, { irpj: 35, csll: 15, cofins: 16.03, pis: 3.47, cpp: 30.5 }] },
+          IV:  { nome: 'Anexo IV — Serviços (construção, limpeza, vigilância, advocacia etc.) — CPP FORA do DAS', aliq: ['0.045', '0.09', '0.102', '0.14', '0.22', '0.33'], ded: ['0', '8100', '12420', '39780', '183780', '828000'],
+                 rep: [{ irpj: 18.8, csll: 15.2, cofins: 17.67, pis: 3.83, iss: 44.5 }, { irpj: 19.8, csll: 15.2, cofins: 20.55, pis: 4.45, iss: 40 }, { irpj: 20.8, csll: 15.2, cofins: 19.73, pis: 4.27, iss: 40 }, { irpj: 17.8, csll: 19.2, cofins: 18.9, pis: 4.1, iss: 40 }, { irpj: 18.8, csll: 19.2, cofins: 18.08, pis: 3.92, iss: 40 }, { irpj: 53.5, csll: 21.5, cofins: 20.55, pis: 4.45 }] },
+          V:   { nome: 'Anexo V — Serviços intelectuais, TI, medicina, engenharia etc. (art. 18, § 5º-I)', aliq: ['0.155', '0.18', '0.195', '0.205', '0.23', '0.305'], ded: ['0', '4500', '9900', '17100', '62100', '540000'],
+                 rep: [{ irpj: 25, csll: 15, cofins: 14.1, pis: 3.05, cpp: 28.85, iss: 14 }, { irpj: 23, csll: 15, cofins: 14.1, pis: 3.05, cpp: 27.85, iss: 17 }, { irpj: 24, csll: 15, cofins: 14.92, pis: 3.23, cpp: 23.85, iss: 19 }, { irpj: 21, csll: 15, cofins: 15.74, pis: 3.41, cpp: 23.85, iss: 21 }, { irpj: 23, csll: 12.5, cofins: 14.1, pis: 3.05, cpp: 23.85, iss: 23.5 }, { irpj: 35, csll: 15.5, cofins: 16.44, pis: 3.56, cpp: 29.5 }] },
+        }, '', 'Tabelas dos Anexos I a V (alíquota nominal, parcela a deduzir e repartição por faixa, em %)'),
+        fator_r_limite: P('0.28', 'taxa', 'Fator R: folha ÷ receita dos 12 meses; 28% ou mais → Anexo III'),
+        iss_maximo: P('0.05', 'taxa', 'Limite do ISS dentro do DAS (5% da receita)'),
+      },
+    },
+    {
+      id: 'SIMPLES_REFORMA_2027', calculator_key: 'simples_reforma', valid_from: '2027-01-01', valid_to: null, version: 1, status: 'ativo', created_at: '2026-10-28', created_by: 'seed (pedido do usuário 28/10/2026) — ALÍQUOTAS DE REFERÊNCIA SÃO ESTIMATIVAS; conferir os atos oficiais',
+      bases: ['LC214_SIMPLES'],
+      params: {
+        cbs_referencia: P('0.088', 'taxa', 'ESTIMATIVA da alíquota de referência da CBS (a definir por resolução do Senado)'),
+        ibs_referencia: P('0.177', 'taxa', 'ESTIMATIVA da alíquota de referência do IBS (estados + municípios)'),
+        reducao_cbs_2027_2028: P('0.001', 'taxa', 'Redução de 0,1 ponto percentual na CBS em 2027 e 2028, quando o IBS é 0,1% (neutralidade)'),
+        ibs_teste: P('0.001', 'taxa', 'IBS em 2027 e 2028 (0,1%)'),
+        escalonamento_ibs: P({ '2029': '0.1', '2030': '0.2', '2031': '0.3', '2032': '0.4', '2033': '1' }, '', 'Fração do IBS de referência cobrada em cada ano; as parcelas de ICMS e ISS caem na mesma proporção'),
+      },
+    },
     {
       id: 'IRRF_2015_04', calculator_key: 'irrf_pf', valid_from: '2015-04-01', valid_to: '2023-04-30', version: 1, status: 'ativo', created_at: '2026-10-22', created_by: 'seed (pedido do usuário 22/10/2026 — tabelas de 2021 a 2026; não conferida na fonte oficial)',
       bases: ['TAB_IRRF_2015', 'LEI_9250_1995'],
@@ -1476,6 +1548,252 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     return { ok: true, resultado: { indices, destaques, ebit: EBIT, ebitda: EBITDA, nopat: NOPAT, eva: EVA, wacc: WACC }, memoria: mem.L, parametros: [], bases: CALC_BASES.filter(b => b.id === 'EVA_ROIC' || b.id === 'ANALISE_BALANCOS'), avisos };
   }
 
+  // ───────────────────────────── novas calculadoras (pedido do usuário 28/10/2026) ─────────────────────────────
+  const temV = v => v !== undefined && v !== null && String(v).trim() !== '';
+  const isoOk = d => /^\d{4}-\d{2}-\d{2}$/.test(String(d || '').slice(0, 10));
+  function ultimoDiaUtilDoMes(ano, mes1a12) { const d = new Date(Date.UTC(ano, mes1a12, 0)); while (d.getUTCDay() === 0 || d.getUTCDay() === 6) d.setUTCDate(d.getUTCDate() - 1); return d.toISOString().slice(0, 10); }
+  const brData = iso => iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + iso.slice(0, 4);
+  const pctTxt = (v, mx) => (v * 100).toLocaleString('pt-BR', { minimumFractionDigits: Math.min(2, mx == null ? 4 : mx), maximumFractionDigits: mx == null ? 4 : mx }) + '%';
+
+  // ── Ganho de capital — pessoa física ──
+  function calcGanhoCapitalPF(inp) {
+    const dt = String(inp.dataAlienacao || '').slice(0, 10); if (!isoOk(dt)) return ERR('Informe a data da alienação.');
+    const set = acharSet('ganho_capital_pf', dt); if (!set) return ERR(ERRO_PARAM, { detalhe: 'Ganho de capital PF — ' + dt.slice(0, 7) });
+    const venda = cents(inp.valorAlienacao), custo = cents(inp.custoAquisicao), desp = cents(inp.despesas);
+    if (!(venda > 0)) return ERR('Informe o valor da alienação.');
+    const mem = Mem(), avisos = [];
+    const ganho = venda - custo - desp;
+    mem.t('Ganho de capital'); mem.l('Valor da alienação', venda); mem.l('(−) Custo de aquisição', custo, '−'); if (desp) mem.l('(−) Despesas comprovadas (corretagem, ITBI, escritura…)', desp, '−'); mem.s('Ganho de capital', ganho);
+    let tributavel = max0(ganho), imposto = 0; const det = [];
+    if (ganho <= 0) mem.n('Não há ganho (perda ou resultado zero): sem imposto. A perda de capital da pessoa física não é compensável.');
+    else {
+      const lPeq = cents(pv(set, 'limite_pequeno_valor')), lUn = cents(pv(set, 'limite_imovel_unico'));
+      const totalMes = temV(inp.totalMesMesmaNatureza) ? cents(inp.totalMesMesmaNatureza) : venda;
+      mem.t('Isenções');
+      if (inp.isencaoPequenoValor) {
+        if (totalMes <= lPeq) { tributavel = 0; mem.txt('Bens de pequeno valor (Lei 9.250, art. 22, I)', 'APLICADA — total do mês ' + brl(totalMes) + ' ≤ ' + brl(lPeq)); }
+        else { mem.txt('Bens de pequeno valor (Lei 9.250, art. 22, I)', 'não aplicada — total do mês ' + brl(totalMes) + ' acima de ' + brl(lPeq)); avisos.push('Isenção de pequeno valor não aplicada: o total alienado no mês, de bens da mesma natureza, passa de ' + brl(lPeq) + '.'); }
+      }
+      if (tributavel > 0 && inp.imovelUnico) {
+        if (venda <= lUn) { tributavel = 0; mem.txt('Único imóvel até ' + brl(lUn) + ' (Lei 9.250, art. 23)', 'APLICADA — valor da venda ' + brl(venda)); }
+        else { mem.txt('Único imóvel até ' + brl(lUn) + ' (Lei 9.250, art. 23)', 'não aplicada — valor da venda ' + brl(venda) + ' acima do limite'); avisos.push('Isenção do único imóvel não aplicada: a venda passa de ' + brl(lUn) + '.'); }
+      }
+      if (tributavel > 0 && inp.reinvestimento) {
+        const ap = cents(inp.valorReinvestido);
+        if (!(ap > 0)) avisos.push('Reinvestimento marcado, mas o valor aplicado não foi informado: tributado sem a isenção.');
+        else { const prop = Math.min(1, ap / venda), antes = tributavel; tributavel = Math.round(antes * (1 - prop)); mem.txt('Reinvestimento em imóvel residencial (Lei 11.196, art. 39)', 'aplicou ' + brl(ap) + ' de ' + brl(venda) + ' (' + pctTxt(prop, 2) + ') → ganho tributável ' + brl(tributavel)); mem.n('Condições: imóvel RESIDENCIAL no País, comprado em até ' + pv(set, 'prazo_reinvestimento_dias') + ' dias da venda, e uma vez a cada 5 anos. Aplicação parcial: isenção proporcional ao valor reaplicado.'); }
+      }
+      if (!inp.isencaoPequenoValor && !inp.imovelUnico && !inp.reinvestimento) mem.n('Nenhuma isenção marcada: o ganho inteiro é tributável.');
+      mem.t('Imposto (alíquotas progressivas por parcela do ganho)');
+      mem.l('Ganho tributável', tributavel);
+      let resto = tributavel, ant = 0;
+      for (const f of pv(set, 'faixas')) {
+        const lim = f.ate === null ? Infinity : cents(f.ate), parcela = Math.min(resto, lim - ant);
+        if (parcela > 0) { const v = mulC(parcela, dec(f.aliq)); imposto += v; det.push({ aliq: f.aliq, parcela, v }); mem.l('Parcela de ' + brl(parcela) + ' × ' + pctTxt(Number(f.aliq), 2), v, '+'); resto -= parcela; }
+        ant = lim; if (resto <= 0) break;
+      }
+    }
+    mem.tot('IMPOSTO SOBRE O GANHO DE CAPITAL', imposto);
+    const venc = ultimoDiaUtilDoMes(+dt.slice(0, 4), +dt.slice(5, 7) + 1);
+    if (imposto > 0) mem.txt('Vencimento do DARF', brData(venc) + ' (último dia útil do mês seguinte, sem considerar feriados) — código de receita 4600 (conferir no Sicalc)');
+    avisos.push('Não considera: redutor de imóveis adquiridos até 1988 (Lei 11.196, art. 40), correção do custo de bens adquiridos até 1995, ações negociadas em bolsa ou mercado de balcão, criptoativos e moeda estrangeira (regras próprias). Use o programa GCAP da Receita para a apuração oficial.');
+    return { ok: true, resultado: { ganho, tributavel, imposto, vencimento: imposto > 0 ? brData(venc) : '—', faixas: det }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
+  }
+
+  // ── Ganho de capital — pessoa jurídica ──
+  function calcGanhoCapitalPJ(inp) {
+    const dt = String(inp.dataAlienacao || '').slice(0, 10); if (!isoOk(dt)) return ERR('Informe a data da alienação.');
+    const set = acharSet('ganho_capital_pj', dt); if (!set) return ERR(ERRO_PARAM, { detalhe: 'Ganho de capital PJ — ' + dt.slice(0, 7) });
+    const venda = cents(inp.valorVenda), despV = cents(inp.despesasVenda), custo = cents(inp.custoAquisicao), dep = cents(inp.depreciacaoAcumulada), perd = cents(inp.perdasRecuperabilidade);
+    if (!(venda > 0)) return ERR('Informe o valor da venda.');
+    const regime = inp.regime === 'real' ? 'real' : 'presumido';
+    const aI = dec(pv(set, 'aliq_irpj')), aA = dec(pv(set, 'aliq_adicional')), aC = dec(pv(set, 'aliq_csll')), lim = cents(pv(set, 'limite_adicional_trimestral'));
+    const vc = custo - dep - perd, ganho = venda - despV - vc;
+    const mem = Mem(), avisos = [];
+    mem.t('Ganho (ou perda) de capital'); mem.l('Valor da venda', venda); if (despV) mem.l('(−) Despesas da venda', despV, '−'); mem.l('Custo de aquisição', custo); if (dep) mem.l('(−) Depreciação/amortização acumulada', dep, '−'); if (perd) mem.l('(−) Perdas por redução ao valor recuperável', perd, '−'); mem.s('Valor contábil líquido do bem', vc); mem.s('Ganho de capital (venda líquida − valor contábil)', ganho);
+    const b0i = temV(inp.baseIrpjTrimestre) ? cents(inp.baseIrpjTrimestre) : 0, b0c = temV(inp.baseCsllTrimestre) ? cents(inp.baseCsllTrimestre) : b0i;
+    const irpj = b => (b > 0 ? mulC(b, aI) + mulC(max0(b - lim), aA) : 0), csll = b => (b > 0 ? mulC(b, aC) : 0);
+    let dI = 0, dA = 0, dC = 0;
+    if (regime === 'presumido' && ganho < 0) mem.n('Lucro Presumido: a perda na venda NÃO reduz a base de cálculo.');
+    else {
+      const g = ganho, base = b0i + g;
+      const comAdic = irpj(Math.max(base, 0)), semAdic = irpj(Math.max(b0i, 0));
+      dI = comAdic - semAdic; dC = csll(b0c + g) - csll(b0c);
+      const adic = (mulC(max0(Math.max(base, 0) - lim), aA)) - mulC(max0(Math.max(b0i, 0) - lim), aA); dA = adic;
+      mem.t('Efeito no IRPJ e na CSLL do trimestre'); mem.l('Base do IRPJ do trimestre sem o ganho', b0i); mem.l('Base com o ganho', b0i + g); mem.l('IRPJ — 15% (parte do ganho)', dI - dA, '+'); mem.l('IRPJ — adicional de 10% (acima de ' + brl(lim) + ' no trimestre)', dA, '+'); mem.l('CSLL — 9%', dC, '+');
+    }
+    const total = dI + dC; mem.tot('TRIBUTOS SOBRE O GANHO (IRPJ + CSLL)', total);
+    if (!temV(inp.baseIrpjTrimestre)) avisos.push('Base do trimestre não informada: o adicional de 10% foi calculado como se o ganho fosse a única base. Informe a base do IRPJ do trimestre (sem o ganho) para o efeito exato.');
+    avisos.push('Lucro Presumido: o ganho entra integralmente na base (Lei 9.430, art. 25, II). Lucro Real: entra no resultado do período, e o efeito depende do lucro total e das compensações.');
+    avisos.push('PIS/Cofins: a receita da venda de ativo permanente é, em regra, excluída da base (Leis 10.637/02 e 10.833/03, art. 1º, § 3º) — confira o seu caso. Não considera diferimento nem reinvestimento.');
+    return { ok: true, resultado: { ganho, irpj: dI, adicional: dA, csll: dC, total, cargaBp: ganho > 0 ? Math.round(total * 10000 / ganho) : 0, regime }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
+  }
+
+  // ── Juros, multa de mora e Selic (tributos federais em atraso) ──
+  function calcJurosMultaSelic(inp) {
+    const venc = String(inp.dataVencimento || '').slice(0, 10), pag = String(inp.dataPagamento || '').slice(0, 10);
+    if (!isoOk(venc) || !isoOk(pag)) return ERR('Informe a data de vencimento e a data do pagamento.');
+    const principal = cents(inp.principal); if (!(principal > 0)) return ERR('Informe o valor do tributo (principal).');
+    const set = acharSet('juros_multa_selic', pag); if (!set) return ERR(ERRO_PARAM, { detalhe: 'Juros e multa de mora — ' + pag.slice(0, 7) });
+    const mem = Mem(), avisos = [];
+    mem.t('Tributo'); mem.l('Valor do tributo (principal)', principal); mem.txt('Vencimento', brData(venc)); mem.txt('Pagamento', brData(pag));
+    if (pag <= venc) { mem.n('Pagamento em dia (até o vencimento): sem multa nem juros.'); mem.tot('TOTAL A PAGAR', principal); return { ok: true, resultado: { principal, dias: 0, multa: 0, juros: 0, total: principal, multaPct: 0, jurosPct: 0 }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos }; }
+    const dias = diasEntre(venc, pag), bpDia = Math.round(Number(pv(set, 'multa_diaria')) * 10000), bpMax = Math.round(Number(pv(set, 'multa_maxima')) * 10000);
+    const bpMulta = Math.min(dias * bpDia, bpMax), multa = Math.round(principal * bpMulta / 10000);
+    mem.t('Multa de mora'); mem.i('Dias de atraso (corridos, do dia seguinte ao vencimento até o pagamento)', dias); mem.txt('Multa = 0,33% por dia, limitada a 20%', pctTxt(bpMulta / 10000, 2) + (bpMulta >= bpMax ? ' (atingiu o limite)' : '')); mem.l('Multa de mora', multa, '+');
+    const vYM = venc.slice(0, 7), pYM = pag.slice(0, 7); let jurosH = 0; const meses = [], faltam = [];
+    mem.t('Juros de mora (Selic)');
+    if (pYM === vYM) mem.n('Pagamento no mesmo mês do vencimento: não há juros de mora, só a multa (informação da página da Receita sobre o Sicalc).');
+    else {
+      const setS = acharSet('mutuo_juros', pag), mapa = setS ? pv(setS, 'selic_mensal') || {} : {};
+      let ym = somaMeses(vYM + '-01', 1).slice(0, 7);
+      while (ym < pYM) { if (mapa[ym] === undefined) faltam.push(ym); else { const h = Math.round(Number(mapa[ym]) * 100); jurosH += h; meses.push({ ym, h }); mem.txt('Selic de ' + ym.slice(5, 7) + '/' + ym.slice(0, 4), (h / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) + '%'); } ym = somaMeses(ym + '-01', 1).slice(0, 7); }
+      if (faltam.length) return ERR('Faltam as taxas Selic mensais de: ' + faltam.join(', ') + '. Atualize a série em “Taxa SELIC acumulada no período” (botão Atualizar pelo Banco Central) e calcule de novo.');
+      const h1 = Math.round(Number(pv(set, 'juros_mes_pagamento')) * 10000); jurosH += h1; mem.txt('Mais 1% do mês do pagamento (' + pYM.slice(5, 7) + '/' + pYM.slice(0, 4) + ')', '1,00%');
+    }
+    const juros = Math.round(principal * jurosH / 10000);
+    mem.txt('Taxa de juros (soma das Selic mensais + 1%)', (jurosH / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) + '%'); mem.l('Juros de mora', juros, '+');
+    const total = principal + multa + juros; mem.tot('TOTAL A PAGAR (DARF)', total);
+    avisos.push('Informe o vencimento já ajustado para dia útil, se for o caso. A multa e os juros incidem sobre o tributo, sem a multa. A Selic é SOMADA (não composta), como no Sicalc. Para o valor oficial do DARF, confira no Sicalc. A denúncia espontânea (CTN, art. 138) pode afastar a multa de mora.');
+    return { ok: true, resultado: { principal, dias, multa, juros, total, multaPct: bpMulta / 100, jurosPct: jurosH / 100 }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
+  }
+
+  // ── Variação patrimonial (acréscimo patrimonial a descoberto) — PF ──
+  function calcVariacaoPatrimonialPF(inp) {
+    const mem = Mem(), avisos = []; const modo = inp.modo === 'mensal' ? 'mensal' : 'anual';
+    let descoberto = 0, resultado;
+    if (modo === 'anual') {
+      const pi = cents(inp.patrimonioInicial), pf = cents(inp.patrimonioFinal), rt = cents(inp.rendTributaveisLiquidos), ri = cents(inp.rendIsentos), rx = cents(inp.rendExclusiva), ou = cents(inp.outrasOrigens), dp = cents(inp.dispendios);
+      const aumento = pf - pi, origens = rt + ri + rx + ou; descoberto = max0(aumento + dp - origens);
+      mem.t('Evolução patrimonial do ano (visão anual simplificada)'); mem.l('Patrimônio líquido em 31/12 do ano anterior (bens e direitos − dívidas)', pi); mem.l('Patrimônio líquido em 31/12 do ano', pf); mem.s('Aumento do patrimônio', aumento);
+      mem.t('Recursos do ano (origens)'); mem.l('Rendimentos tributáveis, líquidos do imposto pago/retido', rt, '+'); mem.l('Rendimentos isentos e não tributáveis', ri, '+'); mem.l('Rendimentos de tributação exclusiva/definitiva (líquidos)', rx, '+'); mem.l('Outras origens (doações, heranças, empréstimos, venda de bens à parte…)', ou, '+'); mem.s('Total de recursos', origens);
+      mem.t('Resultado'); mem.l('Aumento do patrimônio', aumento); mem.l('(+) Dispêndios do ano (gastos, despesas de manutenção, pagamentos que não viram patrimônio)', dp, '+'); mem.l('(−) Recursos do ano', origens, '−');
+      mem.tot('ACRÉSCIMO PATRIMONIAL A DESCOBERTO (estimativa anual)', descoberto);
+      if (aumento + dp < origens) mem.n('Sobra de recursos de ' + brl(origens - aumento - dp) + ' (explica caixa/aplicações ou gastos não informados).');
+      resultado = { modo, aumento, origens, dispendios: dp, descoberto, sobra: max0(origens - aumento - dp) };
+      avisos.push('A apuração oficial é MENSAL (fluxo de caixa): sobra de um mês só cobre o mês seguinte se estiver como saldo declarado. Esta visão anual é uma estimativa para prevenir malha; use o modo mensal para o fluxo de caixa.');
+    } else {
+      const sa = cents(inp.saldoAnterior), rt = cents(inp.rendTributaveisLiquidos), ri = cents(inp.rendIsentos), rx = cents(inp.rendExclusiva), vb = cents(inp.vendaBens), em = cents(inp.emprestimos), ou = cents(inp.outrasOrigens), ab = cents(inp.aquisicoesBens), gs = cents(inp.gastos), pdv = cents(inp.pagamentoDividas);
+      const origens = rt + ri + rx + vb + em + ou, aplic = ab + gs + pdv, saldo = sa + origens - aplic; descoberto = max0(-saldo);
+      mem.t('Fluxo de caixa do mês'); mem.l('Saldo (disponibilidades) transportado do mês anterior', sa, '+');
+      mem.t('Origens de recursos'); mem.l('Rendimentos tributáveis, líquidos do imposto', rt, '+'); mem.l('Rendimentos isentos e não tributáveis', ri, '+'); mem.l('Rendimentos de tributação exclusiva (líquidos)', rx, '+'); mem.l('Venda de bens e direitos (valor recebido)', vb, '+'); mem.l('Empréstimos e dívidas contraídas', em, '+'); mem.l('Outras origens', ou, '+'); mem.s('Total das origens', origens);
+      mem.t('Aplicações de recursos'); mem.l('Aquisição de bens e direitos', ab, '−'); mem.l('Gastos e despesas do mês', gs, '−'); mem.l('Pagamento de dívidas', pdv, '−'); mem.s('Total das aplicações', aplic);
+      mem.s('Saldo do mês (saldo anterior + origens − aplicações)', saldo);
+      mem.tot('ACRÉSCIMO PATRIMONIAL A DESCOBERTO DO MÊS', descoberto);
+      mem.txt('Saldo a transportar para o mês seguinte', brl(max0(saldo)));
+      resultado = { modo, origens, aplicacoes: aplic, saldo, descoberto, transportar: max0(saldo) };
+      avisos.push('O saldo que sobra só pode ser transportado se constar na declaração de bens (dinheiro em espécie ou conta) ou se você comprovar a sua existência. O descoberto de um mês NÃO é compensado com sobra de mês posterior.');
+    }
+    avisos.push('Imposto: o acréscimo patrimonial a descoberto é rendimento tributável apurado mês a mês e entra na declaração de ajuste anual, somado aos demais rendimentos sujeitos à tabela progressiva. Esta calculadora NÃO estima o imposto, porque ele depende dos outros rendimentos e das deduções do ano. Rendimentos de atividade rural têm apuração anual. A comprovação das origens é do contribuinte.');
+    return { ok: true, resultado, memoria: mem.L, parametros: [], bases: [], avisos };
+  }
+
+  // ── Planejamento tributário: Lucro Presumido × Lucro Real (trimestre) ──
+  function calcPlanejamentoTributario(inp) {
+    const ano = parseInt(inp.ano, 10), tri = parseInt(inp.trimestre, 10);
+    if (![1, 2, 3, 4].includes(tri) || !ano) return ERR('Informe o ano e o trimestre (1 a 4).');
+    const fim = ano + '-' + String(tri * 3).padStart(2, '0') + '-' + (tri === 1 || tri === 4 ? '31' : '30');
+    const set = acharSet('planejamento_tributario', fim); if (!set) return ERR(ERRO_PARAM, { detalhe: 'Planejamento tributário — ' + tri + 'º tri/' + ano });
+    const atv = (inp.atividades || []).filter(a => cents(a.receita) > 0); if (!atv.length) return ERR('Informe a receita bruta do trimestre por atividade.');
+    const rec = atv.reduce((x, a) => x + cents(a.receita), 0), rf = cents(inp.receitasFinanceiras);
+    const lucroRealTri = cents(inp.lucroRealTrimestre), prejuizo = cents(inp.prejuizoCompensar), insumos = cents(inp.baseCreditoPisCofins);
+    if (!temV(inp.lucroRealTrimestre)) return ERR('Informe o lucro real do trimestre (lucro contábil ajustado por adições e exclusões, antes da compensação de prejuízos).');
+    const P_ = k => dec(pv(set, k));
+    const lp = calcLucroPresumido({ ano, trimestre: tri, atividades: atv, receitasFinanceiras: rf ? (rf / 100).toFixed(2) : '' });
+    if (!lp.ok) return lp;
+    const mem = Mem(), avisos = [];
+    mem.t('Receita do trimestre'); mem.l('Receita bruta (todas as atividades)', rec); if (rf) mem.l('Receitas financeiras', rf);
+    const pisCum = mulC(rec, P_('pis_cumulativo')), cofCum = mulC(rec, P_('cofins_cumulativo'));
+    const presIr = lp.resultado.irpj, presCs = lp.resultado.csll, presTot = presIr + presCs + pisCum + cofCum;
+    mem.t('LUCRO PRESUMIDO'); mem.l('IRPJ (com a majoração da LC 224/2025, quando aplicável)', presIr, '+'); mem.l('CSLL (idem)', presCs, '+'); mem.l('PIS cumulativo 0,65% sobre a receita bruta', pisCum, '+'); mem.l('Cofins cumulativa 3% sobre a receita bruta', cofCum, '+'); mem.tot('Total — Lucro Presumido', presTot);
+    const lim = cents(pv(set, 'limite_adicional_trimestral')), aI = P_('aliq_irpj'), aA = P_('aliq_adicional'), aC = P_('aliq_csll'), comp = P_('limite_compensacao_prejuizo');
+    const realTributos = lucroReal => { const i = lucroReal > 0 ? mulC(lucroReal, aI) + mulC(max0(lucroReal - lim), aA) : 0; return { i, c: lucroReal > 0 ? mulC(lucroReal, aC) : 0 }; };
+    const baseCred = max0(rec - insumos), pisNc = mulC(baseCred, P_('pis_nao_cumulativo')), cofNc = mulC(baseCred, P_('cofins_nao_cumulativo'));
+    const usoPrej = lucroRealTri > 0 ? Math.min(prejuizo, mulC(lucroRealTri, comp)) : 0, lucroReal = lucroRealTri - usoPrej, rt = realTributos(lucroReal), realTot = rt.i + rt.c + pisNc + cofNc;
+    mem.t('LUCRO REAL'); mem.l('Lucro real antes da compensação', lucroRealTri); if (usoPrej) mem.l('(−) Prejuízo fiscal compensado (limite de 30% do lucro)', usoPrej, '−'); mem.s('Lucro real tributável', lucroReal);
+    mem.l('IRPJ 15% + adicional 10% (acima de ' + brl(lim) + ' no trimestre)', rt.i, '+'); mem.l('CSLL 9%', rt.c, '+'); mem.l('PIS 1,65% sobre (receita − base de crédito)', pisNc, '+'); mem.l('Cofins 7,6% sobre (receita − base de crédito)', cofNc, '+'); mem.tot('Total — Lucro Real', realTot);
+    const dif = presTot - realTot, melhor = dif > 0 ? 'Lucro Real' : (dif < 0 ? 'Lucro Presumido' : 'empate');
+    mem.t('Comparação'); mem.l('Lucro Presumido', presTot); mem.l('Lucro Real', realTot); mem.txt('Menos tributo neste trimestre', melhor + (dif ? ' (economia de ' + brl(Math.abs(dif)) + ')' : ''));
+    // lucro real de equilíbrio: acima dele o Presumido compensa; abaixo, o Real
+    const totReal = L => { const t = realTributos(L); return t.i + t.c + pisNc + cofNc; };
+    let lo = 0, hi = Math.max(rec * 2, 1), eq = null;
+    if (totReal(lo) <= presTot && totReal(hi) >= presTot) { for (let k = 0; k < 60; k++) { const m = Math.floor((lo + hi) / 2); if (totReal(m) < presTot) lo = m; else hi = m; } eq = hi; }
+    if (eq !== null) { mem.txt('Lucro real de equilíbrio do trimestre', brl(eq) + ' — ' + pctTxt(eq / rec, 2) + ' da receita'); mem.n('Com lucro real ABAIXO desse valor o Lucro Real paga menos; ACIMA, o Lucro Presumido paga menos (com os créditos informados).'); }
+    avisos.push('Simulação de UM trimestre. Não considera ISS, ICMS e IPI (iguais nos dois regimes), regimes especiais de PIS/Cofins, retenções, receitas financeiras no PIS/Cofins não cumulativo, escrituração e custo de conformidade do Lucro Real, nem a reforma tributária.');
+    avisos.push('A CSLL do Lucro Real usa a mesma base do IRPJ (sem ajustes próprios). Se houver prejuízo fiscal, o limite de compensação é de 30% do lucro real do período.');
+    return { ok: true, resultado: { receita: rec, presumido: presTot, real: realTot, diferenca: dif, melhor, equilibrio: eq, presIr, presCs, pisCum, cofCum, realIr: rt.i, realCs: rt.c, pisNc, cofNc }, memoria: mem.L, parametros: [refSet(set)].concat(lp.parametros || []), bases: basesDe([set]).concat(lp.bases || []), avisos };
+  }
+
+  // ── Simples Nacional (+ reforma tributária: Simples puro × híbrido) ──
+  function calcSimplesNacional(inp) {
+    const comp = String(inp.competencia || '').slice(0, 7); if (!/^\d{4}-\d{2}$/.test(comp)) return ERR('Informe a competência (mês e ano).');
+    const ano = +comp.slice(0, 4), data = comp + '-01';
+    const set = acharSet('simples_nacional', data); if (!set) return ERR(ERRO_PARAM, { detalhe: 'Simples Nacional — ' + comp });
+    const rbt12 = cents(inp.rbt12), rec = cents(inp.receitaMes); if (!(rbt12 > 0)) return ERR('Informe a RBT12 (receita bruta dos 12 meses anteriores). Se a empresa tem menos de 12 meses, use a média mensal × 12.');
+    if (!(rec > 0)) return ERR('Informe a receita do mês.');
+    const lims = pv(set, 'limites_rbt12').map(x => cents(x)); if (rbt12 > lims[5]) return ERR('RBT12 acima de R$ 4.800.000,00: a empresa excede o limite do Simples Nacional.');
+    const faixa = lims.findIndex(l => rbt12 <= l), tabela = pv(set, 'anexos');
+    const mem = Mem(), avisos = [];
+    let anexo = inp.anexo || 'I', fatorR = null;
+    if (anexo === 'III_V') { const folha = cents(inp.folha12); fatorR = rbt12 > 0 ? folha / rbt12 : 0; anexo = fatorR >= Number(pv(set, 'fator_r_limite')) ? 'III' : 'V'; }
+    const A = tabela[anexo]; if (!A) return ERR('Anexo inválido.');
+    const aliq = Number(A.aliq[faixa]), ded = cents(A.ded[faixa]);
+    const ef = (rbt12 * aliq - ded) / rbt12;            // em centavos: (rbt12 × alíq − deduzir) ÷ rbt12 → fração
+    mem.t('Enquadramento'); mem.txt('Anexo', A.nome); if (fatorR !== null) mem.txt('Fator R (folha 12 meses ÷ RBT12)', pctTxt(fatorR, 2) + (anexo === 'III' ? ' ≥ 28% → Anexo III' : ' < 28% → Anexo V')); mem.l('RBT12', rbt12); mem.i('Faixa', faixa + 1); mem.txt('Alíquota nominal', pctTxt(aliq, 2)); mem.l('Parcela a deduzir', ded);
+    mem.txt('Alíquota efetiva = (RBT12 × alíquota − parcela a deduzir) ÷ RBT12', pctTxt(ef, 4));
+    // repartição entre os tributos (com limite do ISS de 5%)
+    const rep = Object.assign({}, A.rep[faixa]); const chaves = Object.keys(rep); let taxas = {};
+    chaves.forEach(k => { taxas[k] = ef * rep[k] / 100; });
+    if (taxas.iss !== undefined && taxas.iss > Number(pv(set, 'iss_maximo'))) {
+      const cap = Number(pv(set, 'iss_maximo')), resto = ef - cap, somaOutros = chaves.filter(k => k !== 'iss').reduce((x, k) => x + rep[k], 0);
+      chaves.forEach(k => { taxas[k] = k === 'iss' ? cap : resto * rep[k] / somaOutros; });
+      avisos.push('ISS limitado a 5% da receita dentro do DAS: o excedente foi redistribuído entre os demais tributos (LC 123, art. 18).');
+    }
+    // opções que retiram tributos da parcela da receita
+    const st = temV(inp.receitaIcmsSt) ? cents(inp.receitaIcmsSt) : 0, mono = temV(inp.receitaMonofasica) ? cents(inp.receitaMonofasica) : 0, issR = temV(inp.receitaIssRetido) ? cents(inp.receitaIssRetido) : 0;
+    const fator = { icms: 1 - Math.min(st, rec) / rec, pis: 1 - Math.min(mono, rec) / rec, cofins: 1 - Math.min(mono, rec) / rec, iss: 1 - Math.min(issR, rec) / rec };
+    const NOMES = { irpj: 'IRPJ', csll: 'CSLL', cofins: 'Cofins', pis: 'PIS/Pasep', cpp: 'CPP', icms: 'ICMS', iss: 'ISS', ipi: 'IPI' };
+    const valor = {}; let das = 0;
+    const bruto = {}; let somaBruta = 0; chaves.forEach(k => { bruto[k] = rec * taxas[k] * (fator[k] === undefined ? 1 : fator[k]); somaBruta += bruto[k]; valor[k] = Math.round(bruto[k]); });
+    // fecha os centavos: o DAS é UM valor arredondado; a diferença de arredondamento das parcelas vai para a maior
+    let difC = Math.round(somaBruta) - chaves.reduce((x, k) => x + valor[k], 0); if (difC) { const maior = chaves.slice().sort((x, y) => valor[y] - valor[x])[0]; valor[maior] += difC; }
+    das = chaves.reduce((x, k) => x + valor[k], 0);
+    mem.t('DAS do mês (regime atual)'); mem.l('Receita do mês', rec); chaves.forEach(k => mem.l(NOMES[k] + ' (' + pctTxt(rep[k] / 100, 2) + ' do DAS)', valor[k], '+')); mem.tot('DAS A PAGAR', das);
+    if (st || mono || issR) mem.n('Retirados do DAS: ' + (st ? 'ICMS sobre ' + brl(st) + ' (substituição tributária); ' : '') + (mono ? 'PIS/Cofins sobre ' + brl(mono) + ' (monofásico); ' : '') + (issR ? 'ISS sobre ' + brl(issR) + ' (retido na fonte).' : ''));
+    if (faixa === 5) avisos.push('6ª faixa: o DAS não inclui ICMS/ISS — eles são recolhidos fora do DAS ao estado/município (sublimite de R$ 3.600.000,00).');
+    let cppFora = 0;
+    if (anexo === 'IV') { const folhaMes = cents(inp.folhaMes); cppFora = Math.round(folhaMes * 0.20); mem.t('Fora do DAS (Anexo IV)'); mem.l('CPP patronal 20% sobre a folha do mês (+ RAT e terceiros, se houver)', cppFora, '+'); avisos.push('Anexo IV: a contribuição patronal (CPP) é paga à parte, sobre a folha; o cálculo aqui é só o 20% da folha informada (RAT e terceiros não calculados).'); }
+    const resultado = { anexo, faixa: faixa + 1, aliquotaNominal: aliq, aliquotaEfetiva: ef, das, valores: valor, fatorR, cppFora, ano, modo: 'atual' };
+    // ── reforma tributária (a partir de 2027) ──
+    const modoRef = inp.regimeIbsCbs === 'hibrido' ? 'hibrido' : (inp.regimeIbsCbs === 'puro' ? 'puro' : '');
+    if (ano >= 2027 && modoRef) {
+      const setR = acharSet('simples_reforma', data); if (!setR) return ERR(ERRO_PARAM, { detalhe: 'Reforma do Simples — ' + comp });
+      const esc = pv(setR, 'escalonamento_ibs'), red = ano >= 2029 ? Number(esc[String(Math.min(ano, 2033))] || 1) : 0;
+      const cbsDas = (valor.pis || 0) + (valor.cofins || 0), icmsIss = (valor.icms || 0) + (valor.iss || 0), ibsDas = Math.round(icmsIss * red);
+      const cbsAli = temV(inp.cbsAliquota) ? Number(String(inp.cbsAliquota).replace(',', '.')) / 100 : (ano <= 2028 ? Number(pv(setR, 'cbs_referencia')) - Number(pv(setR, 'reducao_cbs_2027_2028')) : Number(pv(setR, 'cbs_referencia')));
+      const ibsAli = temV(inp.ibsAliquota) ? Number(String(inp.ibsAliquota).replace(',', '.')) / 100 : (ano <= 2028 ? Number(pv(setR, 'ibs_teste')) : Number(pv(setR, 'ibs_referencia')) * Number(esc[String(Math.min(ano, 2033))] || 1));
+      const compras = cents(inp.comprasComCredito), deb = Math.round(rec * (cbsAli + ibsAli)), cred = Math.round(compras * (cbsAli + ibsAli)), liq = deb - cred;
+      mem.t('REFORMA TRIBUTÁRIA — Simples ' + (modoRef === 'puro' ? 'PURO' : 'HÍBRIDO') + ' em ' + ano);
+      mem.txt('Parcelas dentro do DAS', 'CBS (no lugar de PIS/Cofins): ' + brl(cbsDas) + (red ? ' · ICMS/ISS reduzidos em ' + pctTxt(red, 0) + ' → IBS dentro do DAS: ' + brl(ibsDas) : ''));
+      const dasPuro = das;
+      const dasHib = das - cbsDas - ibsDas;
+      mem.l('DAS no Simples PURO (CBS e IBS dentro do DAS; total igual ao atual — premissa de neutralidade)', dasPuro);
+      mem.l('DAS no Simples HÍBRIDO (sem CBS e IBS)', dasHib);
+      mem.txt('Alíquotas usadas no regime regular', 'CBS ' + pctTxt(cbsAli, 2) + ' + IBS ' + pctTxt(ibsAli, 2) + ' (ESTIMATIVAS — edite se houver ato oficial)');
+      mem.l('IBS/CBS a recolher no regime regular (débito sobre a receita)', deb); mem.l('(−) Créditos das compras (' + brl(compras) + ' × alíquotas)', cred, '−'); mem.s('IBS/CBS líquido (negativo = saldo credor)', liq);
+      const totalHib = dasHib + liq;
+      mem.tot('TOTAL — Simples híbrido (DAS + IBS/CBS regular)', totalHib); mem.tot('TOTAL — Simples puro (DAS)', dasPuro);
+      mem.txt('Diferença (híbrido − puro)', (totalHib - dasPuro >= 0 ? '+' : '−') + ' ' + brl(Math.abs(totalHib - dasPuro)) + (totalHib < dasPuro ? ' — o híbrido paga MENOS' : ' — o puro paga menos'));
+      const credCliPuro = cbsDas + ibsDas, credCliHib = deb;
+      mem.t('Crédito para o cliente (empresa do regime regular) sobre a venda do mês'); mem.l('Simples PURO: só a parcela de IBS/CBS que está no DAS', credCliPuro); mem.l('Simples HÍBRIDO: todo o IBS/CBS destacado na nota', credCliHib);
+      resultado.reforma = { modo: modoRef, dasPuro, dasHib, ibsCbsRegular: deb, creditos: cred, liquido: liq, totalHib, totalPuro: dasPuro, credCliPuro, credCliHib, cbsAli, ibsAli, red };
+      avisos.push('Reforma tributária: valores de CBS e IBS são ESTIMATIVAS de alíquota de referência e a tabela do Simples a partir de 2029 foi presumida neutra (a parcela de ICMS/ISS que sai vira IBS). Confira a LC 214/2025, as resoluções do CGSN e o ato do Senado com as alíquotas. A opção pelo híbrido é por semestre e tem prazo — confira a resolução vigente.');
+      resultado.das = modoRef === 'hibrido' ? dasHib : dasPuro; resultado.modo = modoRef; resultado.total = modoRef === 'hibrido' ? totalHib : dasPuro;
+    } else if (ano >= 2027) avisos.push('Competência a partir de 2027: escolha “puro” ou “híbrido” em “IBS/CBS (reforma)” para simular a reforma.');
+    avisos.push('Alíquotas, parcelas a deduzir e repartição conferidas em páginas de terceiros (não no texto da LC 123). Não calcula: ICMS/ISS devidos fora do DAS acima do sublimite, ICMS-ST e outras exceções além das opções informadas, nem a RBT12 (informe pronta).');
+    return { ok: true, resultado, memoria: mem.L, parametros: [refSet(set)].concat(resultado.reforma ? [refSet(acharSet('simples_reforma', data))] : []), bases: basesDe([set].concat(resultado.reforma ? [acharSet('simples_reforma', data)] : [])), avisos };
+  }
+
   // ───────────────────────────── catálogo ─────────────────────────────
   const CATALOGO = [
     { key: 'irrf_pf', cat: 'FEDERAL', nome: 'IRRF — Pessoa Física', fn: calcIRRF },
@@ -1487,6 +1805,12 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { key: 'plr', cat: 'TRABALHISTA', nome: 'PLR — tributação exclusiva', fn: calcPLR },
     { key: 'pensao', cat: 'TRABALHISTA', nome: 'Pensão alimentícia', fn: calcPensao },
     { key: 'bens_usados', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'Depreciação de bens usados', fn: calcBensUsados },
+    { key: 'ganho_capital_pf', cat: 'FEDERAL', nome: 'Ganho de capital — Pessoa Física', fn: calcGanhoCapitalPF },
+    { key: 'variacao_patrimonial', cat: 'FEDERAL', nome: 'Variação patrimonial — Pessoa Física', fn: calcVariacaoPatrimonialPF },
+    { key: 'juros_multa_selic', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Juros, multa de mora e Selic (DARF em atraso)', fn: calcJurosMultaSelic },
+    { key: 'ganho_capital_pj', cat: 'TRIBUTÁRIO PJ', nome: 'Ganho de capital — Pessoa Jurídica', fn: calcGanhoCapitalPJ },
+    { key: 'simples_nacional', cat: 'TRIBUTÁRIO PJ', nome: 'Simples Nacional (DAS + reforma)', fn: calcSimplesNacional },
+    { key: 'planejamento_tributario', cat: 'TRIBUTÁRIO PJ', nome: 'Planejamento tributário — Presumido × Real', fn: calcPlanejamentoTributario },
     { key: 'analise_indices', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'Análise contábil — coeficientes', fn: calcAnaliseIndices },
     { key: 'ebitda_eva', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'EBITDA, EVA, ROIC e ROCE', fn: calcEbitdaEva },
     { key: 'mutuo', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Mútuo — IOF / juros / IRRF', fn: calcMutuo },
@@ -1497,10 +1821,10 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { key: 'itcmd', cat: 'ESTADUAL', nome: 'ITCMD — Doação e Causa mortis', fn: calcITCMD },
   ];
   const EM_BREVE = [
-    ['TRIBUTÁRIO PJ', 'PIS/COFINS cumulativo'], ['TRIBUTÁRIO PJ', 'Simples Nacional (RBT12, alíquota efetiva, DAS)'], ['ESTADUAL', 'DIFAL'], ['ESTADUAL', 'ICMS-ST'],
-    ['FEDERAL', 'Ganho de capital PF'], ['FEDERAL', 'Ganho de capital PJ'], ['CONTÁBIL / PATRIMONIAL', 'Depreciação fiscal'], ['FEDERAL', 'Variação patrimonial PF'],
-    ['FINANCEIRO / SOCIETÁRIO', 'Juros / multa / Selic'], ['TRABALHISTA', 'FGTS'], ['TRABALHISTA', 'Horas extras e DSR'], ['TRABALHISTA', 'Adicional noturno'],
-    ['TRABALHISTA', 'Insalubridade e periculosidade'], ['TRABALHISTA', 'Custo da folha'], ['TRIBUTÁRIO PJ', 'Planejamento tributário'],
+    ['TRIBUTÁRIO PJ', 'PIS/COFINS cumulativo'], ['ESTADUAL', 'DIFAL'], ['ESTADUAL', 'ICMS-ST'],
+    ['CONTÁBIL / PATRIMONIAL', 'Depreciação fiscal'],
+    ['TRABALHISTA', 'FGTS'], ['TRABALHISTA', 'Horas extras e DSR'], ['TRABALHISTA', 'Adicional noturno'],
+    ['TRABALHISTA', 'Insalubridade e periculosidade'], ['TRABALHISTA', 'Custo da folha'],
   ];
   const CATEGORIAS = ['FEDERAL', 'TRABALHISTA', 'FINANCEIRO / SOCIETÁRIO', 'TRIBUTÁRIO PJ', 'ESTADUAL', 'CONTÁBIL / PATRIMONIAL'];
 

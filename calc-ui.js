@@ -126,6 +126,76 @@
       resumo: r => r.destaques,
       extra: res => indicesHtml(res),
       tabela: res => ({ nome: 'Indicadores', cab: ['Grupo', 'Indicador', 'Fórmula', 'Valor', 'Unidade'], linhas: res.indices.map(i => [i.grupo, i.nome, i.formula, i.valor === null ? 'não se aplica' : (i.unidade === 'R$' ? i.valor / 100 : i.valor), i.unidade === 'x' ? 'vezes' : i.unidade]) }) },
+    ganho_capital_pf: { titulo: 'Ganho de capital — Pessoa Física', desc: 'Venda de imóvel, veículo, participação societária e outros bens: ganho = valor da venda − custo − despesas; imposto por faixas (15% a 22,5%) e isenções (pequeno valor, único imóvel e reinvestimento em imóvel residencial). Mostra o vencimento do DARF.', campos: [
+      { k: 'dataAlienacao', l: 'Data da alienação (venda)', t: 'date' },
+      { k: 'valorAlienacao', l: 'Valor da alienação (R$)', t: 'money' },
+      { k: 'custoAquisicao', l: 'Custo de aquisição (R$) — o valor que consta na declaração/escritura', t: 'money' },
+      { k: 'despesas', l: 'Despesas comprovadas da compra e da venda (R$) — corretagem, ITBI, escritura…', t: 'money' },
+      { k: 'isencaoPequenoValor', l: 'Aplicar a isenção de bens de pequeno valor (total do mês de bens da mesma natureza até o limite)', t: 'bool', def: false },
+      { k: 'totalMesMesmaNatureza', l: 'Total alienado NO MÊS, de bens da mesma natureza (R$) — vazio = só esta venda', t: 'money', quando: v => !!v.isencaoPequenoValor },
+      { k: 'imovelUnico', l: 'Aplicar a isenção do único imóvel (era o único imóvel e não vendeu outro nos últimos 5 anos)', t: 'bool', def: false },
+      { k: 'reinvestimento', l: 'Reinvestiu o dinheiro em outro imóvel RESIDENCIAL em até 180 dias', t: 'bool', def: false },
+      { k: 'valorReinvestido', l: 'Valor aplicado na compra do novo imóvel (R$)', t: 'money', quando: v => !!v.reinvestimento }],
+      resumo: r => [['Ganho de capital', r.ganho], ['Ganho tributável', r.tributavel], ['Imposto a pagar', r.imposto, 1], ['Vencimento do DARF', r.vencimento]] },
+    ganho_capital_pj: { titulo: 'Ganho de capital — Pessoa Jurídica', desc: 'Venda de bem do ativo não circulante: ganho = venda líquida − valor contábil (custo − depreciação − perdas). O ganho entra na base do IRPJ (15% + adicional de 10%) e da CSLL (9%): mostra o efeito no trimestre.', campos: [
+      { k: 'dataAlienacao', l: 'Data da alienação', t: 'date' },
+      { k: 'regime', l: 'Regime da empresa', t: 'select', def: 'presumido', opts: [['presumido', 'Lucro Presumido'], ['real', 'Lucro Real']] },
+      { k: 'valorVenda', l: 'Valor da venda (R$)', t: 'money' },
+      { k: 'despesasVenda', l: 'Despesas da venda (R$)', t: 'money' },
+      { k: 'custoAquisicao', l: 'Custo de aquisição do bem (R$)', t: 'money' },
+      { k: 'depreciacaoAcumulada', l: 'Depreciação/amortização acumulada (R$)', t: 'money' },
+      { k: 'perdasRecuperabilidade', l: 'Perdas por redução ao valor recuperável (R$)', t: 'money' },
+      { k: 'baseIrpjTrimestre', l: 'Base do IRPJ do trimestre SEM o ganho (R$) — para o adicional de 10%; opcional', t: 'money' },
+      { k: 'baseCsllTrimestre', l: 'Base da CSLL do trimestre SEM o ganho (R$) — vazio = igual à do IRPJ', t: 'money' }],
+      resumo: r => [['Ganho de capital', r.ganho], ['IRPJ (inclui o adicional)', r.irpj], ['CSLL', r.csll], ['Total dos tributos', r.total, 1], ['Carga sobre o ganho', (r.cargaBp / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%']] },
+    juros_multa_selic: { titulo: 'Juros, multa de mora e Selic (DARF em atraso)', desc: 'Tributo federal pago em atraso: multa de mora de 0,33% ao dia (máximo de 20%) e juros pela Selic (soma das taxas mensais + 1% no mês do pagamento). Pagamento no mesmo mês do vencimento tem só multa.', campos: [
+      { k: 'principal', l: 'Valor do tributo (principal, R$)', t: 'money' },
+      { k: 'dataVencimento', l: 'Data de vencimento (já ajustada para dia útil)', t: 'date' },
+      { k: 'dataPagamento', l: 'Data do pagamento', t: 'date', def: hoje }],
+      resumo: r => [['Total a pagar', r.total, 1], ['Principal', r.principal], ['Multa de mora', r.multa], ['Juros de mora (Selic)', r.juros], ['Dias de atraso', String(r.dias)], ['Multa / Juros (%)', r.multaPct.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) + '% / ' + r.jurosPct.toLocaleString('pt-BR', { minimumFractionDigits: 2 }) + '%']] },
+    variacao_patrimonial: { titulo: 'Variação patrimonial — Pessoa Física (acréscimo patrimonial a descoberto)', desc: 'Compara o crescimento do patrimônio e os gastos com os recursos declarados. No modo ANUAL faz uma estimativa do ano; no modo MENSAL monta o fluxo de caixa do mês (origens × aplicações) e mostra o que ficou a descoberto e o saldo a transportar.', campos: [
+      { k: 'modo', l: 'Modo', t: 'select', def: 'anual', opts: [['anual', 'Anual — estimativa do ano (evolução patrimonial)'], ['mensal', 'Mensal — fluxo de caixa do mês']] },
+      { k: 'patrimonioInicial', l: 'Patrimônio líquido em 31/12 do ano anterior (bens e direitos − dívidas, R$)', t: 'money', quando: v => v.modo !== 'mensal' },
+      { k: 'patrimonioFinal', l: 'Patrimônio líquido em 31/12 do ano (R$)', t: 'money', quando: v => v.modo !== 'mensal' },
+      { k: 'saldoAnterior', l: 'Saldo (disponibilidades) transportado do mês anterior (R$)', t: 'money', quando: v => v.modo === 'mensal' },
+      { k: 'rendTributaveisLiquidos', l: 'Rendimentos tributáveis, líquidos do imposto (R$)', t: 'money' },
+      { k: 'rendIsentos', l: 'Rendimentos isentos e não tributáveis (R$)', t: 'money' },
+      { k: 'rendExclusiva', l: 'Rendimentos de tributação exclusiva/definitiva, líquidos (R$)', t: 'money' },
+      { k: 'vendaBens', l: 'Venda de bens e direitos — valor recebido (R$)', t: 'money', quando: v => v.modo === 'mensal' },
+      { k: 'emprestimos', l: 'Empréstimos e dívidas contraídas (R$)', t: 'money', quando: v => v.modo === 'mensal' },
+      { k: 'outrasOrigens', l: 'Outras origens: doações, heranças etc. (R$)', t: 'money' },
+      { k: 'dispendios', l: 'Dispêndios do ano: gastos e despesas de manutenção (R$)', t: 'money', quando: v => v.modo !== 'mensal' },
+      { k: 'aquisicoesBens', l: 'Aquisição de bens e direitos no mês (R$)', t: 'money', quando: v => v.modo === 'mensal' },
+      { k: 'gastos', l: 'Gastos e despesas do mês (R$)', t: 'money', quando: v => v.modo === 'mensal' },
+      { k: 'pagamentoDividas', l: 'Pagamento de dívidas no mês (R$)', t: 'money', quando: v => v.modo === 'mensal' }],
+      resumo: r => r.modo === 'mensal' ? [['Acréscimo patrimonial a descoberto do mês', r.descoberto, 1], ['Total das origens', r.origens], ['Total das aplicações', r.aplicacoes], ['Saldo do mês', r.saldo], ['Saldo a transportar', r.transportar]] : [['Acréscimo patrimonial a descoberto (estimativa)', r.descoberto, 1], ['Aumento do patrimônio', r.aumento], ['Recursos do ano', r.origens], ['Dispêndios', r.dispendios]] },
+    planejamento_tributario: { titulo: 'Planejamento tributário — Lucro Presumido × Lucro Real', desc: 'Compara, em um trimestre, quanto a empresa paga de IRPJ, CSLL, PIS e Cofins no Lucro Presumido e no Lucro Real, e mostra o lucro real de equilíbrio (acima dele o Presumido compensa). Não inclui ISS/ICMS.', campos: [
+      { k: 'ano', l: 'Ano', t: 'int', def: () => new Date().getFullYear() },
+      { k: 'trimestre', l: 'Trimestre', t: 'select', def: '1', opts: [['1', '1º trimestre'], ['2', '2º trimestre'], ['3', '3º trimestre'], ['4', '4º trimestre']] },
+      { k: '_atividades', t: 'atividades' },
+      { k: 'receitasFinanceiras', l: 'Receitas financeiras do trimestre (R$)', t: 'money' },
+      { k: 'lucroRealTrimestre', l: 'LUCRO REAL do trimestre (lucro contábil ± adições e exclusões, antes de compensar prejuízos) (R$)', t: 'money' },
+      { k: 'prejuizoCompensar', l: 'Saldo de prejuízo fiscal a compensar (R$) — limite de 30% do lucro', t: 'money' },
+      { k: 'baseCreditoPisCofins', l: 'Compras e despesas COM direito a crédito de PIS/Cofins no trimestre (R$)', t: 'money' }],
+      resumo: r => [['Paga menos', r.melhor + (r.diferenca ? ' (' + (Math.abs(r.diferenca) / 100).toLocaleString('pt-BR', { style: 'currency', currency: 'BRL' }) + ')' : ''), 1], ['Lucro Presumido', r.presumido], ['Lucro Real', r.real], ['Receita bruta', r.receita], ['Lucro real de equilíbrio', r.equilibrio === null ? 'não há' : r.equilibrio]] },
+    simples_nacional: { titulo: 'Simples Nacional — DAS e reforma tributária (puro × híbrido)', desc: 'Calcula a alíquota efetiva, o DAS e a repartição entre os tributos (Anexos I a V, fator R, limite do ISS). Para competências a partir de 2027, simula o Simples PURO (IBS/CBS dentro do DAS) e o HÍBRIDO (IBS/CBS pelo regime regular, fora do DAS) e compara.', campos: [
+      { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual },
+      { k: 'anexo', l: 'Anexo', t: 'select', def: 'I', opts: [['I', 'Anexo I — Comércio'], ['II', 'Anexo II — Indústria'], ['III', 'Anexo III — Serviços (locação, instalação, contabilidade…)'], ['IV', 'Anexo IV — Construção, limpeza, vigilância, advocacia (CPP fora do DAS)'], ['V', 'Anexo V — Serviços intelectuais (sem fator R)'], ['III_V', 'Serviços do art. 18, § 5º-I — Anexo III ou V pelo FATOR R']] },
+      { k: 'rbt12', l: 'RBT12 — receita bruta dos 12 meses anteriores (R$)', t: 'money' },
+      { k: 'receitaMes', l: 'Receita bruta do mês (R$)', t: 'money' },
+      { k: 'folha12', l: 'Folha de salários dos 12 meses anteriores, com encargos e pró-labore (R$) — fator R', t: 'money', quando: v => v.anexo === 'III_V' },
+      { k: 'folhaMes', l: 'Folha de salários do mês (R$) — para a CPP patronal do Anexo IV', t: 'money', quando: v => v.anexo === 'IV' },
+      { k: 'receitaIcmsSt', l: 'Receita com ICMS por substituição tributária (R$) — opcional', t: 'money' },
+      { k: 'receitaMonofasica', l: 'Receita de produtos monofásicos (PIS/Cofins já pagos) (R$) — opcional', t: 'money' },
+      { k: 'receitaIssRetido', l: 'Receita com ISS retido na fonte (R$) — opcional', t: 'money' },
+      { k: 'regimeIbsCbs', l: 'Reforma (competência 2027 em diante): como paga IBS/CBS', t: 'select', def: 'puro', opts: [['puro', 'PURO — IBS/CBS dentro do DAS'], ['hibrido', 'HÍBRIDO — IBS/CBS pelo regime regular, fora do DAS']], quando: v => parseInt(String(v.competencia || '').slice(0, 4), 10) >= 2027 },
+      { k: 'comprasComCredito', l: 'Compras do mês com direito a crédito de IBS/CBS (R$) — só no híbrido', t: 'money', quando: v => parseInt(String(v.competencia || '').slice(0, 4), 10) >= 2027 },
+      { k: 'cbsAliquota', l: 'Alíquota da CBS (%) — vazio = estimativa do sistema', t: 'pct', quando: v => parseInt(String(v.competencia || '').slice(0, 4), 10) >= 2027 },
+      { k: 'ibsAliquota', l: 'Alíquota do IBS (%) — vazio = estimativa do sistema', t: 'pct', quando: v => parseInt(String(v.competencia || '').slice(0, 4), 10) >= 2027 }],
+      resumo: r => [['DAS a pagar', r.das, 1], ['Anexo / faixa', 'Anexo ' + r.anexo + ' — ' + r.faixa + 'ª faixa'], ['Alíquota nominal', (r.aliquotaNominal * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2 }) + '%'], ['Alíquota efetiva', (r.aliquotaEfetiva * 100).toLocaleString('pt-BR', { minimumFractionDigits: 4, maximumFractionDigits: 4 }) + '%']]
+        .concat(r.fatorR !== null ? [['Fator R', (r.fatorR * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%']] : [])
+        .concat(r.cppFora ? [['CPP patronal fora do DAS (20% da folha)', r.cppFora]] : [])
+        .concat(r.reforma ? [['REFORMA — total no Simples PURO', r.reforma.totalPuro], ['REFORMA — total no Simples HÍBRIDO', r.reforma.totalHib, 1], ['Crédito ao cliente — puro', r.reforma.credCliPuro], ['Crédito ao cliente — híbrido', r.reforma.credCliHib]] : []) },
     bens_usados: { titulo: 'Depreciação de bens usados', desc: 'Bem adquirido USADO (RIR/2018, art. 322): o prazo de depreciação é o MAIOR entre a metade da vida útil do bem novo e a vida útil restante (vida útil − tempo de uso). Mostra a taxa anual, a depreciação mensal, o cronograma por ano e, se o sistema contábil começou a depreciar depois, quantos meses já devem estar depreciados.', campos: [
       { k: 'vidaUtilAnos', l: 'Vida útil do bem NOVO (anos) — tabela de taxas da Receita', t: 'text', def: '' },
       { k: 'usoAnos', l: 'Tempo de uso do bem quando adquirido — anos', t: 'text', def: '0' },
@@ -477,8 +547,8 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   // ───────────────────────────── calcular ─────────────────────────────
   window.calcCalcular = function () {
     const f = F[est.key]; const v = valores();
-    if (est.key === 'lucro_presumido') { v.atividades = est.ativ.map(a => ({ tipo: a.tipo, receita: a.receita, irpj: a.irpj, csll: a.csll, nome: a.nome }));
-      v.receitasAnteriores = [v.ra1, v.ra2, v.ra3]; }
+    if (est.key === 'lucro_presumido' || est.key === 'planejamento_tributario') { v.atividades = est.ativ.map(a => ({ tipo: a.tipo, receita: a.receita, irpj: a.irpj, csll: a.csll, nome: a.nome }));
+      if (est.key === 'lucro_presumido') v.receitasAnteriores = [v.ra1, v.ra2, v.ra3]; }
     if (est.key === 'itcmd') {
       v.quotas = { patrimonioLiquido: g('q_patrimonioLiquido'), ajusteAtivos: g('q_ajusteAtivos'), ajustePassivos: g('q_ajustePassivos'), goodwill: g('q_goodwill'), outraMetodologia: g('q_outraMetodologia'), percentualParticipacao: g('q_percentualParticipacao') || '100' };
       v.herdeiros = est.herd.map(h => ({ nome: h.nome, quinhao: h.quinhao })).filter(h => h.nome || h.quinhao);
