@@ -857,6 +857,7 @@ html.dark-mode #vgCalPop .cal-d.pub:hover,html.dark-mode #vgCalPop .cal-d.sel{co
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script src="razao-parser.js?v=1"></script>
+<script src="fopag-lote.js?v=1"></script>
 <script src="calc-motor.js?v=18"></script>
 <script src="calc-ui.js?v=26"></script>
 <script src="analises.js?v=4"></script>
@@ -25682,6 +25683,72 @@ async function _lancctbProcessarFopag(){
     let raizFopagContabil=null;
     try{ if(await _lancctbTemAcessoPastaFopag()) raizFopagContabil=await _lancctbCarregarHandleFopag(); }catch(e){}
     const recibosFeriasUsados=new Set();
+
+    // ── PRÉ-PASSO POR LOTE (pedido do usuário 28/10/2026, Fast Lube / Itaú / 07/2026) ──
+    // Antes de olhar pagamento por pagamento: agrupa os "Sispag Salários" por data (lote bancário), compara o lote como MULTICONJUNTO de valores com cada relatório da folha e
+    // reserva as ocorrências EXATAS do relatório de maior cobertura (valor repetido não é erro: conta-se ocorrências; quem é quem entre valores iguais nunca é inventado).
+    // O que sobra do lote segue pros caminhos antigos. Núcleo puro e testado em fopag-lote.js (tests/fopag-lote.test.js).
+    try{
+      const ehSispagSal=h=>{ const n=_norm(h); return /SISPAG/.test(n)&&/SALARIO/.test(n)&&!histTemNomePessoa(h)&&!/^\s*\[(DIFEREN|PESSOA IDENTIFICADA|SÓCIO)/i.test(String(h||'')); };
+      const mapaLotes={};
+      pendencias.forEach(l=>{ if(!ehSispagSal(l.historico_bancario)) return; const k=l.data_pagamento+'|'+_norm(l.historico_bancario); (mapaLotes[k]=mapaLotes[k]||{chave:k,data:l.data_pagamento,linhas:[]}).linhas.push({id:l.id,valor:l.valor_saida}); });
+      const lotesFop=Object.values(mapaLotes).filter(x=>x.linhas.length>=3);
+      if(lotesFop.length&&window.JJRFopagLote){
+        const consEx0=await carregarConsumidosFolha();
+        const relDoLote={}, origPorChave={};
+        for(const lt of lotesFop){
+          if(statusEl) statusEl.textContent=`FOPAG: identificando o lote de ${lt.data.split('-').reverse().join('/')}…`;
+          const mm=lt.data.slice(0,7).split('-').reverse().join('-'), cM=mm, cA=mesAnterior(mm), dia=+lt.data.slice(8,10);
+          const tent=dia<=10?[{tipo:'salario',competencia:cA},{tipo:'salario',competencia:cM}]:dia<=14?[{tipo:'salario',competencia:cA},{tipo:'adiantamento',competencia:cM}]:[{tipo:'adiantamento',competencia:cM},{tipo:'adiantamento',competencia:cA},{tipo:'salario',competencia:cA}];
+          let rels=[];
+          if(temFopagMes) rels=await _lancctbRelatoriosFopagDoMes(eid,lt.data);
+          if(!rels.length&&pastaEmpresa) for(const t of tent){
+            const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,t.competencia,t.tipo); if(!file) continue;
+            try{ const dd=await _lancctbParsearRelatorioLiquidos(file); if(dd) rels.push({...t,dados:dd}); }catch(e){ console.warn('Relatório (lote):',e); }
+          }
+          rels=rels.filter(r=>!((r.tipo==='salario'||r.tipo==='adiantamento')&&_compAposPagamento(r.dados.competencia||r.competencia,lt.data)));
+          relDoLote[lt.chave]=rels.map(r=>{ const comp=r.dados.competencia||r.competencia, chave=r.tipo+'|'+comp+'|'+r.dados.total; origPorChave[chave]=r; const pr=tent.findIndex(t=>t.tipo===r.tipo&&t.competencia===comp); return { chave, tipo:r.tipo, competencia:comp, prioridade:pr<0?tent.length:pr, pessoas:r.dados.pessoas||[] }; });
+        }
+        const consumidosLote=new Set();
+        Object.values(relDoLote).flat().forEach(rr=>{ rr.pessoas.forEach((pp,ix)=>{ if(consEx0.has(chaveConsumoFolha(origPorChave[rr.chave],pp))) consumidosLote.add(rr.chave+'|'+ix); }); });
+        const resolvidosLote=JJRFopagLote.resolverLotes(lotesFop,k=>relDoLote[k]||[],consumidosLote);
+        const idsResolvidos=new Set();
+        for(const rl of resolvidosLote){
+          const R=rl.resultado, ro=origPorChave[R.relatorio.chave], comp=R.relatorio.competencia;
+          const lt=lotesFop.find(x=>x.chave===rl.chave);
+          // comprovantes pendentes da janela do lote (1 consulta): confirma a pessoa quando o comprovante existe
+          let compsLote=[]; try{ const d0=new Date(lt.data+'T00:00:00'); d0.setDate(d0.getDate()-6); const { data: cs0 } = await _supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id').eq('empresa_eid',eid).eq('status_conciliacao','pendente').gte('data_pagamento',d0.toISOString().slice(0,10)).lte('data_pagamento',lt.data); compsLote=(cs0||[]).filter(c=>!c.conta_bancaria_id||String(c.conta_bancaria_id)===String(contaId)); }catch(e){}
+          const compsUsados=new Set();
+          for(const a of R.atribuicoes){
+            const l=pendencias.find(x=>x.id===a.id); if(!l) continue;
+            const pessoas=a.grupo.map(ix=>ro.dados.pessoas[ix]);
+            const p=pessoas[0]; if(!p) continue;
+            if(pessoas.some(x=>(x.tipo==='contribuinte')!==(p.tipo==='contribuinte'))) continue; // grupo misto (empregado × sócio): não decide a conta sozinho
+            const c=contaDaPessoa(p,ro.tipo); if(!c) continue;
+            const rot=_rotP(p,ro.tipo);
+            const nomeado=!a.repetido;
+            const hist=nomeado?`Pagamento ref. ${rot} ${comp} - ${p.nome}`:`Pagamento ref. ${rot} ${comp} - valor repetido`;
+            let cp=null;
+            if(nomeado){ const cc=compsLote.filter(x=>!compsUsados.has(x.id)&&Math.abs(Number(x.valor_pago)-l.valor_saida)<=0.005&&identificaPessoa((x.cliente_fornecedor_nome||'')+' '+(x.cnpj_cpf||''),[p])); if(cc.length===1) cp=cc[0]; }
+            const terceiro=nomeado?{ cliente_fornecedor_nome:(cp&&cp.cliente_fornecedor_nome)||p.nome||null, cnpj_cpf:(cp&&cp.cnpj_cpf)||p.cpf||null, comprovante_id:cp?cp.id:null }:{};
+            const linhasL=[
+              { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:hist, ...terceiro, lancamento_extrato_id:l.id, origem_match:'regra' },
+              { empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:l.valor_saida, historico:hist, ...terceiro, lancamento_extrato_id:l.id, origem_match:'regra' },
+            ];
+            const { error: eL } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasL });
+            if(eL){ console.error('Erro FOPAG (lote):',eL); continue; }
+            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+            if(cp){ compsUsados.add(cp.id); await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',cp.id); }
+            idsResolvidos.add(l.id); resolvidos++;
+            if(nomeado) consEx0.add(chaveConsumoFolha(ro,p));
+          }
+          R.consumo.forEach(k=>{ const ix=+k.split('|').pop(); const pp=ro.dados.pessoas[ix]; if(pp) consEx0.add(chaveConsumoFolha(ro,pp)); });
+        }
+        for(let i=pendencias.length-1;i>=0;i--) if(idsResolvidos.has(pendencias[i].id)) pendencias.splice(i,1);
+        if(idsResolvidos.size) toast(`FOPAG por lote: ${idsResolvidos.size} pagamento(s) conciliado(s) pelo relatório da folha.`,'ok');
+      }
+    }catch(e){ console.error('FOPAG — pré-passo por lote:',e); }
+
     for(let i=0;i<pendencias.length;i++){
       const l=pendencias[i];
       if(statusEl) statusEl.textContent=`Processando FOPAG ${i+1}/${pendencias.length}…`;
@@ -26018,6 +26085,10 @@ async function _lancctbProcessarFopag(){
       const liquido=Math.round(p.valor*100)/100;
       const diferenca=Math.round((l.valor_saida-liquido)*100)/100;
       const comp=r.dados.competencia||r.competencia;
+
+      // 28/10/2026: pagamento EXATO tem prioridade absoluta sobre composição. Se existe OUTRO pagamento pendente com exatamente o líquido desta pessoa (até 10 dias), não se tira o valor de dentro deste
+      // (caso Débora R$ 2.000 dentro de 4.754,75): fica pendente e o exato é conciliado no seu lote.
+      if(diferenca>0.01&&pendencias.some(o=>o.id!==l.id&&Math.abs(o.valor_saida-liquido)<=0.01&&_lancctbDiffDias(o.data_pagamento,l.data_pagamento)<=10)){ consEx.delete(chaveConsumoFolha(r,p)); semAchado++; continue; }
 
       if(diferenca>0.01){
         // Divide o lançamento de extrato em dois: o original passa a valer
