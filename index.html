@@ -23926,6 +23926,7 @@ function _lancctbNomeCompativel(textosRef,nomeNf){
 // bancário (18/09/2026: comprovante REDE ANCORA R$272,03 amarrado a extrato
 // COPASA R$270,50 só por valor±2,00 e data±1 dia).
 function _lancctbComprovanteCombinaHistorico(c,historico){
+  historico=String(historico||'').replace(/^\s*(?:\[(?:DIFEREN|FOLHA ABERTA)[^\]]*\]\s*)+/i,''); // marcas do Processar FOPAG no começo não fazem parte do que o banco escreveu
   const doc=_lancctbExtrairDocDoHistorico(historico);
   const cnpjC=String(c.cnpj_cpf||'').replace(/\D/g,'');
   if(doc&&cnpjC) return doc.doc===cnpjC;
@@ -25551,8 +25552,9 @@ async function _lancctbProcessarFopag(){
     if(!pastaEmpresa&&!temFopagMes){ toast(`Não achei a pasta "(${eid}) ..." dentro do ConfiBackup.`,'err'); return; }
 
     const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
-      .select('id,data_pagamento,valor_saida,historico_bancario')
+      .select('id,data_pagamento,valor_saida,historico_bancario,composicao_tributo')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0)));
+    if(pendencias) for(let q=pendencias.length-1;q>=0;q--){ const ct=pendencias[q].composicao_tributo; if(Array.isArray(ct)&&ct.some(c=>c&&c.origem==='folha')) pendencias.splice(q,1); } // já aberta em líquido + diferença (aguarda a conta da diferença)
     if(!pendencias||!pendencias.length){ toast('Nenhuma pendência de saída no período filtrado nesta conta.','ok'); return; }
     // Pedido do usuário 21/10/2026 (Adelpe, Danilo R$ 44,81 em 06/08 e 28/08): o pagamento MAIS ANTIGO consome primeiro o líquido do relatório — ordem por data.
     pendencias.sort((a,b)=>String(a.data_pagamento).localeCompare(String(b.data_pagamento))||(a.id-b.id));
@@ -26055,6 +26057,16 @@ async function _lancctbProcessarFopag(){
           if(iguais.length===1&&calOk(r)){ matchIndiv={r,p:iguais[0]}; break; }
         }
       }
+      // 28/10/2026 (Super Troca 06/08, adiantamentos de 20/08): pagamento maior que o líquido de ninguém — o COMPROVANTE bancário de mesmo valor diz QUEM recebeu; o líquido dessa pessoa vem do relatório e o resto é diferença.
+      if(!matchIndiv&&/SISPAG/.test(_norm(l.historico_bancario))&&!semFolhaAdiant){
+        try{
+          const d0c=new Date(l.data_pagamento+'T00:00:00'); d0c.setDate(d0c.getDate()-6);
+          const { data: csP } = await _supaClient.from('comprovantes_bancarios').select('id,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id').eq('empresa_eid',eid).eq('status_conciliacao','pendente')
+            .gte('valor_pago',l.valor_saida-0.005).lte('valor_pago',l.valor_saida+0.005).gte('data_pagamento',d0c.toISOString().slice(0,10)).lte('data_pagamento',l.data_pagamento);
+          const cps=(csP||[]).filter(x=>!x.conta_bancaria_id||String(x.conta_bancaria_id)===String(contaId));
+          if(cps.length===1){ for(const r of relatorios){ const pc=identificaPessoa((cps[0].cliente_fornecedor_nome||'')+' '+(cps[0].cnpj_cpf||''),r.dados.pessoas||[]); if(pc&&calOk(r)&&l.valor_saida>=pc.valor-0.01){ matchIndiv={r,p:pc,comprovante:cps[0]}; break; } } }
+        }catch(e){ console.warn('FOPAG: pessoa pelo comprovante:',e); }
+      }
       if(matchIndiv){ const ch=chaveConsumoFolha(matchIndiv.r,matchIndiv.p); if(consEx.has(ch)) matchIndiv=null; else consEx.add(ch); } // a mesma pessoa/tipo/competência só é paga UMA vez (Danilo 44,81 em 06/08 e 28/08 — 21/10/2026)
       // Pedido do usuário 19/10/2026 (2ª): NÃO classificar automaticamente como adiantamento/benefício. Pessoa identificada (empregado, sócio/contribuinte ou pessoa nominal do Fluxo) cujo valor não bate com salário/férias/rescisão
       // (nem pró-labore inequívoco) fica PENDENTE, com a pessoa preservada no histórico e a conta D vazia — o usuário define a conta depois.
@@ -26086,28 +26098,28 @@ async function _lancctbProcessarFopag(){
       const diferenca=Math.round((l.valor_saida-liquido)*100)/100;
       const comp=r.dados.competencia||r.competencia;
 
-      // 28/10/2026: pagamento EXATO tem prioridade absoluta sobre composição. Se existe OUTRO pagamento pendente com exatamente o líquido desta pessoa (até 10 dias), não se tira o valor de dentro deste
-      // (caso Débora R$ 2.000 dentro de 4.754,75): fica pendente e o exato é conciliado no seu lote.
-      if(diferenca>0.01&&pendencias.some(o=>o.id!==l.id&&Math.abs(o.valor_saida-liquido)<=0.01&&_lancctbDiffDias(o.data_pagamento,l.data_pagamento)<=10)){ consEx.delete(chaveConsumoFolha(r,p)); semAchado++; continue; }
-
+      // 28/10/2026: pagamento EXATO tem prioridade absoluta sobre composição. Antes de abrir um pagamento maior, garante que NÃO existe outro pagamento SISPAG (qualquer situação, até 10 dias) com exatamente o líquido
+      // desta pessoa (caso Débora R$ 2.000 dentro de 4.754,75): se existe, esse pagamento fica pendente e o exato é conciliado no seu lote/caminho.
       if(diferenca>0.01){
-        // Divide o lançamento de extrato em dois: o original passa a valer
-        // só o líquido; a diferença vira uma linha nova PENDENTE.
-        const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ valor_saida: liquido }).eq('id',l.id);
-        if(eUpd){ console.error('Erro ao dividir extrato (líquido):',eUpd); semAchado++; continue; }
-        const { error: eIns } = await _supaClient.from('lancamentos_extrato').insert({
-          empresa_eid: eid, conta_bancaria_id: contaId, data_pagamento: l.data_pagamento,
-          valor_saida: diferenca, valor_entrada: 0,
-          historico_bancario: `[DIFERENÇA FOLHA ${comp} - ${p.nome}] ${l.historico_bancario||''}`.trim(),
-          origem_importacao: 'manual',
-          hash_dedup: `fopag_dif_${l.id}_${Date.now()}`,
-        });
-        if(eIns){
-          console.error('Erro ao criar linha de diferença:',eIns);
-          await _supaClient.from('lancamentos_extrato').update({ valor_saida: l.valor_saida }).eq('id',l.id); // desfaz
-          semAchado++; continue;
+        let existeExato=pendencias.some(o=>o.id!==l.id&&Math.abs(o.valor_saida-liquido)<=0.01&&_lancctbDiffDias(o.data_pagamento,l.data_pagamento)<=10);
+        if(!existeExato){
+          const dA=new Date(l.data_pagamento+'T00:00:00'); dA.setDate(dA.getDate()-10); const dB=new Date(l.data_pagamento+'T00:00:00'); dB.setDate(dB.getDate()+10);
+          const { count: nEx } = await _supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true}).eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).neq('id',l.id)
+            .gte('valor_saida',liquido-0.005).lte('valor_saida',liquido+0.005).ilike('historico_bancario','%sispag%').gte('data_pagamento',dA.toISOString().slice(0,10)).lte('data_pagamento',dB.toISOString().slice(0,10));
+          existeExato=(nEx||0)>0;
         }
-        diferencasAbertas++;
+        if(existeExato){ consEx.delete(chaveConsumoFolha(r,p)); semAchado++; continue; }
+        // ABRE o pagamento: continua UMA saída do valor total, com duas partes — o líquido da folha (conta já escolhida) e a diferença (você escolhe a conta ao salvar). Nada é dividido nem gravado no extrato.
+        const rotP=_rotP(p,r.tipo), cpComp=matchIndiv.comprovante||null;
+        const partes=[
+          { origem:'folha', valor:liquido, historico:`Pagamento ref. ${rotP} ${comp} - ${p.nome}`, conta_contabil_id:contaP.id, nome:p.nome, cpf:p.cpf||null, comprovante_id:cpComp?cpComp.id:null },
+          { origem:'folha', valor:diferenca, historico:`Diferença folha ${comp} - ${p.nome}`, conta_contabil_id:null, nome:p.nome, cpf:p.cpf||null, comprovante_id:null },
+        ];
+        const hOrig=String(l.historico_bancario||'').replace(/^\s*(?:\[(?:DIFEREN|FOLHA ABERTA)[^\]]*\]\s*)+/i,'');
+        const marca=`[FOLHA ABERTA ${rotP} ${comp} - ${p.nome}: líquido R$ ${_fmt(liquido)} + diferença R$ ${_fmt(diferenca)}] `;
+        const { error: eAb } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:marca+hOrig, composicao_tributo:partes }).eq('id',l.id).eq('status_conciliacao','pendente');
+        if(eAb){ console.error('Erro ao abrir pagamento da folha:',eAb); consEx.delete(chaveConsumoFolha(r,p)); semAchado++; continue; }
+        diferencasAbertas++; continue;
       }
 
       const compPessoa=await acharComprovanteDaPessoa(l,p,liquido);
@@ -36356,6 +36368,20 @@ async function _lancctbRegistroSalvarInline(extratoId){
   const bancoTipo=ehSaida?'C':'D', dc=ehSaida?'D':'C';
   const historicosResolvidos=linhasContrapartida.map(l=>l.historico||r.historico_bancario||'');
   const historicoBanco=new Set(historicosResolvidos).size<=1?historicosResolvidos[0]:'Pagamentos Diversos';
+  // Pagamento de folha ABERTO pelo Processar FOPAG (líquido + diferença): grava a partida dobrada com nome/CPF/comprovante de quem recebeu — sem criar Regra (a diferença é pontual).
+  if(comp.length&&comp.every(c=>c&&c.origem==='folha')){
+    const linhasF=[{ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor:valorTotal, historico:historicoBanco, cliente_fornecedor_nome:comp[0].nome||null, cnpj_cpf:comp[0].cpf||null, comprovante_id:comp[0].comprovante_id||null, lancamento_extrato_id:r.id, origem_match:'regra' }];
+    linhasContrapartida.forEach((l,ix)=>{ const conta=contasPorId.get(String(l.conta_contabil_id)); linhasF.push({ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:conta?.classificacao||'', conta_contabil_id:l.conta_contabil_id, tipo:dc, valor:l.valor, historico:l.historico, cliente_fornecedor_nome:comp[ix].nome||null, cnpj_cpf:comp[ix].cpf||null, comprovante_id:comp[ix].comprovante_id||null, lancamento_extrato_id:r.id, origem_match:'regra' }); });
+    const { error: eF } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{linhas:linhasF});
+    if(eF){ toast('Erro ao gerar lançamento: '+eF.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',r.id);
+    const idsCp=[...new Set(comp.map(c=>c.comprovante_id).filter(Boolean))];
+    if(idsCp.length) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:r.id}).in('id',idsCp);
+    toast('Pagamento da folha classificado (líquido + diferença).','ok');
+    _lancctbInlineExpandidoId=null;
+    renderLancctbRegistroContabil();
+    return;
+  }
   // Pedido do usuário 23/09/2026: "com base no histórico, cria-se a regra
   // pra usar essas contas quando tiver histórico igual (excluindo a
   // competência - que vai sempre alterar de acordo com o DARF)?" — sim,
@@ -36463,8 +36489,8 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
   comp.forEach((c,idx)=>{
     html+=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)">
       <td></td><td></td>
-      ${(bancoEhD?blankGroup:selectCell).replace('@@IDX@@',idx)}
-      ${(bancoEhD?selectCell:blankGroup).replace('@@IDX@@',idx)}
+      ${(bancoEhD?blankGroup:selectCell).replace('@@IDX@@',idx).replace(c.conta_contabil_id?`<option value="${c.conta_contabil_id}"`:'@@NUNCA@@',`<option value="${c.conta_contabil_id}" selected`)}
+      ${(bancoEhD?selectCell:blankGroup).replace('@@IDX@@',idx).replace(c.conta_contabil_id?`<option value="${c.conta_contabil_id}"`:'@@NUNCA@@',`<option value="${c.conta_contabil_id}" selected`)}
       <td></td>
       <td style="padding:4px 10px;text-align:right"><input class="fi" id="lancctbInlineValor_${r.id}_${idx}" type="text" inputmode="decimal" value="${_fmt(c.valor||0)}" style="width:100px;text-align:right;font-size:11.5px" oninput="_lancctbInlineAtualizarTotal(${r.id},${valor})"></td>
       <td colspan="2" style="padding:4px 10px"><input class="fi" id="lancctbInlineHist_${r.id}_${idx}" value="${esc(c.historico||_lancctbPrefixarPagtoRef(c.resumo||c.denominacao||''))}" style="width:100%;font-size:11.5px"></td>
