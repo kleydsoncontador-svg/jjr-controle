@@ -88,8 +88,9 @@
     const cfg = cfgGet(eid); if (!cfg) throw new Error('Defina as contas contábeis primeiro.');
     const pe = AN.periodo[eid]; if (!pe) throw new Error('Escolha o mês do balancete (importe o balancete se a lista estiver vazia).');
     const contas = await contasDoPeriodo(eid, pe); if (!contas || !contas.length) throw new Error('Este balancete não tem contas salvas.');
-    const m = mapa(contas), val = {}, origem = [], avisos = [];
-    VARS.forEach(v => { const r = valorVar(m, (cfg.contas || {})[v.k] || [], v.nat); val[v.k] = r.cents; origem.push({ v, r }); if (r.faltam.length) avisos.push('“' + v.l + '”: conta(s) ' + r.faltam.join(', ') + ' não existe(m) neste balancete.'); });
+    const m = mapa(contas), val = {}, origem = [], avisos = [], faltando = [];
+    VARS.forEach(v => { const r = valorVar(m, (cfg.contas || {})[v.k] || [], v.nat); val[v.k] = r.cents; origem.push({ v, r }); if (r.faltam.length) faltando.push(v.l.replace(/ \(.*$/, '') + ' (' + r.faltam.join(', ') + ')'); });
+    if (faltando.length) avisos.push('Contas que não existem neste balancete (valem zero): ' + faltando.join('; ') + '. Se a empresa usa outra classificação para elas, ajuste em “Editar contas”.');
     ['disponivel', 'clientes', 'estoques', 'imobilizado'].forEach(k => { if (val[k] < 0) avisos.push('Saldo CREDOR em “' + VARS.find(v => v.k === k).l + '” (' + brl(val[k]) + '): confira os lançamentos, pois isso distorce os índices (por exemplo, a liquidez seca fica maior que a corrente).'); });
     const need = ['ativoCirculante', 'ativoNaoCirculante', 'passivoCirculante', 'patrimonioLiquido'];
     for (const k of need) if (!((cfg.contas || {})[k] || []).length) throw new Error('Defina as contas de: ' + VARS.find(v => v.k === k).l);
