@@ -305,10 +305,24 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     else inp = `<input class="fi" id="${id}" inputmode="decimal" value="${E(def)}">`;
     return `<div class="cf" data-k="${c.k}"><label class="fl" for="${id}">${E(c.l)}</label>${inp}</div>`;
   }
+  // Empresa do cálculo (opcional): uma empresa cadastrada no site (lista), uma empresa avulsa digitada, ou vazio.
+  function empresaRotulo(e) { return '#' + e.eid + ' - ' + e.nome; }
+  function empresaCampoHtml() {
+    if (est.empresa === undefined) { const g = (typeof _empresaGlobal !== 'undefined' && _empresaGlobal) ? S.emps().find(e => String(e.eid) === String(_empresaGlobal)) : null; est.empresa = g ? empresaRotulo(g) : ''; }
+    const emps = (S.emps() || []).slice().sort((a, b) => Number(a.eid) - Number(b.eid));
+    return `<div class="calc-grid" style="margin-bottom:8px"><div class="fg" style="grid-column:1/-1"><label class="fl">Empresa (opcional) — escolha uma cadastrada no site ou digite outra; pode ficar vazio</label>
+      <input id="calcEmpresa" class="fi" list="calcEmpresaLista" autocomplete="off" placeholder="Buscar empresa cadastrada ou digitar um nome avulso…" value="${E(est.empresa)}" oninput="calcEmpresaSet(this.value)"><datalist id="calcEmpresaLista">${emps.map(e => `<option value="${E(empresaRotulo(e))}"></option>`).join('')}</datalist></div></div>`;
+  }
+  window.calcEmpresaSet = function (v) { est.empresa = v; };
+  function empresaAtual() {
+    const t = String(est.empresa || '').trim(); if (!t) return null;
+    const e = (S.emps() || []).find(x => empresaRotulo(x) === t);
+    return e ? { eid: String(e.eid), nome: e.nome } : { eid: '', nome: t };
+  }
   function renderCalc() {
     const f = F[est.key]; const main = document.getElementById('calcMain');
     main.innerHTML = `<div class="calc-card"><h2 class="calc-h">${E(f.titulo)}</h2><div class="calc-sub">${E(f.desc)}</div>
-      <div class="calc-grid" id="calcForm">${f.campos.map(campoHtml).join('')}</div>
+      ${empresaCampoHtml()}<div class="calc-grid" id="calcForm">${f.campos.map(campoHtml).join('')}</div>
       <div class="calc-acts"><button class="btn bp" onclick="calcCalcular()">Calcular</button><button class="btn bo" onclick="calcLimpar()">Limpar</button><button class="btn bo" onclick="calcImprimir()">🖨️ Imprimir / PDF</button><button class="btn bo" onclick="calcExcel()">📊 Excel</button></div></div>
       <div id="calcResultado"></div>`;
     if (f.campos.some(c => c.t === 'atividades')) { if (!est.ativ.length) est.ativ = [{ tipo: 'comercio', receita: '' }]; renderAtiv(); }
@@ -414,7 +428,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   window.calcSalvar = function () {
     const r = est.ultimo; if (!r || !r.ok) return;
     const lista = lerLista(LS.hist); const quem = (currentUser && (currentUser.nome || currentUser.login)) || '';
-    lista.unshift({ id: 'c' + Date.now().toString(36), ts: new Date().toISOString(), por: quem, calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
+    lista.unshift({ id: 'c' + Date.now().toString(36), ts: new Date().toISOString(), por: quem, empresa: empresaAtual(), calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
     S.s(LS.hist, lista.slice(0, 400)); toast('Cálculo salvo com a versão dos parâmetros usada.', 'ok');
   };
   function resumoHtml(f, r) {
@@ -469,12 +483,12 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   function renderHistorico() {
     const main = document.getElementById('calcMain'); const lista = lerLista(LS.hist).filter(h => !h.oculto);
     main.innerHTML = `<div class="calc-card"><h2 class="calc-h">🗂️ Cálculos salvos</h2><div class="calc-sub">Cada cálculo guarda a entrada, o resultado, a memória e a versão dos parâmetros usada. Reabrir mostra exatamente o que foi calculado na época — não recalcula.</div>
-      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr></thead><tbody>${lista.map(h => `<tr><td>${E(new Date(h.ts).toLocaleString('pt-BR'))}</td><td>${E(h.titulo)}</td><td>${E(h.por)}</td><td>${(h.parametros || []).map(p => E(p.id) + ' v' + p.version).join(', ') || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" onclick="calcHistOcultar('${h.id}')">ocultar</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`).join('')}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
+      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Empresa</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr></thead><tbody>${lista.map(h => `<tr><td>${E(new Date(h.ts).toLocaleString('pt-BR'))}</td><td>${h.empresa ? E((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) : '—'}</td><td>${E(h.titulo)}</td><td>${E(h.por)}</td><td>${(h.parametros || []).map(p => E(p.id) + ' v' + p.version).join(', ') || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" onclick="calcHistOcultar('${h.id}')">ocultar</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`).join('')}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
   }
   window.calcHistAbrir = function (id) {
     const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return;
     const bs = (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean);
-    document.getElementById('calcHistVer').innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">${E(h.titulo)} — ${E(new Date(h.ts).toLocaleString('pt-BR'))}</h3><div class="calc-sub">Cálculo salvo por ${E(h.por)}. Não é recalculado.</div><div class="calc-acts" style="margin:0 0 8px"><button class="btn bo bsm" onclick="calcHistImprimir('${h.id}')">🖨️ Imprimir / PDF</button><button class="btn bo bsm" onclick="calcHistExcel('${h.id}')">📊 Excel</button></div>${F[h.calc] && F[h.calc].extra && h.resultado && h.resultado.ranking ? F[h.calc].extra(h.resultado) : ''}${memHtml(h.memoria)}<details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(h.parametros)}</details><details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(bs)}</details>${(h.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}</div>`;
+    document.getElementById('calcHistVer').innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">${E(h.titulo)} — ${E(new Date(h.ts).toLocaleString('pt-BR'))}</h3><div class="calc-sub">${h.empresa ? 'Empresa: <b>' + E((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) + '</b> · ' : ''}Cálculo salvo por ${E(h.por)}. Não é recalculado.</div><div class="calc-acts" style="margin:0 0 8px"><button class="btn bo bsm" onclick="calcHistImprimir('${h.id}')">🖨️ Imprimir / PDF</button><button class="btn bo bsm" onclick="calcHistExcel('${h.id}')">📊 Excel</button></div>${F[h.calc] && F[h.calc].extra && h.resultado && h.resultado.ranking ? F[h.calc].extra(h.resultado) : ''}${memHtml(h.memoria)}<details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(h.parametros)}</details><details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(bs)}</details>${(h.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}</div>`;
     document.getElementById('calcHistVer').scrollIntoView({ behavior: 'smooth' });
   };
   window.calcHistExcluir = function (id) {
