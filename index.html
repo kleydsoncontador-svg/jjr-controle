@@ -36342,6 +36342,29 @@ async function _lancctbCarregarRegrasFolhaParte(){
   const { data } = await _supaClient.from('regras_matching').select('historico_gatilho,conta_contabil_id,agencia_bancaria_id,valor_gatilho').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('tipo_regra','historico').eq('dc','D').is('valor_gatilho',null);
   _lancctbRegrasFolhaParte={eid:_lancctbEidAtual,lista:(data||[]).filter(x=>!x.agencia_bancaria_id)};
 }
+// Grava sozinho, na tela, o pagamento de folha aberto cujas partes TODAS já têm conta (líquido + Regra da diferença) — pedido do usuário 28/10/2026: "se eu já criei a regra, não devia pedir pra eu gravar".
+window.__folhaAutoTentada=window.__folhaAutoTentada||new Set();
+async function _lancctbFolhaAbertaGravarAuto(extratoId){
+  try{
+    const item=_lancctbUltimoRegistro.find(i=>i.extrato.id===extratoId); if(!item||item.ctb.length) return;
+    const r=item.extrato, comp=r.composicao_tributo||[]; const valorTotal=r.valor_saida;
+    const partes=comp.map(c=>({...c,conta_contabil_id:c.conta_contabil_id||_lancctbContaPorRegraParte(c.historico)}));
+    if(!partes.length||!partes.every(x=>x.conta_contabil_id)||Math.abs(partes.reduce((a,x)=>a+Number(x.valor||0),0)-valorTotal)>0.01) return;
+    const { data: banco } = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id',r.conta_bancaria_id).single();
+    if(!banco||!banco.conta_contabil_id) return;
+    const { data: pcs } = await _supaClient.from('plano_contas').select('id,classificacao').in('id',partes.map(x=>x.conta_contabil_id));
+    const clas=new Map((pcs||[]).map(c=>[String(c.id),c.classificacao])); if(partes.some(x=>!clas.has(String(x.conta_contabil_id)))) return;
+    const histBanco=new Set(partes.map(x=>x.historico)).size<=1?partes[0].historico:'Pagamentos Diversos';
+    const linhas=[{ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:banco.plano_contas.classificacao, conta_contabil_id:banco.conta_contabil_id, tipo:'C', valor:valorTotal, historico:histBanco, cliente_fornecedor_nome:partes[0].nome||null, cnpj_cpf:partes[0].cpf||null, comprovante_id:partes[0].comprovante_id||null, lancamento_extrato_id:r.id, origem_match:'regra' }];
+    partes.forEach(x=>linhas.push({ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:clas.get(String(x.conta_contabil_id)), conta_contabil_id:x.conta_contabil_id, tipo:'D', valor:x.valor, historico:x.historico, cliente_fornecedor_nome:x.nome||null, cnpj_cpf:x.cpf||null, comprovante_id:x.comprovante_id||null, lancamento_extrato_id:r.id, origem_match:'regra' }));
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas }); if(error){ console.error('Folha aberta (auto):',error); return; }
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',r.id);
+    const idsCp=[...new Set(partes.map(x=>x.comprovante_id).filter(Boolean))];
+    if(idsCp.length) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:r.id}).in('id',idsCp);
+    toast('Pagamento da folha gravado sozinho: todas as partes já tinham conta (Regra).','ok');
+    renderLancctbRegistroContabil();
+  }catch(e){ console.warn('Folha aberta (auto):',e); }
+}
 function _lancctbRegistroFecharInline(){
   _lancctbInlineExpandidoId=null;
   renderLancctbRegistroContabil();
@@ -37993,6 +38016,9 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     window.__inlineOptCarregando=true;
     _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao,tipo,grau').eq('empresa_eid',_lancctbEidAtual).eq('ignorada_em_regras',false).order('classificacao'))
       .then(async({data})=>{ _lancctbInlineContasOptions=data||[]; try{ await _lancctbCarregarRegrasFolhaParte(); }catch(e){ _lancctbRegrasFolhaParte={eid:_lancctbEidAtual,lista:[]}; } window.__inlineOptCarregando=false; renderLancctbRegistroContabil(); }).catch(()=>{ window.__inlineOptCarregando=false; });
+  }
+  if(_folhaAberta&&_lancctbRegrasFolhaParte&&!window.__folhaAutoTentada.has(r.id)&&r.composicao_tributo.every(c=>c.conta_contabil_id||_lancctbContaPorRegraParte(c.historico))){
+    window.__folhaAutoTentada.add(r.id); setTimeout(()=>_lancctbFolhaAbertaGravarAuto(r.id),0);
   }
   if(!item.ctb.length&&Array.isArray(r.composicao_tributo)&&r.composicao_tributo.length>=1&&(String(_lancctbInlineExpandidoId)===String(r.id)||(_folhaAberta&&_lancctbInlineContasOptions.length&&_lancctbRegrasFolhaParte))){
     return _lancctbInlineLinhaHtml(item,contaAtual);
