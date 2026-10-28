@@ -22722,20 +22722,38 @@ async function _lancctbFetchTudo(construirQuery){
 // Para quando a última página da onda retornar < 1000 registros (não há mais dados).
 // Para 27k registros: 4 ondas × 8 requests = 4 round-trips em vez de 28 sequenciais.
 const _LANCCTB_FETCH_PARALELO_LOTE=8;
-// Carga em JANELAS de datas (27/10/2026). Achado real (Fast Lube BB 07/2026): a carga das parcelas de NF por páginas de 1.000 (offset fundo + junção com notas_fiscais) estourava o tempo do banco depois de 16.000 linhas
-// e devolvia só o que já tinha, SEM AVISO — as NFs de recebimentos como BECAR/JADMAX (CNPJ igual, valor exato) nunca entravam e o motor dizia "nenhuma NF candidata". Cada janela pagina pouco; trecho com erro é refeito,
-// e se ainda falhar avisa na tela.
-async function _lancctbFetchPorJanelas(fabrica,dmin,dmax,passoDias,paralelo){
-  if(!dmin||!dmax) return _lancctbFetchTudoParalelo(fabrica(null,null));
-  const jan=[]; let d=new Date(dmin+'T12:00:00'); const fim=new Date(dmax+'T12:00:00');
-  while(d<=fim){ const e=new Date(d); e.setDate(e.getDate()+(passoDias||6)); const ate=e>fim?fim:e; jan.push([d.toISOString().slice(0,10),ate.toISOString().slice(0,10)]); d=new Date(ate); d.setDate(d.getDate()+1); }
+// Parcelas de NF pendentes que o MOTOR de matching precisa (27/10/2026). Achado real (Fast Lube BB 07/2026): a empresa tem ~400 mil parcelas pendentes (~66 mil por mês); a carga "tudo da janela de datas" por páginas
+// de 1.000 estourava o tempo do banco em 16.000 linhas e devolvia só esse pedaço, SEM AVISO — NFs como BECAR/JADMAX (CNPJ igual, valor exato) nunca entravam e o motor dizia "nenhuma NF candidata".
+// Agora só vem o que pode casar: (A) parcelas de valor igual (±2 centavos) ao de algum lançamento a processar, (B) parcelas de NFs com RETENÇÃO (o valor líquido difere do bruto) e (C) as NFs que o Fluxo cita.
+// Um trecho que falha é refeito; se ainda falhar, avisa na tela em vez de seguir com a carga incompleta.
+const LANCCTB_SEL_PARCELA_MOTOR='id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(empresa_eid,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)';
+async function _lancctbFetchLotesParalelo(partes,fabrica,paralelo){
   const todos=[]; let erro=null, falhas=0;
-  for(let i=0;i<jan.length;i+=(paralelo||6)){
-    const rs=await Promise.all(jan.slice(i,i+(paralelo||6)).map(async([a,b])=>{ let r=await _lancctbFetchTudoParalelo(fabrica(a,b)); if(r.error) r=await _lancctbFetchTudoParalelo(fabrica(a,b)); return r; }));
+  for(let g=0;g<partes.length;g+=(paralelo||6)){
+    const rs=await Promise.all(partes.slice(g,g+(paralelo||6)).map(async part=>{ let r=await _lancctbFetchTudoParalelo(fabrica(part)); if(r.error) r=await _lancctbFetchTudoParalelo(fabrica(part)); return r; }));
     rs.forEach(r=>{ if(r.error){ erro=r.error; falhas++; } (r.data||[]).forEach(x=>todos.push(x)); });
   }
-  if(erro){ console.warn('Carga em janelas: '+falhas+' trecho(s) falharam:',erro); try{ toast('Atenção: a carga de NFs ficou incompleta ('+falhas+' trecho(s) de datas falharam). Rode de novo.','err'); }catch(e){} }
-  return {data:todos,error:erro};
+  return {data:todos,error:erro,falhas};
+}
+async function _lancctbFetchParcelasMotor(eid,lancamentos,dmin,dmax){
+  const cents=new Set(); (lancamentos||[]).forEach(l=>{ const c=Math.round((l.valor_saida||l.valor_entrada||0)*100); if(c>0) for(let d=-2;d<=2;d++) cents.add(c+d); });
+  const vals=[...cents].map(c=>(c/100).toFixed(2)); const partes=[]; for(let i=0;i<vals.length;i+=150) partes.push(vals.slice(i,i+150));
+  const base=()=>{ let q=_supaClient.from('notas_fiscais_parcelas').select(LANCCTB_SEL_PARCELA_MOTOR).eq('empresa_eid',eid).eq('status_conciliacao','pendente'); if(dmin) q=q.gte('data_vencimento',dmin); if(dmax) q=q.lte('data_vencimento',dmax); return q; };
+  const A=await _lancctbFetchLotesParalelo(partes,part=>()=>base().in('valor_parcela',part).order('id',{ascending:true}),6);
+  // (B) NFs com retenção
+  const { data: nfsRet } = await _lancctbFetchTudoParalelo(()=>_supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).or('iss_valor.gt.0,pis_valor.gt.0,cofins_valor.gt.0,csll_valor.gt.0,irrf_valor.gt.0').order('id',{ascending:true}));
+  const idsRet=(nfsRet||[]).map(n=>n.id).slice(0,3000), pRet=[]; for(let i=0;i<idsRet.length;i+=150) pRet.push(idsRet.slice(i,i+150));
+  const B=await _lancctbFetchLotesParalelo(pRet,part=>()=>base().in('nf_id',part).order('id',{ascending:true}),6);
+  const vistos=new Set(), out=[]; [...A.data,...B.data].forEach(x=>{ if(!vistos.has(x.id)){ vistos.add(x.id); out.push(x); } });
+  const falhas=(A.falhas||0)+(B.falhas||0);
+  if(falhas){ console.warn('Carga de NFs: '+falhas+' trecho(s) falharam'); try{ toast('Atenção: a carga de NFs ficou incompleta ('+falhas+' trecho(s) falharam). Rode de novo.','err'); }catch(e){} }
+  return {data:out,error:falhas?{message:'carga incompleta'}:null};
+}
+// (C) parcelas das NFs citadas pelo Fluxo de Caixa (pagamento antecipado/valor diferente): por número da NF, só pendentes
+async function _lancctbFetchParcelasPorNumeros(eid,nums){
+  const lim=[...new Set((nums||[]).filter(n=>/^[0-9]+$/.test(n)))].slice(0,3000), partes=[]; for(let i=0;i<lim.length;i+=100) partes.push(lim.slice(i,i+100));
+  const r=await _lancctbFetchLotesParalelo(partes,part=>()=>_supaClient.from('notas_fiscais_parcelas').select(LANCCTB_SEL_PARCELA_MOTOR.replace('notas_fiscais(','notas_fiscais!inner(')).eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('notas_fiscais.numero',part).order('id',{ascending:true}),4);
+  return r.data||[];
 }
 async function _lancctbFetchTudoParalelo(construirQuery){
   let todos=[], offset=0;
@@ -32993,13 +33011,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(_mDmax) q=q.lte('data_pagamento',_mDmax);
       return q; }),
     // parcelas: filtra por data_vencimento (campo equivalente a data_pagamento)
-    _pulaParcelasNf?Promise.resolve({data:[]}):_lancctbFetchPorJanelas((a,b)=>()=>{ let q=_supaClient.from('notas_fiscais_parcelas')
-      .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(empresa_eid,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
-      .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
-      const lo=a||_mDminNf, hi=b||_mDmaxNf;
-      if(lo) q=q.gte('data_vencimento',lo);
-      if(hi) q=q.lte('data_vencimento',hi);
-      return q.order('id',{ascending:true}); },_mDminNf,_mDmaxNf,10,6),
+    _pulaParcelasNf?Promise.resolve({data:[]}):_lancctbFetchParcelasMotor(eid,lancamentos,_mDminNf,_mDmaxNf),
     // regras: pequena, sem filtro de data
     _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
       .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,historico_excecao,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
@@ -33019,6 +33031,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(_mDmax) q=q.lte('data',_mDmax);
       return q; }),
   ]);
+  // (C) NFs citadas pelo Fluxo de Caixa (pagamento antecipado, valor diferente do banco): entram pelo NÚMERO da NF, só as pendentes que ainda não vieram por valor
+  if(!_pulaParcelasNf&&parcelas){ try{
+    const numsFx=[...(fluxoCaixaPonteBase||[]),...(fluxoCaixa||[])].map(f=>String(f.numero||f.documento_numero||'').split('/')[0].replace(/\D/g,'').replace(/^0+/,'')).filter(Boolean);
+    const extra=await _lancctbFetchParcelasPorNumeros(eid,numsFx); const jaTem=new Set(parcelas.map(x=>x.id)); extra.forEach(x=>{ if(!jaTem.has(x.id)){ jaTem.add(x.id); parcelas.push(x); } });
+  }catch(e){ console.warn('Parcelas das NFs citadas pelo Fluxo:',e); } }
   log('Carregando regras e contas (etapa 3 de 3)…');
   // Regra criada com gatilho de FLUXO DE CAIXA (fluxo_*_gatilho) só vale quando o Fluxo associado também bate — ou seja, só no "Processar Fluxo (Regras)".
   // Aqui (matching geral) ela é ignorada: antes aplicava só o gatilho do extrato e pegava todo lançamento parecido (achado 03/10/2026, regra ACORDO).
