@@ -22722,6 +22722,21 @@ async function _lancctbFetchTudo(construirQuery){
 // Para quando a última página da onda retornar < 1000 registros (não há mais dados).
 // Para 27k registros: 4 ondas × 8 requests = 4 round-trips em vez de 28 sequenciais.
 const _LANCCTB_FETCH_PARALELO_LOTE=8;
+// Carga em JANELAS de datas (27/10/2026). Achado real (Fast Lube BB 07/2026): a carga das parcelas de NF por páginas de 1.000 (offset fundo + junção com notas_fiscais) estourava o tempo do banco depois de 16.000 linhas
+// e devolvia só o que já tinha, SEM AVISO — as NFs de recebimentos como BECAR/JADMAX (CNPJ igual, valor exato) nunca entravam e o motor dizia "nenhuma NF candidata". Cada janela pagina pouco; trecho com erro é refeito,
+// e se ainda falhar avisa na tela.
+async function _lancctbFetchPorJanelas(fabrica,dmin,dmax,passoDias,paralelo){
+  if(!dmin||!dmax) return _lancctbFetchTudoParalelo(fabrica(null,null));
+  const jan=[]; let d=new Date(dmin+'T12:00:00'); const fim=new Date(dmax+'T12:00:00');
+  while(d<=fim){ const e=new Date(d); e.setDate(e.getDate()+(passoDias||6)); const ate=e>fim?fim:e; jan.push([d.toISOString().slice(0,10),ate.toISOString().slice(0,10)]); d=new Date(ate); d.setDate(d.getDate()+1); }
+  const todos=[]; let erro=null, falhas=0;
+  for(let i=0;i<jan.length;i+=(paralelo||6)){
+    const rs=await Promise.all(jan.slice(i,i+(paralelo||6)).map(async([a,b])=>{ let r=await _lancctbFetchTudoParalelo(fabrica(a,b)); if(r.error) r=await _lancctbFetchTudoParalelo(fabrica(a,b)); return r; }));
+    rs.forEach(r=>{ if(r.error){ erro=r.error; falhas++; } (r.data||[]).forEach(x=>todos.push(x)); });
+  }
+  if(erro){ console.warn('Carga em janelas: '+falhas+' trecho(s) falharam:',erro); try{ toast('Atenção: a carga de NFs ficou incompleta ('+falhas+' trecho(s) de datas falharam). Rode de novo.','err'); }catch(e){} }
+  return {data:todos,error:erro};
+}
 async function _lancctbFetchTudoParalelo(construirQuery){
   let todos=[], offset=0;
   while(true){
@@ -32978,12 +32993,13 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(_mDmax) q=q.lte('data_pagamento',_mDmax);
       return q; }),
     // parcelas: filtra por data_vencimento (campo equivalente a data_pagamento)
-    _pulaParcelasNf?Promise.resolve({data:[]}):_lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('notas_fiscais_parcelas')
+    _pulaParcelasNf?Promise.resolve({data:[]}):_lancctbFetchPorJanelas((a,b)=>()=>{ let q=_supaClient.from('notas_fiscais_parcelas')
       .select('id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(empresa_eid,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
       .eq('empresa_eid',eid).eq('status_conciliacao','pendente');
-      if(_mDminNf) q=q.gte('data_vencimento',_mDminNf);
-      if(_mDmaxNf) q=q.lte('data_vencimento',_mDmaxNf);
-      return q; }),
+      const lo=a||_mDminNf, hi=b||_mDmaxNf;
+      if(lo) q=q.gte('data_vencimento',lo);
+      if(hi) q=q.lte('data_vencimento',hi);
+      return q.order('id',{ascending:true}); },_mDminNf,_mDmaxNf,10,6),
     // regras: pequena, sem filtro de data
     _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
       .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,historico_excecao,valor_gatilho,cnpj_cpf_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
