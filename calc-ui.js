@@ -322,7 +322,38 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     else if (el.dataset.auto === '1') { el.value = ''; el.dataset.auto = ''; }
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
-  window.calcEmpresaSet = function (v) { est.empresa = v; preencherAberturaDaEmpresa(); };
+  window.calcEmpresaSet = function (v) { est.empresa = v; preencherAberturaDaEmpresa(); socioListaAtualizar(); };
+  // Sócio (opcional) nas calculadoras de pessoa física do sócio: busca os sócios já salvos no site (módulo Lucros + quadro societário da Receita). Só identifica o cálculo — não altera valores.
+  const CALC_COM_SOCIO = ['pro_labore', 'mutuo', 'jcp', 'dist_lucros', 'comparativo'];
+  function socioRotulo(x) { return x.nome + ' — #' + x.eid + ' ' + x.empresa; }
+  function sociosSalvos(soEid) {
+    const out = [], vistos = new Set();
+    (S.emps() || []).forEach(e => {
+      if (soEid && String(e.eid) !== String(soEid)) return;
+      let lista = []; try { lista = (typeof lucSocGet === 'function' ? lucSocGet(e.eid) : []) || []; } catch (x) { }
+      const add = (nome, doc, pct) => { nome = String(nome || '').trim(); if (!nome) return; const k = String(e.eid) + '|' + nome.toUpperCase(); if (vistos.has(k)) return; vistos.add(k); out.push({ nome, doc: doc || '', pct: pct || '', eid: String(e.eid), empresa: e.nome }); };
+      lista.forEach(x => add(x.nome, x.doc, x.pct));
+      (e.sociosRfb || []).forEach(x => add(x.nome, '', x.percentual));
+    });
+    return out.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR'));
+  }
+  function socioOpcoesHtml() { const emp = empresaCadastrada(); return sociosSalvos(emp ? emp.eid : '').map(x => `<option value="${E(socioRotulo(x))}"></option>`).join(''); }
+  function socioCampoHtml() {
+    if (!CALC_COM_SOCIO.includes(est.key)) return '';
+    return `<div class="calc-grid" style="margin-bottom:8px"><div class="fg" style="grid-column:1/-1"><label class="fl">Sócio (opcional) — busque um sócio já salvo no site (da empresa escolhida acima, ou de qualquer empresa) ou digite um nome</label>
+      <input id="calcSocio" class="fi" list="calcSocioLista" autocomplete="off" placeholder="Buscar sócio salvo ou digitar um nome…" value="${E(est.socio || '')}" oninput="calcSocioSet(this.value)"><datalist id="calcSocioLista">${socioOpcoesHtml()}</datalist></div></div>`;
+  }
+  function socioListaAtualizar() { const dl = document.getElementById('calcSocioLista'); if (dl) dl.innerHTML = socioOpcoesHtml(); }
+  function socioCadastrado() { const t = String(est.socio || '').trim(); return t ? sociosSalvos('').find(x => socioRotulo(x) === t) : null; }
+  window.calcSocioSet = function (v) {
+    est.socio = v; const x = socioCadastrado();
+    if (x && !String(est.empresa || '').trim()) { // escolheu um sócio sem empresa: traz a empresa dele
+      const e = (S.emps() || []).find(y => String(y.eid) === x.eid);
+      if (e) { est.empresa = empresaRotulo(e); const inp = document.getElementById('calcEmpresa'); if (inp) inp.value = est.empresa; preencherAberturaDaEmpresa(); }
+    }
+  };
+  function socioAtual() { const t = String(est.socio || '').trim(); if (!t || !CALC_COM_SOCIO.includes(est.key)) return null; const x = socioCadastrado(); return x ? { nome: x.nome, doc: x.doc, eid: x.eid } : { nome: t, doc: '', eid: '' }; }
+  function socioTxt(o) { return o ? o.nome + (o.doc ? ' (' + o.doc + ')' : '') : ''; }
   function empresaAtual() {
     const t = String(est.empresa || '').trim(); if (!t) return null;
     const e = (S.emps() || []).find(x => empresaRotulo(x) === t);
@@ -331,7 +362,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   function renderCalc() {
     const f = F[est.key]; const main = document.getElementById('calcMain');
     main.innerHTML = `<div class="calc-card"><h2 class="calc-h">${E(f.titulo)}</h2><div class="calc-sub">${E(f.desc)}</div>
-      ${empresaCampoHtml()}<div class="calc-grid" id="calcForm">${f.campos.map(campoHtml).join('')}</div>
+      ${empresaCampoHtml()}${socioCampoHtml()}<div class="calc-grid" id="calcForm">${f.campos.map(campoHtml).join('')}</div>
       <div class="calc-acts"><button class="btn bp" onclick="calcCalcular()">Calcular</button><button class="btn bo" onclick="calcLimpar()">Limpar</button><button class="btn bo" onclick="calcImprimir()">🖨️ Imprimir / PDF</button><button class="btn bo" onclick="calcExcel()">📊 Excel</button></div></div>
       <div id="calcResultado"></div>`;
     if (f.campos.some(c => c.t === 'atividades')) { if (!est.ativ.length) est.ativ = [{ tipo: 'comercio', receita: '' }]; renderAtiv(); }
@@ -438,7 +469,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   window.calcSalvar = function () {
     const r = est.ultimo; if (!r || !r.ok) return;
     const lista = lerLista(LS.hist); const quem = (currentUser && (currentUser.nome || currentUser.login)) || '';
-    lista.unshift({ id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: new Date().toISOString(), por: quem, empresa: empresaAtual(), calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
+    lista.unshift({ id: 'c' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), ts: new Date().toISOString(), por: quem, empresa: empresaAtual(), socio: socioAtual(), calc: est.key, titulo: F[est.key].titulo, entrada: est.ultimoInp, resultado: r.resultado, memoria: r.memoria, parametros: r.parametros, bases: (r.bases || []).map(b => b.id), avisos: r.avisos || [], oculto: false });
     S.s(LS.hist, lista.slice(0, 400)); toast('Cálculo salvo com a versão dos parâmetros usada.', 'ok');
   };
   function resumoHtml(f, r) {
@@ -446,12 +477,12 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     return '<table class="calc-tbl"><tbody>' + f.resumo(r.resultado).map(([l, v]) => `<tr><td>${E(l)}</td><td class="v"><b>${fmtV(v)}</b></td></tr>`).join('') + '</tbody></table>' + (f.extra ? f.extra(r.resultado) : '');
   }
   function empresaTxt(o) { return o ? ((o.eid ? '#' + o.eid + ' - ' : '') + o.nome) : ''; }
-  function htmlImpressao(titulo, r, entrada, quando, f, empresa) {
+  function htmlImpressao(titulo, r, entrada, quando, f, empresa, socio) {
     return `<!doctype html><meta charset="utf-8"><title>${E(titulo)}</title><style>body{font:13px Arial,sans-serif;margin:24px;color:#111}h1{font-size:18px}h3{font-size:14px}table{border-collapse:collapse;width:100%}td,th{border-bottom:1px solid #ddd;padding:3px 6px;text-align:left;vertical-align:top;font-size:12px}td.v,td.n{text-align:right;font-family:monospace;white-space:nowrap}tr.titulo td{background:#eee;font-weight:bold}tr.total td{font-weight:bold;background:#e3f3f0}tr.rk-best td{background:#e3f3f0}small{color:#666}.calc-tag{border:1px solid #999;border-radius:3px;padding:0 4px;font-size:10px}.calc-aviso{margin:6px 0}</style>
-      <h1>${E(titulo)}</h1>${empresa ? '<p><b>Empresa:</b> ' + E(empresaTxt(empresa)) + '</p>' : ''}<p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${resumoHtml(f, r)}<h3>Memória de cálculo</h3>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
+      <h1>${E(titulo)}</h1>${empresa ? '<p><b>Empresa:</b> ' + E(empresaTxt(empresa)) + '</p>' : ''}${socio ? '<p><b>Sócio:</b> ' + E(socioTxt(socio)) + '</p>' : ''}<p><small>Calculadoras JJR — ${E(quando)} — cálculo determinístico, sem IA</small></p>${resumoHtml(f, r)}<h3>Memória de cálculo</h3>${memHtml(r.memoria)}<h3>Parâmetros utilizados</h3>${paramsHtml(r.parametros)}<h3>Bases legais</h3>${basesHtml(r.bases)}${(r.avisos || []).map(a => '<p>⚠️ ' + E(a) + '</p>').join('')}`;
   }
   function abrirImpressao(html) { const w = window.open('', '_blank'); if (!w) { toast('Libere pop-ups para imprimir.', 'err'); return; } w.document.write(html); w.document.close(); w.focus(); setTimeout(() => w.print(), 300); }
-  window.calcImprimir = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para poder imprimir.', 'err'); return; } abrirImpressao(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'), F[est.key], empresaAtual())); };
+  window.calcImprimir = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para poder imprimir.', 'err'); return; } abrirImpressao(htmlImpressao(F[est.key].titulo, r, est.ultimoInp, new Date().toLocaleString('pt-BR'), F[est.key], empresaAtual(), socioAtual())); };
 
   // ───── Excel (todas as calculadoras, o cálculo salvo e as tabelas) — SheetJS (XLSX) já carregado no site ─────
   const numR = v => typeof v === 'number' ? v / 100 : v;               // centavos → reais
@@ -472,9 +503,9 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     (mem || []).forEach(l => { if (l.k === 'titulo') a.push([l.r]); else if (l.k === 'nota') a.push([l.r]); else if (l.k === 'texto' || l.k === 'inteiro') a.push([l.r, l.v]); else a.push([l.r, numR(l.v), (l.op || '') + (l.nota ? ' ' + l.nota : '') + (l.k === 'subtotal' ? ' (subtotal)' : l.k === 'total' ? ' (TOTAL)' : '')]); });
     return a;
   }
-  function montarWorkbook(titulo, f, r, entrada, quando, empresa) {
+  function montarWorkbook(titulo, f, r, entrada, quando, empresa, socio) {
     const wb = XLSX.utils.book_new(); const ver = (S.g(LS.verif) && typeof S.g(LS.verif) === 'object') ? S.g(LS.verif) : {};
-    const res = [[titulo]].concat(empresa ? [['Empresa', empresaTxt(empresa)]] : [], [['Gerado em', quando], ['Cálculo determinístico, sem IA'], [], ['Resumo', 'Valor']]);
+    const res = [[titulo]].concat(empresa ? [['Empresa', empresaTxt(empresa)]] : [], socio ? [['Sócio', socioTxt(socio)]] : [], [['Gerado em', quando], ['Cálculo determinístico, sem IA'], [], ['Resumo', 'Valor']]);
     if (f && r.resultado) f.resumo(r.resultado).forEach(([l, v]) => res.push([l, numR(v)]));
     addSheet(wb, 'Resumo', res);
     if (f && f.tabela && r.resultado) { const t = f.tabela(r.resultado); addSheet(wb, t.nome, [t.cab].concat(t.linhas), t); }
@@ -485,31 +516,31 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     if ((r.avisos || []).length) addSheet(wb, 'Avisos', [['Avisos']].concat(r.avisos.map(a => [a])));
     return wb;
   }
-  window.calcExcel = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para gerar o Excel.', 'err'); return; } baixarXlsx(montarWorkbook(F[est.key].titulo, F[est.key], r, est.ultimoInp, new Date().toLocaleString('pt-BR'), empresaAtual()), F[est.key].titulo); };
+  window.calcExcel = function () { if (!est.ultimo) calcCalcular(); const r = est.ultimo; if (!r || !r.ok) { toast('Preencha os dados e corrija o erro indicado para gerar o Excel.', 'err'); return; } baixarXlsx(montarWorkbook(F[est.key].titulo, F[est.key], r, est.ultimoInp, new Date().toLocaleString('pt-BR'), empresaAtual(), socioAtual()), F[est.key].titulo); };
   function dadosHist(id) { const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return null; return { h, f: F[h.calc], r: { ok: true, resultado: h.resultado, memoria: h.memoria, parametros: h.parametros, bases: (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean), avisos: h.avisos || [] } }; }
-  window.calcHistImprimir = function (id) { const d = dadosHist(id); if (!d) return; abrirImpressao(htmlImpressao(d.h.titulo, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.f, d.h.empresa)); };
-  window.calcHistExcel = function (id) { const d = dadosHist(id); if (!d) return; baixarXlsx(montarWorkbook(d.h.titulo, d.f, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.h.empresa), d.h.titulo); };
+  window.calcHistImprimir = function (id) { const d = dadosHist(id); if (!d) return; abrirImpressao(htmlImpressao(d.h.titulo, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.f, d.h.empresa, d.h.socio)); };
+  window.calcHistExcel = function (id) { const d = dadosHist(id); if (!d) return; baixarXlsx(montarWorkbook(d.h.titulo, d.f, d.r, d.h.entrada, new Date(d.h.ts).toLocaleString('pt-BR'), d.h.empresa, d.h.socio), d.h.titulo); };
 
   // ───────────────────────────── histórico ─────────────────────────────
   // linhas do histórico, com filtro por coluna (contém, sem diferenciar maiúsculas/acentos)
-  function histCols(h) { return [new Date(h.ts).toLocaleString('pt-BR'), h.empresa ? ((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) : '', h.titulo || '', h.por || '', (h.parametros || []).map(p => p.id + ' v' + p.version).join(', ')]; }
+  function histCols(h) { return [new Date(h.ts).toLocaleString('pt-BR'), h.empresa ? ((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) : '', h.socio ? h.socio.nome : '', h.titulo || '', h.por || '', (h.parametros || []).map(p => p.id + ' v' + p.version).join(', ')]; }
   function histNorm(t) { return String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase(); }
   function histLinhas(lista) {
     const flt = (est.histFlt || []).map(histNorm);
     const vis = lista.filter(h => { const c = histCols(h); return flt.every((f, i) => !f || histNorm(c[i]).includes(f)); });
-    if (!vis.length) return '<tr><td colspan="6" style="color:var(--slate)">Nenhum cálculo com esses filtros.</td></tr>';
-    return vis.map(h => { const c = histCols(h); return `<tr><td>${E(c[0])}</td><td>${E(c[1]) || '—'}</td><td>${E(c[2])}</td><td>${E(c[3])}</td><td>${E(c[4]) || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`; }).join('');
+    if (!vis.length) return '<tr><td colspan="7" style="color:var(--slate)">Nenhum cálculo com esses filtros.</td></tr>';
+    return vis.map(h => { const c = histCols(h); return `<tr><td>${E(c[0])}</td><td>${E(c[1]) || '—'}</td><td>${E(c[2]) || '—'}</td><td>${E(c[3])}</td><td>${E(c[4])}</td><td>${E(c[5]) || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`; }).join('');
   }
   window.calcHistFiltro = function (i, v) { est.histFlt = est.histFlt || []; est.histFlt[i] = v; const tb = document.getElementById('calcHistTbody'); if (tb) tb.innerHTML = histLinhas(lerLista(LS.hist)); };
   function renderHistorico() {
     const main = document.getElementById('calcMain'); const lista = lerLista(LS.hist); // 'ocultar' foi removido: o que estava oculto volta a aparecer; só 'excluir' tira da lista
     main.innerHTML = `<div class="calc-card"><h2 class="calc-h">🗂️ Cálculos salvos</h2><div class="calc-sub">Cada cálculo guarda a entrada, o resultado, a memória e a versão dos parâmetros usada. Reabrir mostra exatamente o que foi calculado na época — não recalcula.</div>
-      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Empresa</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr><tr>${[0, 1, 2, 3, 4].map(i => `<th style="padding:2px 4px"><input class="fi" style="font-size:11px;padding:3px 6px;width:100%;min-width:70px" placeholder="filtrar…" value="${E((est.histFlt || [])[i] || '')}" oninput="calcHistFiltro(${i},this.value)"></th>`).join('')}<th></th></tr></thead><tbody id="calcHistTbody">${histLinhas(lista)}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
+      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Empresa</th><th>Sócio</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr><tr>${[0, 1, 2, 3, 4, 5].map(i => `<th style="padding:2px 4px"><input class="fi" style="font-size:11px;padding:3px 6px;width:100%;min-width:70px" placeholder="filtrar…" value="${E((est.histFlt || [])[i] || '')}" oninput="calcHistFiltro(${i},this.value)"></th>`).join('')}<th></th></tr></thead><tbody id="calcHistTbody">${histLinhas(lista)}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
   }
   window.calcHistAbrir = function (id) {
     const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return;
     const bs = (h.bases || []).map(b => C.CALC_BASES.find(x => x.id === b)).filter(Boolean);
-    document.getElementById('calcHistVer').innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">${E(h.titulo)} — ${E(new Date(h.ts).toLocaleString('pt-BR'))}</h3><div class="calc-sub">${h.empresa ? 'Empresa: <b>' + E((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) + '</b> · ' : ''}Cálculo salvo por ${E(h.por)}. Não é recalculado.</div><div class="calc-acts" style="margin:0 0 8px"><button class="btn bo bsm" onclick="calcHistImprimir('${h.id}')">🖨️ Imprimir / PDF</button><button class="btn bo bsm" onclick="calcHistExcel('${h.id}')">📊 Excel</button></div>${F[h.calc] && F[h.calc].extra && h.resultado && h.resultado.ranking ? F[h.calc].extra(h.resultado) : ''}${memHtml(h.memoria)}<details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(h.parametros)}</details><details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(bs)}</details>${(h.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}</div>`;
+    document.getElementById('calcHistVer').innerHTML = `<div class="calc-card"><h3 class="calc-h" style="font-size:15px">${E(h.titulo)} — ${E(new Date(h.ts).toLocaleString('pt-BR'))}</h3><div class="calc-sub">${h.empresa ? 'Empresa: <b>' + E((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) + '</b> · ' : ''}${h.socio ? 'Sócio: <b>' + E(socioTxt(h.socio)) + '</b> · ' : ''}Cálculo salvo por ${E(h.por)}. Não é recalculado.</div><div class="calc-acts" style="margin:0 0 8px"><button class="btn bo bsm" onclick="calcHistImprimir('${h.id}')">🖨️ Imprimir / PDF</button><button class="btn bo bsm" onclick="calcHistExcel('${h.id}')">📊 Excel</button></div>${F[h.calc] && F[h.calc].extra && h.resultado && h.resultado.ranking ? F[h.calc].extra(h.resultado) : ''}${memHtml(h.memoria)}<details class="calc-det"><summary>Parâmetros utilizados</summary>${paramsHtml(h.parametros)}</details><details class="calc-det"><summary>📚 Bases Legais</summary>${basesHtml(bs)}</details>${(h.avisos || []).map(a => `<div class="calc-aviso">⚠️ ${E(a)}</div>`).join('')}</div>`;
     document.getElementById('calcHistVer').scrollIntoView({ behavior: 'smooth' });
   };
   window.calcHistExcluir = function (id) {
