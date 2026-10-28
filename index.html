@@ -36298,6 +36298,19 @@ async function _lancctbDesfazerMarcaTributo(extratoId){
   toast('Marca desfeita — o pagamento voltou ao histórico original do banco.','ok');
   renderLancctbRegistroContabil();
 }
+// Regras de histórico (D) cujo gatilho é um trecho do histórico da PARTE aberta da folha (ex.: "Diferença folha") — a tela consulta ao mostrar cada parte, sem depender de reprocessar.
+let _lancctbRegrasFolhaParte=null; // {eid, lista}
+function _lancctbNormParte(t){ return String(t||'').toUpperCase().normalize('NFD').replace(/[̀-ͯ]/g,'').replace(/\d{2}[-\/]\d{4}/g,' ').replace(/\s+/g,' ').trim(); }
+function _lancctbContaPorRegraParte(histParte){
+  const c=_lancctbRegrasFolhaParte; if(!c||String(c.eid)!==String(_lancctbEidAtual)) return null;
+  const h=_lancctbNormParte(histParte); let melhor=null;
+  c.lista.forEach(x=>{ const g=_lancctbNormParte(x.historico_gatilho); if(g.length>=4&&h.includes(g)&&(!melhor||g.length>melhor.g.length)) melhor={g,id:x.conta_contabil_id}; });
+  return melhor?melhor.id:null;
+}
+async function _lancctbCarregarRegrasFolhaParte(){
+  const { data } = await _supaClient.from('regras_matching').select('historico_gatilho,conta_contabil_id,agencia_bancaria_id,valor_gatilho').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('tipo_regra','historico').eq('dc','D').is('valor_gatilho',null);
+  _lancctbRegrasFolhaParte={eid:_lancctbEidAtual,lista:(data||[]).filter(x=>!x.agencia_bancaria_id)};
+}
 function _lancctbRegistroFecharInline(){
   _lancctbInlineExpandidoId=null;
   renderLancctbRegistroContabil();
@@ -36397,11 +36410,12 @@ async function _lancctbRegistroSalvarInline(extratoId){
       const jaTem=new Set((exR||[]).map(x=>semComp(x.historico_gatilho).toLowerCase()));
       for(let ix=0;ix<comp.length;ix++){
         if(comp[ix].conta_contabil_id) continue; // parte com conta já automática (líquido): sem regra
-        const gEd=document.getElementById(`lancctbInlineGatilhoParte_${r.id}_${ix}`); const gat=semComp(gEd?gEd.value:comp[ix].historico); if(gat.length<4||jaTem.has(gat.toLowerCase())) continue;
+        const gEd=document.getElementById(`lancctbInlineGatilhoParte_${r.id}_${ix}`); if(!gEd) continue; const gat=semComp(gEd.value); if(gat.length<4||jaTem.has(gat.toLowerCase())) continue;
         const { error: eRg } = await _supaClient.from('regras_matching').insert({ empresa_eid:_lancctbEidAtual, descricao:`[${gat}] ${String(r.historico_bancario||'').replace(/^\s*\[[^\]]*\]\s*/,'')}`.trim(), historico_fixo:null, tipo_regra:'historico', historico_gatilho:gat, valor_gatilho:null, cnpj_cpf_gatilho:null, dc, conta_contabil_id:linhasContrapartida[ix].conta_contabil_id, agencia_bancaria_id:null });
         if(!eRg){ regrasNovas++; jaTem.add(gat.toLowerCase()); }
       }
     }catch(e){ console.warn('Regra da parte de folha:',e); }
+    _lancctbRegrasFolhaParte=null; // relê as regras: as outras partes abertas já aparecem com a conta nova
     toast('Pagamento da folha classificado (líquido + diferença).'+(regrasNovas?` Regra criada pra diferença (${regrasNovas}) — nos próximos meses já abre com a conta.`:''),'ok');
     _lancctbInlineExpandidoId=null;
     renderLancctbRegistroContabil();
@@ -36512,10 +36526,11 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
   const selectCell=`<td colspan="2" style="padding:4px 10px 4px 24px"><select class="si" id="lancctbInlineConta_${r.id}_@@IDX@@" style="width:100%;font-size:11.5px">${optsHtml}</select></td>`;
   const blankGroup='<td colspan="2"></td>';
   comp.forEach((c,idx)=>{
+    const cSug=c.conta_contabil_id||(c.origem==='folha'?_lancctbContaPorRegraParte(c.historico):null); // conta do líquido, ou a da Regra que casa com o histórico da parte (ex.: "Diferença folha")
     html+=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)">
       <td></td><td></td>
-      ${(bancoEhD?blankGroup:selectCell).replace('@@IDX@@',idx).replace(c.conta_contabil_id?`<option value="${c.conta_contabil_id}"`:'@@NUNCA@@',`<option value="${c.conta_contabil_id}" selected`)}
-      ${(bancoEhD?selectCell:blankGroup).replace('@@IDX@@',idx).replace(c.conta_contabil_id?`<option value="${c.conta_contabil_id}"`:'@@NUNCA@@',`<option value="${c.conta_contabil_id}" selected`)}
+      ${(bancoEhD?blankGroup:selectCell).replace('@@IDX@@',idx).replace(cSug?`<option value="${cSug}"`:'@@NUNCA@@',`<option value="${cSug}" selected`)}
+      ${(bancoEhD?selectCell:blankGroup).replace('@@IDX@@',idx).replace(cSug?`<option value="${cSug}"`:'@@NUNCA@@',`<option value="${cSug}" selected`)}
       <td></td>
       <td style="padding:4px 10px;text-align:right"><input class="fi" id="lancctbInlineValor_${r.id}_${idx}" type="text" inputmode="decimal" value="${_fmt(c.valor||0)}" style="width:100px;text-align:right;font-size:11.5px" oninput="_lancctbInlineAtualizarTotal(${r.id},${valor})"></td>
       <td></td>
@@ -36527,7 +36542,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
   if(comp.length&&comp.every(c=>c&&c.origem==='folha')){
     const semCompUi=t=>String(t||'').replace(/\d{2}[-\/]\d{4}/g,' ').replace(/\s+/g,' ').trim();
     comp.forEach((c,idx)=>{
-      if(c.conta_contabil_id) return; // parte com conta já automática (líquido): sem regra
+      if(c.conta_contabil_id||_lancctbContaPorRegraParte(c.historico)) return; // parte com conta já automática (líquido ou Regra existente): sem gatilho novo
       html+=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)">
         <td></td><td></td>
         <td colspan="6" style="padding:4px 10px;font-size:11.5px;color:var(--slate);text-align:right">Gatilho da Regra da diferença (sem data, que muda todo mês — por padrão "Diferença folha": toda diferença do FOPAG vai pra esta conta; se quiser por pessoa, acrescente o nome):</td>
@@ -37943,12 +37958,12 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   // N+1 linhas editáveis dentro da própria tabela, sem passar pela janela
   // "Cadastrar regra".
   const _folhaAberta=!item.ctb.length&&Array.isArray(r.composicao_tributo)&&r.composicao_tributo.length>=1&&r.composicao_tributo.every(c=>c&&c.origem==='folha');
-  if(_folhaAberta&&!_lancctbInlineContasOptions.length&&!window.__inlineOptCarregando){ // pedido 28/10/2026: o pagamento de folha aberto já aparece em líquido + diferença, sem clicar — carrega as contas 1x e redesenha
+  if(_folhaAberta&&(!_lancctbInlineContasOptions.length||!_lancctbRegrasFolhaParte||String(_lancctbRegrasFolhaParte.eid)!==String(_lancctbEidAtual))&&!window.__inlineOptCarregando){ // pedido 28/10/2026: o pagamento de folha aberto já aparece em líquido + diferença, sem clicar — carrega as contas 1x e redesenha
     window.__inlineOptCarregando=true;
     _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('id,numero_conta,classificacao,descricao,tipo,grau').eq('empresa_eid',_lancctbEidAtual).eq('ignorada_em_regras',false).order('classificacao'))
-      .then(({data})=>{ _lancctbInlineContasOptions=data||[]; window.__inlineOptCarregando=false; renderLancctbRegistroContabil(); }).catch(()=>{ window.__inlineOptCarregando=false; });
+      .then(async({data})=>{ _lancctbInlineContasOptions=data||[]; try{ await _lancctbCarregarRegrasFolhaParte(); }catch(e){ _lancctbRegrasFolhaParte={eid:_lancctbEidAtual,lista:[]}; } window.__inlineOptCarregando=false; renderLancctbRegistroContabil(); }).catch(()=>{ window.__inlineOptCarregando=false; });
   }
-  if(!item.ctb.length&&Array.isArray(r.composicao_tributo)&&r.composicao_tributo.length>=1&&(String(_lancctbInlineExpandidoId)===String(r.id)||(_folhaAberta&&_lancctbInlineContasOptions.length))){
+  if(!item.ctb.length&&Array.isArray(r.composicao_tributo)&&r.composicao_tributo.length>=1&&(String(_lancctbInlineExpandidoId)===String(r.id)||(_folhaAberta&&_lancctbInlineContasOptions.length&&_lancctbRegrasFolhaParte))){
     return _lancctbInlineLinhaHtml(item,contaAtual);
   }
   // Pendente — ainda sem classificação; a ponta do banco já é conhecida.
