@@ -313,7 +313,16 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
     return `<div class="calc-grid" style="margin-bottom:8px"><div class="fg" style="grid-column:1/-1"><label class="fl">Empresa (opcional) — escolha uma cadastrada no site ou digite outra; pode ficar vazio</label>
       <input id="calcEmpresa" class="fi" list="calcEmpresaLista" autocomplete="off" placeholder="Buscar empresa cadastrada ou digitar um nome avulso…" value="${E(est.empresa)}" oninput="calcEmpresaSet(this.value)"><datalist id="calcEmpresaLista">${emps.map(e => `<option value="${E(empresaRotulo(e))}"></option>`).join('')}</datalist></div></div>`;
   }
-  window.calcEmpresaSet = function (v) { est.empresa = v; };
+  // Empresa cadastrada no site → traz sozinha a data de abertura na RFB (campo "Data de abertura", quando a calculadora tem). Empresa avulsa/vazia só limpa o que foi preenchido automaticamente.
+  function empresaCadastrada() { const t = String(est.empresa || '').trim(); return t ? (S.emps() || []).find(x => empresaRotulo(x) === t) : null; }
+  function preencherAberturaDaEmpresa() {
+    const el = document.getElementById('cf_dataAbertura'); if (!el) return;
+    const e = empresaCadastrada();
+    if (e) { const rfb = String(e.rfb || '').substring(0, 10); if (rfb) { el.value = rfb; el.dataset.auto = '1'; el.title = 'Data de abertura na RFB, do cadastro da empresa'; } else if (el.dataset.auto === '1') { el.value = ''; el.dataset.auto = ''; } }
+    else if (el.dataset.auto === '1') { el.value = ''; el.dataset.auto = ''; }
+    el.dispatchEvent(new Event('input', { bubbles: true }));
+  }
+  window.calcEmpresaSet = function (v) { est.empresa = v; preencherAberturaDaEmpresa(); };
   function empresaAtual() {
     const t = String(est.empresa || '').trim(); if (!t) return null;
     const e = (S.emps() || []).find(x => empresaRotulo(x) === t);
@@ -327,6 +336,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
       <div id="calcResultado"></div>`;
     if (f.campos.some(c => c.t === 'atividades')) { if (!est.ativ.length) est.ativ = [{ tipo: 'comercio', receita: '' }]; renderAtiv(); }
     if (f.campos.some(c => c.t === 'herdeiros')) { if (!est.herd.length) est.herd = [{ nome: '', quinhao: '' }]; renderHerd(); }
+    preencherAberturaDaEmpresa();
     calcRefreshQuando();
     if (est.ultimo) mostrarResultado(est.ultimo, est.ultimoInp);
   }
@@ -482,9 +492,9 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
 
   // ───────────────────────────── histórico ─────────────────────────────
   function renderHistorico() {
-    const main = document.getElementById('calcMain'); const lista = lerLista(LS.hist).filter(h => !h.oculto);
+    const main = document.getElementById('calcMain'); const lista = lerLista(LS.hist); // 'ocultar' foi removido: o que estava oculto volta a aparecer; só 'excluir' tira da lista
     main.innerHTML = `<div class="calc-card"><h2 class="calc-h">🗂️ Cálculos salvos</h2><div class="calc-sub">Cada cálculo guarda a entrada, o resultado, a memória e a versão dos parâmetros usada. Reabrir mostra exatamente o que foi calculado na época — não recalcula.</div>
-      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Empresa</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr></thead><tbody>${lista.map(h => `<tr><td>${E(new Date(h.ts).toLocaleString('pt-BR'))}</td><td>${h.empresa ? E((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) : '—'}</td><td>${E(h.titulo)}</td><td>${E(h.por)}</td><td>${(h.parametros || []).map(p => E(p.id) + ' v' + p.version).join(', ') || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" onclick="calcHistOcultar('${h.id}')">ocultar</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`).join('')}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
+      ${lista.length ? `<div style="overflow-x:auto"><table class="calc-tbl"><thead><tr><th>Data</th><th>Empresa</th><th>Calculadora</th><th>Por</th><th>Parâmetros</th><th></th></tr></thead><tbody>${lista.map(h => `<tr><td>${E(new Date(h.ts).toLocaleString('pt-BR'))}</td><td>${h.empresa ? E((h.empresa.eid ? '#' + h.empresa.eid + ' - ' : '') + h.empresa.nome) : '—'}</td><td>${E(h.titulo)}</td><td>${E(h.por)}</td><td>${(h.parametros || []).map(p => E(p.id) + ' v' + p.version).join(', ') || '—'}</td><td style="white-space:nowrap"><button class="btn bo bsm" onclick="calcHistAbrir('${h.id}')">abrir</button> <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="calcHistExcluir('${h.id}')">excluir</button></td></tr>`).join('')}</tbody></table></div>` : '<div style="color:var(--slate);font-size:13px">Nenhum cálculo salvo ainda.</div>'}</div><div id="calcHistVer"></div>`;
   }
   window.calcHistAbrir = function (id) {
     const h = lerLista(LS.hist).find(x => x.id === id); if (!h) return;
@@ -494,10 +504,9 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
   };
   window.calcHistExcluir = function (id) {
     const l = lerLista(LS.hist); const h = l.find(x => x.id === id); if (!h) return;
-    if (!confirm('Excluir este cálculo salvo (' + h.titulo + ', ' + new Date(h.ts).toLocaleString('pt-BR') + ')? Isso apaga a entrada, o resultado e a memória guardados e não dá para desfazer. Para só tirar da lista, use "ocultar".')) return;
+    if (!confirm('Excluir este cálculo salvo (' + h.titulo + ', ' + new Date(h.ts).toLocaleString('pt-BR') + ')? Isso apaga a entrada, o resultado e a memória guardados e não dá para desfazer. ')) return;
     S.s(LS.hist, l.filter(x => x.id !== id)); renderHistorico(); toast('Cálculo excluído.', 'ok');
   };
-  window.calcHistOcultar = function (id) { const l = lerLista(LS.hist); const h = l.find(x => x.id === id); if (!h) return; h.oculto = true; S.s(LS.hist, l); renderHistorico(); toast('Cálculo ocultado da lista (continua guardado).', 'ok'); };
 
   // ───────────────────────────── bases legais, parâmetros e IA ─────────────────────────────
   function valorTxt(v) { try { return JSON.stringify(v); } catch (e) { return String(v); } }
