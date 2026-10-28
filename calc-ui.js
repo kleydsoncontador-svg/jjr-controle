@@ -70,6 +70,15 @@
     plr: { titulo: 'PLR — tributação exclusiva', desc: 'Tributação exclusiva na fonte pela tabela anual própria da PLR (nunca a do salário nem o redutor mensal). Tabelas cadastradas: janeiro/2025 em diante.', campos: [
       { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual }, { k: 'plrAtual', l: 'PLR atual (R$)', t: 'money' }, { k: 'plrAnterior', l: 'PLR já paga no ano (R$)', t: 'money' }, { k: 'irJaRetido', l: 'IR já retido sobre a PLR do ano (R$)', t: 'money' }, { k: 'pensaoPLR', l: 'Pensão alimentícia judicial correspondente à PLR (R$) — dedutível da base', t: 'money' }],
       resumo: r => [['IR a reter agora', r.ir, 1]] },
+    bens_usados: { titulo: 'Depreciação de bens usados', desc: 'Bem adquirido USADO (RIR/2018, art. 322): o prazo de depreciação é o MAIOR entre a metade da vida útil do bem novo e a vida útil restante (vida útil − tempo de uso). Mostra a taxa anual, a depreciação mensal, o cronograma por ano e, se o sistema contábil começou a depreciar depois, quantos meses já devem estar depreciados.', campos: [
+      { k: 'vidaUtilAnos', l: 'Vida útil do bem NOVO (anos) — tabela de taxas da Receita', t: 'text', def: '' },
+      { k: 'usoAnos', l: 'Tempo de uso do bem quando adquirido — anos', t: 'text', def: '0' },
+      { k: 'usoMeses', l: 'Tempo de uso — meses a mais (além dos anos)', t: 'int', def: 0 },
+      { k: 'valorAquisicao', l: 'Valor de aquisição (R$)', t: 'money' },
+      { k: 'dataAquisicao', l: 'Data de aquisição', t: 'date' },
+      { k: 'competenciaInicio', l: 'Mês inicial da depreciação (vazio = mês da aquisição)', t: 'month' },
+      { k: 'competenciaSistema', l: 'Mês em que o SISTEMA contábil passou a depreciar (opcional) — calcula os meses já depreciados', t: 'month' }],
+      resumo: r => [['Depreciação mensal', r.mensal, 1], ['Taxa anual (%)', (r.taxaAnual * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })], ['Prazo adotado (meses)', String(r.prazoMeses) + ' — inciso ' + r.incisoAdotado], ['Período', r.inicio + ' a ' + r.fim], ['Valor de aquisição', r.valor]].concat(r.mesesDep != null ? [['Meses já depreciados (sistema)', String(r.mesesDep)], ['Valor depreciado acumulado', r.depreciado], ['Saldo a depreciar', r.saldo]] : []) },
     pensao: { titulo: 'Pensão alimentícia', desc: 'Percentual sobre a base escolhida, ou valor fixo.', campos: [
       { k: 'modo', l: 'Base da pensão', t: 'select', def: 'bruto', opts: [['bruto', 'Rendimento bruto'], ['bruto_menos_inss', 'Bruto menos INSS'], ['liquido', 'Líquido (bruto − INSS − IRRF − outros)'], ['personalizada', 'Base personalizada (decisão judicial)'], ['fixo', 'Valor fixo']] },
       { k: 'rendimento', l: 'Rendimento bruto (R$)', t: 'money', quando: v => ['bruto', 'bruto_menos_inss', 'liquido'].includes(v.modo) },

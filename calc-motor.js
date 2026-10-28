@@ -59,6 +59,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { id: 'LEI_15270_2025', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Lei', numero: '15.270/2025 (de 26/11/2025)', artigo: 'art. 2º: Lei 9.250, art. 3º-A, caput e §§ 1º a 3º', assunto: 'Redução mensal do IRPF a partir de janeiro/2026: rendimentos até R$ 5.000,00 → redução de até R$ 312,89 (imposto zero); de R$ 5.000,01 a R$ 7.350,00 → R$ 978,62 − (0,133145 × rendimentos tributáveis); acima de R$ 7.350,00 → nenhuma. Limitada ao imposto pela tabela (§ 1º). Aplica-se também ao imposto exclusivo na fonte do 13º salário (§ 3º).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Mesma lei: retenção de 10% sobre dividendos acima de R$ 50.000/mês por PF (art. 6º-A, Lei 9.250) — ver a calculadora "Distribuição de lucros".' },
     { id: 'LEI_9250_6A', calcs: ['dist_lucros'], norma: 'Lei 15.270/2025, art. 2º (acrescenta o art. 6º-A à Lei 9.250/1995)', numero: '15.270/2025 (de 26/11/2025) — Lei 9.250/1995, art. 6º-A', artigo: 'art. 6º-A, caput e §§ 1º, 2º e 3º', assunto: 'A partir de janeiro/2026: lucros e dividendos pagos, creditados, empregados ou entregues por uma MESMA pessoa jurídica a uma MESMA pessoa física residente no Brasil, em montante superior a R$ 50.000,00 em um mesmo mês, sofrem retenção do IRPF na fonte à alíquota de 10% sobre o TOTAL do valor pago (§ 1º: vedadas quaisquer deduções); com mais de um pagamento no mês, a retenção é recalculada pelo total do mês (§ 2º). Não se sujeitam (§ 3º): lucros de resultados apurados até 2025, cuja distribuição tenha sido aprovada até 31/12/2025 e que sejam exigíveis nos termos da legislação civil ou empresarial, pagos nos termos originalmente previstos no ato de aprovação.', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-22 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. A lei NÃO diz se a parcela isenta do § 3º conta para o teste de R$ 50.000 no mês (parâmetro isenta_compoe_limite = NÃO) nem se o IRRF é definitivo ou antecipação. A IN RFB 2.299/2025 e o "Perguntas e Respostas" da Receita NÃO foram lidos no texto oficial (só resumo em fonte secundária: a Receita entende que a retenção alcança também sócios de optantes pelo Simples Nacional — há controvérsia pelo art. 14 da LC 123/2006).' },
     { id: 'LEI_9249_10', calcs: ['dist_lucros'], norma: 'Lei 15.270/2025, art. 3º (nova redação do art. 10 da Lei 9.249/1995)', numero: '15.270/2025 — Lei 9.249/1995, art. 10', artigo: 'art. 10, caput (ressalva dos arts. 6º-A e 16-A da Lei 9.250), § 4º e § 5º', assunto: 'Lucros e dividendos pagos, creditados, entregues, empregados ou REMETIDOS AO EXTERIOR: IRRF de 10% (§ 4º), sem piso mensal. Não se sujeitam (§ 5º): I – resultados apurados até 2025 com distribuição aprovada até 31/12/2025, exigíveis e pagos nos termos originalmente previstos; II – pagos a governos estrangeiros (com reciprocidade), fundos soberanos (Lei 11.312, art. 3º, § 5º) e entidades no exterior de previdência. Art. 10-A: crédito opcional ao beneficiário no exterior (não calculado aqui).', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2023-2026/2025/lei/L15270.htm', ultima_verificacao: '2026-10-22 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. Tributação mínima anual (Lei 9.250, art. 16-A; rendimentos anuais acima de R$ 600.000; alíquota até 10%) é outra apuração e NÃO é calculada aqui.' },
+    { id: 'DEC_9580_ART322', calcs: ['bens_usados'], norma: 'Decreto', numero: '9.580/2018 (RIR/2018)', artigo: 'art. 322', assunto: 'Taxa anual de depreciação de bens adquiridos USADOS: fixada pelo MAIOR dos prazos — I) metade da vida útil admissível para o bem novo; ou II) restante da vida útil, considerada em relação à primeira instalação para utilização do bem.', vig_ini: '2018-11-23', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/_ato2015-2018/2018/decreto/D9580.htm', ultima_verificacao: null, obs: 'Texto do artigo conforme a planilha de apoio do escritório (Base Legal). A vida útil admissível do bem novo vem das tabelas de taxas da Receita (IN RFB 1.700/2017, Anexo III) — conferir.' },
     { id: 'LEI_9250_1995', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao', 'pensao'], norma: 'Lei', numero: '9.250/1995', artigo: 'arts. 4º e 8º', assunto: 'Deduções do IRPF: dependentes, pensão alimentícia, previdência oficial', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Base geral das deduções legais. Artigos a conferir.' },
     { id: 'TAB_IRRF_2026', calcs: ['irrf_pf', 'salario_liquido', 'pro_labore', 'ferias', 'decimo_terceiro', 'rescisao'], norma: 'Leis 15.191/2025 (art. 2º, nova redação do art. 1º, XII, da Lei 11.482/2007) e 9.250/1995 (art. 4º, III, "i" e § 2º)', numero: '15.191/2025 e 9.250/1995', artigo: 'Lei 15.191 art. 2º; Lei 9.250 art. 4º, III, "i" e § 2º (redação da Lei 14.663/2023)', assunto: 'Tabela progressiva mensal desde maio/2025: até 2.428,80 (0%); até 2.826,65 (7,5% − 182,16); até 3.751,05 (15% − 394,16); até 4.664,68 (22,5% − 675,49); acima (27,5% − 908,73). Dependente R$ 189,59 (desde abril/2015). Desconto simplificado mensal = 25% da faixa de alíquota zero = R$ 607,20.', vig_ini: '2025-05-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9250.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Tudo lido no texto oficial do Planalto. O simplificado de R$ 607,20 é derivado: 25% × R$ 2.428,80 (a lei define o percentual, não o valor).' },
     { id: 'MUTUO_USURA', calcs: ['mutuo', 'comparativo'], norma: 'Decreto (Lei de Usura) e Código Civil', numero: 'Decreto 22.626/1933; Código Civil, art. 591', artigo: 'Decreto 22.626/1933, art. 1º; CC art. 591', assunto: 'Mútuo de PESSOA FÍSICA para PESSOA JURÍDICA: não há piso — o mútuo gratuito (0%) é admitido se previsto expressamente no contrato; teto de 12% ao ano (1% ao mês, juros simples) pela Lei de Usura c/c Código Civil. Entidades imunes/isentas (terceiro setor): referência segura de no máximo 100% da Selic/CDI, para não caracterizar distribuição disfarçada de lucros (Lei 9.532/1997, art. 12, § 2º, "a").', vig_ini: '1933-04-07', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/decreto/d22626.htm', ultima_verificacao: null, obs: 'Regra informada pelo usuário em 22/10/2026; NÃO conferida no texto oficial. Há discussão jurídica: o art. 591 do CC remete ao art. 406 (taxa legal, hoje Selic − IPCA após a Lei 14.905/2024) e a Súmula 596 do STF exclui as instituições financeiras do teto — confirme antes de usar como limite definitivo.' },
@@ -1252,6 +1253,60 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     return calcComparativoCore(Object.assign({}, inp, { _vf: vf }));
   }
 
+  // ───────────────────────────── Depreciação de bens USADOS (RIR/2018, art. 322) ─────────────────────────────
+  // Planilha de apoio do escritório (@Depreciação_Amortização de Bens Usados.xlsx): prazo = MAIOR entre (I) metade da vida útil do bem novo e (II) vida útil restante (vida útil − tempo de uso);
+  // taxa anual = 1 ÷ prazo; depreciação mensal = valor ÷ meses do prazo; meses já depreciados até o mês em que o sistema contábil passou a depreciar.
+  function calcBensUsados(inp) {
+    const num = v => { const t = String(v == null ? '' : v).trim().replace(/\\./g, '').replace(',', '.'); const x = parseFloat(t); return isFinite(x) ? x : NaN; };
+    const vidaA = num(inp.vidaUtilAnos); if (!(vidaA > 0)) return ERR('Informe a vida útil admissível do bem NOVO, em anos (ex.: 5 para veículos, 10 para máquinas).');
+    const usoA = (inp.usoAnos === '' || inp.usoAnos == null) ? 0 : num(inp.usoAnos), usoMx = (inp.usoMeses === '' || inp.usoMeses == null) ? 0 : num(inp.usoMeses);
+    if (!(usoA >= 0) || !(usoMx >= 0)) return ERR('O tempo de uso anterior não pode ser negativo.');
+    const valor = cents(inp.valorAquisicao); if (!(valor > 0)) return ERR('Informe o valor de aquisição do bem.');
+    const ymOf = s => { const m = String(s || '').match(/^(\d{4})-(\d{2})/); return m ? parseInt(m[1], 10) * 12 + parseInt(m[2], 10) - 1 : null; };
+    const ymBr = i => String(i % 12 + 1).padStart(2, '0') + '/' + Math.floor(i / 12);
+    const ini = ymOf(inp.competenciaInicio) != null ? ymOf(inp.competenciaInicio) : ymOf(inp.dataAquisicao);
+    if (ini == null) return ERR('Informe o mês inicial da depreciação (ou a data de aquisição).');
+    const vidaM = Math.round(vidaA * 12), usoM = Math.round(usoA * 12 + usoMx);
+    const metadeM = vidaM / 2, restM = Math.max(vidaM - usoM, 0), prazoM = Math.max(metadeM, restM);
+    const meses = Math.round(prazoM); if (!(meses > 0)) return ERR('Prazo de depreciação inválido.');
+    const incisoII = restM > metadeM;
+    const mensal = Math.round(valor / meses), ultima = valor - mensal * (meses - 1);
+    const fim = ini + meses - 1;
+    const sis = ymOf(inp.competenciaSistema);
+    const mem = Mem(), avisos = [];
+    const nb = (x, mx) => x.toLocaleString('pt-BR', { maximumFractionDigits: mx == null ? 2 : mx });
+    mem.t('Prazo e taxa (RIR/2018, art. 322)');
+    mem.txt('Vida útil admissível do bem novo', nb(vidaM / 12) + ' ano(s) = ' + vidaM + ' meses');
+    mem.txt('I — metade da vida útil do bem novo', nb(metadeM / 12) + ' ano(s) = ' + nb(metadeM) + ' meses');
+    mem.txt('Tempo de uso do bem adquirido', nb(usoM / 12) + ' ano(s) = ' + usoM + ' meses');
+    mem.txt('II — restante da vida útil (vida útil − uso)', nb(restM / 12) + ' ano(s) = ' + restM + ' meses');
+    mem.txt('Prazo adotado (o MAIOR dos dois)', (incisoII ? 'inciso II (restante)' : 'inciso I (metade da vida útil)') + ' = ' + meses + ' meses');
+    mem.txt('Taxa anual de depreciação (1 ÷ prazo em anos)', nb(12 / prazoM * 100, 4) + '% a.a.');
+    mem.t('Depreciação');
+    mem.l('Valor de aquisição', valor); mem.i('Meses a depreciar', meses);
+    mem.txt('Mês inicial da depreciação', ymBr(ini)); mem.txt('Mês final da depreciação', ymBr(fim));
+    mem.l('Depreciação mensal (valor ÷ meses)', mensal);
+    if (ultima !== mensal) mem.n('A última parcela (' + ymBr(fim) + ') fica em ' + brl(ultima) + ' para a soma fechar exatamente o valor de aquisição (diferença de arredondamento de centavos).');
+    mem.t('Cronograma por ano-calendário');
+    for (let a = Math.floor(ini / 12); a <= Math.floor(fim / 12); a++) {
+      const de = Math.max(ini, a * 12), ate = Math.min(fim, a * 12 + 11), n = ate - de + 1; let v = mensal * n; if (ate === fim) v = mensal * (n - 1) + ultima;
+      mem.l(a + ' — ' + n + ' mês(es)', v);
+    }
+    let mesesDep = null, depreciado = null, saldo = null;
+    if (sis != null) {
+      mesesDep = Math.min(meses, Math.max(0, sis - ini)); depreciado = mesesDep >= meses ? valor : mensal * mesesDep; saldo = valor - depreciado;
+      mem.t('Posição no sistema contábil (mês em que o sistema passou a depreciar: ' + ymBr(sis) + ')');
+      mem.i('Meses já depreciados até esse mês (a lançar de uma vez, se o sistema está atrasado)', mesesDep);
+      mem.l('Valor depreciado acumulado', depreciado); mem.l('Saldo a depreciar', saldo);
+      mem.txt('Taxa acumulada (depreciado ÷ valor)', nb(depreciado * 100 / valor, 4) + '%');
+      if (sis < ini) avisos.push('O mês do sistema contábil é anterior ao mês inicial da depreciação: nenhum mês depreciado até lá.');
+    }
+    if (usoM >= vidaM) avisos.push('O tempo de uso já alcançou a vida útil do bem novo: o restante é zero e vale a metade da vida útil (inciso I).');
+    if (prazoM !== meses) avisos.push('O prazo não deu número inteiro de meses (' + prazoM + '); foi arredondado para ' + meses + ' meses.');
+    avisos.push('Depreciação FISCAL (dedutibilidade pelo art. 322). A vida útil econômica usada na contabilidade (NBC TG 27) pode ser diferente. Confira a vida útil do bem novo nas tabelas de taxas da Receita (IN RFB 1.700/2017, Anexo III).');
+    return { ok: true, resultado: { prazoMeses: meses, taxaAnual: 12 / prazoM, incisoAdotado: incisoII ? 'II' : 'I', mensal, ultima, valor, inicio: ymBr(ini), fim: ymBr(fim), mesesDep, depreciado, saldo }, memoria: mem.L, parametros: [], bases: CALC_BASES.filter(b => b.id === 'DEC_9580_ART322'), avisos };
+  }
+
   // ───────────────────────────── catálogo ─────────────────────────────
   const CATALOGO = [
     { key: 'irrf_pf', cat: 'FEDERAL', nome: 'IRRF — Pessoa Física', fn: calcIRRF },
@@ -1262,6 +1317,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { key: 'rescisao', cat: 'TRABALHISTA', nome: 'Rescisão trabalhista', fn: calcRescisao },
     { key: 'plr', cat: 'TRABALHISTA', nome: 'PLR — tributação exclusiva', fn: calcPLR },
     { key: 'pensao', cat: 'TRABALHISTA', nome: 'Pensão alimentícia', fn: calcPensao },
+    { key: 'bens_usados', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'Depreciação de bens usados', fn: calcBensUsados },
     { key: 'mutuo', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Mútuo — IOF / juros / IRRF', fn: calcMutuo },
     { key: 'jcp', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'JCP — Juros sobre Capital Próprio', fn: calcJCP },
     { key: 'dist_lucros', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Distribuição de lucros — IRRF 10%', fn: calcDistLucros },
