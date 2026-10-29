@@ -23206,7 +23206,7 @@ function _lancctbRegraPreencherTerceiro(k,silencioso){
 }
 // Condições opcionais da Regra (29/10/2026): "Cliente/Fornecedor contém" e "Comprovante contém". Só valem quando preenchidas; regra sem elas não muda. Sem o comprovante/cliente na linha, a regra com a condição NÃO se aplica.
 function _lancctbTerceiroGatilhosOk(r,nomesCliente,nomeComprovante){
-  const nz=t=>String(t||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'');
+  const nz=t=>String(t||'').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,' ').trim(); // pontuação não conta: "ALELO S.A" = "ALELO S A"
   const cg=nz(r&&r.cliente_gatilho).trim(), pg=nz(r&&r.comprovante_gatilho).trim();
   if(cg&&!(nomesCliente||[]).some(n=>n&&nz(n).includes(cg))) return false;
   if(pg&&!(nomeComprovante&&nz(nomeComprovante).includes(pg))) return false;
@@ -32835,6 +32835,7 @@ async function _lancctbProcessarFluxo(){
   const btn=document.getElementById('lancctbProcessarFluxoBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn){ btn.disabled=true; }
+  if(statusEl) statusEl.textContent='Fluxo: carregando pendências…'; // feedback imediato (pedido 29/10/2026: "nem mostra que está processando")
   try{
     try{ const rb=await _lancctbReabsorverSeparacoesIntermediadoras(eid,contaId); if(rb.reabsorvidas) toast(`Intermediadoras: ${rb.reabsorvidas} pedaço(s) antigo(s) reabsorvido(s) (nada foi apagado).`,'ok'); }catch(e){ console.error('Reabsorção das separações antigas:',e); }
     const { data: pendencias } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato')
@@ -33101,6 +33102,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
   _lancctbMatchingEmExecucao.add(_chaveLock);
   const btn=document.getElementById('lancctbProcessarFluxoRegrasBtn');
   if(btn){ btn.disabled=true; btn.textContent='Processando…'; }
+  const _stRg=document.getElementById('lancctbRegistroProcessarStatus'); if(_stRg) _stRg.textContent='Fluxo: aplicando as Regras salvas…';
   const _toast=silencioso?(()=>{}):toast;
   try{
     const { data: todasRegras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
@@ -33114,14 +33116,18 @@ async function _lancctbProcessarFluxoRegras(silencioso){
       else _toast('Nenhuma Regra com gatilho de Fluxo de Caixa cadastrada ainda — crie uma associando manualmente um lançamento ao Fluxo, com "Também criar uma Regra" marcado.','err');
       return;
     }
+    // Regra com condição "Comprovante contém": só então baixa os comprovantes de pagamento (sem a condição, nada muda e nada fica mais lento).
+    const _precisaComp=regras.some(r=>r.comprovante_gatilho);
+    const compsPromise=_precisaComp?_lancctbFetchTudo(()=>_supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,valor_pago').eq('empresa_eid',eid)):Promise.resolve({data:[]});
     // Pendências e Fluxo carregados ao mesmo tempo (antes um depois do outro).
-    const [ { data: pendencias }, { data: fluxoPend } ] = await Promise.all([
+    const [ { data: pendencias }, { data: fluxoPend }, { data: compsFluxo } ] = await Promise.all([
       _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato')
       .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id')
       .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')),
       _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos')
       .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,documento_numero,descricao_conta_origem,unidade,status_associado,lancamento_extrato_id')
       .eq('empresa_eid',eid).or('status_associado.eq.nao_associado,lancamento_extrato_id.not.is.null')),
+      compsPromise,
     ]);
     if(!pendencias||!pendencias.length){ _toast('Nenhuma pendência nesta conta.','ok'); return; }
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
@@ -33153,10 +33159,12 @@ async function _lancctbProcessarFluxoRegras(silencioso){
       candidatos.sort((a,b)=>(_lancctbNomeCompativel([l.historico_bancario],b.cliente_fornecedor_nome)?1:0)-(_lancctbNomeCompativel([l.historico_bancario],a.cliente_fornecedor_nome)?1:0)
         ||_lancctbTextoScoreSimilaridade(l.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(l.historico_bancario,a.descricao));
       const fluxo=candidatos[0];
+      const compL=_precisaComp?(compsFluxo||[]).find(c=>Math.abs((c.valor_pago||0)-valor)<=0.01&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS):null;
+      const nomeComp=compL?compL.cliente_fornecedor_nome:null;
       const regra=regras.find(r=>
         (r.agencia_bancaria_id?String(r.agencia_bancaria_id)===String(contaId):true)&&
         _lancctbExcecaoOk(r,l.historico_bancario)&&bateExtrato(r.historico_gatilho,l.historico_bancario)&&
-        _lancctbTerceiroGatilhosOk(r,[fluxo.cliente_fornecedor_nome],null)&&
+        _lancctbTerceiroGatilhosOk(r,[fluxo.cliente_fornecedor_nome,nomeComp],nomeComp)&&
         bateCondicao(r.fluxo_historico_gatilho,fluxo.descricao)&&
         bateCondicao(r.fluxo_cliente_gatilho,fluxo.cliente_fornecedor_nome)&&
         bateCondicao(r.fluxo_numero_gatilho,fluxo.numero||fluxo.documento_numero)&&
@@ -33181,6 +33189,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
     return resolvidos;
   } finally {
     if(btn){ btn.disabled=false; btn.textContent='🎯 Processar Fluxo (Regras)'; }
+    if(_stRg&&silencioso!==true) _stRg.textContent='';
     _lancctbMatchingEmExecucao.delete(_chaveLock);
   }
 }
