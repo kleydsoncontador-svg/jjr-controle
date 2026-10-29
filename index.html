@@ -2974,7 +2974,8 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
             <input type="radio" name="lancctbRegraHistModo" value="fixo" checked onchange="_lancctbAtualizarCampoHistoricoFixo()">
             <span>Personalizado — mesmo texto em todos os lançamentos que caírem nesta regra</span>
           </label>
-          <input class="fi" id="lancctbRegraHistoricoFixo" title="Ex: Tarifa bancária mensal" style="margin-left:24px"><div style="font-size:10.5px;color:var(--slate);margin:2px 0 0 0;font-style:italic">Ex: Tarifa bancária mensal</div>
+          <input class="fi" id="lancctbRegraHistoricoFixo" title="Ex: Tarifa bancária mensal" style="margin-left:24px" oninput="_lancctbHistChipsAtualizar()"><div style="font-size:10.5px;color:var(--slate);margin:2px 0 0 0;font-style:italic">Ex: Tarifa bancária mensal</div>
+          <div id="lancctbRegraHistChips" style="margin-left:24px" onfocusin="_lancctbHistChipsAtualizar()"></div>
           <label style="display:flex;align-items:center;gap:6px;cursor:pointer">
             <input type="radio" name="lancctbRegraHistModo" value="extrato" onchange="_lancctbAtualizarCampoHistoricoFixo()">
             <span>Manter o histórico original do extrato bancário de cada lançamento</span>
@@ -30747,6 +30748,7 @@ async function abrirLancctbRegraModal(id){
   _lancctbAtualizarCamposRegra();
   _lancctbRegraAvaliarDas();
   openModal('mLancctbRegra');
+  _lancctbHistChipsAtualizar();
 }
 // Alterna o campo de texto do "Histórico Utilizado" conforme o rádio
 // escolhido (pedido do usuário 05/09/2026): "Personalizado" grava o mesmo
@@ -30759,6 +30761,7 @@ function _lancctbAtualizarCampoHistoricoFixo(){
   const campo=document.getElementById('lancctbRegraHistoricoFixo');
   campo.style.display=modo==='fixo'?'':'none';
   if(modo==='fixo'&&!campo.value.trim()) _lancctbPreencherHistoricoDoFluxo();
+  _lancctbHistChipsAtualizar();
 }
 // Pedido do usuário 04/10/2026: regra criada com apoio do Fluxo de Caixa + "Personalizado" → o histórico vem sozinho no padrão
 // "Pagamento a FORNECEDOR - Documento 33860" (saída) / "Recebimento de CLIENTE - Documento N" (entrada), com os dados do próprio Fluxo.
@@ -30802,15 +30805,56 @@ function _lancctbModeloHistoricoDoFluxo(fluxoRow,extratoRow){
   const numero=String(fluxoRow.documento_numero||fluxoRow.numero||'').trim();
   return (ehEntrada?'Recebimento de ':'Pagamento a ')+'{FLUXO_CLIENTE}'+(numero?' - Documento {FLUXO_NUMERO}':'')+((_lancctbParcelaTxtFluxo(fluxoRow)||_lancctbEhFornecedorPjFluxo(fluxoRow))?' - parcela {FLUXO_PARCELA}':''); // fornecedor PJ: o modelo sempre leva a parcela (some quando é a 1ª)
 }
-function _lancctbResolverHistFluxo(texto,fluxo){
+// Pedido do usuário 29/10/2026: caixinhas numeradas no "Personalizado" — o usuário escolhe, na ordem, o que entra no histórico (fornecedor, NF/documento, parcela…). Cada caixinha vira um MARCADOR no texto, trocado
+// pelo dado real de cada lançamento (Fluxo associado; na falta dele, o terceiro do comprovante/NF — parâmetro extra).
+const LANCCTB_HIST_CHIPS=[
+  {tok:'{FLUXO_CLIENTE}',rot:'Fornecedor / Cliente'},
+  {tok:'{FLUXO_NUMERO}',rot:'NF / Documento'},
+  {tok:'{FLUXO_PARCELA}',rot:'Parcela'},
+  {tok:'{FLUXO_DESCRICAO}',rot:'Descrição (Fluxo)'},
+  {tok:'{FLUXO_CNPJ}',rot:'CNPJ / CPF'},
+  {tok:'{FLUXO_DATA}',rot:'Data do Fluxo'},
+];
+function _lancctbResolverHistFluxo(texto,fluxo,extra){
   const t=String(texto||''); if(!t||t.indexOf('{FLUXO_')<0) return texto;
-  const nome=String((fluxo&&(fluxo.cliente_fornecedor_nome||fluxo.descricao))||'').trim();
-  const numero=String((fluxo&&(fluxo.documento_numero||fluxo.numero))||'').trim();
-  const parc=_lancctbParcelaTxtFluxo(fluxo);
-  let out=t.split('{FLUXO_CLIENTE}').join(nome).split('{FLUXO_NUMERO}').join(numero).split('{FLUXO_PARCELA}').join(parc).split('{FLUXO_DESCRICAO}').join(_lancctbDescricaoGuiaDoFluxo(fluxo));
+  const ex=extra||{};
+  const nome=String((fluxo&&(fluxo.cliente_fornecedor_nome||fluxo.descricao))||ex.nome||'').trim();
+  const numero=String((fluxo&&(fluxo.documento_numero||fluxo.numero))||ex.numero||'').trim();
+  const parc=fluxo?_lancctbParcelaTxtFluxo(fluxo):String(ex.parcela||'');
+  const cnpj=_fmtCnpjCpf(String((fluxo&&fluxo.cnpj_cpf)||ex.cnpj||''));
+  const dIso=String((fluxo&&fluxo.data)||ex.data||'').slice(0,10);
+  const data=/^\d{4}-\d{2}-\d{2}$/.test(dIso)?dIso.split('-').reverse().join('/'):'';
+  let out=t.split('{FLUXO_CLIENTE}').join(nome).split('{FLUXO_NUMERO}').join(numero).split('{FLUXO_PARCELA}').join(parc).split('{FLUXO_DESCRICAO}').join(fluxo?_lancctbDescricaoGuiaDoFluxo(fluxo):'').split('{FLUXO_CNPJ}').join(cnpj).split('{FLUXO_DATA}').join(data);
   if(!parc) out=out.replace(/\s*-\s*parcela\s*$/i,'');
   if(!numero) out=out.replace(/\s*-\s*Documento\s*(?=-|$)/i,'');
-  return out.trim();
+  return out.replace(/\s{2,}/g,' ').replace(/\s+-\s*$/,'').trim();
+}
+function _lancctbHistChipsAtualizar(){
+  const box=document.getElementById('lancctbRegraHistChips'), campo=document.getElementById('lancctbRegraHistoricoFixo'); if(!box||!campo) return;
+  const fixo=(document.querySelector('input[name="lancctbRegraHistModo"]:checked')||{}).value!=='extrato';
+  box.style.display=fixo?'':'none'; if(!fixo) return;
+  if(!box.dataset.pronto){
+    box.dataset.pronto='1';
+    box.innerHTML=`<div style="font-size:11px;color:var(--slate);margin:6px 0 4px">Escreva o começo (ex.: <i>Pagamento ref.</i>) e marque, na ordem, o que deve aparecer — o número mostra a posição. Vale pro que aparece em <b>Amarrar Nota Fiscal</b> e <b>Amarrar Fluxo de Caixa</b>:</div>
+    <div style="display:flex;flex-wrap:wrap;gap:6px">${LANCCTB_HIST_CHIPS.map(c=>`<label data-tok="${c.tok}" style="display:flex;align-items:center;gap:5px;cursor:pointer;border:1px solid var(--border);border-radius:14px;padding:3px 9px 3px 6px;font-size:11.5px;user-select:none"><input type="checkbox" onchange="_lancctbHistChipToggle('${c.tok}',this.checked)"><span class="hchipN" style="display:inline-block;min-width:16px;height:16px;border-radius:8px;background:var(--teal);color:#fff;font-size:10px;font-weight:700;text-align:center;line-height:16px;visibility:hidden"></span>${c.rot}</label>`).join('')}</div>
+    <div id="lancctbRegraHistPrevia" style="font-size:11px;color:var(--slate);margin-top:5px;font-style:italic"></div>`;
+  }
+  const t=campo.value;
+  const pos=LANCCTB_HIST_CHIPS.map(c=>({tok:c.tok,i:t.indexOf(c.tok)})).filter(x=>x.i>=0).sort((a,b)=>a.i-b.i);
+  box.querySelectorAll('label[data-tok]').forEach(lb=>{
+    const k=pos.findIndex(x=>x.tok===lb.dataset.tok), n=lb.querySelector('.hchipN');
+    lb.querySelector('input').checked=k>=0; n.textContent=k>=0?String(k+1):''; n.style.visibility=k>=0?'visible':'hidden';
+    lb.style.borderColor=k>=0?'var(--teal)':'var(--border)';
+  });
+  const pv=document.getElementById('lancctbRegraHistPrevia');
+  if(pv){ if(!pos.length) pv.textContent=''; else { const ex=(typeof _lancctbRegraFluxoRowAtual!=='undefined'&&_lancctbRegraFluxoRowAtual)?_lancctbResolverHistFluxo(t,_lancctbRegraFluxoRowAtual):''; pv.textContent=ex?'Prévia: '+ex:'Cada lançamento vai sair com os dados da sua própria NF/Fluxo no lugar das caixinhas.'; } }
+}
+function _lancctbHistChipToggle(tok,on){
+  const campo=document.getElementById('lancctbRegraHistoricoFixo'); if(!campo) return;
+  let t=campo.value;
+  if(on){ if(t.indexOf(tok)<0) t=(t.replace(/\s+$/,'')+' '+tok).trim(); }
+  else t=t.split(tok).join('').replace(/\s{2,}/g,' ').trim();
+  campo.value=t; _lancctbHistChipsAtualizar();
 }
 function _lancctbPreencherHistoricoDoFluxo(){
   const wrap=document.getElementById('lancctbRegraGatilhosFluxoWrap'); if(!wrap||wrap.style.display==='none'||!_lancctbRegraFluxoRowAtual) return;
@@ -31878,7 +31922,7 @@ async function salvarLancctbRegra(){
     // histórico cru do banco, porque "Descrição" tinha sido pré-preenchida
     // com esse texto cru ao abrir o modal a partir do lançamento — e a
     // linha usava "Descrição" em vez do "Histórico Utilizado" de verdade).
-    const historicoPadrao=histModo==='fixo'?historicoFixo:(extrato.historico_bancario||descricao);
+    const historicoPadrao=histModo==='fixo'?(_lancctbResolverHistFluxo(historicoFixo,_lancctbRegraFluxoRowAtual,{nome:extrato.cliente_fornecedor_nome||'',data:extrato.data_pagamento})||historicoFixo):(extrato.historico_bancario||descricao);
     // Histórico do banco: repete se todas as linhas de baixo compartilham o
     // MESMO texto resolvido; "Pagamentos Diversos" se houver textos
     // diferentes entre elas (ver feedback_historico_saida_bancaria_padrao).
@@ -34703,7 +34747,8 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         // regra pai) recebe o que sobra do total menos a soma das filhas.
         const somaFilhasFixas=filhas.reduce((s,f)=>s+Number(f.valor_fixo||0),0);
         const valorLinha1=filhas.length?valor-somaFilhasFixas:valor;
-        const historicosResolvidos=[regra.historico_fixo||l.historico_bancario||'',...filhas.map(f=>f.descricao_imposto||regra.historico_fixo||l.historico_bancario||'')];
+        const _hfResolvido=_lancctbResolverHistFluxo(regra.historico_fixo,fluxoMatch,{nome:nomeParaLinha,cnpj:cnpjParaLinha,data:l.data_pagamento});
+        const historicosResolvidos=[_hfResolvido||l.historico_bancario||'',...filhas.map(f=>f.descricao_imposto||_hfResolvido||l.historico_bancario||'')];
         const historicoBanco=new Set(historicosResolvidos).size<=1?historicosResolvidos[0]:'Pagamentos Diversos';
         const linhas=[
           { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:bancoTipo, valor, historico:historicoBanco, cliente_fornecedor_nome:nomeParaLinha, cnpj_cpf:cnpjParaLinha, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
