@@ -33586,7 +33586,12 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     let valorContra=valor; const extrasDif=[];
     if(valorParcela!=null){
       const diff=Math.round((valor-Number(valorParcela))*100)/100;
-      if(Math.abs(diff)>=0.005){
+      if(Math.abs(diff)>=0.005&&opcoes&&opcoes.difPref){
+        // Diferença já ensinada pelo usuário (3+ vezes, mesmo fornecedor/cliente): vai pra conta aprendida, no lado aprendido.
+        const dp=opcoes.difPref;
+        extrasDif.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:dp.classificacao, conta_contabil_id:dp.contaId, tipo:dp.dc, valor:Math.abs(diff), historico:`${dp.rot||'Diferença'} - ${historicoUtilizadoBase}`, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' });
+        valorContra=Math.round(Number(valorParcela)*100)/100;
+      } else if(Math.abs(diff)>=0.005){
         const mkExtra=(k,tipo,v,rot)=>{ const c=contaPad(k); return c?{ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo, valor:Math.round(v*100)/100, historico:`${rot} - ${historicoUtilizadoBase}`, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, comprovante_id:comprovanteMatch?.id||null, lancamento_extrato_id:l.id, origem_match:'automatico_triangular' }:null; };
         const mesmoLadoNf=contrapartidaTipo, ladoBanco=bancoTipo;
         let ex=[];
@@ -34767,6 +34772,46 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
           resolvSubsetSum++; resolvido=true;
         }
       }
+    }
+
+    // Passo 2b — diferença APRENDIDA (pedido do usuário 29/10/2026, "sim, na ordem"): só entra se nada acima resolveu, há CNPJ âncora e o usuário já mandou, 3+ vezes, a diferença deste
+    // fornecedor/cliente (mesma direção: a mais/a menos) pra MESMA conta e lado. Exige UMA única parcela do CNPJ na janela, com diferença pequena (até 3% e R$ 300) e o lado aprendido fechando a partida.
+    if(!resolvido&&cnpjAncora&&!ehPonte&&!bloqueiaNf&&!gruposComprovantes&&modo!=='recebimentos_so_regras'&&!_lancctbHistoricoSemNF(l.historico_bancario)){
+      try{
+        const prefs=(S.g('lancctb_difpref_'+eid)||{})[String(cnpjAncora).replace(/\D/g,'').slice(0,8)]||{};
+        const candDif=parcelas.filter(p=>{
+          if(parcelasUsadas.has(p.id)||!nfBateFluxoLigado(p)) return false;
+          if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
+          if(!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,p.notas_fiscais)) return false;
+          if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
+          if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
+          if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
+          if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
+          if(!_lancctbCnpjMesmaRaiz(ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario,cnpjAncora)) return false;
+          const vP=Number(_lancctbNfValorParaMatching(p,valor)); const d=Math.round((valor-vP)*100)/100;
+          if(Math.abs(d)<0.005||Math.abs(d)>Math.min(300,vP*0.03)) return false;
+          const pf=prefs[(ehSaida?'saida':'entrada')+(d>0?'_mais':'_menos')];
+          return !!(pf&&(pf.n||0)>=3&&pf.dc===(d>0?(ehSaida?'D':'C'):(ehSaida?'C':'D')));
+        });
+        if(candDif.length===1){
+          const escolhida=candDif[0], nf=escolhida.notas_fiscais;
+          const vP=Number(_lancctbNfValorParaMatching(escolhida,valor)), d=Math.round((valor-vP)*100)/100;
+          const pf=prefs[(ehSaida?'saida':'entrada')+(d>0?'_mais':'_menos')];
+          const { data: cDif } = await _supaClient.from('plano_contas').select('id,classificacao').eq('id',pf.contaId).maybeSingle();
+          if(cDif){
+            const nomeTerceiro=comprovanteMatch?.cliente_fornecedor_nome||(ehSaida?nf?.nome_emitente:nf?.nome_destinatario);
+            const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjAncora,nomeTerceiro,nf?.numero?[nf.numero]:[],comprovanteMatch,escolhida.numero_parcela,escolhida.id,vP,{difPref:{contaId:cDif.id,classificacao:cDif.classificacao,dc:pf.dc,rot:pf.rot}});
+            if(error){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); }
+            else {
+              parcelasUsadas.add(escolhida.id);
+              await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',escolhida.id);
+              if(comprovanteMatch){ comprovantesUsados.add(comprovanteMatch.id); await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',comprovanteMatch.id); }
+              await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+              resolvNF++; resolvido=true;
+            }
+          }
+        }
+      }catch(e){ console.warn('Diferença aprendida:',e); }
     }
 
     // Passo 3: Regra (só entra se passo 2 não resolveu). Roda em QUALQUER
