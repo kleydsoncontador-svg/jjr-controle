@@ -36370,6 +36370,36 @@ async function _lancctbFolhaAbertaGravarAuto(extratoId){
     renderLancctbRegistroContabil();
   }catch(e){ console.warn('Folha aberta (auto):',e); }
 }
+// "Processado por": forma de processamento que classificou o lançamento. Os feitos a partir de agora vêm marcados pelo botão que rodou ("[PROC] Processar FOPAG" em informacao_extra);
+// os antigos são DEDUZIDOS pelo tipo do lançamento (aparecem em itálico).
+function _lancctbProcessoDe(item){
+  const ctb=item.ctb||[]; if(!ctb.length) return null;
+  const mTag=ctb.map(l=>String(l.informacao_extra||'').match(/^\[PROC\]\s*(.+)$/)).find(Boolean); if(mTag) return {rot:mTag[1].trim(),deduzido:false};
+  const h=ctb.map(l=>l.historico||'').join(' | '), ehSaida=(item.extrato.valor_saida||0)>0, bk=item.extrato.historico_bancario||'';
+  if(/^\s*Transfer[eê]ncia entre contas correntes/i.test(ctb[0].historico||'')) return {rot:'Transferência entre C/C',deduzido:true};
+  if(/Pagamento ref\. (sal[aá]rio|adiantamento|f[eé]rias|13[ºo]|rescis[aã]o|pr[oó]-labore)|Diferen[cç]a folha/i.test(h)) return {rot:'Processar FOPAG',deduzido:true};
+  if((typeof _lancctbHistoricoEhTributo==='function'&&_lancctbHistoricoEhTributo(bk))||/c[oó]d\.\s*\d{3,4}/i.test(h)) return {rot:'Processar Tributos',deduzido:true};
+  if(ctb.some(l=>l.origem_match==='ia')) return {rot:'IA',deduzido:true};
+  if(ctb.some(l=>l.nf_parcela_id||l.comprovante_id)) return {rot:ehSaida?'Processar Pagamentos':'Processar Recebimentos',deduzido:true};
+  if(item.fluxoConciliadoLigado) return {rot:'Fluxo',deduzido:true};
+  if(ctb.some(l=>l.origem_match==='automatico_triangular')) return {rot:ehSaida?'Processar Pagamentos':'Processar Recebimentos',deduzido:true};
+  return {rot:'Regra / manual',deduzido:true};
+}
+function _lancctbProcessoCelHtml(item){
+  const p=_lancctbProcessoDe(item);
+  if(!p) return `<td style="padding:7px 10px;color:var(--slate)">—</td>`;
+  return `<td style="padding:7px 10px;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;${p.deduzido?'font-style:italic;color:var(--slate)':'font-weight:600;color:var(--teal)'}" title="${p.deduzido?'Deduzido pelo tipo do lançamento (feito antes do registro da forma de processamento)':'Registrado pelo botão que classificou'}: ${esc(p.rot)}">${esc(p.rot)}</td>`;
+}
+async function _lancctbMarcarProcesso(rot,maxIdAntes){
+  try{ await _supaClient.from('lancamentos_contabeis').update({informacao_extra:'[PROC] '+rot}).eq('empresa_eid',_lancctbEidAtual).eq('estornado',false).gt('id',maxIdAntes).is('informacao_extra',null).neq('origem_match','ia'); }catch(e){ console.warn('Processo não marcado:',e); }
+}
+function _lancctbRotuloProcesso(nome,args){
+  if(nome==='_lancctbProcessarFluxo') return 'Processar Fluxo';
+  if(nome==='_lancctbProcessarFopag') return 'Processar FOPAG';
+  if(nome==='_lancctbProcessarTributos') return 'Processar Tributos';
+  if(nome==='_lancctbProcessarFonteRegistro') return (args&&args[0]==='comprovantes_pagamento')?'Processar Pagamentos':'Processar Recebimentos';
+  return '';
+}
 function _lancctbRegistroFecharInline(){
   _lancctbInlineExpandidoId=null;
   renderLancctbRegistroContabil();
@@ -36674,10 +36704,14 @@ async function _lancctbRodarBotao(nome,args){
     const falta=_lancctbEtapaBloqueio(_etapa);
     if(falta){ alert('Antes, processe o botão "'+falta+'" neste mês.\n\nOrdem: Transf. entre C/C → Processar Fluxo → Processar Pagamentos → Processar Recebimentos → Processar FOPAG → Processar Tributos.\n\n(Isso evita, por exemplo, uma transferência entre contas ser tratada como recebimento.)'); return; }
   }
-  if(!_lancctbRegistroTodas){ const r=await fn.apply(null,args||[]); if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
+  // Registra QUAL botão classificou (coluna "Processado por"): guarda o maior id antes e marca, depois, tudo o que nasceu durante o processamento.
+  const _rotProc=_lancctbRotuloProcesso(nome,args); let _maxIdAntes=0;
+  if(_rotProc){ try{ const { data: mx } = await _supaClient.from('lancamentos_contabeis').select('id').eq('empresa_eid',_lancctbEidAtual).order('id',{ascending:false}).limit(1); _maxIdAntes=(mx&&mx[0])?mx[0].id:0; }catch(e){} }
+  const _fimProc=async()=>{ if(_rotProc){ await _lancctbMarcarProcesso(_rotProc,_maxIdAntes); renderLancctbRegistroContabil(); } };
+  if(!_lancctbRegistroTodas){ let r; try{ r=await fn.apply(null,args||[]); } finally { await _fimProc(); } if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
   if(_lancctbRodandoTodas){ toast('Já tem um processamento de todas as contas em andamento.','info'); return; }
   const ags=(_lancctbRegistroAgenciasCache||[]).slice();
-  if(ags.length<2){ const r=await fn.apply(null,args||[]); if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
+  if(ags.length<2){ let r; try{ r=await fn.apply(null,args||[]); } finally { await _fimProc(); } if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
   const nomeA=a=>`${_lancctbNomeBancoExibicao(a.banco_nome)} Cc ${a.conta_corrente}`;
   if(!confirm(`Processar em TODAS as ${ags.length} contas, uma de cada vez?\n\n${ags.map(nomeA).join('\n')}\n\nCada conta é processada separada das outras (como se você escolhesse a conta e clicasse no botão). Cada uma pode pedir a sua confirmação.`)) return;
   _lancctbRodandoTodas=true;
@@ -36690,6 +36724,7 @@ async function _lancctbRodarBotao(nome,args){
     }
     if(_etapa&&!erros.length) _lancctbEtapaMarcar(_etapa);
   } finally {
+    await _fimProc();
     _lancctbRodandoTodas=false; _lancctbExtratoContaSel=selAntes; _lancctbRegistroTodas=true;
     toast(erros.length?`Terminou com ${erros.length} erro(s): ${erros[0]}`:`Processou as ${ags.length} contas.`,erros.length?'err':'ok');
     renderLancctbRegistroContabil();
@@ -37980,6 +38015,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
       ${_lancctbNfBateCelHtml(_lancctbNfBateInfo(d.historico,item.fluxoConciliadoTodas||(item.fluxoConciliado?[item.fluxoConciliado]:[])),item.fluxoConciliado&&!item.fluxoConciliadoLigado)}
       ${_lancctbFluxoParamCelHtml(r)}
       ${statusCelHtml}
+      ${_lancctbProcessoCelHtml(item)}
       ${iaCelHtml(d.origem_match==='ia'?d:c)}
     </tr>`;
   }
@@ -38008,6 +38044,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
         ${_celNfBateRateio(l)}
       ${_lancctbFluxoParamCelHtml(r)}
         ${statusCelHtml}
+        ${_lancctbProcessoCelHtml(item)}
         ${iaCelHtml(l)}
       </tr>`;
     }).join('');
@@ -38052,6 +38089,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;color:var(--slate);text-align:center" title="Ainda sem Histórico Utilizado (pendente) — nada a comparar">—</td>
     ${_lancctbFluxoParamCelHtml(r)}
     <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${statusTxt}</span></td>
+    <td style="padding:7px 10px;color:var(--slate)">—</td>
     <td style="padding:7px 10px;color:var(--slate)">—</td>
   </tr>`;
 }
@@ -38219,8 +38257,8 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   // pequenas (5-6%) e o título ("Classificação", "Descrição da conta"
   // etc.) ficava sobrepondo/cortado. Aqui cada uma tem ch suficiente pro
   // próprio título caber por inteiro.
-  const CH_DATA=13,CH_CONTA=12,CH_CLASSIF=16,CH_DESCR=21,CH_IDENT=24,CH_PFPJ=10,CH_VALOR=Math.max(Math.min(maxValorLen+2,22),14),CH_CLIENTE=28,CH_CNPJ=20,CH_DTPARC=16,CH_MESBATE=14,CH_COMP=22,CH_FLUXO=24,CH_NFBATE=9,CH_STATUS=11,CH_SEL=4;
-  const somaChFixo=CH_SEL+CH_DATA+CH_CONTA*2+CH_IDENT*2+CH_PFPJ+CH_VALOR+CH_CLIENTE+CH_CNPJ+CH_DTPARC+CH_MESBATE+CH_COMP+CH_FLUXO+CH_NFBATE+CH_STATUS;
+  const CH_DATA=13,CH_CONTA=12,CH_CLASSIF=16,CH_DESCR=21,CH_IDENT=24,CH_PFPJ=10,CH_VALOR=Math.max(Math.min(maxValorLen+2,22),14),CH_CLIENTE=28,CH_CNPJ=20,CH_DTPARC=16,CH_MESBATE=14,CH_COMP=22,CH_FLUXO=24,CH_NFBATE=9,CH_STATUS=11,CH_PROC=20,CH_SEL=4;
+  const somaChFixo=CH_SEL+CH_DATA+CH_CONTA*2+CH_IDENT*2+CH_PFPJ+CH_VALOR+CH_CLIENTE+CH_CNPJ+CH_DTPARC+CH_MESBATE+CH_COMP+CH_FLUXO+CH_NFBATE+7+CH_STATUS+CH_PROC;
   const minWidthTabela=Math.max(1320,(somaChFixo+5+chHistBanc+chHistUsado+chIa)*7.4);
   html+=`
   <style>tr.rg-lin>:nth-child(3),tr.rg-lin>:nth-child(8),tr.rg-lin>:nth-child(9),tr.rg-lin>:nth-child(10),tr.rg-lin>:nth-child(11),tr.rg-lin>:nth-child(12){border-left:1px solid rgba(148,163,184,.40)}</style>
@@ -38229,7 +38267,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <col style="width:${CH_SEL}ch"><col style="width:${CH_DATA}ch"><col style="width:${CH_CONTA}ch"><col style="width:${CH_IDENT}ch">
       <col style="width:${CH_CONTA}ch"><col style="width:${CH_IDENT}ch"><col style="width:${CH_PFPJ}ch"><col style="width:${CH_VALOR}ch">
       <col style="width:${chHistBanc}ch"><col style="width:8ch"><col style="width:${chHistUsado}ch"><col style="width:${CH_CLIENTE}ch"><col style="width:${CH_CNPJ}ch">
-      <col style="width:${CH_DTPARC}ch"><col style="width:${CH_MESBATE}ch"><col style="width:${CH_COMP}ch"><col style="width:${CH_FLUXO}ch"><col style="width:${CH_NFBATE}ch"><col style="width:${CH_STATUS}ch"><col style="width:${chIa}ch">
+      <col style="width:${CH_DTPARC}ch"><col style="width:${CH_MESBATE}ch"><col style="width:${CH_COMP}ch"><col style="width:${CH_FLUXO}ch"><col style="width:${CH_NFBATE}ch"><col style="width:7ch"><col style="width:${CH_STATUS}ch"><col style="width:${CH_PROC}ch"><col style="width:${chIa}ch">
     </colgroup>
     <thead><tr class="rg-lin" style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">
       <th style="padding:8px 6px;text-align:center" title="Selecionar pendências pra Classificar em Lote"><input type="checkbox" id="lancctbRegistroSelTodosCheckbox" onchange="_lancctbRegistroToggleSelecionarTodos(this.checked)"></th>
@@ -38252,6 +38290,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       <th style="padding:8px 6px;text-align:center;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="A NF indicada no Fluxo de Caixa é a mesma NF do Histórico Utilizado?">NF Bate?</th>
       <th style="padding:8px 6px;text-align:center;font-size:11px;white-space:nowrap" title="Parâmetros opcionais: o que o fornecedor do Fluxo deve ou não conter para este histórico bancário">🎛 Parâm.</th>
       <th style="padding:8px 10px;text-align:center;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">Status</th>
+      <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="Qual forma de processamento classificou este lançamento (Processar FOPAG, Tributos, Pagamentos, Recebimentos, Fluxo, Transferência…)">Processado por</th>
       <th style="padding:8px 10px;text-align:left;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="🤖 Explicação da IA">🤖 Explicação da IA</th>
     </tr>
     <tr class="rg-lin" style="background:var(--bg2)">
@@ -38283,11 +38322,12 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
       </select></th>
       <th style="padding:4px 6px"></th>
       <th style="padding:4px 6px"></th>
+      <th style="padding:4px 6px"></th>
       <th style="padding:4px 6px"><input class="si" data-filtro="registro-ia" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbRegistroIaBusca)}" oninput="_lancctbRegistroCampoDebounced('ia',this.value)"></th>
     </tr></thead>
     <tbody>`;
   if(!linhas.length){
-    html+=`<tr><td colspan="21" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
+    html+=`<tr><td colspan="23" style="padding:30px;text-align:center;color:var(--slate)">Nenhum lançamento encontrado com esses filtros.</td></tr>`;
   } else {
     linhas.forEach(item=>{ html+=_lancctbRegistroLinhaHtml(item,todasContas?(agencias.find(a=>Number(a.id)===Number(item.extrato.conta_bancaria_id))||contaAtual):contaAtual); });
   }
@@ -38503,7 +38543,7 @@ async function exportarLancctbRegistroExcel(){
     if(!todos.length){ toast('Nada para exportar com esse filtro.','err'); return; }
     const ags=Object.fromEntries((_lancctbRegistroAgenciasCache||[]).map(a=>[a.id,a]));
     const nomeConta=id=>{ const a=ags[id]; return a?`${_lancctbNomeBancoExibicao(a.banco_nome)}${_lancctbAgCcTxt(a)}`:''; };
-    const header=['Conta bancária','Data','Conta D','Classificação D','Descrição conta D','Conta C','Classificação C','Descrição conta C','Valor','Histórico Bancário','Histórico Utilizado','Cliente/Fornecedor','CPF/CNPJ','Data Parcela','Mês bate?','Comprovante','Fluxo de Caixa','NF bate?','Parâm. Fluxo','Status','Explicação da IA'];
+    const header=['Conta bancária','Data','Conta D','Classificação D','Descrição conta D','Conta C','Classificação C','Descrição conta C','Valor','Histórico Bancário','Histórico Utilizado','Cliente/Fornecedor','CPF/CNPJ','Data Parcela','Mês bate?','Comprovante','Fluxo de Caixa','NF bate?','Parâm. Fluxo','Status','Processado por','Explicação da IA'];
     const fmtD=d=>d?new Date(d+'T00:00:00').toLocaleDateString('pt-BR'):'';
     const rows=[];
     todos.forEach(item=>{
@@ -38520,11 +38560,11 @@ async function exportarLancctbRegistroExcel(){
       const nfb=hu=>{ const i=_lancctbNfBateInfo(hu,item.fluxoConciliadoTodas||(item.fluxoConciliado?[item.fluxoConciliado]:[])); return i.estado==='sim'?'Sim':i.estado==='nao'?'Não':''; };
       if(item.ctb.length&&ds.length===1&&cs.length===1){
         const d=ds[0],c=cs[0], pc=parcelaDe(d);
-        rows.push([conta,dataFmt,d.plano_contas?.numero_conta||'',d.classificacao||'',d.plano_contas?.descricao||'',c.plano_contas?.numero_conta||'',c.classificacao||'',c.plano_contas?.descricao||'',valor,r.historico_bancario||'',d.historico||'',d.cliente_fornecedor_nome||'',_fmtCnpjCpf(d.cnpj_cpf),pc[0],pc[1],item.comprovanteNome||'',fluxoTxt,nfb(d.historico),paramTxt,r.status_conciliacao||'',ia(d)||ia(c)]);
+        rows.push([conta,dataFmt,d.plano_contas?.numero_conta||'',d.classificacao||'',d.plano_contas?.descricao||'',c.plano_contas?.numero_conta||'',c.classificacao||'',c.plano_contas?.descricao||'',valor,r.historico_bancario||'',d.historico||'',d.cliente_fornecedor_nome||'',_fmtCnpjCpf(d.cnpj_cpf),pc[0],pc[1],item.comprovanteNome||'',fluxoTxt,nfb(d.historico),paramTxt,r.status_conciliacao||'',(_lancctbProcessoDe(item)||{}).rot||'',ia(d)||ia(c)]);
       } else if(item.ctb.length){
         item.ctb.forEach(l=>{
           const ehD=l.tipo==='D', pc=parcelaDe(l);
-          rows.push([conta,dataFmt, ehD?(l.plano_contas?.numero_conta||''):'', ehD?(l.classificacao||''):'', ehD?(l.plano_contas?.descricao||''):'', !ehD?(l.plano_contas?.numero_conta||''):'', !ehD?(l.classificacao||''):'', !ehD?(l.plano_contas?.descricao||''):'', l.valor, r.historico_bancario||'', l.historico||'', l.cliente_fornecedor_nome||'', _fmtCnpjCpf(l.cnpj_cpf), pc[0], pc[1], item.comprovanteNome||'', fluxoTxt, nfb(l.historico), paramTxt, r.status_conciliacao||'', ia(l)]);
+          rows.push([conta,dataFmt, ehD?(l.plano_contas?.numero_conta||''):'', ehD?(l.classificacao||''):'', ehD?(l.plano_contas?.descricao||''):'', !ehD?(l.plano_contas?.numero_conta||''):'', !ehD?(l.classificacao||''):'', !ehD?(l.plano_contas?.descricao||''):'', l.valor, r.historico_bancario||'', l.historico||'', l.cliente_fornecedor_nome||'', _fmtCnpjCpf(l.cnpj_cpf), pc[0], pc[1], item.comprovanteNome||'', fluxoTxt, nfb(l.historico), paramTxt, r.status_conciliacao||'', (_lancctbProcessoDe(item)||{}).rot||'', ia(l)]);
         });
       } else {
         const pc=parcelaDe(null);
