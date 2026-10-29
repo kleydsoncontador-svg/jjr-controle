@@ -35705,7 +35705,7 @@ function _lancctbIcmsPintarTabela(){
       <td style="padding:6px 10px;text-align:center">${/^[0-9]+$/.test(String(r.unidade))?esc(r.unidade):`<a href="#" style="color:var(--teal)" title="Clique pra informar o código desta unidade (ex.: 164) — fica gravado" onclick="_lancctbIcmsDefinirUnidade('${esc(r.unidade)}');return false">${esc(r.unidade)}</a>`}</td>
       <td style="padding:6px 10px;text-align:center">${esc(r.uf)}</td>
       <td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap">R$ ${_fmt(r.valor)}${r.dev?' <span style="color:var(--slate);font-size:11px">devolução</span>':''}</td>
-      <td style="padding:6px 10px;text-align:center">${r.ext?'<span style="color:var(--green)" title="Identificado num pagamento do extrato">✔</span>':'<span style="color:var(--slate)">—</span>'}</td></tr>`).join('')||'<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--slate)">Nenhuma NF neste filtro.</td></tr>';
+      <td style="padding:6px 10px;text-align:left;white-space:nowrap">${_lancctbIcmsExtCelHtml(r)}</td></tr>`).join('')||'<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--slate)">Nenhuma NF neste filtro.</td></tr>';
   const barra=_lancctbPagGenericaHtml(_lancctbIcmsPagina,rows.length,from,to,totalPaginas,'_lancctbIcmsPagina','_lancctbIcmsPintarTabela');
   const rod=document.getElementById('lancctbIcmsRodape'); if(rod) rod.innerHTML=`<div style="padding:8px 4px">${barra}</div>`;
   const topo=document.getElementById('lancctbIcmsPagTopo'); if(topo) topo.innerHTML=barra;
@@ -35719,11 +35719,29 @@ function _lancctbIcmsTotalPintar(n,total,filtrado){
   b.innerHTML=`<span style="font-size:11px;color:var(--slate);text-transform:uppercase;letter-spacing:.04em">${filtrado?'Total do filtro':'Total do mês'}</span><b style="font-size:16px;font-variant-numeric:tabular-nums">R$ ${_fmt(Math.round(total*100)/100)}</b><span style="font-size:11.5px;color:var(--slate)">${n} NF(s)</span>`;
 }
 let _lancctbIcmsFiltroUltimo=0;
+// Coluna "No extrato" (pedido do usuário 29/10/2026): em qual pagamento do extrato a NF entrou, o valor TOTAL da saída e quantas NFs compõem esse pagamento.
+let _lancctbIcmsExtInfo=new Map(), _lancctbIcmsExtStats=null;
+async function _lancctbIcmsCarregarExtInfo(){
+  const ids=[...new Set(_lancctbIcmsRowsMes.map(r=>r.ext).filter(Boolean))].filter(id=>!_lancctbIcmsExtInfo.has(id));
+  for(let i=0;i<ids.length;i+=150){
+    try{ const { data } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida').in('id',ids.slice(i,i+150)); (data||[]).forEach(x=>_lancctbIcmsExtInfo.set(x.id,x)); }catch(e){ console.warn('ICMS: extrato das NFs não lido:',e); }
+  }
+  _lancctbIcmsExtStats=null;
+}
+function _lancctbIcmsExtCelHtml(r){
+  if(!r.ext) return '<span style="color:var(--slate)">—</span>';
+  if(!_lancctbIcmsExtStats){ _lancctbIcmsExtStats=new Map(); _lancctbIcmsRowsMes.forEach(x=>{ if(!x.ext) return; const s=_lancctbIcmsExtStats.get(x.ext)||{n:0,soma:0}; s.n++; s.soma+=x.valor||0; _lancctbIcmsExtStats.set(x.ext,s); }); }
+  const e=_lancctbIcmsExtInfo.get(r.ext), s=_lancctbIcmsExtStats.get(r.ext)||{n:1,soma:r.valor||0};
+  const dt=e?String(e.data_pagamento||'').split('-').reverse().join('/'):'';
+  const txt=e?`Saída ${dt} · R$ ${_fmt(e.valor_saida)}`:'Pagamento do extrato';
+  return `<span style="color:var(--green)">✔</span> <span style="font-size:11.5px" title="Esta NF faz parte do pagamento do extrato de ${esc(dt)} (R$ ${e?_fmt(e.valor_saida):'?'}). Neste pagamento entraram ${s.n} NF(s) da base, somando R$ ${_fmt(s.soma)}.">${esc(txt)} <span style="color:var(--slate)">(${s.n} NF${s.n>1?'s':''} · R$ ${_fmt(s.soma)})</span></span>`;
+}
 async function renderLancctbIcms(){
   const el=document.getElementById('lancctbConteudoAba'); const eid=_lancctbEidAtual;
   if(!_lancctbIcmsMesInicial){ _lancctbIcmsMesInicial=true; const ms0=_lancctbIcmsMesesGet(eid); const fa=S.fechAtual()||_cronHoje().slice(0,7); _lancctbIcmsMes=ms0.includes(fa)?fa:(ms0.length?ms0[ms0.length-1]:fa); } // abre no fechamento atual, ou no último mês que tem relatório
   const mesesLer=_lancctbIcmsMes?[_lancctbIcmsMes]:_lancctbIcmsMesesGet(eid); let faltamBlocos=0;
   _lancctbIcmsRowsMes=[]; mesesLer.forEach(m=>{ const inf=_lancctbIcmsLerInfo(eid,m); faltamBlocos+=inf.faltam; inf.rows.forEach(r=>_lancctbIcmsRowsMes.push(r)); });
+  _lancctbIcmsExtStats=null; await _lancctbIcmsCarregarExtInfo(); // saída do extrato de cada NF já identificada (coluna "No extrato")
   const resumo=new Map();
   _lancctbIcmsRowsMes.forEach(r=>{ const k=[r.compet,r.tipo,r.uf,r.unidade].join('|'); const x=resumo.get(k)||{compet:r.compet,tipo:r.tipo,uf:r.uf,unidade:r.unidade,n:0,total:0}; x.n++; x.total+=r.valor||0; resumo.set(k,x); });
   const resumoLinhas=[...resumo.values()].sort((a,b)=>String(a.compet).slice(3).localeCompare(String(b.compet).slice(3))||String(a.compet).localeCompare(String(b.compet))||a.tipo.localeCompare(b.tipo)||String(a.unidade).localeCompare(String(b.unidade),'pt',{numeric:true})||a.uf.localeCompare(b.uf));
