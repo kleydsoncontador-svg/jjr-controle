@@ -35099,7 +35099,7 @@ async function _lancctbAplicarRegraPorItens({regras,comp,compet,l,valor,contaBan
   if(achadas.some(r=>!r)) return false;
   const soma=Math.round(comp.reduce((s,c)=>s+(c.valor||0),0)*100)/100;
   if(Math.abs(soma-valor)>0.02) return false;
-  const histDe=(c,r)=>{ const base=`${_lancctbGatilhoItemComposicao(c)}${compet?' ref. '+compet:''}`; return r.historico_fixo?_lancctbSubstituirCompetenciaTexto(r.historico_fixo,compet):_lancctbPrefixarPagtoRef(base); };
+  const histDe=(c,r)=>{ const base=`${_lancctbGatilhoItemComposicao(c)}${c.uf?' UF '+c.uf:''}${compet?' ref. '+compet:''}`; let hf=r.historico_fixo; if(hf&&c.uf) hf=/UF\s+[A-Z]{2}/.test(hf)?hf.replace(/UF\s+[A-Z]{2}/,'UF '+c.uf):hf; /* UF da guia deste mês, nunca a da guia em que a Regra foi ensinada */ return hf?_lancctbSubstituirCompetenciaTexto(hf,compet):_lancctbPrefixarPagtoRef(base); };
   const hists=comp.map((c,i)=>histDe(c,achadas[i]));
   const histBanco=new Set(hists).size===1?hists[0]:'Pagamentos Diversos';
   const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:histBanco, lancamento_extrato_id:l.id, regra_matching_id:achadas[0].id, origem_match:'regra' }];
@@ -35477,7 +35477,7 @@ async function _lancctbExtrairGnresMulti(pdf,statusCb){
     let m;
     if(/Itens da GNRE M[úu]ltipla/i.test(t)){ // página de itens da GNRE múltipla: o valor pago é o total; as partes são os itens
       const it=_lancctbGnreItensMultipla(t); if(!it) continue;
-      guias.push({ pagina:pag, valor:it.total, gnre:{ uf:it.uf, codigo:null, referencia:it.referencia, tipo:null, tipoNome:null, multipla:true }, composicao:it.itens.length>=2?mkComp(it.itens):null, competencia:it.referencia });
+      guias.push({ pagina:pag, valor:it.total, gnre:{ uf:it.uf, codigo:null, referencia:it.referencia, tipo:null, tipoNome:null, multipla:true }, composicao:it.itens.length>=2?mkComp(it.itens).map(c=>({...c,uf:it.uf})):null, competencia:it.referencia });
     } else if(/Guia Nacional de Recolhimento/i.test(t)&&/VIDE DETALHAMENTO/i.test(t)){ continue; // 1ª página da múltipla (só remete aos itens): vale a página de itens
     } else if(/Guia Nacional de Recolhimento/i.test(t)&&(m=t.match(/Total a Recolher\s*\|\s*R\$\s*([\d.]+,\d{2})/))){
       const gn=_lancctbGnreDoTexto(t.replace(/\s*\|\s*/g,' ')); if(!gn) continue;
@@ -35903,12 +35903,16 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
 // GNRE do PR traz DIFAL + ST na MESMA guia (código 100048 'ICMS/ST POR APURAÇÃO'): parte pelos totais da base de ICMS (UF + unidade + competência). Só parte quando a soma dos dois tipos
 // fecha EXATAMENTE (±0,02) com o valor da guia — devolve [{tipo,valor}] (DIFAL primeiro) ou null.
 function _lancctbIcmsPartirGuia(ctx,o){
-  if(!ctx||!o||!o.uf||!o.compet||!(o.valor>0)||!o.unidade) return null;
-  const mes=String(o.compet).slice(3)+'-'+String(o.compet).slice(0,2), por=new Map();
-  (ctx.rows[mes]||[]).filter(r=>r.uf===o.uf&&String(r.unidade)===String(o.unidade)).forEach(r=>por.set(r.tipo,(por.get(r.tipo)||0)+Math.round(r.valor*100)));
-  const difal=por.get(LANCCTB_ICMS_TIPOS.difal)||0, st=por.get(LANCCTB_ICMS_TIPOS.st)||0;
-  if(!difal||!st||Math.abs(difal+st-Math.round(o.valor*100))>2) return null;
-  return [{tipo:LANCCTB_ICMS_TIPOS.difal,valor:difal/100},{tipo:LANCCTB_ICMS_TIPOS.st,valor:st/100}];
+  if(!ctx||!o||!o.compet||!(o.valor>0)||!o.unidade) return null;
+  const mes=String(o.compet).slice(3)+'-'+String(o.compet).slice(0,2), alvo=Math.round(o.valor*100);
+  const rowsUn=(ctx.rows[mes]||[]).filter(r=>String(r.unidade)===String(o.unidade));
+  const ufs=o.uf?[o.uf]:[...new Set(rowsUn.map(r=>r.uf))]; // UF não lida (OCR): vale a ÚNICA UF cujo DIFAL+ST fecha o valor
+  const ach=[];
+  ufs.forEach(uf=>{ const por=new Map(); rowsUn.filter(r=>r.uf===uf).forEach(r=>por.set(r.tipo,(por.get(r.tipo)||0)+Math.round(r.valor*100)));
+    const difal=por.get(LANCCTB_ICMS_TIPOS.difal)||0, st=por.get(LANCCTB_ICMS_TIPOS.st)||0;
+    if(difal&&st&&Math.abs(difal+st-alvo)<=2) ach.push({uf,partes:[{tipo:LANCCTB_ICMS_TIPOS.difal,valor:difal/100},{tipo:LANCCTB_ICMS_TIPOS.st,valor:st/100}]}); });
+  if(ach.length!==1) return null;
+  const r=ach[0].partes; r.uf=ach[0].uf; return r;
 }
 function _lancctbIcmsTipoPorValor(ctx,o){
   if(!ctx||!o||!o.uf||!o.compet||!(o.valor>0)) return null;
@@ -36188,7 +36192,7 @@ async function _lancctbProcessarTributos(){
     if(achou.extraido&&achou.extraido.gnre&&icmsCtx&&!achou.extraido.composicao){ try{
       const gP=achou.extraido.gnre, unP=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1];
       const partes=_lancctbIcmsPartirGuia(icmsCtx,{uf:gP.uf||_lancctbGnreUfDoNome(achou.f.nome),unidade:unP,compet:gP.referencia||_lancctbExtrairCompetenciaDoNome(achou.f.nome),valor:achou.extraido.valor});
-      if(partes){ achou.extraido={...achou.extraido,composicao:partes.map(x=>({codigo:x.tipo===LANCCTB_ICMS_TIPOS.difal?'100110':'100048',denominacao:x.tipo+(unP?' UN '+unP:''),valor:x.valor})),partidaPelaBase:true}; }
+      if(partes){ if(!gP.uf&&partes.uf) achou.extraido.gnre={...gP,uf:partes.uf}; achou.extraido={...achou.extraido,composicao:partes.map(x=>({codigo:x.tipo===LANCCTB_ICMS_TIPOS.difal?'100110':'100048',denominacao:x.tipo+(unP?' UN '+unP:''),uf:gP.uf||partes.uf||null,valor:x.valor})),partidaPelaBase:true}; }
     }catch(e){ console.warn('ICMS: partir guia pela base falhou:',e); } }
     if(achou.extraido&&achou.extraido.gnre&&icmsCtx&&!achou.extraido.composicao&&!achou.extraido.gnre.tipoNome){ try{
       const g=achou.extraido.gnre, un=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1];
@@ -36275,6 +36279,7 @@ async function _lancctbProcessarTributos(){
           const resumoDe=(c)=>{
             const partes=[_lancctbRotuloEncargo(c)+nomeCurto(c)];
             if(c.codigo) partes.push(`cód. ${c.codigo}`);
+            if(c.uf) partes.push(`UF ${c.uf}`);
             if(compet) partes.push(`ref. ${compet}`);
             return partes.join(' ');
           };
@@ -36287,7 +36292,7 @@ async function _lancctbProcessarTributos(){
           // crédito do banco (resumoDe acima). O auto-match de meses
           // futuros (ver bateram/baseDescricaoImposto mais abaixo) ignora
           // esse sufixo decorado na hora de comparar, então não quebra.
-          const composicaoParaSalvar=comp.map(c=>({codigo:c.codigo,denominacao:c.denominacao,encargo:c.encargo||null,valor:Math.round((c.valor||0)*100)/100,resumo:resumoDe(c),competencia:compet||null}));
+          const composicaoParaSalvar=comp.map(c=>({codigo:c.codigo,denominacao:c.denominacao,encargo:c.encargo||null,uf:c.uf||null,valor:Math.round((c.valor||0)*100)/100,resumo:resumoDe(c),competencia:compet||null}));
           const { error: eU } = await _supaClient.from('lancamentos_extrato').update({
             historico_bancario: `[TRIBUTO COMPOSTO: ${resumo}] ${semMarcaComp}`.trim(),
             origem_importacao: 'tributo_composicao',
@@ -36354,6 +36359,11 @@ async function _lancctbProcessarTributos(){
     const competenciaEsteMes=achou.extraido.competencia||_lancctbExtrairCompetenciaDoNome(info.descricao);
     let historicoFixoAtualizado=regra.historico_fixo?_lancctbSubstituirCompetenciaTexto(regra.historico_fixo,competenciaEsteMes):null;
     if(historicoFixoAtualizado&&_parcG) historicoFixoAtualizado=_lancctbSubstituirParcelaTexto(historicoFixoAtualizado,_parcG); // guia de parcelamento: a parcela também muda todo mês
+    // GNRE/ICMS: a Regra guarda o texto da guia em que foi ensinada ("… UF BA UN 163 (10 NFs)"); em outra guia (outra UF/unidade) esse texto fica ERRADO — refaz pela guia deste mês (achado 29/10/2026, PR lançado com "UF BA").
+    if(historicoFixoAtualizado&&_gnG&&/UF\s+[A-Z]{2}|\(\d+\s*NFs?\)|NF\s+\d+/.test(historicoFixoAtualizado)){
+      const _ufH=_gnG.uf||_lancctbGnreUfDoNome(achou.f.nome);
+      historicoFixoAtualizado=`Pagamento ref. ${_gnG.tipoNome||'GNRE'}${_gnG.codigo?' cód. '+_gnG.codigo:''}${_ufH?' UF '+_ufH:''}${_unGuia?' UN '+_unGuia:''}${competenciaEsteMes?' '+competenciaEsteMes:''}`;
+    }
 
     const filhas=linhasRateioPorRegra[regra.id]||[];
     let linhas;
