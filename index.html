@@ -26911,6 +26911,8 @@ async function _lancctbExtrairGuiaGaRs(pdf){
   }catch(e){ return null; }
 }
 async function _lancctbExtrairValorPdfTributoBase(pdf,permitirIA,statusCb){
+  // PDF com VÁRIAS GNREs (uma por UF/receita): cada uma vira guia própria no motor (ver o laço de candidatos em _lancctbProcessarTributos)
+  try{ const mg=await _lancctbExtrairGnresMulti(pdf,statusCb); if(mg) return { valor:0, composicao:null, multiGnre:mg.map(g=>({ pagina:g.pagina, extraido:{ valor:g.valor, composicao:g.composicao, competencia:g.competencia, gnre:g.gnre, viaOcr:g.viaOcr||false } })) }; }catch(e){ console.warn('GNRE múltipla: leitura falhou:',e); }
   const darf=await _lancctbExtrairComposicaoDarf(pdf);
   if(darf) return { valor:darf.valorTotal, composicao:darf.itens, competencia:darf.competencia };
   // GFD — Guia do FGTS Digital (achado real 26/09/2026, Peixoto Serviços): traz
@@ -35452,6 +35454,51 @@ function _lancctbGnreDoTexto(texto){
   if(!tipo&&mCod){ if(mCod[1]==='100110') tipo='difal'; else if(mCod[1]==='100048') tipo='st'; }
   return { uf:mUf?mUf[1]:null, codigo:mCod?mCod[1]:null, referencia:mRef?mRef[1]:null, tipo, tipoNome:tipo?LANCCTB_ICMS_TIPOS[tipo]:null };
 }
+// ── PDF com VÁRIAS GNREs dentro (pedido do usuário 29/10/2026, Fast Lube 163/164: uma GNRE por UF/receita no mesmo arquivo, mais DUA do ES e GNRE múltipla do RJ) ──
+// Cada GNRE vira uma guia própria {valor, gnre, composicao?}; o motor de Processar Tributos casa o pagamento com a guia certa (valor exato) e não com o arquivo todo.
+const LANCCTB_GNRE_COD_TIPO={ '100110':'difal', '100048':'st' }; // 100110 = ICMS Consumidor Final Não Contribuinte (DIFAL); 100048 = ICMS Substituição Tributária
+function _lancctbGnreItensMultipla(texto){
+  const t=String(texto||'').replace(/\s+/g,' ');
+  const mTot=t.match(/([\d.]+,\d{2})\s*\|?\s*Total da GNRE/i); const mUf=t.match(/UF Favorecida:?\s*\|?\s*([A-Z]{2})\b/); const mRef=t.match(/Per[íi]odo:\s*mensal\/(\d{2}\/\d{4})/i);
+  const itens=[]; const re=/\b(100110|100048)\s*\|\s*([\d.]+,\d{2})\s*\|\s*([\d.]+,\d{2})\s*\|\s*Per[íi]odo:/g; let m;
+  while((m=re.exec(t))){ const v=_lancctbParseValorBR2(m[2])+_lancctbParseValorBR2(m[3]); itens.push({ codigo:m[1], valor:Math.round(v*100)/100 }); } // principal + FECP do item
+  const total=mTot?_lancctbParseValorBR2(mTot[1]):null;
+  if(!itens.length||total==null||Math.abs(itens.reduce((s,x)=>s+x.valor,0)-total)>0.011) return null; // só vale se os itens fecham o total impresso
+  return { total, uf:mUf?mUf[1]:null, referencia:mRef?mRef[1]:null, itens };
+}
+async function _lancctbExtrairGnresMulti(pdf,statusCb){
+  if(!pdf||pdf.numPages<2) return null;
+  { const c1=await (await pdf.getPage(1)).getTextContent(); const t1=c1.items.map(i=>i.str).join(' '); if(t1.trim()&&!/Guia Nacional de Recolhimento de Tributos Estaduais|Documento Único de Arrecadação|Itens da GNRE/i.test(t1)) return null; } // 1ª página de outro tipo de guia: nem lê o resto
+  const textos=[]; for(let p=1;p<=pdf.numPages;p++){ const c=await (await pdf.getPage(p)).getTextContent(); textos.push(c.items.map(i=>i.str).filter(s=>s.trim()).join(' | ')); }
+  if(!textos.some(t=>/Guia Nacional de Recolhimento de Tributos Estaduais|Documento Único de Arrecadação/i.test(t))) return null;
+  const guias=[]; const mkComp=itens=>itens.map(x=>({ codigo:x.codigo, denominacao:LANCCTB_ICMS_TIPOS[LANCCTB_GNRE_COD_TIPO[x.codigo]]||('Código '+x.codigo), valor:x.valor }));
+  for(let i=0;i<textos.length;i++){
+    const t=textos[i], pag=i+1;
+    let m;
+    if(/Itens da GNRE M[úu]ltipla/i.test(t)){ // página de itens da GNRE múltipla: o valor pago é o total; as partes são os itens
+      const it=_lancctbGnreItensMultipla(t); if(!it) continue;
+      guias.push({ pagina:pag, valor:it.total, gnre:{ uf:it.uf, codigo:null, referencia:it.referencia, tipo:null, tipoNome:null, multipla:true }, composicao:it.itens.length>=2?mkComp(it.itens):null, competencia:it.referencia });
+    } else if(/Guia Nacional de Recolhimento/i.test(t)&&/VIDE DETALHAMENTO/i.test(t)){ continue; // 1ª página da múltipla (só remete aos itens): vale a página de itens
+    } else if(/Guia Nacional de Recolhimento/i.test(t)&&(m=t.match(/Total a Recolher\s*\|\s*R\$\s*([\d.]+,\d{2})/))){
+      const gn=_lancctbGnreDoTexto(t.replace(/\s*\|\s*/g,' ')); if(!gn) continue;
+      guias.push({ pagina:pag, valor:_lancctbParseValorBR2(m[1]), gnre:gn, composicao:null, competencia:gn.referencia });
+    } else if(/Documento Único de Arrecadação/i.test(t)&&(m=t.match(/\|\s*Total\s*\|\s*R\$\s*([\d.]+,\d{2})/))){ // DUA (ex.: ES)
+      const mRef=t.match(/Refer[êe]ncia\s*\|\s*(\d{2}\/\d{4})/), mCod=t.match(/C[óo]digo de Receita\s*\|\s*([\d-]+)/), difal=/Diferencial de Al[íi]quota/i.test(t), st=/Substitui[çc][ãa]o Tribut/i.test(t);
+      const uf=/Estado do Esp[íi]rito Santo/i.test(t)?'ES':null; const tipo=difal?'difal':(st?'st':null);
+      guias.push({ pagina:pag, valor:_lancctbParseValorBR2(m[1]), gnre:{ uf, codigo:mCod?mCod[1].replace('-',''):null, referencia:mRef?mRef[1]:null, tipo, tipoNome:tipo?LANCCTB_ICMS_TIPOS[tipo]:null, dua:true }, composicao:null, competencia:mRef?mRef[1]:null });
+    } else if(!t.trim()){ // página só imagem (ex.: GNRE do PR): OCR só desta página
+      try{
+        if(statusCb) statusCb(`GNRE em imagem (página ${pag}) — lendo por OCR…`);
+        const worker=await _lancctbOcrEmprestar();
+        try{ const page=await pdf.getPage(pag); const canvas=await _ganhoItauFundoRenderizarPagina(page,0,3); const { data } = await worker.recognize(canvas); const tx=String(data.text||'').replace(/\s+/g,' ');
+          const gn=_lancctbGnreDoTexto(tx), mt=tx.match(/total a recolher[^\d]{0,12}([\d.]+,\d{2})/i);
+          if(gn&&mt) guias.push({ pagina:pag, valor:_lancctbParseValorBR2(mt[1]), gnre:gn, composicao:null, competencia:gn.referencia, viaOcr:true });
+        } finally { _lancctbOcrDevolver(worker); }
+      }catch(e){ console.warn('GNRE em imagem: OCR da página '+pag+' falhou:',e); }
+    }
+  }
+  return guias.length>=2?guias:null;
+}
 // UF da guia pelo nome do arquivo ("… GNRE 07.2026 PR - vencimento …") quando o OCR não a trouxe
 function _lancctbGnreUfDoNome(nome){ const m=String(nome||'').match(/GNRE[^-]*?\b(AC|AL|AP|AM|BA|CE|DF|ES|GO|MA|MT|MS|MG|PA|PB|PR|PE|PI|RJ|RN|RS|RO|RR|SC|SP|SE|TO)\b/); return m?m[1]:null; }
 // ═══ ICMS por NF (DIFAL Não Contribuinte / Substituição Tributária) — pedido do usuário 27/10/2026 (Fast Lube) ═══════════════════════════════════════════════════════
@@ -35853,6 +35900,16 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
 }
 // O rótulo impresso na GNRE ("ICMS/ST POR APURAÇÃO") nem sempre diz o tipo real: a GNRE do PR 07/2026 (164) de R$ 3.792,03 é, na base, o DIFAL Não Contribuinte. Quando o valor total de UMA UNIDADE+UF+competência
 // fecha com exatidão num único tipo da base de ICMS, é esse o tipo (devolve null se não fecha ou se fecha em mais de um).
+// GNRE do PR traz DIFAL + ST na MESMA guia (código 100048 'ICMS/ST POR APURAÇÃO'): parte pelos totais da base de ICMS (UF + unidade + competência). Só parte quando a soma dos dois tipos
+// fecha EXATAMENTE (±0,02) com o valor da guia — devolve [{tipo,valor}] (DIFAL primeiro) ou null.
+function _lancctbIcmsPartirGuia(ctx,o){
+  if(!ctx||!o||!o.uf||!o.compet||!(o.valor>0)||!o.unidade) return null;
+  const mes=String(o.compet).slice(3)+'-'+String(o.compet).slice(0,2), por=new Map();
+  (ctx.rows[mes]||[]).filter(r=>r.uf===o.uf&&String(r.unidade)===String(o.unidade)).forEach(r=>por.set(r.tipo,(por.get(r.tipo)||0)+Math.round(r.valor*100)));
+  const difal=por.get(LANCCTB_ICMS_TIPOS.difal)||0, st=por.get(LANCCTB_ICMS_TIPOS.st)||0;
+  if(!difal||!st||Math.abs(difal+st-Math.round(o.valor*100))>2) return null;
+  return [{tipo:LANCCTB_ICMS_TIPOS.difal,valor:difal/100},{tipo:LANCCTB_ICMS_TIPOS.st,valor:st/100}];
+}
 function _lancctbIcmsTipoPorValor(ctx,o){
   if(!ctx||!o||!o.uf||!o.compet||!(o.valor>0)) return null;
   const mes=String(o.compet).slice(3)+'-'+String(o.compet).slice(0,2);
@@ -36015,11 +36072,14 @@ async function _lancctbProcessarTributos(){
     // nenhum bateu o valor — diagnósticos bem diferentes. Conta separado.
     if(!candidatos.length&&!l._soExato) semPdfNaPasta++;
     let achou=null, folga=null, quase=null;
-    for(const f of candidatos){
-      const chaveArquivo=(f._mesPasta||anoMes)+'|'+f.nome;
+    const filaCand=[...candidatos]; // PDF com várias GNREs: cada página-guia entra na fila logo depois do arquivo
+    for(let ci=0;ci<filaCand.length;ci++){
+      const f=filaCand[ci];
+      const chaveArquivo=f._pseudo?f._pseudo.chave:((f._mesPasta||anoMes)+'|'+f.nome);
       if(arquivosUsados.has(chaveArquivo)) continue;
       let extraido;
-      if(chaveArquivo in cacheLeituraPdf) extraido=cacheLeituraPdf[chaveArquivo];
+      if(f._pseudo) extraido=f._pseudo.extraido;
+      else if(chaveArquivo in cacheLeituraPdf) extraido=cacheLeituraPdf[chaveArquivo];
       else {
         try{
           const pdfDoc=await _lancctbAbrirPdfTributo(f.fileHandle);
@@ -36028,6 +36088,11 @@ async function _lancctbProcessarTributos(){
         cacheLeituraPdf[chaveArquivo]=extraido;
       }
       if(!extraido) continue;
+      if(extraido.multiGnre){
+        const unM=(String(f.nome||'').match(/\((\d+)\)/)||[])[1];
+        filaCand.splice(ci+1,0,...extraido.multiGnre.map(g=>({...f,_pseudo:{extraido:{...g.extraido,composicao:g.extraido.composicao&&unM?g.extraido.composicao.map(c=>({...c,denominacao:c.denominacao+' UN '+unM})):g.extraido.composicao},chave:chaveArquivo+'#p'+g.pagina}})));
+        continue;
+      }
       { const ufG=(extraido.gnre&&extraido.gnre.uf)||_lancctbGnreUfDoNome(f.nome), ufP=_lancctbUfDoTexto(l.historico_bancario); if(ufG&&ufP&&ufG!==ufP) continue; } // UF é filtro duro: pagamento "…SEFAZ ES" nunca casa com GNRE do PR
       if(!_lancctbJurisdicaoCompativel(l.historico_bancario,f.nome,extraido)) continue; // esfera diferente (ex.: histórico "PREF MUN" × DAE de ICMS estadual): nunca casa
       // Bate exato (±2,00) OU o pagamento é MAIOR que o tributo por até 30%
@@ -36120,7 +36185,12 @@ async function _lancctbProcessarTributos(){
     if(!achou){ if(!l._soExato) semAchado++; continue; }
     const info=_lancctbParsearNomeArquivoTributo(achou.f.nome);
     // GNRE de ICMS: o tipo real (ST × DIFAL) vem da base de ICMS quando o valor da guia fecha com um único tipo da UF/unidade/competência (ver _lancctbIcmsTipoPorValor).
-    if(achou.extraido&&achou.extraido.gnre&&icmsCtx){ try{
+    if(achou.extraido&&achou.extraido.gnre&&icmsCtx&&!achou.extraido.composicao){ try{
+      const gP=achou.extraido.gnre, unP=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1];
+      const partes=_lancctbIcmsPartirGuia(icmsCtx,{uf:gP.uf||_lancctbGnreUfDoNome(achou.f.nome),unidade:unP,compet:gP.referencia||_lancctbExtrairCompetenciaDoNome(achou.f.nome),valor:achou.extraido.valor});
+      if(partes){ achou.extraido={...achou.extraido,composicao:partes.map(x=>({codigo:x.tipo===LANCCTB_ICMS_TIPOS.difal?'100110':'100048',denominacao:x.tipo+(unP?' UN '+unP:''),valor:x.valor})),partidaPelaBase:true}; }
+    }catch(e){ console.warn('ICMS: partir guia pela base falhou:',e); } }
+    if(achou.extraido&&achou.extraido.gnre&&icmsCtx&&!achou.extraido.composicao&&!achou.extraido.gnre.tipoNome){ try{
       const g=achou.extraido.gnre, un=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1];
       const tr=_lancctbIcmsTipoPorValor(icmsCtx,{uf:g.uf||_lancctbGnreUfDoNome(achou.f.nome),unidade:un,compet:g.referencia||_lancctbExtrairCompetenciaDoNome(achou.f.nome),valor:achou.extraido.valor});
       if(tr){ g.tipoNome=tr; g.tipoPelaBase=true; }
