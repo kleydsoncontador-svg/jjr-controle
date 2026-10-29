@@ -1380,6 +1380,146 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     return { ok: true, resultado: { prazoMeses: meses, taxaAnual: 12 / prazoM, incisoAdotado: incisoII ? 'II' : 'I', mensal, ultima, valor, inicio: ymBr(ini), fim: ymBr(fim), mesesDep, depreciado, saldo }, memoria: mem.L, parametros: [], bases: CALC_BASES.filter(b => b.id === 'DEC_9580_ART322'), avisos };
   }
 
+  // ───────────────────────────── PRECIFICAÇÃO (pedido do usuário 28/10/2026) ─────────────────────────────
+  // Quatro formas: (1) markup "por dentro" (divisor), a correta quando impostos/comissões/lucro são % DO PREÇO; (2) markup "por fora" (multiplicador sobre o custo), com a margem REAL mostrada;
+  // (3) preço da HORA de serviço (custo-hora + por dentro); (4) análise: dado o preço, qual a margem. Aritmética exata (racionais), arredondamento único em centavos.
+  // Os percentuais de imposto são informados pelo usuário (não são parâmetros legais do sistema): Simples = alíquota efetiva do DAS; Presumido/Real = soma dos tributos sobre a venda.
+  const num0 = v => { const t = String(v == null ? '' : v).trim().replace(/\./g, '').replace(',', '.'); const x = parseFloat(t); return isFinite(x) ? x : NaN; };
+  function calcPrecificacao(inp) {
+    const metodo = inp.metodo || 'por_dentro';
+    const mem = Mem(), avisos = [];
+    const vazio = k => inp[k] === undefined || inp[k] === null || String(inp[k]).trim() === '';
+    const P = k => { if (vazio(k)) return Q(0); const x = pct(inp[k]); if (x.n < 0n) throw new Error('Percentual negativo não é aceito (' + k + ').'); return x; };
+    const qDiv = (a, b) => Q(a.n * b.d, a.d * b.n);
+    const qNum = q => Number(q.n) / Number(q.d);
+    const pTxt = q => (qNum(q) * 100).toLocaleString('pt-BR', { maximumFractionDigits: 4 }) + '%';
+    const nb = (x, mx) => x.toLocaleString('pt-BR', { maximumFractionDigits: mx == null ? 2 : mx });
+    const R = c => 'R$ ' + brl(c);
+    const item = (rot, q) => ({ rot, q });
+    // decompõe um preço (centavos) em custo + cada percentual + lucro, fechando exatamente (o lucro absorve o arredondamento)
+    const compor = (preco, custo, itens) => { const out = itens.map(it => ({ rot: it.rot, q: it.q, v: qRound(qMul(Q(preco), it.q)) })); const soma = out.reduce((a, o) => a + o.v, 0); return { out, lucro: preco - custo - soma }; };
+    const AV_IMP = 'Impostos: informe o percentual sobre a VENDA do seu regime. Simples Nacional → alíquota efetiva do DAS (use a calculadora do Simples); Lucro Presumido → PIS + Cofins + ISS/ICMS + IRPJ + CSLL sobre a receita; Lucro Real → conforme a apuração. O sistema não altera esse percentual.';
+
+    if (metodo === 'por_dentro') {
+      const custo = cents(inp.custo); if (!(custo > 0)) return ERR('Informe o custo do produto/serviço (R$).');
+      const qtd = vazio('quantidade') ? 1 : parseInt(inp.quantidade, 10); if (!(qtd >= 1)) return ERR('Quantidade inválida.');
+      const imp = P('impostosPct'), vari = P('variaveisPct'), fix = P('fixasPct'), luc = P('lucroPct');
+      const soma = qAdd(qAdd(imp, vari), qAdd(fix, luc));
+      const denom = qSub(Q(1), soma);
+      if (denom.n <= 0n) return ERR('A soma dos percentuais (' + pTxt(soma) + ') chega a 100% ou mais — nenhum preço cobre isso. Reduza impostos, comissões, despesas ou a margem.');
+      const preco = qRound(qMul(Q(custo), qDiv(Q(1), denom)));
+      const sem = qSub(Q(1), qAdd(qAdd(imp, vari), fix));
+      const minimo = sem.n > 0n ? qRound(qMul(Q(custo), qDiv(Q(1), sem))) : null;
+      const { out, lucro } = compor(preco, custo, [item('Impostos sobre a venda', imp), item('Despesas variáveis (comissão, frete, taxa de cartão)', vari), item('Despesas fixas rateadas', fix)]);
+      const mult = preco / custo;
+      mem.t('Preço de venda "por dentro" (markup divisor)');
+      mem.l('Custo do produto/serviço', custo);
+      mem.txt('Impostos sobre a venda', pTxt(imp)); mem.txt('Despesas variáveis', pTxt(vari)); mem.txt('Despesas fixas rateadas', pTxt(fix)); mem.txt('Lucro desejado', pTxt(luc));
+      mem.txt('Soma dos percentuais que incidem SOBRE O PREÇO', pTxt(soma));
+      mem.txt('Fator (1 − soma)', nb(qNum(denom), 6));
+      mem.l('Preço = custo ÷ (1 − soma dos %)', preco, '=');
+      mem.t('De onde sai cada real do preço');
+      mem.l('Custo', custo);
+      out.forEach(o => mem.l(o.rot + ' (' + pTxt(o.q) + ' do preço)', o.v, '+'));
+      mem.l('Lucro (' + nb(lucro * 100 / preco) + '% do preço)', lucro, '+', 'fica com o centavo de arredondamento');
+      mem.tot('PREÇO DE VENDA' + (qtd > 1 ? ' UNITÁRIO' : ''), preco);
+      if (qtd > 1) mem.l('Total para ' + qtd + ' unidades', preco * qtd, '×');
+      mem.t('Explicação');
+      mem.n('Por que "por dentro": impostos, comissão e lucro são percentuais DO PREÇO (e não do custo). Por isso o preço é custo ÷ (1 − soma dos %). Se você multiplicasse o custo por (1 + %), o lucro real sairia menor que o desejado.');
+      mem.n('Markup multiplicador: ' + nb(mult, 4) + ' (preço ÷ custo). O custo precisa ser multiplicado por ' + nb(mult, 4) + ' — equivale a um acréscimo de ' + nb((mult - 1) * 100) + '% sobre o custo.');
+      if (minimo != null) mem.n('Preço mínimo (lucro zero, só cobrindo custo, impostos e despesas): ' + R(minimo) + '. Abaixo disso você vende com prejuízo; entre ' + R(minimo) + ' e ' + R(preco) + ' dá lucro menor que o desejado.');
+      mem.n('Margem de contribuição por unidade (preço − custo − impostos − despesas variáveis): ' + R(preco - custo - out[0].v - out[1].v) + ' — é o que sobra para pagar as despesas fixas e dar lucro.');
+      if (!vazio('fixasPct')) mem.n('As despesas fixas entram como % do preço; esse % = despesas fixas do mês ÷ faturamento previsto do mês. Se vender menos que o previsto, o % real é maior e o lucro cai.');
+      avisos.push(AV_IMP);
+      if (qNum(soma) > 0.7) avisos.push('A soma dos percentuais passa de 70% do preço: o preço fica muito acima do custo (' + nb(mult, 2) + '×). Confira se os percentuais estão corretos.');
+      return { ok: true, resultado: { metodo, preco, custo, qtd, total: preco * qtd, impostos: out[0].v, variaveis: out[1].v, fixas: out[2].v, lucro, markupMult: mult, markupPctCusto: (mult - 1) * 100, precoMinimo: minimo, somaPct: qNum(soma) * 100 }, memoria: mem.L, parametros: [], bases: [], avisos };
+    }
+
+    if (metodo === 'por_fora') {
+      const custo = cents(inp.custo); if (!(custo > 0)) return ERR('Informe o custo do produto/serviço (R$).');
+      if (vazio('markupPct')) return ERR('Informe o markup sobre o custo (%).');
+      const mk = P('markupPct'), imp = P('impostosPct'), vari = P('variaveisPct'), fix = P('fixasPct');
+      const preco = qRound(qMul(Q(custo), qAdd(Q(1), mk)));
+      const { out, lucro } = compor(preco, custo, [item('Impostos sobre a venda', imp), item('Despesas variáveis', vari), item('Despesas fixas rateadas', fix)]);
+      const margem = lucro * 100 / preco, mkN = qNum(mk);
+      mem.t('Preço de venda "por fora" (markup sobre o custo)');
+      mem.l('Custo do produto/serviço', custo); mem.txt('Markup sobre o custo', pTxt(mk));
+      mem.l('Preço = custo × (1 + markup)', preco, '=');
+      mem.t('O que sobra de verdade (conferência)');
+      mem.l('Preço', preco); mem.l('(−) Custo', custo, '−');
+      out.forEach(o => mem.l('(−) ' + o.rot + ' (' + pTxt(o.q) + ' do preço)', o.v, '−'));
+      mem.tot('LUCRO REAL', lucro); mem.txt('Margem de lucro real sobre o preço', nb(margem) + '%');
+      mem.t('Explicação');
+      mem.n('Markup "por fora" = % somada AO CUSTO. É simples, mas ignora que impostos e comissões incidem sobre o PREÇO: quanto maiores esses percentuais, menor o lucro real em relação ao que o markup sugere.');
+      mem.n('Markup de ' + pTxt(mk) + ' sobre o custo dá margem BRUTA de ' + nb(mkN / (1 + mkN) * 100) + '% sobre o preço; depois de impostos e despesas a margem real ficou em ' + nb(margem) + '%.');
+      const somaD = qAdd(qAdd(imp, vari), fix), alvoQ = qDiv(mk, qAdd(Q(1), mk));
+      if (somaD.n > 0n) { const dn = qSub(qSub(Q(1), somaD), alvoQ); if (dn.n > 0n) mem.n('Para MANTER a margem de ' + nb(qNum(alvoQ) * 100) + '% sobre o preço depois dos impostos e despesas, o preço "por dentro" seria ' + R(qRound(qMul(Q(custo), qDiv(Q(1), dn)))) + ' (use o método "por dentro").'); }
+      if (lucro < 0) avisos.push('Com esses percentuais o preço dá PREJUÍZO de ' + R(-lucro) + ' por unidade. Aumente o markup ou use o método "por dentro".');
+      return { ok: true, resultado: { metodo, preco, custo, lucro, margemReal: margem, impostos: out[0].v, variaveis: out[1].v, fixas: out[2].v }, memoria: mem.L, parametros: [], bases: [], avisos };
+    }
+
+    if (metodo === 'hora') {
+      const ret = cents(inp.retiradaMensal), fixas = cents(inp.despesasFixasMensais), horas = num0(inp.horasMes);
+      if (!(ret > 0 || fixas > 0)) return ERR('Informe a retirada mensal desejada e/ou as despesas fixas do mês.');
+      if (!(horas > 0)) return ERR('Informe as horas produtivas (vendáveis) por mês — descontando reuniões, administração e ociosidade.');
+      const enc = P('encargosPct'), imp = P('impostosPct'), vari = P('variaveisPct'), luc = P('lucroPct');
+      const soma = qAdd(qAdd(imp, vari), luc), denom = qSub(Q(1), soma);
+      if (denom.n <= 0n) return ERR('A soma de impostos, despesas variáveis e lucro (' + pTxt(soma) + ') chega a 100% ou mais.');
+      const retEnc = qRound(qMul(Q(ret), qAdd(Q(1), enc)));
+      const custoMes = retEnc + fixas;
+      const horasQ = Q(Math.round(horas * 100), 100);
+      const custoHora = qRound(qDiv(Q(custoMes), horasQ));
+      const precoHora = qRound(qMul(Q(custoHora), qDiv(Q(1), denom)));
+      const hp = vazio('horasProjeto') ? 0 : num0(inp.horasProjeto);
+      const precoProj = hp > 0 ? qRound(qMul(Q(precoHora), Q(Math.round(hp * 100), 100))) : null;
+      const { out, lucro } = compor(precoHora, custoHora, [item('Impostos sobre a venda', imp), item('Despesas variáveis', vari)]);
+      const semLucro = qSub(Q(1), qAdd(imp, vari));
+      mem.t('Custo da hora de serviço');
+      mem.l('Retirada/salário mensal desejado', ret);
+      if (!vazio('encargosPct')) mem.l('(+) Encargos sobre a retirada (' + pTxt(enc) + ')', retEnc - ret, '+');
+      mem.l('(+) Despesas fixas do mês (aluguel, sistemas, contador…)', fixas, '+');
+      mem.l('Custo mensal total', custoMes, '=');
+      mem.txt('Horas produtivas (vendáveis) por mês', nb(horas, 2));
+      mem.l('Custo da hora = custo mensal ÷ horas produtivas', custoHora, '=');
+      mem.t('Preço da hora "por dentro"');
+      mem.txt('Impostos', pTxt(imp)); mem.txt('Despesas variáveis', pTxt(vari)); mem.txt('Lucro desejado', pTxt(luc));
+      mem.l('Preço da hora = custo da hora ÷ (1 − soma dos %)', precoHora, '=');
+      mem.l('Custo da hora', custoHora);
+      out.forEach(o => mem.l(o.rot + ' (' + pTxt(o.q) + ')', o.v, '+'));
+      mem.l('Lucro (' + nb(lucro * 100 / precoHora) + '% do preço)', lucro, '+');
+      mem.tot('PREÇO DA HORA', precoHora);
+      if (precoProj != null) { mem.t('Preço do projeto'); mem.txt('Horas estimadas', nb(hp, 2)); mem.tot('PREÇO DO PROJETO (' + nb(hp, 2) + ' h × ' + R(precoHora) + ')', precoProj); }
+      mem.t('Explicação');
+      mem.n('Horas produtivas são só as horas que você consegue COBRAR. Em geral 60% a 75% das horas de trabalho: o resto vai para reuniões, propostas, administração e tempo ocioso. Se usar todas as horas do mês, o preço da hora fica baixo demais.');
+      mem.n('Os encargos da retirada são os custos extras de quem trabalha com você (ex.: INSS patronal, FGTS, férias e 13º no caso de empregado). Para pró-labore de sócio, use o percentual que valer no seu caso.');
+      if (semLucro.n > 0n) mem.n('Preço mínimo da hora (lucro zero): ' + R(qRound(qMul(Q(custoHora), qDiv(Q(1), semLucro)))) + '. Abaixo disso cada hora vendida dá prejuízo.');
+      avisos.push(AV_IMP);
+      return { ok: true, resultado: { metodo, custoHora, precoHora, precoProjeto: precoProj, custoMes, horas, lucro }, memoria: mem.L, parametros: [], bases: [], avisos };
+    }
+
+    if (metodo === 'analise') {
+      const preco = cents(inp.preco), custo = cents(inp.custo);
+      if (!(preco > 0)) return ERR('Informe o preço de venda (R$).');
+      if (!(custo >= 0)) return ERR('Informe o custo (R$).');
+      const imp = P('impostosPct'), vari = P('variaveisPct'), fix = P('fixasPct');
+      const { out, lucro } = compor(preco, custo, [item('Impostos sobre a venda', imp), item('Despesas variáveis', vari), item('Despesas fixas rateadas', fix)]);
+      const margem = lucro * 100 / preco, sem = qSub(Q(1), qAdd(qAdd(imp, vari), fix));
+      const minimo = (sem.n > 0n && custo > 0) ? qRound(qMul(Q(custo), qDiv(Q(1), sem))) : null;
+      mem.t('Análise do preço de venda');
+      mem.l('Preço de venda', preco); mem.l('(−) Custo', custo, '−');
+      out.forEach(o => mem.l('(−) ' + o.rot + ' (' + pTxt(o.q) + ')', o.v, '−'));
+      mem.tot('LUCRO', lucro); mem.txt('Margem de lucro sobre o preço', nb(margem) + '%');
+      if (custo > 0) mem.txt('Markup sobre o custo (preço ÷ custo − 1)', nb((preco / custo - 1) * 100) + '%');
+      mem.t('Explicação');
+      mem.n('Margem = lucro ÷ preço de venda. Markup = acréscimo sobre o custo. São coisas diferentes: markup de 100% (preço = 2× o custo) dá margem de 50% antes de impostos e despesas.');
+      if (minimo != null) mem.n('Preço mínimo para não ter prejuízo (lucro zero): ' + R(minimo) + (preco < minimo ? ' — o preço atual está ABAIXO dele.' : '.'));
+      if (lucro < 0) avisos.push('Esse preço dá PREJUÍZO de ' + R(-lucro) + ' por unidade com os percentuais informados.');
+      avisos.push(AV_IMP);
+      return { ok: true, resultado: { metodo, preco, custo, lucro, margem, markupCusto: custo > 0 ? (preco / custo - 1) * 100 : null, precoMinimo: minimo }, memoria: mem.L, parametros: [], bases: [], avisos };
+    }
+    return ERR('Método de precificação desconhecido.');
+  }
+
   // ───────────────────────────── ANÁLISE DAS DEMONSTRAÇÕES — coeficientes (Domínio: Relatórios > Análises > Coeficientes) ─────────────────────────────
   // Todos os índices com a FÓRMULA mostrada ao lado do resultado. Saldos finais por padrão; "saldos médios" só quando marcado e o saldo anterior foi informado.
   // Índices cujo nome no Domínio não tem definição pública (a conferir pelo botão "Conteúdo…" do Domínio) estão marcados com nota.
@@ -1803,6 +1943,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { key: 'plr', cat: 'TRABALHISTA', nome: 'PLR — tributação exclusiva', fn: calcPLR },
     { key: 'pensao', cat: 'TRABALHISTA', nome: 'Pensão alimentícia', fn: calcPensao },
     { key: 'bens_usados', cat: 'CONTÁBIL / PATRIMONIAL', nome: 'Depreciação de bens usados', fn: calcBensUsados },
+    { key: 'precificacao', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Precificação — preço de venda (por dentro, por fora, hora e análise)', fn: calcPrecificacao },
     { key: 'ganho_capital_pf', cat: 'FEDERAL', nome: 'Ganho de capital — Pessoa Física', fn: calcGanhoCapitalPF },
     { key: 'variacao_patrimonial', cat: 'FEDERAL', nome: 'Variação patrimonial — Pessoa Física', fn: calcVariacaoPatrimonialPF },
     { key: 'juros_multa_selic', cat: 'FINANCEIRO / SOCIETÁRIO', nome: 'Juros, multa de mora e Selic (DARF em atraso)', fn: calcJurosMultaSelic },

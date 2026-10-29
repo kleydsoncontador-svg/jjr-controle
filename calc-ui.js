@@ -205,6 +205,28 @@
       { k: 'competenciaInicio', l: 'Mês inicial da depreciação (vazio = mês da aquisição)', t: 'month' },
       { k: 'competenciaSistema', l: 'Mês em que o SISTEMA contábil passou a depreciar (opcional) — calcula os meses já depreciados', t: 'month' }],
       resumo: r => [['Depreciação mensal', r.mensal, 1], ['Taxa anual (%)', (r.taxaAnual * 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 4 })], ['Prazo adotado (meses)', String(r.prazoMeses) + ' — inciso ' + r.incisoAdotado], ['Período', r.inicio + ' a ' + r.fim], ['Valor de aquisição', r.valor]].concat(r.mesesDep != null ? [['Meses já depreciados (sistema)', String(r.mesesDep)], ['Valor depreciado acumulado', r.depreciado], ['Saldo a depreciar', r.saldo]] : []) },
+    precificacao: { titulo: 'Precificação — preço de venda', desc: 'Quanto cobrar por um produto ou serviço. Quatro formas: POR DENTRO (a correta quando impostos, comissão e lucro são % do preço: preço = custo ÷ (1 − soma dos %)), POR FORA (markup somado ao custo, mostrando o lucro REAL que sobra), PREÇO DA HORA de serviço (custo-hora + por dentro) e ANÁLISE (já tenho o preço: qual é a margem?). Depois do cálculo vêm as explicações.', campos: [
+      { k: 'metodo', l: 'Forma de cálculo', t: 'select', def: 'por_dentro', opts: [['por_dentro', 'Por dentro (divisor) — recomendada'], ['por_fora', 'Por fora (markup sobre o custo)'], ['hora', 'Preço da hora de serviço'], ['analise', 'Análise: já tenho o preço, qual a margem?']] },
+      { k: 'custo', l: 'Custo do produto/serviço (R$) — o que você gasta pra ter 1 unidade (mercadoria, matéria-prima, mão de obra direta)', t: 'money', quando: v => v.metodo !== 'hora' },
+      { k: 'preco', l: 'Preço de venda atual (R$)', t: 'money', quando: v => v.metodo === 'analise' },
+      { k: 'quantidade', l: 'Quantidade (opcional — calcula o total)', t: 'int', def: 1, quando: v => v.metodo === 'por_dentro' },
+      { k: 'markupPct', l: 'Markup sobre o custo (%) — ex.: 100 = preço é o dobro do custo', t: 'pct', quando: v => v.metodo === 'por_fora' },
+      { k: 'retiradaMensal', l: 'Quanto você quer retirar por mês (R$) — salário/pró-labore desejado', t: 'money', quando: v => v.metodo === 'hora' },
+      { k: 'encargosPct', l: 'Encargos sobre essa retirada (%) — opcional', t: 'pct', quando: v => v.metodo === 'hora' },
+      { k: 'despesasFixasMensais', l: 'Despesas fixas do mês (R$) — aluguel, sistemas, contador, internet…', t: 'money', quando: v => v.metodo === 'hora' },
+      { k: 'horasMes', l: 'Horas PRODUTIVAS (que dá pra cobrar) por mês — ex.: 120', t: 'text', def: '', quando: v => v.metodo === 'hora' },
+      { k: 'horasProjeto', l: 'Horas estimadas de um projeto (opcional — calcula o preço do projeto)', t: 'text', def: '', quando: v => v.metodo === 'hora' },
+      { k: 'impostosPct', l: 'Impostos sobre a venda (%) — Simples: alíquota efetiva do DAS; Presumido/Real: PIS + Cofins + ISS/ICMS + IRPJ + CSLL', t: 'pct' },
+      { k: 'variaveisPct', l: 'Despesas variáveis (%) — comissão, frete, taxa de cartão (que mudam com a venda)', t: 'pct' },
+      { k: 'fixasPct', l: 'Despesas fixas rateadas (%) — despesas fixas do mês ÷ faturamento previsto do mês', t: 'pct', quando: v => v.metodo !== 'hora' },
+      { k: 'lucroPct', l: 'Lucro desejado (% do preço de venda)', t: 'pct', quando: v => v.metodo === 'por_dentro' || v.metodo === 'hora' }],
+      resumo: r => {
+        const pc = x => (x == null ? '—' : x.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%');
+        if (r.metodo === 'por_dentro') return [['Preço de venda' + (r.qtd > 1 ? ' (unitário)' : ''), r.preco, 1], ['Custo', r.custo], ['Impostos sobre a venda', r.impostos], ['Despesas variáveis', r.variaveis], ['Despesas fixas rateadas', r.fixas], ['Lucro', r.lucro], ['Markup multiplicador', r.markupMult.toLocaleString('pt-BR', { minimumFractionDigits: 4, maximumFractionDigits: 4 }) + '× (' + pc(r.markupPctCusto) + ' sobre o custo)'], ['Preço mínimo (lucro zero)', r.precoMinimo == null ? '—' : r.precoMinimo]].concat(r.qtd > 1 ? [['Total (' + r.qtd + ' un.)', r.total, 1]] : []);
+        if (r.metodo === 'por_fora') return [['Preço de venda', r.preco, 1], ['Custo', r.custo], ['Impostos sobre a venda', r.impostos], ['Despesas variáveis', r.variaveis], ['Despesas fixas rateadas', r.fixas], ['LUCRO REAL', r.lucro, 1], ['Margem real sobre o preço', pc(r.margemReal)]];
+        if (r.metodo === 'hora') return [['Custo da hora', r.custoHora], ['PREÇO DA HORA', r.precoHora, 1], ['Custo mensal total', r.custoMes], ['Horas produtivas/mês', String(r.horas)]].concat(r.precoProjeto != null ? [['PREÇO DO PROJETO', r.precoProjeto, 1]] : []);
+        return [['Lucro por unidade', r.lucro, 1], ['Margem sobre o preço', pc(r.margem)], ['Markup sobre o custo', pc(r.markupCusto)], ['Preço mínimo (lucro zero)', r.precoMinimo == null ? '—' : r.precoMinimo]];
+      } },
     pensao: { titulo: 'Pensão alimentícia', desc: 'Percentual sobre a base escolhida, ou valor fixo.', campos: [
       { k: 'modo', l: 'Base da pensão', t: 'select', def: 'bruto', opts: [['bruto', 'Rendimento bruto'], ['bruto_menos_inss', 'Bruto menos INSS'], ['liquido', 'Líquido (bruto − INSS − IRRF − outros)'], ['personalizada', 'Base personalizada (decisão judicial)'], ['fixo', 'Valor fixo']] },
       { k: 'rendimento', l: 'Rendimento bruto (R$)', t: 'money', quando: v => ['bruto', 'bruto_menos_inss', 'liquido'].includes(v.modo) },
