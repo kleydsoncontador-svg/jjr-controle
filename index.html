@@ -23956,6 +23956,12 @@ function _lancctbCnpjsDoTexto(txt){
   (t.replace(/\D+/g,' ').match(/\b\d{14}\b/g)||[]).forEach(c=>achados.add(c));
   return [...achados];
 }
+// CNPJ da mesma EMPRESA: igual, ou mesma RAIZ (8 primeiros dígitos) — matriz × filial (achado 29/10/2026, Super Troca: comprovante/Fluxo da matriz 06.352.893/0001-10 × NF 326052 da filial 06.352.893/0030-55, mesmo valor e parcela).
+function _lancctbCnpjMesmaRaiz(a,b){
+  const x=String(a||'').replace(/\D/g,''), y=String(b||'').replace(/\D/g,'');
+  if(!x||!y) return false;
+  return x===y||(x.length===14&&y.length===14&&x.slice(0,8)===y.slice(0,8));
+}
 function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorExtrato,permitirParcial){
   const numero=String(f.numero||f.documento_numero||'').trim().replace(/^0+/,'');
   if(!numero||!/^\d+$/.test(numero)) return null;
@@ -23968,7 +23974,7 @@ function _lancctbAcharParcelaPeloFluxo(f,parcelas,ehSaida,parcelasUsadas,valorEx
   if(!doNumero.length) return null;
   const compat=doNumero.filter(p=>{
     const nf=p.notas_fiscais;
-    if(cnpjF&&nf[campoCnpj]) return cnpjF===nf[campoCnpj];
+    if(cnpjF&&nf[campoCnpj]) return _lancctbCnpjMesmaRaiz(cnpjF,nf[campoCnpj]);
     if(_lancctbTokensNome(nomeRef).length) return String(nf[campoNome]||'').trim()&&_lancctbNomeCompativel([nomeRef],nf[campoNome]);
     return new Set(doNumero.map(x=>x.nf_id)).size===1; // sem nome no Fluxo: só se houver UMA NF com esse número
   });
@@ -24027,7 +24033,7 @@ function _lancctbParcelaIndicadaPeloFluxo(f,parcelas,ehSaida){
   const doNumero=parcelas.filter(p=>p.notas_fiscais&&p.notas_fiscais.direcao===(ehSaida?'compra':'venda')&&_lancctbNumeroNfBate(p.notas_fiscais.numero,numero));
   const compat=doNumero.filter(p=>{
     const nf=p.notas_fiscais;
-    if(cnpjF&&nf[campoCnpj]) return cnpjF===nf[campoCnpj];
+    if(cnpjF&&nf[campoCnpj]) return _lancctbCnpjMesmaRaiz(cnpjF,nf[campoCnpj]);
     if(_lancctbTokensNome(nomeRef).length) return String(nf[campoNome]||'').trim()&&_lancctbNomeCompativel([nomeRef],nf[campoNome]);
     return new Set(doNumero.map(x=>x.nf_id)).size===1;
   });
@@ -33549,7 +33555,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       }
       const nf=par.notas_fiscais;
       const cnpjT=ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario, nomeT=ehSaida?nf.nome_emitente:nf.nome_destinatario;
-      const compUsa=comprovanteMatch&&(ehPonteL||!comprovanteMatch.cnpj_cpf||comprovanteMatch.cnpj_cpf===cnpjT)?comprovanteMatch:null;
+      const compUsa=comprovanteMatch&&(ehPonteL||!comprovanteMatch.cnpj_cpf||_lancctbCnpjMesmaRaiz(comprovanteMatch.cnpj_cpf,cnpjT))?comprovanteMatch:null;
       l._fxJDM=ehSaida?{j:Number(f.valor_juros||0),m:Number(f.valor_multa||0),d:Number(f.valor_desconto||0)}:null;
       const { error } = await gerarLancamentoNF(l,valor,ehSaida,cnpjT,nomeT,nf.numero?[nf.numero]:[],compUsa,par.numero_parcela,par.id,par.valor_parcela);
       if(error){ if(desfazerParcial) await desfazerParcial(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); return false; }
@@ -34334,7 +34340,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // NF tem prioridade: se algum comprovante do grupo tem NF (mesmo CNPJ e valor
       // exato) disponível, não resolve por Regra — fica pra amarrar a NF.
       const temNfDisponivel=!bloqueiaNf&&gruposComprovantes.some(c=>c.cnpj_cpf&&parcelas.some(p=>!parcelasUsadas.has(p.id)&&p.notas_fiscais?.direcao===(ehSaida?'compra':'venda')
-        &&(ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario)===String(c.cnpj_cpf).replace(/\D/g,'')
+        &&_lancctbCnpjMesmaRaiz(ehSaida?p.notas_fiscais?.cnpj_emitente:p.notas_fiscais?.cnpj_destinatario,c.cnpj_cpf)
         &&Math.abs(p.valor_parcela-c.valor_pago)<=tolNF&&_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)));
       if(!temNfDisponivel&&resolucoesGrupo.every(rg=>rg.regra)){
         const historicosGrupo=resolucoesGrupo.map(rg=>rg.regra.historico_fixo||`${ehSaida?'Pagamento a':'Recebimento de'} ${rg.comprovante.cliente_fornecedor_nome||''}`.trim());
@@ -34456,7 +34462,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento,(cnpjExatoDoHistorico||_nomeForteExato)?LANCCTB_MATCH_JANELA_DIAS_NF:undefined)) return false;
       }
       if(cnpjAncora){
-        if(cnpjNf!==cnpjAncora) return false;
+        if(!_lancctbCnpjMesmaRaiz(cnpjNf,cnpjAncora)) return false;
       }
       return true;
     });
