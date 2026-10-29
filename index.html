@@ -35436,7 +35436,7 @@ async function _lancctbPreLerGuiasTributos(eid,pendencias,cacheLeituraPdf,cacheP
 // GNRE (Guia Nacional de Recolhimento de Tributos Estaduais — "Emissão de GNRE on-line", só imagem): lê UF favorecida, código da receita, período de referência e o tipo do ICMS pelas
 // "Informações Complementares" (ex.: "ICMS/ST POR APURAÇÃO - MES REF. 07/2026" → Substituição Tributária; DIFAL/consumidor final → DIFAL Não Contribuinte). Pedido do usuário 27/10/2026.
 function _lancctbGnreDoTexto(texto){
-  const t=String(texto||'').replace(/\s+/g,' ').replace(/(\d)\s*\/\s*(\d)/g,'$1/$2'); // "06 / 2026" → "06/2026"
+  const t=String(texto||'').replace(/\s+/g,' ').replace(/(\d)\s*\/\s*(\d)/g,'$1/$2').replace(/\b(\d{5})-(\d)\b/g,'$1$2'); // "06 / 2026" → "06/2026"; "10004-8" → "100048"
   if(!/GNRE|Guia Nacional de Recolhimento/i.test(t)) return null;
   // GNRE com texto nativo (pdf.js entrega os rótulos juntos e depois os valores): "UF Favorecida Código da Receita BA 100110"
   const mUfCod=t.match(/UF\s*Favorecida\s*C[óo]digo\s*da\s*Receita\s*([A-Z]{2})\s+(\d{6})\b/i);
@@ -35448,6 +35448,8 @@ function _lancctbGnreDoTexto(texto){
   let tipo=null;
   if(/DIFAL|DIFERENCIAL|CONSUMIDOR\s*FINAL|N[ÃA]O\s*CONTRIBUINTE/i.test(info)) tipo='difal';
   else if(/ICMS\s*\/?\s*ST|SUBSTITUI[ÇC][ÃA]O\s*TRIBUT/i.test(info)) tipo='st';
+  // Código da receita (confirmado pelo usuário 29/10/2026): 100110 = ICMS Consumidor Final Não Contribuinte (DIFAL); 100048 / 10004-8 = ICMS Substituição Tributária
+  if(!tipo&&mCod){ if(mCod[1]==='100110') tipo='difal'; else if(mCod[1]==='100048') tipo='st'; }
   return { uf:mUf?mUf[1]:null, codigo:mCod?mCod[1]:null, referencia:mRef?mRef[1]:null, tipo, tipoNome:tipo?LANCCTB_ICMS_TIPOS[tipo]:null };
 }
 // UF da guia pelo nome do arquivo ("… GNRE 07.2026 PR - vencimento …") quando o OCR não a trouxe
@@ -35771,10 +35773,14 @@ function _lancctbIcmsAcharPagamento(l,ctx){
   const [a,m]=String(l.data_pagamento||'').split('-').map(Number); if(!a||!m) return null;
   const mesAdd=k=>{ let y=a,mm=m+k; while(mm<1){mm+=12;y--;} while(mm>12){mm-=12;y++;} return y+'-'+String(mm).padStart(2,'0'); };
   const fx=(ctx.fluxo&&ctx.fluxo[l.id])||[], nfsFx=new Set(fx.map(x=>x.nf).filter(Boolean));
+  // PROVA DA UF (achado 29/10/2026, Fast Lube: pagamentos de GNRE de ES/RN/AM/GO… amarrados a NFs do PR só porque o valor era igual): NF individual só vale com a UF confirmada
+  // pelo histórico do banco, pelo Fluxo de Caixa ligado ou pelo nome do órgão no comprovante bancário. Sem prova, nunca amarra por valor sozinho.
+  const _ufsFx0=new Set(fx.map(x=>x.uf).filter(Boolean)), _ufsComp=(ctx.compUf&&ctx.compUf(l))||new Set();
+  const ufProva=ufH||(_ufsFx0.size===1?[..._ufsFx0][0]:null)||(_ufsComp.size===1?[..._ufsComp][0]:null);
   for(const k of [-1,0,-2]){
     const mes=mesAdd(k);
     const livres=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&(!ufH||r.uf===ufH));
-    let sing=livres.filter(r=>Math.round(r.valor*100)===cents);
+    let sing=ufProva?livres.filter(r=>r.uf===ufProva&&Math.round(r.valor*100)===cents):[];
     // ajuda do Fluxo de Caixa: a NF que a linha do Fluxo ligada a este extrato cita desempata candidatos iguais
     if(sing.length>1&&nfsFx.size){ const f2=sing.filter(r=>nfsFx.has(String(r.doc).replace(/^0+/,''))); if(f2.length) sing=f2; }
     if(sing.length){
@@ -35783,7 +35789,7 @@ function _lancctbIcmsAcharPagamento(l,ctx){
       return {rows:[sing[0]],mes};
     }
     const gs=new Map(); livres.forEach(r=>{ const key=r.tipo+'|'+r.uf+'|'+r.unidade; if(!gs.has(key)) gs.set(key,[]); gs.get(key).push(r); });
-    const ach=[...gs.values()].filter(g=>g.length>=2&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents);
+    const ach=[...gs.values()].filter(g=>g.length>=2&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents&&(g.length>=5||(ufProva&&g[0].uf===ufProva))); // poucas NFs somando igual é coincidência fácil: só com a UF provada
     if(ach.length===1) return {rows:ach[0],mes};
     if(ach.length>1) return {ambiguo:true};
   }
@@ -35843,6 +35849,16 @@ async function _lancctbIcmsCarregarCtx(eid,pendencias){
   (pendencias||[]).forEach(l=>{ const [a,m]=String(l.data_pagamento||'').split('-').map(Number); if(!a||!m) return; for(let k=-2;k<=0;k++){ let y=a,mm=m+k; while(mm<1){mm+=12;y--;} meses.add(y+'-'+String(mm).padStart(2,'0')); } });
   meses.forEach(mes=>{ const r=_lancctbIcmsLer(eid,mes); if(r.length){ ctx.rows[mes]=r; ctx.total+=r.length; } });
   if(ctx.total&&_supaClient){
+    // Comprovantes bancários do período: o nome do órgão ("SECRETARIA DE ESTADO DA FAZENDA … AM") dá a UF do pagamento (valor + data iguais ao do extrato)
+    try{
+      const ds=(pendencias||[]).map(l=>l.data_pagamento).filter(Boolean).sort();
+      if(ds.length){
+        const { data: cps } = await _lancctbFetchTudo(()=>_supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,valor_pago,lancamento_extrato_id').eq('empresa_eid',eid).gte('data_pagamento',ds[0]).lte('data_pagamento',ds[ds.length-1]));
+        const porChave=new Map(), porExt=new Map();
+        (cps||[]).forEach(c=>{ const uf=_lancctbUfDoTexto(c.cliente_fornecedor_nome||''); if(!uf) return; const k=c.data_pagamento+'|'+Math.round(Number(c.valor_pago||0)*100); if(!porChave.has(k)) porChave.set(k,new Set()); porChave.get(k).add(uf); if(c.lancamento_extrato_id){ if(!porExt.has(c.lancamento_extrato_id)) porExt.set(c.lancamento_extrato_id,new Set()); porExt.get(c.lancamento_extrato_id).add(uf); } });
+        ctx.compUf=l=>porExt.get(l.id)||porChave.get(l.data_pagamento+'|'+Math.round(Number(l.valor_saida||0)*100))||new Set();
+      }
+    }catch(e){ console.warn('ICMS: comprovantes não lidos:',e); }
     const ids=(pendencias||[]).map(l=>l.id);
     for(let i=0;i<ids.length;i+=200){
       try{
