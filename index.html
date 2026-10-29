@@ -36856,7 +36856,7 @@ async function _lancctbRodarBotao(nome,args){
   // Registra QUAL botão classificou (coluna "Processado por"): guarda o maior id antes e marca, depois, tudo o que nasceu durante o processamento.
   const _rotProc=_lancctbRotuloProcesso(nome,args); let _maxIdAntes=0;
   if(_rotProc){ try{ const { data: mx } = await _supaClient.from('lancamentos_contabeis').select('id').eq('empresa_eid',_lancctbEidAtual).order('id',{ascending:false}).limit(1); _maxIdAntes=(mx&&mx[0])?mx[0].id:0; }catch(e){} }
-  const _fimProc=async()=>{ if(_rotProc){ await _lancctbMarcarProcesso(_rotProc,_maxIdAntes); renderLancctbRegistroContabil(); } };
+  const _fimProc=async()=>{ window.__nfParcCache=null; if(_rotProc){ await _lancctbMarcarProcesso(_rotProc,_maxIdAntes); renderLancctbRegistroContabil(); } };
   if(!_lancctbRegistroTodas){ let r; try{ r=await fn.apply(null,args||[]); } finally { await _fimProc(); } if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
   if(_lancctbRodandoTodas){ toast('Já tem um processamento de todas as contas em andamento.','info'); return; }
   const ags=(_lancctbRegistroAgenciasCache||[]).slice();
@@ -37822,19 +37822,32 @@ async function renderLancctbRegistroContabil(){
         // só as parcelas de valor igual a algum pagamento mostrado interessam — o resultado na tela é idêntico.
         const _cents=new Set(); pendentes.forEach(it=>{ const c=Math.round((it.extrato.valor_saida||it.extrato.valor_entrada||0)*100); if(c>0) for(let d=-2;d<=2;d++) _cents.add(c+d); });
         const _vals=[..._cents].map(c=>(c/100).toFixed(2));
-        const partes=[]; for(let i=0;i<_vals.length;i+=200) partes.push(_vals.slice(i,i+200));
-        const out=[]; let erro=null;
-        for(let g=0;g<partes.length;g+=6){
-          const rs=await Promise.all(partes.slice(g,g+6).map(part=>_lancctbFetchTudoParalelo(()=>{
-            let q=_supaClient.from('notas_fiscais_parcelas')
-              .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,data_emissao)')
-              .eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('valor_parcela',part);
-            if(_dMinPnd) q=q.gte('data_vencimento',_dMinPnd);
-            if(_dMaxPnd) q=q.lte('data_vencimento',_dMaxPnd);
-            return q;
-          })));
-          rs.forEach(r=>{ if(r.error) erro=r.error; (r.data||[]).forEach(x=>out.push(x)); });
+        // Reaproveita o que já foi baixado (mesma empresa e mesma janela de datas, até 90 s e até a próxima rodada dos botões "Processar"): trocar de filtro não rebaixa tudo. Pedido que falha (erro 500/tempo) é repetido; nada é dado como "sem parcela" sem ter sido lido.
+        const _kNF=eid+'|'+_dMinPnd+'|'+_dMaxPnd; let _cNF=window.__nfParcCache;
+        if(!_cNF||_cNF.k!==_kNF||Date.now()-_cNF.t>90000) _cNF=window.__nfParcCache={k:_kNF,t:Date.now(),m:new Map()};
+        const _faltam=_vals.filter(v=>!_cNF.m.has(v));
+        const partes=[]; for(let i=0;i<_faltam.length;i+=200) partes.push(_faltam.slice(i,i+200));
+        let erro=null;
+        const _baixa=async(part)=>{
+          for(let tent=0;tent<3;tent++){
+            const r=await _lancctbFetchTudoParalelo(()=>{
+              let q=_supaClient.from('notas_fiscais_parcelas')
+                .select('id,data_vencimento,valor_parcela,notas_fiscais(direcao,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,data_emissao)')
+                .eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('valor_parcela',part);
+              if(_dMinPnd) q=q.gte('data_vencimento',_dMinPnd);
+              if(_dMaxPnd) q=q.lte('data_vencimento',_dMaxPnd);
+              return q;
+            });
+            if(!r.error){ const g=new Map(part.map(v=>[v,[]])); (r.data||[]).forEach(x=>{ const k=Number(x.valor_parcela).toFixed(2); if(g.has(k)) g.get(k).push(x); }); g.forEach((rows,v)=>_cNF.m.set(v,rows)); return null; }
+            if(tent<2) await new Promise(res=>setTimeout(res,600*(tent+1)));
+            else return r.error;
+          }
+        };
+        for(let g=0;g<partes.length;g+=4){
+          const rs=await Promise.all(partes.slice(g,g+4).map(_baixa));
+          rs.forEach(e=>{ if(e) erro=e; });
         }
+        const out=[]; _vals.forEach(v=>{ (_cNF.m.get(v)||[]).forEach(x=>out.push(x)); });
         return { data:out, error:erro };
       })(),
       // Pedido do usuário 09/09/2026: "preciso ter a coluna Fluxo de Caixa,
