@@ -31213,6 +31213,21 @@ async function _lancctbBuscarNfProLancamento(){
 // a UMA parcela de NF escolhida na busca acima — mesmo cálculo de conta
 // contrapartida/Regra por CNPJ do matching automático (gerarLancamentoNF em
 // _lancctbRodarMatching), mas disparado direto pelo clique do usuário.
+// ── Aprendizado do mês da NF (pedido do usuário 29/10/2026) ───────────────────────────────────────────────────────────────────────────────
+// Ao clicar "Usar esta" numa NF, o site guarda, POR EMPRESA E FORNECEDOR (raiz do CNPJ), quantos meses separam o vencimento da parcela escolhida e o mês do pagamento (0 = mesmo mês, 1 = vencia no mês anterior…).
+// Só vira PREFERÊNCIA DE DESEMPATE quando há 2+ escolhas e ao menos 70% iguais; nunca elimina uma NF que antes amarrava. Guardado em dados (chave lancctb_nfpref_<eid>) — pode ser apagado: sem ele, tudo volta ao que era.
+function _lancctbNfPrefMeses(dataPag,dataVenc){ const a=String(dataPag||'').slice(0,7).split('-').map(Number), b=String(dataVenc||'').slice(0,7).split('-').map(Number); if(a.length<2||b.length<2||!a[0]||!b[0]) return null; return (a[0]*12+a[1])-(b[0]*12+b[1]); }
+function _lancctbNfPrefRegistrar(eid,cnpj,dataVenc,dataPag){
+  const raiz=String(cnpj||'').replace(/\D/g,'').slice(0,8), d=_lancctbNfPrefMeses(dataPag,dataVenc); if(!raiz||d===null||d<-1||d>3) return;
+  const k='lancctb_nfpref_'+eid, todo=Object.assign({},S.g(k)||{}), m=todo[raiz]=Object.assign({n:{}},todo[raiz]||{}); m.n=Object.assign({},m.n); m.n[d]=(m.n[d]||0)+1; S.s(k,todo);
+}
+function _lancctbNfPrefAcerta(eid,cnpj,dataVenc,dataPag){
+  const raiz=String(cnpj||'').replace(/\D/g,'').slice(0,8); if(!raiz) return 0;
+  const m=(S.g('lancctb_nfpref_'+eid)||{})[raiz]; if(!m||!m.n) return 0;
+  let tot=0,best=0,bk=null; Object.entries(m.n).forEach(([k,v])=>{ tot+=v; if(v>best){ best=v; bk=k; } });
+  if(!(best>=2&&best/tot>=0.7)) return 0;
+  return _lancctbNfPrefMeses(dataPag,dataVenc)===Number(bk)?1:0;
+}
 async function _lancctbAssociarNfManual(parcelaId,btn){
   const r=_lancctbRegraExtratoAlvo;
   if(!r){ toast('Lançamento de origem não encontrado — feche e reabra o modal.','err'); return; }
@@ -31228,6 +31243,7 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     const nf=parcela.notas_fiscais;
     const cnpjTerceiro=ehSaida?nf?.cnpj_emitente:nf?.cnpj_destinatario;
     const nomeTerceiro=ehSaida?nf?.nome_emitente:nf?.nome_destinatario;
+    try{ _lancctbNfPrefRegistrar(eid,cnpjTerceiro,parcela.data_vencimento,r.data_pagamento); }catch(e){} // aprende o mês da NF escolhida (só desempate)
 
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
       .select('conta_contabil_id,plano_contas(classificacao)').eq('id',r.conta_bancaria_id).single();
@@ -34646,6 +34662,8 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       nfCandidatas.sort((a,b)=>{
         const diffValor=Math.abs(_lancctbNfValorParaMatching(a,valor)-valor)-Math.abs(_lancctbNfValorParaMatching(b,valor)-valor);
         if(Math.abs(diffValor)>0.005) return diffValor;
+        const pa=_lancctbNfPrefAcerta(eid,ehSaida?a.notas_fiscais?.cnpj_emitente:a.notas_fiscais?.cnpj_destinatario,a.data_vencimento,l.data_pagamento), pb=_lancctbNfPrefAcerta(eid,ehSaida?b.notas_fiscais?.cnpj_emitente:b.notas_fiscais?.cnpj_destinatario,b.data_vencimento,l.data_pagamento);
+        if(pa!==pb) return pb-pa; // mês da NF aprendido pelos cliques em "Usar esta" (só desempate)
         return _lancctbDiffDias(a.data_vencimento,l.data_pagamento)-_lancctbDiffDias(b.data_vencimento,l.data_pagamento);
       });
       const escolhida=nfCandidatas[0];
