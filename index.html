@@ -26934,7 +26934,7 @@ async function _lancctbExtrairValorPdfTributoBase(pdf,permitirIA,statusCb){
   if(generico!=null){
     const r={ valor:generico, composicao:null };
     // GNRE com texto nativo: lê código da receita, UF e referência (antes só o OCR fazia isso — 29/10/2026, Fast Lube GNRE 163/164)
-    try{ const its=await _lancctbExtrairItensPagina(await pdf.getPage(1)); const gn=_lancctbGnreDoTexto(its.map(it=>it.str).join(' ')); if(gn){ r.gnre=gn; if(gn.referencia) r.competencia=gn.referencia; } }catch(e){}
+    try{ const its=await _lancctbExtrairItensPagina(await pdf.getPage(1)); const txtP=its.map(it=>it.str).join(' '); const gn=_lancctbGnreDoTexto(txtP); if(gn){ r.gnre=gn; if(gn.referencia) r.competencia=gn.referencia; } const dr=_lancctbDareSpDoTexto(txtP); if(dr) r.dare=dr; }catch(e){}
     return r;
   }
   try{
@@ -35457,6 +35457,13 @@ function _lancctbGnreDoTexto(texto){
   if(!tipo&&mCod){ if(mCod[1]==='100110') tipo='difal'; else if(mCod[1]==='100048') tipo='st'; }
   return { uf:mUf?mUf[1]:null, codigo:mCod?mCod[1]:null, referencia:mRef?mRef[1]:null, tipo, tipoNome:tipo?LANCCTB_ICMS_TIPOS[tipo]:null };
 }
+// DARE-SP (Fazenda de São Paulo): "01 - Código de Receita – Descrição | 046-2 | ICMS – regime periódico de apuração | 02 - Código do Serviço". Pedido do usuário 30/10/2026: código + descrição vão pro histórico e pro gatilho (com a unidade do nome do arquivo).
+function _lancctbDareSpDoTexto(texto){
+  const t=String(texto||'').replace(/\s*\|\s*/g,' ').replace(/\s+/g,' ');
+  if(!/DARE-?SP|Documento de Arrecada[çc][ãa]o de Receitas Estaduais/i.test(t)) return null;
+  const m=t.match(/C[óo]digo de Receita\s*[–-]\s*Descri[çc][ãa]o\s*(\d{3}-\d)\s+(.+?)\s+02\s*-\s*C[óo]digo do Servi[çc]o/i);
+  return m?{ codigo:m[1], descricao:m[2].trim() }:null;
+}
 // ── PDF com VÁRIAS GNREs dentro (pedido do usuário 29/10/2026, Fast Lube 163/164: uma GNRE por UF/receita no mesmo arquivo, mais DUA do ES e GNRE múltipla do RJ) ──
 // Cada GNRE vira uma guia própria {valor, gnre, composicao?}; o motor de Processar Tributos casa o pagamento com a guia certa (valor exato) e não com o arquivo todo.
 const LANCCTB_GNRE_COD_TIPO={ '100110':'difal', '100048':'st' }; // 100110 = ICMS Consumidor Final Não Contribuinte (DIFAL); 100048 = ICMS Substituição Tributária
@@ -36309,7 +36316,8 @@ async function _lancctbProcessarTributos(){
     const _parcG=achou.extraido&&achou.extraido.parcelamento;
     const _gnG=achou.extraido&&achou.extraido.gnre;
     const _unGuia=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1], _ehGnreGuia=!!_gnG||/GNRE/i.test(String(achou.f.nome||''));
-    const palheiroGuia=[info.descricao,_nlR.nomeCompleto,_nlR.token,...(_gnG&&_gnG.tipoNome?[_gnG.tipoNome]:[]),...(_unGuia&&_gnG&&_gnG.tipoNome?[_gnG.tipoNome+' UN '+_unGuia]:[]),...(_unGuia&&_ehGnreGuia?['GNRE UN '+_unGuia]:[]),...(_gnG&&_gnG.codigo?['GNRE cód. '+_gnG.codigo,...(_unGuia?['GNRE cód. '+_gnG.codigo+' UN '+_unGuia]:[]),...(_gnG.tipoNome?[_gnG.tipoNome+' cód. '+_gnG.codigo,...(_unGuia?[_gnG.tipoNome+' cód. '+_gnG.codigo+' UN '+_unGuia]:[])]:[])]:[]),...((achou.extraido&&achou.extraido.composicao)||[]).flatMap(c=>[c.denominacao,String(c.denominacao||'').split(' - ')[0],String(c.denominacao||'').split(' - ')[0]+' cód. '+c.codigo,c.denominacao+' cód. '+c.codigo])].filter(Boolean).join(' | ').toLowerCase();
+    const _drG=achou.extraido&&achou.extraido.dare;
+    const palheiroGuia=[info.descricao,_nlR.nomeCompleto,_nlR.token,...(_drG?[_drG.descricao,_drG.descricao+' cód. '+_drG.codigo,...(_unGuia?[_drG.descricao+' cód. '+_drG.codigo+' UN '+_unGuia,_drG.descricao+' UN '+_unGuia]:[])]:[]),...(_gnG&&_gnG.tipoNome?[_gnG.tipoNome]:[]),...(_unGuia&&_gnG&&_gnG.tipoNome?[_gnG.tipoNome+' UN '+_unGuia]:[]),...(_unGuia&&_ehGnreGuia?['GNRE UN '+_unGuia]:[]),...(_gnG&&_gnG.codigo?['GNRE cód. '+_gnG.codigo,...(_unGuia?['GNRE cód. '+_gnG.codigo+' UN '+_unGuia]:[]),...(_gnG.tipoNome?[_gnG.tipoNome+' cód. '+_gnG.codigo,...(_unGuia?[_gnG.tipoNome+' cód. '+_gnG.codigo+' UN '+_unGuia]:[])]:[])]:[]),...((achou.extraido&&achou.extraido.composicao)||[]).flatMap(c=>[c.denominacao,String(c.denominacao||'').split(' - ')[0],String(c.denominacao||'').split(' - ')[0]+' cód. '+c.codigo,c.denominacao+' cód. '+c.codigo])].filter(Boolean).join(' | ').toLowerCase();
     const guiaComVariosItens=!!(achou.extraido&&achou.extraido.composicao&&achou.extraido.composicao.length>=2);
     const _regrasDaGuia=guiaComVariosItens?[]:regras.filter(r=>{
       if(r.agencia_bancaria_id&&String(r.agencia_bancaria_id)!==String(contaId)) return false;
@@ -36318,7 +36326,7 @@ async function _lancctbProcessarTributos(){
       if(mParc) return !!_parcG&&String(_parcG.numero).toLowerCase()===mParc[1].toLowerCase();
       return r.historico_gatilho&&palheiroGuia.includes(r.historico_gatilho.toLowerCase());
     });
-    if(_unGuia&&_ehGnreGuia) _regrasDaGuia.sort((a,b)=>String(b.historico_gatilho||'').length-String(a.historico_gatilho||'').length); // GNRE: a Regra da unidade ("... UN 163") vence a geral
+    if(_unGuia&&(_ehGnreGuia||_drG)) _regrasDaGuia.sort((a,b)=>String(b.historico_gatilho||'').length-String(a.historico_gatilho||'').length); // GNRE: a Regra da unidade ("... UN 163") vence a geral
     // guia de ISS RETIDO: se existe uma Regra "ISS Retido" ela vence a Regra genérica "ISS" (que também casa com o nome da guia); nos demais casos vale a 1ª, como sempre
     // a Regra de PARCELAMENTO (gatilho "Parcelamento <nº>", exata) vence qualquer Regra genérica que também case (ex.: "ICMS")
     const regra=(_parcG&&_regrasDaGuia.find(r=>/^parcelamento\s+\S+$/i.test(String(r.historico_gatilho||'').trim())))||(_nlR.token==='ISS RETIDO'&&_regrasDaGuia.find(r=>/retid/i.test(r.historico_gatilho)))||_regrasDaGuia[0]||null;
@@ -36387,7 +36395,8 @@ async function _lancctbProcessarTributos(){
         // GNRE sem o tipo do ICMS identificado (pedido 29/10/2026): o histórico leva código da receita, UF e unidade ("GNRE cód. 100102 UF PA UN 163") e o gatilho leva a UNIDADE ("GNRE UN 163"), porque cada unidade tem conta própria.
         const _ehGnre1=!!_gn1||/GNRE/i.test(String(achou.f.nome||''));
         const _ufG1=(_gn1&&_gn1.uf)||_lancctbGnreUfDoNome(achou.f.nome);
-        const nomeGuia=(_gn1&&_gn1.tipoNome?`${_gn1.tipoNome}${_gn1.codigo?' cód. '+_gn1.codigo:''}${_ufG1?' UF '+_ufG1:''}${_un1?' UN '+_un1:''}`:(_ehGnre1?`GNRE${_gn1&&_gn1.codigo?' cód. '+_gn1.codigo:''}${_ufG1?' UF '+_ufG1:''}${_un1?' UN '+_un1:''}`:(_lancctbNomeTributoLegivel(info.descricao).nomeCompleto||info.descricao||''))).trim();
+        const _dr1=achou.extraido&&achou.extraido.dare;
+        const nomeGuia=(_dr1?`${_dr1.descricao} cód. ${_dr1.codigo}${_un1?' UN '+_un1:''}`:_gn1&&_gn1.tipoNome?`${_gn1.tipoNome}${_gn1.codigo?' cód. '+_gn1.codigo:''}${_ufG1?' UF '+_ufG1:''}${_un1?' UN '+_un1:''}`:(_ehGnre1?`GNRE${_gn1&&_gn1.codigo?' cód. '+_gn1.codigo:''}${_ufG1?' UF '+_ufG1:''}${_un1?' UN '+_un1:''}`:(_lancctbNomeTributoLegivel(info.descricao).nomeCompleto||info.descricao||''))).trim();
         // Pedido do usuário 25/09/2026: o gatilho é o que CONSTA NA GUIA (denominação
         // do imposto dentro do PDF, ex: "CP DESCONTADA SEGURADO"; DAS/TFE sem
         // código: o nome do tributo), nunca um pedaço do nome do arquivo ("Guia",
@@ -36396,7 +36405,7 @@ async function _lancctbProcessarTributos(){
         const nlg=_lancctbNomeTributoLegivel(info.descricao);
         // Guia de PARCELAMENTO com número impresso: o gatilho é "Parcelamento <nº>" — o nome do arquivo muda todo mês ("32ª Parcela… 09.2026" → "33ª…"), o número do parcelamento não.
         const parc1=achou.extraido&&achou.extraido.parcelamento;
-        const gatilhoGuia=parc1?('Parcelamento '+parc1.numero):(_gn1&&_gn1.tipoNome?_gn1.tipoNome+(_gn1.codigo?' cód. '+_gn1.codigo:'')+(_un1?' UN '+_un1:''):(_ehGnre1&&!c0g?'GNRE'+(_gn1&&_gn1.codigo?' cód. '+_gn1.codigo:'')+(_un1?' UN '+_un1:''):c0g?String(c0g.denominacao).split(' - ')[0].trim():(nlg.token||nomeGuia))||nomeGuia);
+        const gatilhoGuia=parc1?('Parcelamento '+parc1.numero):(_dr1?nomeGuia:_gn1&&_gn1.tipoNome?_gn1.tipoNome+(_gn1.codigo?' cód. '+_gn1.codigo:'')+(_un1?' UN '+_un1:''):(_ehGnre1&&!c0g?'GNRE'+(_gn1&&_gn1.codigo?' cód. '+_gn1.codigo:'')+(_un1?' UN '+_un1:''):c0g?String(c0g.denominacao).split(' - ')[0].trim():(nlg.token||nomeGuia))||nomeGuia);
         const semMarca1=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
         // DARF de 1 imposto (ex: CP DESCONTADA SEGURADO cód. 1099): o nome vem
         // da denominação DENTRO do PDF, com código — igual à guia composta
