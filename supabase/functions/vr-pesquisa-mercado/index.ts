@@ -21,7 +21,11 @@ function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function chamarGemini(prompt: string): Promise<string> {
+type Fonte = { titulo: string; url: string };
+
+// comBusca = true liga a pesquisa do Google (grounding): o Gemini consulta a web de verdade e devolve os sites usados.
+// Nesse modo não dá pra forçar responseMimeType JSON junto com a ferramenta, então o JSON é extraído do texto.
+async function chamarGemini(prompt: string, comBusca = false): Promise<{ raw: string; fontes: Fonte[] }> {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
 
@@ -35,7 +39,9 @@ async function chamarGemini(prompt: string): Promise<string> {
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify({
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
-          generationConfig: { responseMimeType: 'application/json', temperature: 0.4 },
+          ...(comBusca
+            ? { tools: [{ google_search: {} }], generationConfig: { temperature: 0.3 } }
+            : { generationConfig: { responseMimeType: 'application/json', temperature: 0.4 } }),
         }),
       }
     );
@@ -43,7 +49,13 @@ async function chamarGemini(prompt: string): Promise<string> {
       const data = await resp.json();
       const raw = data?.candidates?.[0]?.content?.parts?.find((p: any) => typeof p.text === 'string')?.text || '';
       if (!raw) throw new Error('Gemini não retornou texto — resposta: ' + JSON.stringify(data).slice(0, 300));
-      return raw;
+      const fontes: Fonte[] = [];
+      const vistos = new Set<string>();
+      for (const c of data?.candidates?.[0]?.groundingMetadata?.groundingChunks || []) {
+        const url = c?.web?.uri;
+        if (url && !vistos.has(url)) { vistos.add(url); fontes.push({ titulo: c.web.title || url, url }); }
+      }
+      return { raw, fontes };
     }
     const errText = await resp.text();
     ultimoErro = 'Erro na API da IA (Gemini, ' + resp.status + '): ' + errText.slice(0, 300);
@@ -78,7 +90,7 @@ Vida útil estimada: ${vidaUtilAnos ?? ''} anos
 
 Atenção: a descrição do ativo vem direto da nota fiscal e costuma vir abreviada com jargão/códigos internos do fornecedor (sigla de modelo, cor, tecido, acabamento, medidas) — não é uma frase em português natural. NÃO tente decifrar cada sigla isoladamente nem invente um tipo de produto diferente a partir de uma palavra ambígua (ex: não conclua "equipamento de pintura" só porque aparece algo como "PINT" ou "TINTA" na descrição). Use a Categoria contábil acima como referência principal do tipo de bem, e a descrição apenas como pista de modelo/acabamento dentro dessa categoria.
 
-Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usados, e responda SOMENTE com um JSON válido, exatamente neste formato:
+Pesquise na web (anúncios e lojas brasileiras de itens novos e usados equivalentes) e baseie as faixas de preço no que encontrar; se não achar item equivalente, diga isso em analise_demanda em vez de inventar. Responda SOMENTE com um JSON válido, exatamente neste formato:
 
 {
   "mercado": {
@@ -106,9 +118,18 @@ Pesquise, com base no seu conhecimento do mercado brasileiro de bens novos e usa
 
 Use valores realistas para o mercado brasileiro — não invente números absurdos, e mantenha conservador_pct < realista_pct < otimista_pct.`;
 
-    let raw = await chamarGemini(prompt);
-    raw = raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
+    let resposta: { raw: string; fontes: Fonte[] };
+    try {
+      resposta = await chamarGemini(prompt, true);
+    } catch (_e) {
+      resposta = await chamarGemini(prompt, false); // sem a pesquisa: estimativa da IA, sem fontes
+    }
+    let raw = resposta.raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
+    const ini = raw.indexOf('{'), fim = raw.lastIndexOf('}');
+    if (ini >= 0 && fim > ini) raw = raw.slice(ini, fim + 1);
     const dados = JSON.parse(raw);
+    dados.fontes = resposta.fontes.slice(0, 12);
+    dados.pesquisaWeb = resposta.fontes.length > 0;
 
     return new Response(JSON.stringify(dados), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
