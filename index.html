@@ -31787,7 +31787,7 @@ async function aceitarLancctbFluxoSugestao(extratoId){
   try{ const eidM=_lancctbEidAtual, atuais=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); ids.forEach(i=>atuais.add(i)); S.s('lancctb_fluxo_manual_'+eidM,[...atuais]); }catch(e){}  // associação aceita à mão não é desfeita pelo Processar Fluxo
   // Composição de TRIBUTO (soma exata do Fluxo): o valor do extrato abre em linhas no Registro Contábil (1 crédito banco : N débitos), uma por linha do Fluxo.
   if(c.tributo&&item.extrato.valor_saida>0&&!(item.extrato.composicao_tributo||[]).length){
-    const comp=c.itens.map(f=>({codigo:String(f.documento_numero||f.numero||'').trim()||null,denominacao:String(f.descricao||'').trim(),encargo:null,uf:null,valor:Math.round((f.valor_saida||0)*100)/100,resumo:String(f.descricao||'').trim().slice(0,120),competencia:null}));
+    const comp=c.itens.map(f=>({codigo:null,denominacao:String(f.descricao||'').trim(),encargo:null,uf:null,valor:Math.round((f.valor_saida||0)*100)/100,resumo:String(f.descricao||'').trim().slice(0,120),competencia:null}));
     const hist=`[TRIBUTO COMPOSTO: ${comp.map(x=>x.resumo+' '+_fmt(x.valor)).join(' + ')}] `+String(item.extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
     const { error: eC } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',extratoId);
     if(eC) toast('Fluxo associado, mas não consegui abrir a composição em linhas: '+eC.message,'err');
@@ -37133,7 +37133,7 @@ function _lancctbInlineAtualizarTotal(extratoId,valorTotal){
   let soma=0;
   comp.forEach((c,idx)=>{
     const v=document.getElementById(`lancctbInlineValor_${extratoId}_${idx}`);
-    if(v) soma+=_lancctbParseValorInput(v.value);
+    if(v) soma+=(c&&c.lado==='inverso'?-1:1)*_lancctbParseValorInput(v.value);
   });
   const feedback=document.getElementById(`lancctbInlineTotal_${extratoId}`);
   if(!feedback) return;
@@ -37160,9 +37160,9 @@ async function _lancctbRegistroSalvarInline(extratoId){
     const valorInput=document.getElementById(`lancctbInlineValor_${extratoId}_${idx}`);
     const contaId=contaSel?contaSel.value:'';
     if(!contaId){ toast('Selecione a conta em todas as linhas.','err'); return; }
-    linhasContrapartida.push({ conta_contabil_id:contaId, historico:(histInput?histInput.value.trim():''), valor:_lancctbParseValorInput(valorInput?valorInput.value:'0') });
+    linhasContrapartida.push({ conta_contabil_id:contaId, historico:(histInput?histInput.value.trim():''), valor:_lancctbParseValorInput(valorInput?valorInput.value:'0'), inverso:comp[idx]&&comp[idx].lado==='inverso' });
   }
-  const soma=linhasContrapartida.reduce((s,l)=>s+(l.valor||0),0);
+  const soma=linhasContrapartida.reduce((s,l)=>s+(l.inverso?-1:1)*(l.valor||0),0);
   if(Math.abs(soma-valorTotal)>0.01){ toast('A soma das linhas precisa bater com o valor do lançamento.','err'); return; }
   const btnSalvar=document.getElementById(`lancctbInlineSalvarBtn_${extratoId}`);
   if(btnSalvar) btnSalvar.disabled=true;
@@ -37247,14 +37247,14 @@ async function _lancctbRegistroSalvarInline(extratoId){
     const resp=await _supaClient.from('regras_matching').insert({ ...registro, created_by:_lancctbCriadorRegra() }).select('id').single();
     if(resp.error){ toast('Erro ao criar regra: '+resp.error.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
     regraSalva=resp.data;
-    await _lancctbSalvarLinhasRateio(regraSalva.id,linhasContrapartida,dc);
+    await _lancctbSalvarLinhasRateio(regraSalva.id,linhasContrapartida.filter(l=>!l.inverso),dc); // a linha de lado oposto (diferença) é pontual: não vira rateio da Regra
   }
   const linhas=[
     { empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor:valorTotal, historico:historicoBanco, lancamento_extrato_id:r.id, regra_matching_id:regraSalva.id, origem_match:'regra' },
   ];
   linhasContrapartida.forEach((l,idxL)=>{
     const conta=contasPorId.get(String(l.conta_contabil_id));
-    linhas.push({ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:conta?.classificacao||'', conta_contabil_id:l.conta_contabil_id, tipo:dc, valor:l.valor, historico:l.historico, lancamento_extrato_id:r.id, regra_matching_id:regrasPorItem?regrasPorItem[idxL]:regraSalva.id, origem_match:'regra' });
+    linhas.push({ empresa_eid:_lancctbEidAtual, data:r.data_pagamento, classificacao:conta?.classificacao||'', conta_contabil_id:l.conta_contabil_id, tipo:l.inverso?(dc==='D'?'C':'D'):dc, valor:l.valor, historico:l.historico, lancamento_extrato_id:r.id, regra_matching_id:regrasPorItem?regrasPorItem[idxL]:regraSalva.id, origem_match:'regra' });
   });
   const { error: erroLanc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{linhas});
   if(erroLanc){ toast('Erro ao gerar lançamento: '+erroLanc.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
@@ -37302,7 +37302,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
     <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(valor)}</td>
     <td style="padding:6px 8px;font-size:10.5px;line-height:1.25;white-space:normal;word-break:break-word" title="${esc(r.historico_bancario||'')}">${esc(r.historico_bancario||'')}</td>
     <td colspan="2" style="padding:7px 6px;text-align:center;white-space:nowrap"><button class="btn bp bsm" id="lancctbInlineSalvarBtn_${r.id}" onclick="_lancctbRegistroSalvarInline(${r.id})">✓ Salvar</button> <button class="btn bo bsm" title="O sistema marcou este pagamento como 'composição de guias' e a leitura está errada: desfaz a marca, tira a composição e devolve o lançamento ao histórico original do banco (nada é lançado)" onclick="_lancctbDesfazerMarcaTributo(${r.id})">↩ Desfazer marca</button></td>
-    <td colspan="9" style="padding:7px 14px;font-size:11.5px;color:var(--slate);white-space:nowrap" id="lancctbInlineTotal_${r.id}">Soma: <strong>R$ ${_fmt(comp.reduce((s,c)=>s+(c.valor||0),0))}</strong> / <strong>R$ ${_fmt(valor)}</strong> <span style="color:var(--teal)">✓ bate</span></td>
+    <td colspan="9" style="padding:7px 14px;font-size:11.5px;color:var(--slate);white-space:nowrap" id="lancctbInlineTotal_${r.id}">Soma: <strong>R$ ${_fmt(comp.reduce((s,c)=>s+(c.lado==='inverso'?-1:1)*(c.valor||0),0))}</strong> / <strong>R$ ${_fmt(valor)}</strong> <span style="color:var(--teal)">✓ bate</span></td>
   </tr>`;
   const selectCell=`<td colspan="2" style="padding:4px 10px 4px 24px"><select class="si" id="lancctbInlineConta_${r.id}_@@IDX@@" style="width:100%;font-size:11.5px">${optsHtml}</select></td>`;
   const blankGroup='<td colspan="2"></td>';
@@ -37310,8 +37310,8 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
     const cSug=c.conta_contabil_id||(c.origem==='folha'?_lancctbContaPorRegraParte(c.historico):null); // conta do líquido, ou a da Regra que casa com o histórico da parte (ex.: "Diferença folha")
     html+=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)">
       <td></td><td></td>
-      ${(bancoEhD?blankGroup:selectCell).replace('@@IDX@@',idx).replace(cSug?`<option value="${cSug}"`:'@@NUNCA@@',`<option value="${cSug}" selected`)}
-      ${(bancoEhD?selectCell:blankGroup).replace('@@IDX@@',idx).replace(cSug?`<option value="${cSug}"`:'@@NUNCA@@',`<option value="${cSug}" selected`)}
+      ${((bancoEhD!==(c.lado==='inverso'))?blankGroup:selectCell).replace('@@IDX@@',idx).replace(cSug?`<option value="${cSug}"`:'@@NUNCA@@',`<option value="${cSug}" selected`)}
+      ${((bancoEhD!==(c.lado==='inverso'))?selectCell:blankGroup).replace('@@IDX@@',idx).replace(cSug?`<option value="${cSug}"`:'@@NUNCA@@',`<option value="${cSug}" selected`)}
       <td></td>
       <td style="padding:4px 10px;text-align:right"><input class="fi" id="lancctbInlineValor_${r.id}_${idx}" type="text" inputmode="decimal" value="${_fmt(c.valor||0)}" style="width:100px;text-align:right;font-size:11.5px" oninput="_lancctbInlineAtualizarTotal(${r.id},${valor})"></td>
       <td></td>
@@ -42538,20 +42538,19 @@ async function confirmarLancctbAberturaNaExtrato(extratoId,ehSaidaExtrato){
   const somaFluxo=Math.round(fluxoLinhas.reduce((a,f)=>a+Number((ehSaidaExtrato?f.valor_saida:f.valor_entrada)||0),0)*100)/100;
   const diferenca=Math.round((valorExtrato-somaFluxo)*100)/100;
   const linhasDesc=fluxoLinhas.map(f=>'• R$ '+_fmt(ehSaidaExtrato?f.valor_saida:f.valor_entrada)+' — '+(f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).join('\n');
-  const difMsg=diferenca>=0.005?'\n• R$ '+_fmt(diferenca)+' — Diferença (mesmo histórico, "(diferença)")':'';
+  const difMsg=Math.abs(diferenca)>=0.005?'\n• R$ '+_fmt(Math.abs(diferenca))+' — Diferença '+(diferenca<0?'(lado oposto: crédito)':'(débito)')+', mesmo histórico com "(diferença)"':'';
   const dt=(extrato.data_pagamento||'').split('-').reverse().join('/');
-  if(!confirm('Abrir '+dt+' R$ '+_fmt(valorExtrato)+' em '+(fluxoLinhas.length+(diferenca>=0.005?1:0))+' débito(s), com 1 crédito de R$ '+_fmt(valorExtrato)+' no banco (o extrato não é dividido):\n'+linhasDesc+difMsg+'\n\nConfirmar?')) return;
+  if(!confirm('Abrir '+dt+' R$ '+_fmt(valorExtrato)+' em '+(fluxoLinhas.length+(Math.abs(diferenca)>=0.005?1:0))+' linha(s), com 1 lançamento de R$ '+_fmt(valorExtrato)+' no banco (o extrato não é dividido):\n'+linhasDesc+difMsg+'\n\nConfirmar?')) return;
   closeModal('mLancctbFluxoAbrirExtrato');
   await _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaidaExtrato,campoV,campoZ,somaFluxo,diferenca);
 }
 
 async function _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaida,campoV,campoZ,somaFluxo,diferenca){
   // Pedido do usuário 30/10/2026: o extrato NUNCA é dividido em várias saídas bancárias. Fica 1 linha com o valor INTEIRO do extrato (1 crédito no banco) aberta em N débitos: um por linha do Fluxo e, se houver
-  // diferença, mais 1 débito com a diferença (mesmo histórico, com "(diferença)" entre parênteses). Diferença negativa (Fluxo maior que o extrato) não cabe como débito — nada é alterado.
-  if(diferenca<-0.005){ toast('A soma do Fluxo (R$ '+_fmt(somaFluxo)+') é maior que o extrato (R$ '+_fmt(Number(extrato[campoV]))+'): não dá para abrir em débitos. Escolha as linhas certas ou associe sem abrir.','err'); return; }
-  const comp=fluxoLinhas.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const txt=((f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).trim(); return { codigo:String(f.documento_numero||f.numero||'').trim()||null, denominacao:txt, encargo:null, uf:null, valor:vf, resumo:txt.slice(0,120), competencia:null }; });
-  if(diferenca>=0.005){ const txt=((fluxoLinhas[0].descricao||'')+' '+(fluxoLinhas[0].cliente_fornecedor_nome||'')).trim(); comp.push({ codigo:null, denominacao:txt, encargo:null, uf:null, valor:Math.round(diferenca*100)/100, resumo:(txt.slice(0,105)+' (diferença)').trim(), competencia:null }); }
-  const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+_fmt(x.valor)).join(' + ')+'] '+String(extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+  // diferença, mais 1 linha com a diferença (mesmo histórico, com "(diferença)" entre parênteses): no MESMO lado dos débitos quando o extrato é maior que o Fluxo, no lado OPOSTO (crédito) quando o Fluxo é maior (lado:'inverso').
+  const comp=fluxoLinhas.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const txt=((f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).trim(); return { codigo:null, denominacao:txt, encargo:null, uf:null, valor:vf, resumo:txt.slice(0,120), competencia:null }; });
+  if(Math.abs(diferenca)>=0.005){ const txt=((fluxoLinhas[0].descricao||'')+' '+(fluxoLinhas[0].cliente_fornecedor_nome||'')).trim(); comp.push({ codigo:null, denominacao:txt, encargo:null, uf:null, valor:Math.round(Math.abs(diferenca)*100)/100, lado:diferenca<0?'inverso':null, resumo:(txt.slice(0,105)+' (diferença)').trim(), competencia:null }); }
+  const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+String(extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
   const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',extrato.id);
   if(eUpd){ toast('Erro ao abrir o extrato em débitos: '+eUpd.message,'err'); return; }
   const { error: eFx } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).in('id',fluxoLinhas.map(f=>f.id));
