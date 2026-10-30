@@ -36009,6 +36009,13 @@ function _lancctbIcmsAcharPagamento(l,ctx){
     const ach=[...gs.values()].filter(g=>g.length>=2&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents&&(g.length>=5||(ufProva&&g[0].uf===ufProva))); // poucas NFs somando igual é coincidência fácil: só com a UF provada
     if(ach.length===1) return {rows:ach[0],mes};
     if(ach.length>1) return {ambiguo:true};
+    // Pagamento único das DUAS guias do mesmo estado (DIFAL + ST da mesma UF e unidade, ex.: PR 62.916,00 = 19.461,00 + 43.455,00): a soma dos dois tipos fecha com o banco — só com a UF provada.
+    if(ufProva){
+      const porUfUn=new Map(); livres.forEach(r=>{ if(r.uf!==ufProva) return; const key=r.uf+'|'+r.unidade; if(!porUfUn.has(key)) porUfUn.set(key,[]); porUfUn.get(key).push(r); });
+      const mt=[...porUfUn.values()].filter(g=>new Set(g.map(r=>r.tipo)).size>1&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents);
+      if(mt.length===1) return {rows:mt[0],mes,multiTipo:true};
+      if(mt.length>1) return {ambiguo:true};
+    }
   }
   // Último recurso — Fluxo de Caixa: as NFs citadas pelas linhas do Fluxo ligadas a este pagamento (e a UF delas), conferidas contra a base: a soma tem que fechar o valor do banco.
   if(nfsFx.size){
@@ -36031,6 +36038,27 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
   // Contas diferentes por unidade (pedido 29/10/2026): o gatilho sugerido leva a unidade ("ICMS-DIFAL Não Contribuinte UN 163"); vale primeiro a Regra da unidade, e a Regra antiga só com o tipo continua valendo como reserva.
   const gatUn=`${tipo} UN ${r0.unidade}`;
   const _regraIcmsDe=gat=>(regras||[]).find(g=>(!g.agencia_bancaria_id||String(g.agencia_bancaria_id)===String(contaId))&&g.historico_gatilho&&String(g.historico_gatilho).trim().toLowerCase()===gat.toLowerCase()&&g.plano_contas);
+  if(r.multiTipo){ // 1 crédito no banco : 1 débito por tipo (DIFAL e ST), cada um pela Regra da sua unidade
+    const tipos=[...new Set(rows.map(x=>x.tipo))];
+    const partes=tipos.map(t=>{ const rs=rows.filter(x=>x.tipo===t); return { tipo:t, n:rs.length, valor:Math.round(rs.reduce((s,x)=>s+Math.round(x.valor*100),0))/100 }; });
+    const rotuloMT=`${tipos.join(' + ')} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${rows.length} NFs)`;
+    const histDe=pt=>`Pagamento ref. ${pt.tipo} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${pt.n} NFs)`;
+    const regrasT=partes.map(pt=>_regraIcmsDe(`${pt.tipo} UN ${r0.unidade}`)||_regraIcmsDe(pt.tipo));
+    if(regrasT.every(Boolean)){
+      const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:`Pagamento ref. ${rotuloMT}`, lancamento_extrato_id:l.id, regra_matching_id:regrasT[0].id, origem_match:'regra' }];
+      partes.forEach((pt,i)=>{ const rg=regrasT[i]; linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:rg.plano_contas.classificacao, conta_contabil_id:rg.conta_contabil_id, tipo:rg.dc, valor:pt.valor, historico:histDe(pt), lancamento_extrato_id:l.id, regra_matching_id:rg.id, origem_match:'regra' }); });
+      const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+      if(error){ console.error('ICMS: erro ao gerar o lançamento (2 tipos):',error); desfazer(); return null; }
+      await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado', historico_bancario:`[${rotuloMT}] ${semMarca}`.trim() }).eq('id',l.id);
+      return 'resolvido';
+    }
+    const itens=partes.map(pt=>({ codigo:null, denominacao:pt.tipo, valor:pt.valor, resumo:`${pt.tipo} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${pt.n} NFs)`, competencia:r0.compet, gatilho:`${pt.tipo} UN ${r0.unidade}`, historico:histDe(pt) }));
+    const novoHistMT=`[${rotuloMT}] ${semMarca}`.trim();
+    const { error: eUm } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:novoHistMT, origem_importacao:'tributo_composicao', composicao_tributo:itens }).eq('id',l.id);
+    if(eUm){ console.error('ICMS: erro ao identificar o pagamento (2 tipos):',eUm); desfazer(); return null; }
+    l.historico_bancario=novoHistMT; l.composicao_tributo=itens; composicoesParaAbrir.push(l);
+    return 'marcado';
+  }
   const regra=_regraIcmsDe(gatUn)||_regraIcmsDe(tipo);
   if(regra){
     const linhas=[
