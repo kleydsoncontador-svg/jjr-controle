@@ -32123,6 +32123,27 @@ async function salvarLancctbRegra(){
       await _lancctbSalvarLinhasRateio(regraId,linhasContrapartida,dc);
     }
     if(ehFluxo&&_lancctbRegraFluxoRowAtual) _lancctbFluxoDifAprender(_lancctbRegraFluxoRowAtual,valorTotal,ehSaida); // diferença Fluxo × extrato aceita ao salvar → vale nos próximos meses (dentro desse limite)
+    // Pedido do usuário 30/10/2026: Fluxo com valor diferente do extrato NÃO vira 1 débito só pelo valor do extrato. Abre em 1 crédito no banco (valor do extrato) + 1 linha com o valor do FLUXO (conta já escolhida)
+    // + 1 linha com a DIFERENÇA (mesmo histórico com "(diferença)"; mesmo lado se o extrato é maior, lado oposto se o Fluxo é maior), que fica pendente de conta no Registro Contábil.
+    if(ehFluxo&&_lancctbRegraFluxoRowAtual&&linhasContrapartida.length===1){
+      const fxr=_lancctbRegraFluxoRowAtual, vFx=Math.round(Number((ehSaida?fxr.valor_saida:fxr.valor_entrada)||0)*100)/100, difAb=Math.round((valorTotal-vFx)*100)/100;
+      if(vFx>0&&Math.abs(difAb)>=0.005){
+        const histMain=String(linhasContrapartida[0].historico||(histModo==='fixo'?(_lancctbResolverHistFluxo(historicoFixo,fxr,{nome:extrato.cliente_fornecedor_nome||'',data:extrato.data_pagamento})||historicoFixo):(extrato.historico_bancario||descricao))||'').trim();
+        const compAb=[{ codigo:null, denominacao:histMain, encargo:null, uf:null, valor:vFx, historico:histMain, conta_contabil_id:linhasContrapartida[0].conta_contabil_id, resumo:histMain.slice(0,120), competencia:null },
+          { codigo:null, denominacao:histMain, encargo:null, uf:null, valor:Math.abs(difAb), lado:difAb<0?'inverso':null, historico:(histMain.slice(0,105)+' (diferença)').trim(), conta_contabil_id:null, resumo:(histMain.slice(0,105)+' (diferença)').trim(), competencia:null }];
+        const histAb='[TRIBUTO COMPOSTO: '+compAb.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+String(extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+        const { error: eAb } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:histAb.trim(), origem_importacao:'tributo_composicao', composicao_tributo:compAb }).eq('id',extrato.id);
+        if(eAb){ toast('Erro ao abrir o lançamento com a diferença: '+eAb.message,'err'); return; }
+        await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).eq('id',_lancctbFluxoAssociandoFluxoId);
+        try{ const eidM=_lancctbEidAtual, at=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); at.add(_lancctbFluxoAssociandoFluxoId); S.s('lancctb_fluxo_manual_'+eidM,[...at]); }catch(e){}
+        closeModal('mLancctbRegra'); _lancctbRegraExtratoAlvo=null;
+        toast('Regra salva. Lançamento aberto: 1 crédito no banco, '+_fmt(vFx)+' na conta escolhida e a diferença de '+_fmt(Math.abs(difAb))+' ('+(difAb<0?'crédito':'débito')+') pendente de conta — escolha a conta dela no Registro Contábil.','ok');
+        _lancctbFluxoAssociandoFluxoId=null; _lancctbFluxoAssociandoExtrato=null;
+        try{ renderLancctbFluxoCaixa(); }catch(e){}
+        try{ renderLancctbRegistroContabil(); }catch(e){}
+        return;
+      }
+    }
 
     const contaBancariaId=extrato.conta_bancaria_id||_lancctbExtratoContaSel;
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
