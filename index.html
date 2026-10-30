@@ -31785,6 +31785,13 @@ async function aceitarLancctbFluxoSugestao(extratoId){
   const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extratoId}).in('id',ids);
   if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
   try{ const eidM=_lancctbEidAtual, atuais=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); ids.forEach(i=>atuais.add(i)); S.s('lancctb_fluxo_manual_'+eidM,[...atuais]); }catch(e){}  // associação aceita à mão não é desfeita pelo Processar Fluxo
+  // Composição de TRIBUTO (soma exata do Fluxo): o valor do extrato abre em linhas no Registro Contábil (1 crédito banco : N débitos), uma por linha do Fluxo.
+  if(c.tributo&&item.extrato.valor_saida>0&&!(item.extrato.composicao_tributo||[]).length){
+    const comp=c.itens.map(f=>({codigo:String(f.documento_numero||f.numero||'').trim()||null,denominacao:String(f.descricao||'').trim(),encargo:null,uf:null,valor:Math.round((f.valor_saida||0)*100)/100,resumo:String(f.descricao||'').trim().slice(0,120),competencia:null}));
+    const hist=`[TRIBUTO COMPOSTO: ${comp.map(x=>x.resumo+' '+_fmt(x.valor)).join(' + ')}] `+String(item.extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+    const { error: eC } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',extratoId);
+    if(eC) toast('Fluxo associado, mas não consegui abrir a composição em linhas: '+eC.message,'err');
+  }
   document.getElementById('fxSugOverlay')?.remove();
   toast(`${ids.length} linha(s) do Fluxo associada(s) ao lançamento.`,'ok');
   try{ renderLancctbRegistroContabil(); }catch(e){}
@@ -38503,7 +38510,7 @@ async function renderLancctbRegistroContabil(){
       if(!item.fluxoConfirmado&&ehSaida&&(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|SISPAG ABERTO|DIFEREN)/i.test(String(r.historico_bancario||''))||(String(eid)!=='89'&&_pessoasFolhaReg.length&&_lancctbHistEhTransfNome(r.historico_bancario)&&_pessoasFolhaReg.some(pp=>_lancctbPessoaNoTexto(pp,r.historico_bancario))))){ item.rotaFopag=true; }
       else if(!item.fluxoConfirmado&&!_lancctbContaSemNfVinculo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)){
         const _filtroFluxoSug=(semTextoTributo)=>_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
-          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(!semTextoTributo&&ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; if(semTextoTributo&&(!vF||Math.abs(vF-valor)>0.005||_lancctbDiffDias(f.data,r.data_pagamento)>1)) return false; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO; })
+          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(!semTextoTributo&&ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; if(semTextoTributo&&(!vF||Math.abs(vF-valor)>0.005||_lancctbDiffDias(f.data,r.data_pagamento)>1)) return false; return vF&&Math.abs(vF-valor)<=(ehTribHist?0.005:LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO); })
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual,_lancctbHistEhTransfNome(r.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(r.historico_bancario,f,_lancctbFluxoParamLista))
@@ -38531,7 +38538,21 @@ async function renderLancctbRegistroContabil(){
         } else {
           // Sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco); depois, "possível alias/intermediário" (só mostra, nunca associa sozinho)
           const poolC=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id));
-          const comp=_lancctbFluxoComposicao(r.historico_bancario,valor,r.data_pagamento,poolC,{lista:_lancctbFluxoParamLista,aliases:_lancctbFluxoAliasLista,usados:fluxoUsadoSugestao,ehSaida});
+          let comp=_lancctbFluxoComposicao(r.historico_bancario,valor,r.data_pagamento,poolC,{lista:_lancctbFluxoParamLista,aliases:_lancctbFluxoAliasLista,usados:fluxoUsadoSugestao,ehSaida});
+          // Tributo (pedido do usuário 30/10/2026): só sugere valor EXATO ou COMPOSIÇÃO cuja soma do Fluxo seja IGUAL ao valor do extrato (sem folga de centavos); ao aceitar, a composição abre em linhas no Registro Contábil.
+          if(ehTribHist&&ehSaida){
+            if(comp&&comp.itens&&Math.abs((comp.delta||0))>0.005) comp=null;
+            if(!comp||!comp.itens){
+              const alvoT=Math.round(valor*100);
+              const candT=poolC.filter(f=>!fluxoUsadoSugestao.has(f.id)&&(f.valor_saida||0)>0&&_lancctbDiffDias(f.data,r.data_pagamento)<=1&&_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))&&_lancctbFluxoParamOk(r.historico_bancario,f,_lancctbFluxoParamLista)).map(f=>({f,v:Math.round((f.valor_saida||0)*100)})).filter(c=>c.v>0&&c.v<alvoT).slice(0,40);
+              if(candT.length>=2){
+                const orcT={n:200000}; const achT=new Map();
+                for(const ix of _lancctbFluxoEnumerarSolucoes(candT,alvoT,8,orcT)){ if(ix.length<2) continue; achT.set(ix.map(k=>candT[k].f.id).sort((a,b)=>a-b).join(','),ix); }
+                if(orcT.n>0&&achT.size===1){ const ix=[...achT.values()][0]; comp={itens:ix.map(k=>candT[k].f),soma:alvoT/100,delta:0,tributo:true}; }
+                else if(achT.size>1) comp={ambiguo:true,qtd:achT.size};
+              }
+            }
+          }
           if(comp&&comp.itens){ item.fluxoComposicao=comp; comp.itens.forEach(f=>fluxoUsadoSugestao.add(f.id)); }
           else if(comp&&comp.ambiguo){ item.fluxoComposicaoAmbigua=comp.qtd; }
           else {
