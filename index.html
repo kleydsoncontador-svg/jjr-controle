@@ -3681,36 +3681,29 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
 </div>
 
 <div class="page" id="page-appfin-meses" style="display:none;flex-direction:column">
-  <div style="display:flex;flex-direction:column;gap:12px">
-    <div class="ptitle" style="margin-bottom:0">APP Financeiro - Meses</div>
+  <div style="display:flex;flex-direction:row;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap">
+    <div style="display:flex;flex-direction:column;gap:12px">
+    <div class="ptitle" style="margin-bottom:0">APP Financeiro</div>
     <div class="action-bar-sticky">
       <button class="action-btn action-btn-pdf" onclick="exportAppFinPDF()">📄 Gerar PDF</button>
       <button class="action-btn action-btn-excel" onclick="exportarPagina('appfin-meses','excel')">📊 Gerar Excel</button>
     </div>
+    </div>
+    <div id="appFinCards" style="display:flex;gap:12px;padding-right:8px"></div>
   </div>
-  <div class="psub">Gerencie os sistemas financeiros e atribua a cada empresa</div>
+  <div class="psub">Situação atual de cada empresa, calculada pelo selo de Automação das contas correntes (Visão Geral): todas com Automação = Automação; parte sim, parte não = Híbrido; nenhuma = Extrato</div>
   <div style="margin-bottom:12px;display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-    <select id="appFinAno" class="si" onchange="renderAppFinanceiro()" style="min-width:120px">
-      <option value="">Ano completo</option>
-    </select>
     <select id="appFinFiltroResp" class="si" onchange="renderAppFinanceiro()" style="min-width:150px">
       <option value="">Todos responsáveis</option>
     </select>
     <select id="appFinFiltroApp" class="si" onchange="renderAppFinanceiro()" style="min-width:150px">
       <option value="">Todos tipos</option>
-      <option value="MISTER integração">MISTER integração</option>
-      <option value="MISTER manual">MISTER manual</option>
-      <option value="MISTER híbrido">MISTER híbrido</option>
-      <option value="CONVERSOR">CONVERSOR</option>
-      <option value="DOMINIO manual">DOMINIO manual</option>
-      <option value="Excel">Excel</option>
-      <option value="TXT">TXT</option>
-      <option value="Sem Movimento">Sem Movimento</option>
-      <option value="Não Envia">Não Envia</option>
+      <option value="Automação">Automação</option>
+      <option value="Híbrido">Híbrido</option>
+      <option value="Extrato">Extrato</option>
     </select>
     <input class="si" id="appFinBusca" placeholder="🔍 Buscar por nome ou CNPJ..." style="flex:1;min-width:200px" oninput="renderAppFinanceiro()">
   </div>
-  <div id="appFinCards" style="padding:0 20px 12px;display:flex;gap:12px;flex-wrap:wrap;overflow-x:auto"></div>
   <div class="tw" style="overflow-x:auto;max-height:calc(100vh - 260px);overflow-y:auto">
     <table class="data" id="appFinTable" style="width:100%">
       <thead style="position:sticky;top:0;z-index:4">
@@ -3720,6 +3713,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
           <th style="background:var(--ink2);color:#fff;white-space:nowrap;min-width:160px">CNPJ</th>
           <th style="background:var(--ink2);color:#fff;white-space:nowrap;min-width:100px">Resp</th>
           <th style="background:var(--ink2);color:#fff;white-space:nowrap;min-width:120px">Tributação</th>
+          <th style="background:var(--ink2);color:#fff;white-space:nowrap;min-width:140px">Situação</th>
         </tr>
       </thead>
       <tbody id="appFinTbody"></tbody>
@@ -61106,57 +61100,50 @@ function lucExportMes(mesKey){
 // ── APP Financeiro ──────────────────────────────────────────────────────────────
 function getAppFinanceiro(){return S.g('app_financeiro')||{};}
 function setAppFinanceiro(d){S.s('app_financeiro',d);}
-function renderAppFinanceiro(){
-  const emps=S.emps().filter(e=>{
-    const tipo=(e.fechamentoStatus&&e.fechamentoStatus.tipo)||'ativo';
-    return tipo!=='saida'&&tipo!=='extincao';
-  }).sort((a,b)=>(a.id||0)-(b.id||0));
-  const appFin=getAppFinanceiro();
+// Situação ATUAL (sem meses): por empresa, olha as contas correntes ativas — selo de Automação = origem_extrato 'mister_contador' (o mesmo critério do selo da Visão Geral).
+// Todas com Automação => 'Automação'; parte com e parte sem => 'Híbrido'; nenhuma => 'Extrato'. Os dados antigos por mês (app_financeiro) continuam guardados, só não aparecem aqui.
+let _appFinSituacao=null;
+async function _appFinCarregarSituacao(forcar){
+  if(_appFinSituacao&&!forcar) return _appFinSituacao;
+  const { data } = await _lancctbFetchTudo(()=>_supaClient.from('agencias_bancarias').select('id,empresa_eid,origem_extrato').eq('ativo',true).order('id'));
+  const c={};
+  (data||[]).forEach(a=>{ const k=String(a.empresa_eid); const o=c[k]||(c[k]={total:0,auto:0}); o.total++; if(a.origem_extrato==='mister_contador') o.auto++; });
+  const m={};
+  Object.keys(c).forEach(k=>{ m[k]=c[k].auto===c[k].total?'Automação':(c[k].auto>0?'Híbrido':'Extrato'); });
+  _appFinSituacao=m; return m;
+}
+function _appFinSit(e){ return (_appFinSituacao&&_appFinSituacao[String(e.eid)])||'Extrato'; }
+function _appFinEmpsFiltradas(){
   const filtroResp=document.getElementById('appFinFiltroResp')?.value||'';
   const filtroApp=document.getElementById('appFinFiltroApp')?.value||'';
-  const anoSel=document.getElementById('appFinAno')?.value||'';
-
-  // Preencher dropdown de responsáveis
+  const busca=(document.getElementById('appFinBusca')?.value||'').trim().toLowerCase();
+  return S.emps().filter(e=>{
+    const tipo=(e.fechamentoStatus&&e.fechamentoStatus.tipo)||'ativo';
+    return tipo!=='saida'&&tipo!=='extincao';
+  }).sort((a,b)=>(a.id||0)-(b.id||0)).filter(e=>{
+    if(filtroResp&&respEmpMes(e)!==filtroResp) return false;
+    if(filtroApp&&_appFinSit(e)!==filtroApp) return false;
+    if(busca&&!((e.nome||'').toLowerCase().includes(busca)||(e.cnpj||'').includes(busca))) return false;
+    return true;
+  });
+}
+const _APPFIN_COR={'Automação':'background:#1d4ed8;color:#fff','Híbrido':'background:#d97706;color:#fff','Extrato':'background:#e5e7eb;color:#1f2937'};
+async function renderAppFinanceiro(){
+  const tbody=document.getElementById('appFinTbody'); if(!tbody) return;
   const respSel=document.getElementById('appFinFiltroResp');
   if(respSel && !respSel.hasAttribute('data-filled')){
-    const resps=new Set(emps.map(e=>respEmpMes(e)).filter(Boolean));
+    const resps=new Set(S.emps().map(e=>respEmpMes(e)).filter(Boolean));
     resps.forEach(r=>{const o=document.createElement('option');o.value=r;o.textContent=r;respSel.appendChild(o);});
     respSel.setAttribute('data-filled','1');
   }
-
-  // Preencher dropdown de anos
-  const anoSelEl=document.getElementById('appFinAno');
-  if(anoSelEl && !anoSelEl.hasAttribute('data-filled')){
-    for(let y=2026;y<=new Date().getFullYear()+1;y++){
-      const o=document.createElement('option');o.value=y;o.textContent='Ano '+y;anoSelEl.appendChild(o);
-    }
-    anoSelEl.setAttribute('data-filled','1');
-  }
-
-  // Renderizar tabela
-  const tbody=document.getElementById('appFinTbody');
-  const headerRow=document.getElementById('appFinHeaderRow');
-
-  // Gerar meses baseado no ano selecionado
-  let months=[];
-  if(anoSel){
-    const y=parseInt(anoSel);
-    for(let m=1;m<=12;m++){months.push(String(m).padStart(2,'0')+'/'+y);}
-  }else{
-    for(let y=2026;y<=new Date().getFullYear()+1;y++){for(let m=1;m<=12;m++){months.push(String(m).padStart(2,'0')+'/'+y);}}
-  }
-
-  // Limpar e reconstruir headers
-  const oldThs=Array.from(headerRow.querySelectorAll('th'));
-  while(oldThs.length>5){oldThs.pop().remove();}
-  months.forEach(m=>{const th=document.createElement('th');th.style.cssText='padding:10px;text-align:center;min-width:100px;background:#1E3558;color:#fff';th.textContent=m;headerRow.appendChild(th);});
-
-  // Linhas da tabela
+  if(!_appFinSituacao){ tbody.innerHTML='<tr><td colspan="6" style="padding:14px">Carregando situação das contas…</td></tr>'; }
+  try{ await _appFinCarregarSituacao(); }
+  catch(err){ tbody.innerHTML='<tr><td colspan="6" style="padding:14px;color:var(--red)">Não consegui ler as contas correntes ('+esc(err.message||err)+'). Tente de novo.</td></tr>'; return; }
   tbody.innerHTML='';
-  emps.forEach(e=>{
-    if(filtroResp && respEmpMes(e)!==filtroResp)return;
+  _appFinEmpsFiltradas().forEach(e=>{
     const st=e.fechamentoStatus?.tipo||'ativo';
-    const rowBg=st==='ativo'?'':(st==='saida'?'background:var(--red-bg)':st==='bloqueio'?'background:var(--amber-bg)':st==='extincao'?'background:var(--gray-bg)':'');
+    const rowBg=st==='ativo'?'':(st==='bloqueio'?'background:var(--amber-bg)':'');
+    const sit=_appFinSit(e);
     const tr=document.createElement('tr');
     tr.style.cssText=`border-bottom:1px solid var(--border);${rowBg}`;
     tr.innerHTML=`
@@ -61165,90 +61152,22 @@ function renderAppFinanceiro(){
       <td style="padding:8px;font-family:var(--mono);font-size:.85rem;color:var(--slate)">${esc(e.cnpj||'')}</td>
       <td style="padding:8px;font-size:.85rem">${esc(respEmpMes(e))}</td>
       <td style="padding:8px;font-size:.85rem">${esc(e.reg||'')}</td>
-    `;
-    const empId=e.eid;
-    months.forEach(m=>{
-      const td=document.createElement('td');
-      td.style.cssText='padding:4px;text-align:center;min-width:100px;border-right:1px solid var(--border)';
-      const key=`${empId}_${m}`;
-      const val=appFin[key]||'';
-      const match=filtroApp&&val!==filtroApp;
-      if(match)tr.style.opacity='0.4';
-      const sel=document.createElement('select');
-      sel.className='fi';
-      sel.style.cssText='width:100%;padding:3px;font-size:.75rem';
-      sel.innerHTML=`
-        <option value="">—</option>
-        <option value="MISTER integração">MISTER int</option>
-        <option value="MISTER manual">MISTER man</option>
-        <option value="MISTER híbrido">MISTER híb</option>
-        <option value="CONVERSOR">CONVERSOR</option>
-        <option value="DOMINIO manual">DOMINIO</option>
-        <option value="Excel">Excel</option>
-        <option value="TXT">TXT</option>
-        <option value="Sem Movimento">Sem Mov</option>
-        <option value="Não Envia">Não Envia</option>
-      `;
-      sel.value=val;
-      sel.onchange=(evt)=>{
-        const newVal=evt.target.value;
-        appFin[key]=newVal;
-        const currentMonthIndex=months.indexOf(m);
-        if(currentMonthIndex>=0){
-          months.slice(currentMonthIndex+1).forEach(futMonth=>{
-            const futKey=`${empId}_${futMonth}`;
-            appFin[futKey]=newVal;
-          });
-        }
-        setAppFinanceiro(appFin);renderAppFinanceiro();
-      };
-      td.appendChild(sel);
-      tr.appendChild(td);
-    });
+      <td style="padding:8px"><span style="${_APPFIN_COR[sit]};padding:2px 10px;border-radius:10px;font-size:.78rem;font-weight:600">${sit}</span></td>`;
     tbody.appendChild(tr);
   });
-
   renderAppFinCards();
 }
 function renderAppFinCards(){
-  const appFin=getAppFinanceiro();
-  const emps=S.emps().filter(e=>{
-    const tipo=(e.fechamentoStatus&&e.fechamentoStatus.tipo)||'ativo';
-    return tipo!=='saida'&&tipo!=='extincao';
-  });
-  const anoSel=document.getElementById('appFinAno')?.value||'';
-  const months=[];
-  if(anoSel){
-    const y=parseInt(anoSel);
-    for(let m=1;m<=12;m++){months.push(String(m).padStart(2,'0')+'/'+y);}
-  }else{
-    for(let y=2026;y<=new Date().getFullYear()+1;y++){for(let m=1;m<=12;m++){months.push(String(m).padStart(2,'0')+'/'+y);}}
-  }
-  const cardsDiv=document.getElementById('appFinCards');
+  const cardsDiv=document.getElementById('appFinCards'); if(!cardsDiv) return;
   cardsDiv.innerHTML='';
-
-  months.forEach(m=>{
-    const tipos=['MISTER integração','MISTER manual','MISTER híbrido','CONVERSOR','DOMINIO manual','Excel','TXT','Sem Movimento','Não Envia'];
-    const counts={};tipos.forEach(t=>{counts[t]=0;});
-    let total=0;
-    Object.entries(appFin).forEach(([k,v])=>{
-      if(k.endsWith('_'+m)&&v){counts[v]++;total++;}
-    });
-
-    if(total===0)return;
-
-    const card=document.createElement('div');
-    card.style.cssText='background:white;border:1px solid var(--border);border-radius:8px;padding:12px;min-width:200px;box-shadow:0 1px 3px rgba(0,0,0,.1)';
-    let html=`<div style="font-size:.85rem;font-weight:700;color:#1E3558;margin-bottom:8px">${m}</div>`;
-    tipos.forEach(t=>{
-      if(counts[t]>0){
-        const pct=((counts[t]/total)*100).toFixed(0);
-        html+=`<div style="font-size:.75rem;color:var(--slate);margin:4px 0">${t}: <b>${counts[t]}</b> (${pct}%)</div>`;
-      }
-    });
-    card.innerHTML=html;
-    cardsDiv.appendChild(card);
-  });
+  const lista=_appFinEmpsFiltradas(); if(!lista.length) return;
+  const counts={'Automação':0,'Híbrido':0,'Extrato':0};
+  lista.forEach(e=>{ counts[_appFinSit(e)]++; });
+  const card=document.createElement('div');
+  card.style.cssText='background:white;border:1px solid var(--border);border-radius:8px;padding:12px;min-width:220px;box-shadow:0 1px 3px rgba(0,0,0,.1)';
+  let html=`<div style="font-size:.85rem;font-weight:700;color:#1E3558;margin-bottom:8px">Situação atual (${lista.length} empresas)</div>`;
+  Object.keys(counts).forEach(t=>{ html+=`<div style="font-size:.78rem;color:var(--slate);margin:4px 0">${t}: <b>${counts[t]}</b> (${Math.round(counts[t]/lista.length*100)}%)</div>`; });
+  card.innerHTML=html; cardsDiv.appendChild(card);
 }
 
 function limparAppFinanceiro(){
@@ -61259,64 +61178,21 @@ function limparAppFinanceiro(){
 }
 
 function exportAppFinPDF(){
-  const emps=S.emps().sort((a,b)=>(a.id||0)-(b.id||0));
-  const appFin=getAppFinanceiro();
-  const anoSel=document.getElementById('appFinAno')?.value||'';
-  const filtroResp=document.getElementById('appFinFiltroResp')?.value||'';
-  const filtroApp=document.getElementById('appFinFiltroApp')?.value||'';
-
-  let months=[];
-  if(anoSel){
-    const y=parseInt(anoSel);
-    for(let m=1;m<=12;m++){months.push(String(m).padStart(2,'0')+'/'+y);}
-  }else{
-    for(let y=2026;y<=new Date().getFullYear()+1;y++){for(let m=1;m<=12;m++){months.push(String(m).padStart(2,'0')+'/'+y);}}
-  }
-
-  let empList=emps;
-  if(filtroResp){empList=empList.filter(e=>respEmpMes(e)===filtroResp);}
-  if(filtroApp){empList=empList.filter(e=>{for(let m of months){const k=`${e.id}_${m}`;if(appFin[k]===filtroApp)return true;}return false;});}
-
-  const anoTexto=anoSel?('Ano '+anoSel):'Todos os anos';
-  let content=`<h2 style="color:#1E3558;font-size:14px;margin:0 0 4px">APP Financeiro - Meses</h2>
-  <p style="color:#888;font-size:11px;margin:0 0 20px">${anoTexto} &bull; ${new Date().toLocaleDateString('pt-BR')}</p>`;
-
-  content+=`<table style="width:100%;border-collapse:collapse;font-size:10px">
-    <thead>
-      <tr style="background:#1E3558;color:#fff;font-weight:bold">
-        <th style="padding:6px 8px;border:1px solid #ccc;text-align:left">ID</th>
-        <th style="padding:6px 8px;border:1px solid #ccc;text-align:left">Empresa</th>
-        <th style="padding:6px 8px;border:1px solid #ccc;text-align:left">CNPJ</th>
-        <th style="padding:6px 8px;border:1px solid #ccc;text-align:left">Resp</th>
-        <th style="padding:6px 8px;border:1px solid #ccc;text-align:left">Tributação</th>`;
-  months.forEach(m=>{
-    content+=`<th style="padding:6px 8px;border:1px solid #ccc;text-align:center;background:#2d5a8a;color:#fff">${m}</th>`;
-  });
-  content+=`</tr></thead><tbody>`;
-
+  if(!_appFinSituacao){ toast('Aguarde a tela carregar a situação das contas.','err'); return; }
+  const empList=_appFinEmpsFiltradas();
+  const th='padding:6px 8px;border:1px solid #ccc;text-align:left';
+  let content=`<h2 style="color:#1E3558;font-size:14px;margin:0 0 4px">APP Financeiro - Situação atual</h2>
+  <p style="color:#888;font-size:11px;margin:0 0 20px">${new Date().toLocaleDateString('pt-BR')}</p>
+  <table style="width:100%;border-collapse:collapse;font-size:10px"><thead><tr style="background:#1E3558;color:#fff;font-weight:bold">
+    <th style="${th}">ID</th><th style="${th}">Empresa</th><th style="${th}">CNPJ</th><th style="${th}">Resp</th><th style="${th}">Tributação</th><th style="${th}">Situação</th></tr></thead><tbody>`;
   empList.forEach(e=>{
-    const st=e.fechamentoStatus?.tipo||'ativo';
-    const rowBg=st==='ativo'?'#fff':(st==='saida'?'#fee2e2':st==='bloqueio'?'#fef3c7':st==='extincao'?'#f3f4f6':'#fff');
-    content+=`<tr style="background:${rowBg}">
-      <td style="padding:4px 8px;border:1px solid #ccc;font-weight:600">${e.id||''}</td>
-      <td style="padding:4px 8px;border:1px solid #ccc"><b>${esc(e.nome||'')}</b></td>
-      <td style="padding:4px 8px;border:1px solid #ccc;font-family:var(--mono);font-size:9px">${esc(e.cnpj||'')}</td>
-      <td style="padding:4px 8px;border:1px solid #ccc;font-size:9px">${esc(respEmpMes(e))}</td>
-      <td style="padding:4px 8px;border:1px solid #ccc;font-size:9px">${esc(e.reg||'')}</td>`;
-    months.forEach(m=>{
-      const key=`${e.id}_${m}`;
-      const val=appFin[key]||'';
-      const valDisplay=val?val.replace('MISTER integração','MISTER int').replace('MISTER manual','MISTER man').replace('MISTER híbrido','MISTER híb').replace('DOMINIO manual','DOMINIO').replace('Sem Movimento','Sem Mov'):'—';
-      content+=`<td style="padding:4px 8px;border:1px solid #ccc;text-align:center;font-size:9px">${esc(valDisplay)}</td>`;
-    });
-    content+=`</tr>`;
+    const td='padding:4px 8px;border:1px solid #ccc';
+    content+=`<tr><td style="${td};font-weight:600">${e.eid||''}</td><td style="${td}"><b>${esc(e.nome||'')}</b></td><td style="${td};font-size:9px">${esc(e.cnpj||'')}</td><td style="${td};font-size:9px">${esc(respEmpMes(e))}</td><td style="${td};font-size:9px">${esc(e.reg||'')}</td><td style="${td};font-weight:600">${_appFinSit(e)}</td></tr>`;
   });
   content+=`</tbody></table>`;
-
-  const hdr=`<html><head><meta charset="UTF-8"><title>APP Financeiro - ${anoTexto}</title>
+  const hdr=`<html><head><meta charset="UTF-8"><title>APP Financeiro</title>
   <style>body{font-family:Arial,sans-serif;font-size:11px;color:#1E3558;margin:18px}@media print{body{margin:8px}table{page-break-inside:avoid}}</style>
-  </head><body>${_jjrHeader('APP Financeiro - '+anoTexto)}${content}</body></html>`;
-
+  </head><body>${_jjrHeader('APP Financeiro - Situação atual')}${content}</body></html>`;
   const win=window.open('','_blank','width=1000,height=800');
   if(!win){toast('Permita popups para gerar PDF','err');return;}
   win.document.write(hdr);win.document.close();
