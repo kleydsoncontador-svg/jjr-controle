@@ -36024,6 +36024,21 @@ async function _lancctbIcmsCarregarCtx(eid,pendencias){
   }
   return ctx;
 }
+// Guia que fecha EXATAMENTE com o total de um grupo da base (tipo + UF + unidade + competência), ex.: DIFAL do PR/163 = 866 NFs = R$ 16.117,12 (ensinado pelo usuário em 30/10/2026):
+// todas as NFs do grupo passam a pertencer a esse pagamento (✔ em "No extrato") e saem da busca de pagamentos avulsos (ctx.usados + r.ext).
+function _lancctbIcmsMarcarGrupos(ctx,extId,achou){
+  const ex=achou&&achou.extraido, gn=ex&&ex.gnre; if(!ctx||!gn) return 0;
+  const un=(String(achou.f.nome||'').match(/\((\d+)\)/)||[])[1], uf=gn.uf, comp=gn.referencia||ex.competencia;
+  if(!un||!uf||!comp||!/^\d{2}\/\d{4}$/.test(comp)) return 0;
+  const mes=comp.slice(3)+'-'+comp.slice(0,2), rows=ctx.rows[mes]; if(!rows) return 0;
+  const partes=(ex.composicao&&ex.composicao.length>=2)?ex.composicao.map(c=>({tipo:String(c.denominacao||'').replace(/\s+UN\s+\d+.*$/,''),valor:c.valor})):[{tipo:gn.tipoNome,valor:ex.valor}];
+  let n=0;
+  partes.forEach(pt=>{ if(!pt.tipo) return;
+    const g=rows.filter(r=>r.tipo===pt.tipo&&r.uf===uf&&String(r.unidade)===String(un)&&(!r.ext||r.ext===extId));
+    const soma=g.reduce((t,r)=>t+Math.round(r.valor*100),0);
+    if(g.length&&Math.abs(soma-Math.round(pt.valor*100))<=2){ g.forEach(r=>{ r.ext=extId; ctx.usados.add(r.id); }); ctx.mesesTocados.add(mes); n+=g.length; } });
+  return n;
+}
 function _lancctbIcmsPersistirCtx(eid,ctx){ ctx.mesesTocados.forEach(mes=>{ try{ _lancctbIcmsSalvar(eid,mes,ctx.rows[mes]||[]); }catch(e){ console.error('ICMS: não consegui gravar o mês '+mes,e); } }); }
 
 async function _lancctbProcessarTributos(){
@@ -36275,6 +36290,7 @@ async function _lancctbProcessarTributos(){
       const mapaUn=_lancctbIcmsUnidadesMapa(eid), UN_RESERVA={ '71810931000101':'163', '71810931000365':'164' }; // reserva: Fast Lube (informado pelo usuário em 30/10/2026); o mapa da empresa tem prioridade
       achou.extraido={...achou.extraido,composicao:achou.extraido.composicao.map(c=>{ const un=c.cnpjDebito&&(mapaUn[c.cnpjDebito]||mapaUn['CNPJ '+String(c.cnpjDebito).slice(8,12)+'-'+String(c.cnpjDebito).slice(12)]||UN_RESERVA[c.cnpjDebito]); if(!un||/\sUN\s+\d+/.test(c.denominacao)) return c; const [a0,...resto]=String(c.denominacao).split(' - '); return {...c,un:String(un),denominacao:[a0+' UN '+un,...resto].join(' - ')}; })};
     }
+    if(icmsCtx&&achou.extraido&&achou.extraido.gnre){ try{ _lancctbIcmsMarcarGrupos(icmsCtx,l.id,achou); }catch(e){ console.warn('ICMS: marcar NFs da guia falhou:',e); } } // as NFs do grupo passam a pertencer a este pagamento
     // Divide o extrato quando o pagamento passou do valor do tributo.
     if(achou.diferenca>0.01){
       const valorTributo=Math.round(achou.extraido.valor*100)/100;
