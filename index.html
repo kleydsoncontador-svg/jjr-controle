@@ -25922,6 +25922,7 @@ async function _lancctbProcessarFopag(){
     for(let i=0;i<pendencias.length;i++){
       const l=pendencias[i];
       if(statusEl) statusEl.textContent=`Processando FOPAG ${i+1}/${pendencias.length}…`;
+      if(/SISPAG\s*TRIBUT/.test(_norm(String(l.historico_bancario||'')))) continue; // "Sispag Tributos" jamais é folha/pessoa física (30/10/2026: DIFAL por NF virava "[PESSOA IDENTIFICADA…]" pelo CPF do consumidor)
       if(raizFopagContabil&&contaFerias){
         const [anoL,mesL]=l.data_pagamento.slice(0,7).split('-').map(Number);
         const meses=[l.data_pagamento.slice(0,7), mesL===12?`${anoL+1}-01`:`${anoL}-${String(mesL+1).padStart(2,'0')}`];
@@ -26474,14 +26475,27 @@ async function _lancctbExtrairComposicaoDarf(pdf){
 // Arrecadação" — página sem isso só devolve null e é ignorada) e soma TODOS
 // os itens de TODAS as páginas pro valor total, em vez de confiar num rótulo
 // "Valor Total"/"Totais" que pode estar numa página só (ou faltar no OCR).
+// OCR confunde dígitos parecidos (ex.: 136,11 lido como 186,11 — guia DCTFWeb da Fast Lube 06/2026). Quando a soma dos códigos lidos não fecha com o TOTAL declarado do documento,
+// tenta trocar UM dígito de UM valor por um dígito parecido: só aceita se a troca fizer a soma bater EXATAMENTE com o total declarado e se for a ÚNICA troca possível.
+function _lancctbOcrCorrigirDigito(itens,declarado){
+  const conf={'0':['8','6'],'1':['7','4'],'3':['8','5'],'4':['1','9'],'5':['6','3','8'],'6':['5','8','0'],'7':['1'],'8':['3','0','6','9'],'9':['8','4']};
+  const alvo=Math.round(declarado*100), soma=itens.reduce((t,i)=>t+Math.round(i.valor*100),0), sols=[];
+  itens.forEach((it,k)=>{ const cent=Math.round(it.valor*100), str=String(cent);
+    for(let p=0;p<str.length;p++) for(const alt of (conf[str[p]]||[])){ const novo=Number(str.slice(0,p)+alt+str.slice(p+1)); if(soma-cent+novo===alvo) sols.push({k,novo}); } });
+  if(sols.length!==1) return null;
+  const { k, novo } = sols[0];
+  return itens.map((it,i)=>i===k?{...it,valor:novo/100,ocrCorrigido:true}:it);
+}
 function _lancctbComposicaoDarfMultiPagina(porPaginaItens,tolY){
   const resultados=porPaginaItens.map(itensPagina=>_lancctbComposicaoDarfDeItens(itensPagina,tolY)).filter(Boolean);
   if(!resultados.length) return null;
   const ehDas=resultados.some(r=>r.itens===null);
   // 1 página só e a soma das linhas lidas não fecha com o total declarado do documento: devolve o TOTAL DECLARADO sem composição (nunca um total parcial)
   if(porPaginaItens.length===1&&resultados.length===1&&resultados[0].incompleta&&!ehDas) return { itens:null, valorTotal:resultados[0].declarado, competencia:resultados[0].competencia, incompleta:true };
-  const itensTodos=resultados.flatMap(r=>r.itens||[]);
-  const valorTotal=itensTodos.length?Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100:resultados[0].valorTotal;
+  let itensTodos=resultados.flatMap(r=>r.itens||[]);
+  let valorTotal=itensTodos.length?Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100:resultados[0].valorTotal;
+  { const decl0=Math.max(0,...resultados.map(r=>Number(r.declarado)||0));
+    if(!ehDas&&itensTodos.length&&decl0>0&&Math.abs(valorTotal-decl0)>0.02){ const fix=_lancctbOcrCorrigirDigito(itensTodos,decl0); if(fix){ itensTodos=fix; valorTotal=Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100; } } }
   const competencia=(resultados.find(r=>r.competencia)||{}).competencia||null;
   // Mesma conferência da guia de 1 página, agora somando as páginas: se o documento declara um total ("Valor Total do Documento"/"Totais") e a soma de TODOS os códigos lidos não fecha,
   // falta código (OCR/leitura) — devolve o TOTAL DECLARADO sem composição, nunca a soma parcial (foi o que deixou a guia de R$ 1.714,47 com 734,13 e sem casar com o pagamento).
