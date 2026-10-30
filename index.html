@@ -42538,53 +42538,28 @@ async function confirmarLancctbAberturaNaExtrato(extratoId,ehSaidaExtrato){
   const somaFluxo=Math.round(fluxoLinhas.reduce((a,f)=>a+Number((ehSaidaExtrato?f.valor_saida:f.valor_entrada)||0),0)*100)/100;
   const diferenca=Math.round((valorExtrato-somaFluxo)*100)/100;
   const linhasDesc=fluxoLinhas.map(f=>'• R$ '+_fmt(ehSaidaExtrato?f.valor_saida:f.valor_entrada)+' — '+(f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).join('\n');
-  const difMsg=Math.abs(diferenca)>0.01?'\n• R$ '+_fmt(Math.abs(diferenca))+' — Diferença (linha extra criada)':'';
+  const difMsg=diferenca>=0.005?'\n• R$ '+_fmt(diferenca)+' — Diferença (mesmo histórico, "(diferença)")':'';
   const dt=(extrato.data_pagamento||'').split('-').reverse().join('/');
-  if(!confirm('Dividir '+dt+' R$ '+_fmt(valorExtrato)+' em '+(fluxoLinhas.length+(Math.abs(diferenca)>0.01?1:0))+' linha(s):\n'+linhasDesc+difMsg+'\n\nConfirmar?')) return;
+  if(!confirm('Abrir '+dt+' R$ '+_fmt(valorExtrato)+' em '+(fluxoLinhas.length+(diferenca>=0.005?1:0))+' débito(s), com 1 crédito de R$ '+_fmt(valorExtrato)+' no banco (o extrato não é dividido):\n'+linhasDesc+difMsg+'\n\nConfirmar?')) return;
   closeModal('mLancctbFluxoAbrirExtrato');
   await _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaidaExtrato,campoV,campoZ,somaFluxo,diferenca);
 }
 
 async function _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaida,campoV,campoZ,somaFluxo,diferenca){
-  const eid=_lancctbEidAtual;
-  const criadas=[];
-  const desfazer=async()=>{ for(const c of criadas) await _supaClient.from('lancamentos_extrato').delete().eq('id',c.id); };
-  for(const f of fluxoLinhas.slice(1)){
-    const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100;
-    const {data:nova,error:eI}=await _supaClient.from('lancamentos_extrato').insert({
-      empresa_eid:eid, conta_bancaria_id:extrato.conta_bancaria_id,
-      data_pagamento:extrato.data_pagamento, [campoV]:vf, [campoZ]:0,
-      historico_bancario:extrato.historico_bancario,
-      informacao:'Aberto do Fluxo: '+((f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).trim(),
-      origem_importacao:'manual',
-      hash_dedup:'fluxo_abert_'+extrato.id+'_'+f.id+'_'+Date.now()
-    }).select('id').single();
-    if(eI||!nova){ await desfazer(); toast('Erro ao criar linha: '+(eI?.message||'sem retorno'),'err'); return; }
-    criadas.push({id:nova.id,fluxoId:f.id});
-  }
-  if(Math.abs(diferenca)>0.01){
-    const {data:novaDif,error:eDi}=await _supaClient.from('lancamentos_extrato').insert({
-      empresa_eid:eid, conta_bancaria_id:extrato.conta_bancaria_id,
-      data_pagamento:extrato.data_pagamento, [campoV]:Math.round(Math.abs(diferenca)*100)/100, [campoZ]:0,
-      historico_bancario:extrato.historico_bancario,
-      informacao:'Diferença — abertura manual pelo Fluxo de Caixa (original R$ '+_fmt(Number(extrato[campoV]))+')',
-      origem_importacao:'manual',
-      hash_dedup:'fluxo_dif_'+extrato.id+'_'+Date.now()
-    }).select('id').single();
-    if(eDi||!novaDif){ await desfazer(); toast('Erro ao criar linha de diferença: '+(eDi?.message||'sem retorno'),'err'); return; }
-    criadas.push({id:novaDif.id,fluxoId:null});
-  }
-  const vf0=Math.round(Number((ehSaida?fluxoLinhas[0].valor_saida:fluxoLinhas[0].valor_entrada)||0)*100)/100;
-  const {error:eUpd}=await _supaClient.from('lancamentos_extrato').update({[campoV]:vf0}).eq('id',extrato.id);
-  if(eUpd){ await desfazer(); toast('Erro ao atualizar extrato: '+eUpd.message,'err'); return; }
-  await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).eq('id',fluxoLinhas[0].id);
-  for(const c of criadas.filter(x=>x.fluxoId))
-    await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:c.id}).eq('id',c.fluxoId);
+  // Pedido do usuário 30/10/2026: o extrato NUNCA é dividido em várias saídas bancárias. Fica 1 linha com o valor INTEIRO do extrato (1 crédito no banco) aberta em N débitos: um por linha do Fluxo e, se houver
+  // diferença, mais 1 débito com a diferença (mesmo histórico, com "(diferença)" entre parênteses). Diferença negativa (Fluxo maior que o extrato) não cabe como débito — nada é alterado.
+  if(diferenca<-0.005){ toast('A soma do Fluxo (R$ '+_fmt(somaFluxo)+') é maior que o extrato (R$ '+_fmt(Number(extrato[campoV]))+'): não dá para abrir em débitos. Escolha as linhas certas ou associe sem abrir.','err'); return; }
+  const comp=fluxoLinhas.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const txt=((f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).trim(); return { codigo:String(f.documento_numero||f.numero||'').trim()||null, denominacao:txt, encargo:null, uf:null, valor:vf, resumo:txt.slice(0,120), competencia:null }; });
+  if(diferenca>=0.005){ const txt=((fluxoLinhas[0].descricao||'')+' '+(fluxoLinhas[0].cliente_fornecedor_nome||'')).trim(); comp.push({ codigo:null, denominacao:txt, encargo:null, uf:null, valor:Math.round(diferenca*100)/100, resumo:(txt.slice(0,105)+' (diferença)').trim(), competencia:null }); }
+  const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+_fmt(x.valor)).join(' + ')+'] '+String(extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+  const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',extrato.id);
+  if(eUpd){ toast('Erro ao abrir o extrato em débitos: '+eUpd.message,'err'); return; }
+  const { error: eFx } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extrato.id}).in('id',fluxoLinhas.map(f=>f.id));
+  if(eFx){ toast('Extrato aberto, mas erro ao associar o Fluxo: '+eFx.message,'err'); }
   _lancctbFluxoSelecionados.clear();
   _lancctbFluxoSelecionarTodosMode=false;
   renderLancctbFluxoCaixa();
-  const nTotal=fluxoLinhas.length+(Math.abs(diferenca)>0.01?1:0);
-  toast('Extrato dividido em '+nTotal+' linha(s) — vá ao Registro Contábil para classificar cada uma.','ok');
+  toast('Extrato aberto em '+comp.length+' débito(s) com 1 crédito no banco — vá ao Registro Contábil para classificar.','ok');
 }
 
 // Pedido do usuário 09/09/2026: "crie um botão para desassociar" — desfaz
