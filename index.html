@@ -19130,7 +19130,7 @@ function _convAtivoProcessarFilaAutomatica(eid){
   const restantes=[];
   fila.forEach(entrada=>{
     const item=entrada.nfInfo.itens[0];
-    const r=_convAtivoClassificar(item.ncm,regras);
+    const r=_convAtivoClassificar(item.ncm,regras,item.categoria);
     if(!r){restantes.push(entrada);return;}
     if(entrada.valorResidualSugerido!=null){
       _convAtivoRegistrarResidual(eid,item.valorUnitario,r.contaPatrimonial,r.centroCusto,r.taxaDepreciacao,_convAtivoFmtValorTxt(entrada.valorResidualSugerido));
@@ -19395,10 +19395,11 @@ function salvarClassificacaoFilaImobilizado(eid,i){
   if(!contaPatrimonial||!centroCusto||!taxaDepreciacao){toast('Preencha conta patrimonial, centro de custo e taxa de depreciação.','err');return;}
   const item=entrada.nfInfo.itens[0];
   if(valorResidual)_convAtivoRegistrarResidual(eid,item.valorUnitario,contaPatrimonial,centroCusto,taxaDepreciacao,valorResidual);
-  const regra={ncm:item.ncm,contaPatrimonial,centroCusto,taxaDepreciacao,ignorarIcms,ignorarPis,ignorarCofins};
+  const regra={ncm:item.ncm,categoria:item.categoria||'',categoriaLabel:item.categoriaLabel||'',contaPatrimonial,centroCusto,taxaDepreciacao,ignorarIcms,ignorarPis,ignorarCofins};
   let regras=getConvAtivoRegras(eid);
   if(usarComoRegra){
-    regras.push(regra);
+    const iDup=regras.findIndex(r=>r.ncm===regra.ncm&&(r.categoria||'')===regra.categoria);
+    if(iDup>=0) regras[iDup]=regra; else regras.push(regra);
     setConvAtivoRegras(eid,regras);
   } else {
     regras=[...regras,regra];
@@ -20195,8 +20196,9 @@ async function _convAtivoParsearPDF(file){
   if(!itens.length)throw new Error('Nenhum item de produto reconhecido no PDF.');
   return {nfNumero,dataEmissao,fornecedor,itens};
 }
-function _convAtivoClassificar(ncm,regras){
-  return regras.find(r=>r.ncm===ncm)||null;
+// A regra só vale quando NCM E Categoria são iguais (pedido do usuário 30/10/2026). Item sem categoria (NF enviada direto) só casa com regra sem categoria.
+function _convAtivoClassificar(ncm,regras,categoria){
+  return regras.find(r=>r.ncm===ncm&&(r.categoria||'')===(categoria||''))||null;
 }
 async function processarConvAtivo(eid){
   const btn=document.getElementById('convAtivoBtnProcessar_'+eid);
@@ -20234,7 +20236,7 @@ async function processarConvAtivo(eid){
   const regras=getConvAtivoRegras(eid);
   const naoClassificados=new Map();
   todosItens.forEach(it=>{
-    const r=_convAtivoClassificar(it.ncm,regras);
+    const r=_convAtivoClassificar(it.ncm,regras,it.categoria);
     if(!r&&!naoClassificados.has(it.ncm)){
       const mesmoNcm=todosItens.filter(x=>x.ncm===it.ncm);
       naoClassificados.set(it.ncm,{
@@ -20347,7 +20349,7 @@ function renderConvAtivoRegrasPanel(eid,regras){
     } else {
       const flags=[r.ignorarIcms?'sem ICMS':'',r.ignorarPis?'sem PIS':'',r.ignorarCofins?'sem COFINS':''].filter(Boolean).join(', ');
       html+=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:11px;padding:6px 0;border-bottom:1px solid var(--border)">
-        <div><span style="color:var(--slate)">NCM ${esc(r.ncm)}</span> → <strong>Conta ${esc(r.contaPatrimonial)}</strong> · Centro ${esc(r.centroCusto)} · ${esc(String(r.taxaDepreciacao))}% a.a.${flags?' · '+esc(flags):''}</div>
+        <div><span style="color:var(--slate)">NCM ${esc(r.ncm)}${r.categoria?' + '+esc(r.categoriaLabel||r.categoria):''}</span> → <strong>Conta ${esc(r.contaPatrimonial)}</strong> · Centro ${esc(r.centroCusto)} · ${esc(String(r.taxaDepreciacao))}% a.a.${flags?' · '+esc(flags):''}</div>
         <div style="display:flex;gap:4px">
           <button class="icon-btn" onclick="_convAtivoEditandoRegra['${eid}']=${i};renderConvAtivoLista()" title="Editar" style="padding:4px;background:none;border:none;cursor:pointer;font-size:1rem">✏️</button>
           <button class="icon-btn" onclick="excluirRegraConvAtivo('${eid}',${i})" title="Excluir" style="padding:4px;background:none;border:none;cursor:pointer;color:#dc2626;font-size:1rem">🗑️</button>
@@ -20369,7 +20371,7 @@ function salvarEdicaoRegraConvAtivo(eid,i){
   const ignorarPis=!!document.getElementById('convAtivoRegraIgnoraPis_'+eid+'_'+i)?.checked;
   const ignorarCofins=!!document.getElementById('convAtivoRegraIgnoraCofins_'+eid+'_'+i)?.checked;
   if(!ncm||!contaPatrimonial||!centroCusto||!taxaDepreciacao){toast('Preencha todos os campos.','err');return;}
-  regras[i]={ncm,contaPatrimonial,centroCusto,taxaDepreciacao,ignorarIcms,ignorarPis,ignorarCofins};
+  regras[i]={ncm,categoria:regras[i].categoria||'',categoriaLabel:regras[i].categoriaLabel||'',contaPatrimonial,centroCusto,taxaDepreciacao,ignorarIcms,ignorarPis,ignorarCofins};
   setConvAtivoRegras(eid,regras);
   _convAtivoEditandoRegra[eid]=null;
   renderConvAtivoLista();
@@ -20448,7 +20450,7 @@ async function _convAtivoGerarResultado(eid,nfsInfo,regras){
       const novosBens=[];
       nfsInfo.forEach(nfInfo=>{
         nfInfo.itens.forEach(item=>{
-          const r=_convAtivoClassificar(item.ncm,regras);
+          const r=_convAtivoClassificar(item.ncm,regras,item.categoria);
           // Valor Residual só repete quando Valor do Produto + Conta + Centro +
           // Taxa baterem todos com uma combinação já informada antes — não é uma
           // propriedade do NCM, já que o mesmo NCM pode cobrir itens de valores
