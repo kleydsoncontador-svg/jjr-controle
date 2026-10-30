@@ -16,6 +16,7 @@ const CORS_HEADERS = {
 };
 
 const GEMINI_MODEL = 'gemini-3.6-flash';
+const GEMINI_MODEL_BUSCA = 'gemini-3.8-flash'; // modelo usado só na chamada com pesquisa do Google (o 3.6 ignorava a ferramenta de busca)
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -25,7 +26,7 @@ type Fonte = { titulo: string; url: string };
 
 // comBusca = true liga a pesquisa do Google (grounding): o Gemini consulta a web de verdade e devolve os sites usados.
 // Nesse modo não dá pra forçar responseMimeType JSON junto com a ferramenta, então o JSON é extraído do texto.
-async function chamarGemini(prompt: string, comBusca = false): Promise<{ raw: string; fontes: Fonte[] }> {
+async function chamarGemini(prompt: string, comBusca = false): Promise<{ raw: string; fontes: Fonte[]; buscas?: string[]; dbg?: string }> {
   const apiKey = Deno.env.get('GEMINI_API_KEY');
   if (!apiKey) throw new Error('GEMINI_API_KEY não configurada nos secrets da function');
 
@@ -33,7 +34,7 @@ async function chamarGemini(prompt: string, comBusca = false): Promise<{ raw: st
   let ultimoErro = '';
   for (let tentativa = 1; tentativa <= MAX_TENTATIVAS; tentativa++) {
     const resp = await fetch(
-      `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+      `https://generativelanguage.googleapis.com/v1beta/models/${comBusca ? GEMINI_MODEL_BUSCA : GEMINI_MODEL}:generateContent`,
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
@@ -55,7 +56,9 @@ async function chamarGemini(prompt: string, comBusca = false): Promise<{ raw: st
         const url = c?.web?.uri;
         if (url && !vistos.has(url)) { vistos.add(url); fontes.push({ titulo: c.web.title || url, url }); }
       }
-      return { raw, fontes };
+      const buscas = data?.candidates?.[0]?.groundingMetadata?.webSearchQueries || [];
+      const cand = data?.candidates?.[0] || {};
+      return { raw, fontes, buscas, dbg: 'keys=' + Object.keys(cand).join(',') + ' gm=' + JSON.stringify(cand.groundingMetadata ?? null).slice(0, 300) + ' parts=' + (cand.content?.parts || []).map((p: any) => Object.keys(p).join('+')).join('|') };
     }
     const errText = await resp.text();
     ultimoErro = 'Erro na API da IA (Gemini, ' + resp.status + '): ' + errText.slice(0, 300);
@@ -90,7 +93,7 @@ Vida útil estimada: ${vidaUtilAnos ?? ''} anos
 
 Atenção: a descrição do ativo vem direto da nota fiscal e costuma vir abreviada com jargão/códigos internos do fornecedor (sigla de modelo, cor, tecido, acabamento, medidas) — não é uma frase em português natural. NÃO tente decifrar cada sigla isoladamente nem invente um tipo de produto diferente a partir de uma palavra ambígua (ex: não conclua "equipamento de pintura" só porque aparece algo como "PINT" ou "TINTA" na descrição). Use a Categoria contábil acima como referência principal do tipo de bem, e a descrição apenas como pista de modelo/acabamento dentro dessa categoria.
 
-Pesquise na web (anúncios e lojas brasileiras de itens novos e usados equivalentes) e baseie as faixas de preço no que encontrar; se não achar item equivalente, diga isso em analise_demanda em vez de inventar. Responda SOMENTE com um JSON válido, exatamente neste formato:
+OBRIGATÓRIO: use a ferramenta de busca do Google pelo menos 3 vezes ANTES de responder — (1) preço de item novo equivalente em lojas brasileiras, (2) anúncios de usados equivalentes no Mercado Livre e na OLX, (3) venda de móveis/equipamentos corporativos seminovos desse tipo. Baseie as faixas de preço no que encontrar; se não achar item equivalente, diga isso em analise_demanda em vez de inventar. Responda SOMENTE com um JSON válido, exatamente neste formato:
 
 {
   "mercado": {
@@ -118,10 +121,13 @@ Pesquise na web (anúncios e lojas brasileiras de itens novos e usados equivalen
 
 Use valores realistas para o mercado brasileiro — não invente números absurdos, e mantenha conservador_pct < realista_pct < otimista_pct.`;
 
-    let resposta: { raw: string; fontes: Fonte[] };
+    let resposta: { raw: string; fontes: Fonte[]; buscas?: string[]; dbg?: string };
+    let avisoBusca = '';
     try {
       resposta = await chamarGemini(prompt, true);
-    } catch (_e) {
+      if (!resposta.fontes.length) avisoBusca = 'A IA respondeu sem devolver links de fonte.';
+    } catch (e) {
+      avisoBusca = 'Pesquisa na web falhou: ' + (e instanceof Error ? e.message : String(e)).slice(0, 300);
       resposta = await chamarGemini(prompt, false); // sem a pesquisa: estimativa da IA, sem fontes
     }
     let raw = resposta.raw.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/```\s*$/i, '');
@@ -130,6 +136,9 @@ Use valores realistas para o mercado brasileiro — não invente números absurd
     const dados = JSON.parse(raw);
     dados.fontes = resposta.fontes.slice(0, 12);
     dados.pesquisaWeb = resposta.fontes.length > 0;
+    if (avisoBusca) dados.avisoBusca = avisoBusca;
+    dados.buscas = resposta.buscas || [];
+    dados.dbg = resposta.dbg || '';
 
     return new Response(JSON.stringify(dados), {
       headers: { ...CORS_HEADERS, 'Content-Type': 'application/json' },
