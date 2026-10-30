@@ -4512,6 +4512,13 @@ function cccIdbGetAll(db){
     }catch(e){ resolve({}); }
   });
 }
+function cccIdbDel(key){
+  if(!cccDb) return;
+  try{
+    var tx = cccDb.transaction(CCC_DB_STORE, 'readwrite');
+    tx.objectStore(CCC_DB_STORE).delete(key);
+  }catch(e){ /* best-effort */ }
+}
 function cccIdbSet(key, value){
   if(!cccDb) return;
   try{
@@ -11999,10 +12006,18 @@ async function _loadFromSupabase(){
     // no momento exato em que uma gravação falha — não precisa (e não deve)
     // ser reforçado por um reenvio automático no boot.
     var chavesDivergentes=[];
+    var _orfaosVr=false;
     Object.keys(cccLocalUpdatedAt).forEach(function(key){
       if(key==='ccc_session')return;
       var localTs=cccLocalUpdatedAt[key],serverTs=serverTsByKey[key];
       if(!localTs)return;
+      // Análise de Imobilizado apagada (a tela grava e apaga DIRETO no servidor): a cópia local fica órfã e gerava o aviso laranja em TODOS os navegadores
+      // (visto 30/10/2026: 4 análises da NF 64078 excluídas). Só limpa com a carga completa do servidor e guarda backup local da cópia.
+      if(/^vr_relatorio_/.test(key)&&!(key in serverValByKey)&&r.data&&r.data.length>100){
+        try{ var bkVr=JSON.parse(localStorage.getItem('ccc_backup_vr_orfaos')||'{}'); bkVr[key]=cccCache[key]; localStorage.setItem('ccc_backup_vr_orfaos',JSON.stringify(bkVr)); }catch(e){}
+        delete cccCache[key]; delete cccLocalUpdatedAt[key]; cccIdbDel(key); _orfaosVr=true;
+        return;
+      }
       var divergeDeVerdade=serverTs
         ? new Date(localTs).getTime()-new Date(serverTs).getTime()>RACE_CONDITION_MS
         : (Date.now()-new Date(localTs).getTime()>RACE_CONDITION_MS); // chave que só existe local (nem no servidor)
@@ -12016,6 +12031,7 @@ async function _loadFromSupabase(){
         console.warn('Cache local diverge do servidor (NÃO reenviado automaticamente):',key,localTs);
       }
     });
+    if(_orfaosVr) cccIdbSet(CCC_META_KEY,cccLocalUpdatedAt);
     if(chavesDivergentes.length>0) _avisarCacheLocalDesatualizado(chavesDivergentes,chavesDivergentes.map(function(k){ return {key:k, local:cccLocalUpdatedAt[k], servidor:serverTsByKey[k], existeNoServidor:(k in serverValByKey)}; }));
   }catch(e){console.warn('_loadFromSupabase:',e);_supaLastLoadOk=false;}
 }
