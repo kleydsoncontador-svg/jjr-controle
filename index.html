@@ -26482,8 +26482,16 @@ function _lancctbOcrCorrigirDigito(itens,declarado){
   const alvo=Math.round(declarado*100), soma=itens.reduce((t,i)=>t+Math.round(i.valor*100),0), sols=[];
   itens.forEach((it,k)=>{ const cent=Math.round(it.valor*100), str=String(cent);
     for(let p=0;p<str.length;p++) for(const alt of (conf[str[p]]||[])){ const novo=Number(str.slice(0,p)+alt+str.slice(p+1)); if(soma-cent+novo===alvo) sols.push({k,novo}); } });
-  if(sols.length!==1) return null;
-  const { k, novo } = sols[0];
+  let sol=null;
+  if(sols.length===1) sol=sols[0];
+  else if(sols.length>1){
+    // várias trocas fecham a soma: fica com a do item que o OCR menos confiou — só se for claramente suspeito (confiança <= 85) e 8+ pontos abaixo do segundo mais suspeito
+    const porConf=sols.map(x=>({...x,conf:itens[x.k].conf})).filter(x=>typeof x.conf==='number').sort((a,b)=>a.conf-b.conf);
+    const itensDistintos=new Set(sols.map(x=>x.k));
+    if(porConf.length===sols.length&&itensDistintos.size>1&&porConf[0].conf<=85&&porConf[1].conf-porConf[0].conf>=8&&sols.filter(x=>x.k===porConf[0].k).length===1) sol=porConf[0];
+  }
+  if(!sol) return null;
+  const { k, novo } = sol;
   return itens.map((it,i)=>i===k?{...it,valor:novo/100,ocrCorrigido:true}:it);
 }
 function _lancctbComposicaoDarfMultiPagina(porPaginaItens,tolY){
@@ -26553,12 +26561,15 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
       }
     }
     const nome=m[2].trim().replace(/^[^A-Za-zÀ-ÿ0-9]+/,''); // sem o traço "—" que o OCR coloca entre o código e a denominação
+    const _confs=linha.itens.filter(i=>typeof i.conf==='number'&&LANCCTB_RE_MONETARIO.test(String(i.str).trim())).map(i=>i.conf); // confiança do OCR nos valores desta linha (menor = mais suspeito)
+    const _confLinha=_confs.length?Math.min(..._confs):null;
     const _tam0=itensComp.length;
     if(partes&&(partes.multa>0||partes.juros>0)){
       itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.principal*100)/100, encargo:'principal' });
       if(partes.multa>0) itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.multa*100)/100, encargo:'multa' });
       if(partes.juros>0) itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.juros*100)/100, encargo:'juros' });
     } else itensComp.push({ codigo:m[1], denominacao:nome, valor:totalLinha });
+    if(_confLinha!=null) itensComp.slice(_tam0).forEach(it=>{ it.conf=_confLinha; });
     grupoItem=itensComp.slice(_tam0);
   }
   return itensComp;
@@ -26800,13 +26811,13 @@ function _lancctbOcrDataParaItens(data){
     const atual=palavras[i], prox=palavras[i+1];
     if(prox&&/^\d[\d.]*,$/.test(atual.text.trim())&&/^\d{1,2}$/.test(prox.text.trim())
        &&Math.abs(prox.bbox.y0-atual.bbox.y0)<20&&(prox.bbox.x0-atual.bbox.x1)<40&&(prox.bbox.x0-atual.bbox.x1)>=-40){
-      fundidas.push({ text:atual.text.trim()+prox.text.trim(), bbox:{x0:atual.bbox.x0,y0:atual.bbox.y0,x1:prox.bbox.x1,y1:atual.bbox.y1} });
+      fundidas.push({ text:atual.text.trim()+prox.text.trim(), bbox:{x0:atual.bbox.x0,y0:atual.bbox.y0,x1:prox.bbox.x1,y1:atual.bbox.y1}, confidence:Math.min(Number(atual.confidence)||0,Number(prox.confidence)||0) });
       i++;
       continue;
     }
     fundidas.push(atual);
   }
-  return fundidas.map(w=>({ str:w.text.trim(), x:w.bbox.x0, y:-w.bbox.y0 }));
+  return fundidas.map(w=>({ str:w.text.trim(), x:w.bbox.x0, y:-w.bbox.y0, conf:Number(w.confidence)||0 }));
 }
 // Guia de pagamento/boleto de prefeitura (ex: ISS retido de Ibirité, "Recibo do Sacado" + "Ficha de Compensação"): o texto
 // corrido do OCR embaralha os campos (a base de cálculo aparece entre o rótulo e o valor), então lê POR POSIÇÃO — o valor fica
