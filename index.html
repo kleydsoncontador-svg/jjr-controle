@@ -26495,21 +26495,30 @@ function _lancctbOcrCorrigirDigito(itens,declarado){
   return itens.map((it,i)=>i===k?{...it,valor:novo/100,ocrCorrigido:true}:it);
 }
 function _lancctbComposicaoDarfMultiPagina(porPaginaItens,tolY){
-  const resultados=porPaginaItens.map(itensPagina=>_lancctbComposicaoDarfDeItens(itensPagina,tolY)).filter(Boolean);
-  if(!resultados.length) return null;
-  const ehDas=resultados.some(r=>r.itens===null);
+  const resultados0=porPaginaItens.map(itensPagina=>_lancctbComposicaoDarfDeItens(itensPagina,tolY)).filter(Boolean);
+  if(!resultados0.length) return null;
+  const ehDas=resultados0.some(r=>r.itens===null);
   // 1 página só e a soma das linhas lidas não fecha com o total declarado do documento: devolve o TOTAL DECLARADO sem composição (nunca um total parcial)
-  if(porPaginaItens.length===1&&resultados.length===1&&resultados[0].incompleta&&!ehDas) return { itens:null, valorTotal:resultados[0].declarado, competencia:resultados[0].competencia, incompleta:true };
-  let itensTodos=resultados.flatMap(r=>r.itens||[]);
-  let valorTotal=itensTodos.length?Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100:resultados[0].valorTotal;
-  { const decl0=Math.max(0,...resultados.map(r=>Number(r.declarado)||0));
-    if(!ehDas&&itensTodos.length&&decl0>0&&Math.abs(valorTotal-decl0)>0.02){ const fix=_lancctbOcrCorrigirDigito(itensTodos,decl0); if(fix){ itensTodos=fix; valorTotal=Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100; } } }
-  const competencia=(resultados.find(r=>r.competencia)||{}).competencia||null;
+  if(porPaginaItens.length===1&&resultados0.length===1&&resultados0[0].incompleta&&!ehDas) return { itens:null, valorTotal:resultados0[0].declarado, competencia:resultados0[0].competencia, incompleta:true };
+  // Soma das páginas + correção de 1 dígito do OCR. Se ainda não fecha com o total declarado, refaz a leitura de TODAS as páginas na versão tolerante (código com 1 dígito a mais, ex: "11388" = 1138): numa guia
+  // de várias páginas o total só aparece numa delas, então a leitura tolerante por página nunca fecha sozinha (achado real 30/10/2026, Fast Lube, DARF R$ 76.639,80: a linha 11388 de R$ 38.409,64 sumia).
+  const montar=resultados=>{
+    let itensTodos=resultados.flatMap(r=>r.itens||[]);
+    let valorTotal=itensTodos.length?Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100:resultados[0].valorTotal;
+    const decl=Math.max(0,...resultados.map(r=>Number(r.declarado)||0));
+    if(!ehDas&&itensTodos.length&&decl>0&&Math.abs(valorTotal-decl)>0.02){ const fix=_lancctbOcrCorrigirDigito(itensTodos,decl); if(fix){ itensTodos=fix; valorTotal=Math.round(itensTodos.reduce((s,i)=>s+i.valor,0)*100)/100; } }
+    return { resultados, itensTodos, valorTotal, decl, fecha:!(itensTodos.length&&decl>0&&Math.abs(valorTotal-decl)>0.02) };
+  };
+  let M=montar(resultados0);
+  if(!ehDas&&!M.fecha&&M.decl>0){
+    const r2=porPaginaItens.map(itensPagina=>_lancctbComposicaoDarfDeItens(itensPagina,tolY,true)).filter(Boolean);
+    if(r2.length){ const M2=montar(r2); if(M2.fecha&&M2.itensTodos.length>M.itensTodos.length) M=M2; }
+  }
+  const competencia=(M.resultados.find(r=>r.competencia)||{}).competencia||null;
   // Mesma conferência da guia de 1 página, agora somando as páginas: se o documento declara um total ("Valor Total do Documento"/"Totais") e a soma de TODOS os códigos lidos não fecha,
   // falta código (OCR/leitura) — devolve o TOTAL DECLARADO sem composição, nunca a soma parcial (foi o que deixou a guia de R$ 1.714,47 com 734,13 e sem casar com o pagamento).
-  const declaradoDoc=Math.max(0,...resultados.map(r=>Number(r.declarado)||0));
-  if(!ehDas&&itensTodos.length&&declaradoDoc>0&&Math.abs(valorTotal-declaradoDoc)>0.02) return { itens:null, valorTotal:declaradoDoc, competencia, incompleta:true };
-  return { itens:ehDas?null:itensTodos, valorTotal, competencia };
+  if(!ehDas&&!M.fecha) return { itens:null, valorTotal:M.decl, competencia, incompleta:true };
+  return { itens:ehDas?null:M.itensTodos, valorTotal:M.valorTotal, competencia };
 }
 // Núcleo compartilhado entre a leitura por TEXTO NATIVO (pdf.js, tol=3 —
 // itens já vêm com coordenada exata) e a leitura por OCR local (Tesseract.js,
@@ -26518,7 +26527,7 @@ function _lancctbComposicaoDarfMultiPagina(porPaginaItens,tolY){
 // glyph nativo). Separado pra não duplicar a regex de composição em dois
 // lugares — pedido do usuário 22/09/2026: "implemente um OCR local...
 // reutilizar o parser tributário existente".
-function _lancctbComposicaoDarfDeItens(itens,tolY){
+function _lancctbComposicaoDarfDeItens(itens,tolY,relaxadoForcado){
   const texto=itens.map(it=>it.str).join(' ');
   if(!/composi[cç][aã]o do documento de arrecada[cç][aã]o/i.test(texto)) return null;
   const linhas=_lancctbAgruparLinhasPorY(itens,tolY);
@@ -26574,7 +26583,7 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
   }
   return itensComp;
   };
-  let itensComp=lerLinhas(false);
+  let itensComp=lerLinhas(!!relaxadoForcado);
   if(!itensComp.length) return null;
   // DAS do Simples Nacional também usa o cabeçalho "Composição do Documento
   // de Arrecadação" (com o detalhamento interno IRPJ/CSLL/COFINS/PIS/INSS/
