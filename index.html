@@ -37177,6 +37177,39 @@ let _lancctbRegistroStatus='';
 // Pedido do usuário 17/10/2026: "permita que eu filtre todas as contas — pra visualizar tudo de todas as contas". Modo SÓ VISUALIZAÇÃO: lista o extrato de todas as contas juntas (cada linha com o banco da própria conta);
 // os botões de Processar (que trabalham numa conta por vez) ficam desligados até escolher uma conta. A conta escolhida antes (_lancctbExtratoContaSel) é preservada pra quando voltar.
 let _lancctbRegistroTodas=false;
+// Seletor de contas com caixinhas (pedido do usuário 30/10/2026): marque os bancos que quer ver juntos. 1 marcada = a conta sozinha; 2+ = visualização conjunta SÓ delas (os botões de processar rodam uma conta de cada vez, só nas marcadas).
+let _lancctbRegistroContasSel=null; // Set de ids (texto) das contas marcadas; null = todas
+function _lancctbContasMarcadasIds(agencias){
+  if(_lancctbRegistroTodas){ const sel=_lancctbRegistroContasSel; return (sel&&sel.size>=2)?agencias.filter(a=>sel.has(String(a.id))).map(a=>String(a.id)):agencias.map(a=>String(a.id)); }
+  return [String(_lancctbExtratoContaSel)];
+}
+function _lancctbContasDropdownHtml(agencias){
+  const marc=new Set(_lancctbContasMarcadasIds(agencias));
+  const nome=a=>`${esc(_lancctbNomeBancoExibicao(a.banco_nome))} — Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}`;
+  const uma=marc.size===1?agencias.find(a=>marc.has(String(a.id))):null;
+  const resumo=uma?nome(uma):(marc.size===agencias.length?'📚 Todas as contas':`📚 ${marc.size} de ${agencias.length} contas`);
+  if(agencias.length<2) return `<span class="si" style="min-width:440px;display:inline-block">${resumo}</span>`;
+  return `<div style="position:relative;min-width:440px" data-filtro="registro-conta-sel">
+    <button type="button" class="si" style="width:100%;text-align:left;cursor:pointer" onclick="_lancctbContasDropToggle(event)">${resumo} ▾</button>
+    <div id="lancctbContasDrop" style="display:none;position:absolute;z-index:60;top:calc(100% + 4px);left:0;right:0;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;box-shadow:0 8px 24px rgba(0,0,0,.35)" onclick="event.stopPropagation()">
+      <label style="display:flex;gap:8px;align-items:center;padding:4px 6px;cursor:pointer;font-weight:600"><input type="checkbox" id="lancctbContasTodas" ${marc.size===agencias.length?'checked':''} onchange="_lancctbContasMarcarTodas(this.checked)"> Todas as contas</label>
+      <div style="border-top:1px solid var(--border);margin:4px 0"></div>
+      ${agencias.map(a=>`<label style="display:flex;gap:8px;align-items:center;padding:4px 6px;cursor:pointer;font-size:12.5px"><input type="checkbox" data-conta="${a.id}" ${marc.has(String(a.id))?'checked':''} onchange="_lancctbContasMudou()"> ${nome(a)}</label>`).join('')}
+      <div style="display:flex;justify-content:flex-end;gap:6px;margin-top:8px"><button type="button" class="btn bo bsm" onclick="_lancctbContasDropToggle(event)">Fechar</button><button type="button" class="btn bp bsm" onclick="_lancctbContasAplicar()">Aplicar</button></div>
+    </div></div>`;
+}
+function _lancctbContasDropToggle(ev){ if(ev) ev.stopPropagation(); const d=document.getElementById('lancctbContasDrop'); if(d) d.style.display=d.style.display==='none'?'block':'none'; }
+function _lancctbContasMarcarTodas(on){ document.querySelectorAll('#lancctbContasDrop input[data-conta]').forEach(c=>{ c.checked=on; }); }
+function _lancctbContasMudou(){ const cs=[...document.querySelectorAll('#lancctbContasDrop input[data-conta]')], t=document.getElementById('lancctbContasTodas'); if(t) t.checked=cs.every(c=>c.checked); }
+function _lancctbContasAplicar(){
+  const ids=[...document.querySelectorAll('#lancctbContasDrop input[data-conta]:checked')].map(c=>c.dataset.conta);
+  if(!ids.length){ toast('Marque pelo menos uma conta.','err'); return; }
+  const total=document.querySelectorAll('#lancctbContasDrop input[data-conta]').length;
+  if(ids.length===1){ _lancctbRegistroTodas=false; _lancctbExtratoContaSel=ids[0]; _lancctbRegistroContasSel=null; }
+  else { _lancctbRegistroTodas=true; _lancctbRegistroContasSel=(ids.length===total)?null:new Set(ids); }
+  _lancctbRegistroPagina=0; _lancctbRegistroSelecionados.clear(); _lancctbRegistroSelecionadosDesclass.clear(); renderLancctbRegistroContabil();
+}
+document.addEventListener('click',e=>{ const d=document.getElementById('lancctbContasDrop'); if(d&&d.style.display!=='none'&&!d.contains(e.target)) d.style.display='none'; });
 let _lancctbRegistroAgenciasCache=[];
 // Botões de Processar com "Todas as contas" (pedido do usuário 17/10/2026): cada conta é processada SOZINHA, uma depois da outra — o mesmo que escolher a conta e clicar no botão, só que automático.
 // Nunca roda misturando contas (o motor trabalha com 1 conta por vez: banco do lançamento, Fluxo, comprovantes e regras são da conta). Se uma conta falhar, segue pras outras e avisa no fim.
@@ -37220,10 +37253,10 @@ async function _lancctbRodarBotao(nome,args){
   const _fimProc=async()=>{ window.__nfParcCache=null; if(_rotProc){ await _lancctbMarcarProcesso(_rotProc,_maxIdAntes); renderLancctbRegistroContabil(); } };
   if(!_lancctbRegistroTodas){ let r; try{ r=await fn.apply(null,args||[]); } finally { await _fimProc(); } if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
   if(_lancctbRodandoTodas){ toast('Já tem um processamento de todas as contas em andamento.','info'); return; }
-  const ags=(_lancctbRegistroAgenciasCache||[]).slice();
+  const ags=(_lancctbRegistroAgenciasCache||[]).filter(a=>!(_lancctbRegistroContasSel&&_lancctbRegistroContasSel.size>=2)||_lancctbRegistroContasSel.has(String(a.id)));
   if(ags.length<2){ let r; try{ r=await fn.apply(null,args||[]); } finally { await _fimProc(); } if(_etapa) _lancctbEtapaMarcar(_etapa); return r; }
   const nomeA=a=>`${_lancctbNomeBancoExibicao(a.banco_nome)} Cc ${a.conta_corrente}`;
-  if(!confirm(`Processar em TODAS as ${ags.length} contas, uma de cada vez?\n\n${ags.map(nomeA).join('\n')}\n\nCada conta é processada separada das outras (como se você escolhesse a conta e clicasse no botão). Cada uma pode pedir a sua confirmação.`)) return;
+  if(!confirm(`Processar em ${(_lancctbRegistroContasSel&&_lancctbRegistroContasSel.size>=2)?'as '+ags.length+' contas MARCADAS':'TODAS as '+ags.length+' contas'}, uma de cada vez?\n\n${ags.map(nomeA).join('\n')}\n\nCada conta é processada separada das outras (como se você escolhesse a conta e clicasse no botão). Cada uma pode pedir a sua confirmação.`)) return;
   _lancctbRodandoTodas=true;
   const selAntes=_lancctbExtratoContaSel, erros=[];
   try{
@@ -37804,7 +37837,8 @@ async function renderLancctbRegistroContabil(){
   _lancctbRegistroAgenciasCache=agencias;
   const _todasC=_lancctbRegistroTodas&&agencias.length>1; if(!_todasC) _lancctbRegistroTodas=false;
   const _agPorId=new Map(agencias.map(a=>[Number(a.id),a]));
-  const _sohConta=qq=>_todasC?qq.in('conta_bancaria_id',agencias.map(a=>a.id)):qq.eq('conta_bancaria_id',_lancctbExtratoContaSel);
+  const _agVis=(_todasC&&_lancctbRegistroContasSel&&_lancctbRegistroContasSel.size>=2)?agencias.filter(a=>_lancctbRegistroContasSel.has(String(a.id))):agencias; // contas marcadas nas caixinhas
+  const _sohConta=qq=>_todasC?qq.in('conta_bancaria_id',_agVis.map(a=>a.id)):qq.eq('conta_bancaria_id',_lancctbExtratoContaSel);
   let contaAtual=agencias.find(a=>String(a.id)===_lancctbExtratoContaSel);
   if(!contaAtual){ contaAtual=agencias[0]; _lancctbExtratoContaSel=String(contaAtual.id); }
 
@@ -38103,7 +38137,7 @@ async function renderLancctbRegistroContabil(){
     _rt('antesFluxoLigLiv');
     const [{ data: _flxLig },{ data: _flxLiv }]=await Promise.all([
       idsExtrato.length ? _lancctbFetchPorIds(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid),'lancamento_extrato_id',idsExtrato,()=>false) : Promise.resolve({data:[]}),
-      contaAtual && _datMinLiv ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(_todasC?`conta_bancaria_id.is.null,conta_bancaria_id.in.(${agencias.map(a=>a.id).join(',')})`:`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`).gte('data',_datMinLiv).lte('data',_datMaxLiv)) : Promise.resolve({data:[]}),
+      contaAtual && _datMinLiv ? _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select(_FLUXO_SEL).eq('empresa_eid',eid).is('lancamento_extrato_id',null).or(_todasC?`conta_bancaria_id.is.null,conta_bancaria_id.in.(${_agVis.map(a=>a.id).join(',')})`:`conta_bancaria_id.is.null,conta_bancaria_id.eq.${contaAtual.id}`).gte('data',_datMinLiv).lte('data',_datMaxLiv)) : Promise.resolve({data:[]}),
     ]);
     const fluxoAll=[...(_flxLig||[]),...(_flxLiv||[])];
     const fluxoPorExtrato={}, _ligPorExtC={};
@@ -38746,7 +38780,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   ].map(o=>`<option value="${o.v}" ${_lancctbRegistroDirecao===o.v?'selected':''}>${o.t}</option>`).join('');
 
   let html=`<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:8px">
-    <select class="si" data-filtro="registro-conta-sel" style="min-width:440px" onchange="if(this.value==='__todas__'){_lancctbRegistroTodas=true;}else{_lancctbRegistroTodas=false;_lancctbExtratoContaSel=this.value;}_lancctbRegistroPagina=0;_lancctbRegistroSelecionados.clear();_lancctbRegistroSelecionadosDesclass.clear();renderLancctbRegistroContabil()">${opcoesConta}</select>
+    ${_lancctbContasDropdownHtml(agencias)}
     ${_lancctbMesPickerHtml(_lancctbRegistroMes,'_lancctbRegistroMudarMes')}
     <select class="si" data-filtro="registro-direcao" onchange="_lancctbRegistroDirecao=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesDirecao}</select>
     <select class="si" data-filtro="registro-status" onchange="_lancctbRegistroStatus=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">${opcoesStatus}</select>
