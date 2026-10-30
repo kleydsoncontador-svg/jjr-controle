@@ -35496,7 +35496,7 @@ async function _lancctbExtrairGnresMulti(pdf,statusCb){
       const mRef=t.match(/Refer[êe]ncia\s*\|\s*(\d{2}\/\d{4})/), mCod=t.match(/C[óo]digo de Receita\s*\|\s*([\d-]+)/), difal=/Diferencial de Al[íi]quota/i.test(t), st=/Substitui[çc][ãa]o Tribut/i.test(t);
       const uf=/Estado do Esp[íi]rito Santo/i.test(t)?'ES':null; const tipo=difal?'difal':(st?'st':null);
       guias.push({ pagina:pag, valor:_lancctbParseValorBR2(m[1]), gnre:{ uf, codigo:mCod?mCod[1].replace('-',''):null, referencia:mRef?mRef[1]:null, tipo, tipoNome:tipo?LANCCTB_ICMS_TIPOS[tipo]:null, dua:true }, composicao:null, competencia:mRef?mRef[1]:null });
-    } else if(!t.trim()){ // página só imagem (ex.: GNRE do PR): OCR só desta página
+    } else if(!t.trim()&&!window.__jjrSemOcrGnre){ // página só imagem (ex.: GNRE do PR): OCR só desta página
       try{
         if(statusCb) statusCb(`GNRE em imagem (página ${pag}) — lendo por OCR…`);
         const worker=await _lancctbOcrEmprestar();
@@ -35810,6 +35810,7 @@ function _lancctbIcmsGnreCel(r){
 async function _lancctbIcmsGnresIndexar(){
   const eid=_lancctbEidAtual, st=document.getElementById('lancctbIcmsStatus');
   const meses=_lancctbIcmsMes?[_lancctbIcmsMes]:_lancctbIcmsMesesGet(eid), cache={}, idx=Object.assign({},S.g('lancctb_icms_gnres_'+eid)||{});
+  window.__jjrSemOcrGnre=true; // indexar é leve: guias só-imagem (OCR) ficam de fora
   try{
     for(const mesBase of meses){
       const [y,m]=mesBase.split('-').map(Number), prox=m===12?`${y+1}-01`:`${y}-${String(m+1).padStart(2,'0')}`, compet=mesBase.slice(5)+'/'+mesBase.slice(0,4), ents=[];
@@ -35833,6 +35834,7 @@ async function _lancctbIcmsGnresIndexar(){
     S.s('lancctb_icms_gnres_'+eid,idx);
     toast('GNREs lidas da pasta Tributos do Mês: '+Object.values(idx).flat().length+' guia(s) indexada(s).','ok');
   }catch(e){ toast('Não consegui ler as GNREs da pasta: '+e.message,'err'); }
+  window.__jjrSemOcrGnre=false;
   if(st) st.textContent=''; _lancctbIcmsGruposRef=null; renderLancctbIcms();
 }
 // Coluna "No extrato" (pedido do usuário 29/10/2026): em qual pagamento do extrato a NF entrou, o valor TOTAL da saída e quantas NFs compõem esse pagamento.
@@ -35914,7 +35916,7 @@ function _lancctbIcmsAcharPagamento(l,ctx){
   const ufProva=ufH||(_ufsFx0.size===1?[..._ufsFx0][0]:null)||(_ufsComp.size===1?[..._ufsComp][0]:null);
   for(const k of [-1,0,-2]){
     const mes=mesAdd(k);
-    const livres=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&(!ufH||r.uf===ufH));
+    const livres=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&(!ufH||r.uf===ufH)&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade))); // NF de grupo que uma guia da pasta aglutina nunca é avulsa
     let sing=ufProva?livres.filter(r=>r.uf===ufProva&&Math.round(r.valor*100)===cents):[];
     // ajuda do Fluxo de Caixa: a NF que a linha do Fluxo ligada a este extrato cita desempata candidatos iguais
     if(sing.length>1&&nfsFx.size){ const f2=sing.filter(r=>nfsFx.has(String(r.doc).replace(/^0+/,''))); if(f2.length) sing=f2; }
@@ -36022,6 +36024,7 @@ async function _lancctbIcmsCarregarCtx(eid,pendencias){
       }catch(e){ console.warn('ICMS: leitura do Fluxo ligado aos extratos falhou:',e); }
     }
   }
+  try{ ctx.cobertos=_lancctbIcmsGruposCobertos(eid,ctx); }catch(e){ ctx.cobertos=new Set(); }
   return ctx;
 }
 // Guia que fecha EXATAMENTE com o total de um grupo da base (tipo + UF + unidade + competência), ex.: DIFAL do PR/163 = 866 NFs = R$ 16.117,12 (ensinado pelo usuário em 30/10/2026):
@@ -36038,6 +36041,17 @@ function _lancctbIcmsMarcarGrupos(ctx,extId,achou){
     const soma=g.reduce((t,r)=>t+Math.round(r.valor*100),0);
     if(g.length&&Math.abs(soma-Math.round(pt.valor*100))<=2){ g.forEach(r=>{ r.ext=extId; ctx.usados.add(r.id); }); ctx.mesesTocados.add(mes); n+=g.length; } });
   return n;
+}
+// Regra do usuário (30/10/2026): guia que AGLUTINA as NFs (a soma do grupo tipo+UF+unidade+competência fecha com o valor da guia) => nenhuma dessas NFs pode ser pagamento avulso.
+// NF que não está na composição de nenhuma guia continua podendo ser avulsa. Usa o índice das GNREs da pasta (botão "Ler GNREs da pasta").
+function _lancctbIcmsGruposCobertos(eid,ctx){
+  const idx=_lancctbIcmsGnreIdxGet(eid), cob=new Set(); if(!idx.length) return cob;
+  Object.keys(ctx.rows).forEach(mes=>{
+    const compet=mes.slice(5)+'/'+mes.slice(0,4), somas=new Map();
+    ctx.rows[mes].forEach(r=>{ const k=[r.tipo,r.uf,r.unidade].join('|'); somas.set(k,(somas.get(k)||0)+Math.round(r.valor*100)); });
+    somas.forEach((soma,k)=>{ const [tipo,uf,un]=k.split('|'); if(idx.some(e=>e.ref===compet&&e.uf===uf&&String(e.un)===String(un)&&e.tipo===tipo&&Math.abs(Math.round(e.valor*100)-soma)<=2)) cob.add(mes+'|'+k); });
+  });
+  return cob;
 }
 function _lancctbIcmsPersistirCtx(eid,ctx){ ctx.mesesTocados.forEach(mes=>{ try{ _lancctbIcmsSalvar(eid,mes,ctx.rows[mes]||[]); }catch(e){ console.error('ICMS: não consegui gravar o mês '+mes,e); } }); }
 
