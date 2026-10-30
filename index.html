@@ -26425,7 +26425,7 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
     if(cab.principal!==undefined&&cab.total!==undefined&&(cab.multa!==undefined||cab.juros!==undefined)) colsValores=cab; }
   // lerLinhas(false) = leitura normal; lerLinhas(true) = leitura tolerante (denominação com qualquer caractere), usada só quando a soma das linhas NÃO fecha com o total do documento
   const lerLinhas=(relaxado)=>{
-  const itensComp=[];
+  const itensComp=[]; let grupoItem=[]; // grupoItem = itens da última linha de código (principal/multa/juros) — recebem o "CNPJ Débito" que vem logo abaixo
   for(const linha of linhas){
     // OCR local lê o 0 do código de receita como letra O (achado real 02/10/2026: '0561' IRRF virou 'O561' e a linha sumia da composição) — só corrige token de 4 caracteres com 2+ dígitos.
     const t=linha.itens.map(i=>i.str).join(' ').trim().replace(/^([0-9OoIl]{4})(?=\s)/,tok=>(tok.match(/\d/g)||[]).length>=2?tok.replace(/[Oo]/g,'0').replace(/[Il]/g,'1'):tok);
@@ -26434,6 +26434,7 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
     // denominação (nunca acontece no texto nativo) — tolera até 3
     // caracteres não-alfanuméricos ali sem quebrar a linha inteira.
     // Achado real 14/10/2026 (Peixoto, DARF PIS/COFINS R$ 7.623,80): a linha do PIS tem "(LEI 10.637/02)" na denominação — sem aceitar parênteses ela era DESCARTADA e o leitor devolvia só a COFINS (6.263,88).
+    { const mCnpjDeb=t.match(/CNPJ\s*D[ée]bito:?\s*(\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2})/i); if(mCnpjDeb&&grupoItem.length){ grupoItem.forEach(it=>{ it.cnpjDebito=mCnpjDeb[1].replace(/\D/g,''); }); continue; } } // DARF de IPI: um CNPJ de débito por item (matriz × filial = unidades diferentes)
     let m=t.match(/^(\d{4})\s+[^A-ZÀ-Ü0-9]{0,3}\s*([A-ZÀ-Ü][A-ZÀ-Ü0-9\s\-\/\.\(\)]*?)\s+((?:[\d.,]+\s*)+)$/);
     // Achado real 16/10/2026 (ACCI, DARF INSS 08/2026, R$ 1.714,47): o OCR leu o código 1138 como "11388" (um dígito a mais colado no traço) e a linha de R$ 980,34 sumiu — a guia ficou com 9
     // dos 10 códigos e o valor lido (734,13) nunca bateu com o pagamento. Na leitura tolerante o código aceita 1 dígito a mais; só vale se a soma passar a fechar com o total do documento.
@@ -26456,11 +26457,13 @@ function _lancctbComposicaoDarfDeItens(itens,tolY){
       }
     }
     const nome=m[2].trim().replace(/^[^A-Za-zÀ-ÿ0-9]+/,''); // sem o traço "—" que o OCR coloca entre o código e a denominação
+    const _tam0=itensComp.length;
     if(partes&&(partes.multa>0||partes.juros>0)){
       itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.principal*100)/100, encargo:'principal' });
       if(partes.multa>0) itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.multa*100)/100, encargo:'multa' });
       if(partes.juros>0) itensComp.push({ codigo:m[1], denominacao:nome, valor:Math.round(partes.juros*100)/100, encargo:'juros' });
     } else itensComp.push({ codigo:m[1], denominacao:nome, valor:totalLinha });
+    grupoItem=itensComp.slice(_tam0);
   }
   return itensComp;
   };
@@ -36053,7 +36056,8 @@ async function _lancctbProcessarTributos(){
   // Linha de guia de 1 imposto identificada por versão antiga (sem código/nome
   // do PDF no histórico) volta a ser processada pra se corrigir sozinha; toda
   // outra linha nascida de composição continua fora (bug 12/09/2026).
-  const _ehComposicaoAntigaSemCodigo=l=>Array.isArray(l.composicao_tributo)&&l.composicao_tributo.length===1&&(!l.composicao_tributo[0].codigo||!/cód\./i.test(l.composicao_tributo[0].historico||''));
+  const _ehComposicaoAntigaSemCodigo=l=>(Array.isArray(l.composicao_tributo)&&l.composicao_tributo.length===1&&(!l.composicao_tributo[0].codigo||!/cód\./i.test(l.composicao_tributo[0].historico||'')))
+    ||(Array.isArray(l.composicao_tributo)&&l.composicao_tributo.length>=2&&(()=>{ const cs=l.composicao_tributo.map(c=>c.codigo).filter(Boolean); return new Set(cs).size<cs.length&&l.composicao_tributo.some(c=>!/\sUN\s+\d+/.test(c.denominacao||'')); })()); // mesmo código repetido (IPI de 2 unidades) sem a unidade: refaz com o CNPJ Débito do PDF
   // Bug real 16/09/2026 (Taylu, "vc cagou tudo"): sem essa trava, o botão
   // tentava casar QUALQUER saída pendente contra guias de tributo dentro da
   // folga de 30% — pegou por engano 2 pagamentos REAIS ao fornecedor Jahu
@@ -36259,6 +36263,11 @@ async function _lancctbProcessarTributos(){
       const tr=_lancctbIcmsTipoPorValor(icmsCtx,{uf:g.uf||_lancctbGnreUfDoNome(achou.f.nome),unidade:un,compet:g.referencia||_lancctbExtrairCompetenciaDoNome(achou.f.nome),valor:achou.extraido.valor});
       if(tr){ g.tipoNome=tr; g.tipoPelaBase=true; }
     }catch(e){ console.warn('ICMS: tipo da GNRE pela base falhou:',e); } }
+    // DARF com "CNPJ Débito" por item (IPI): a unidade vem do CNPJ do PDF (pedido do usuário 30/10/2026: 0001-01 = 163, 0003-65 = 164). Mapa 'lancctb_icms_unidades_<eid>' (chave = 14 dígitos do CNPJ).
+    if(achou.extraido&&achou.extraido.composicao&&achou.extraido.composicao.some(c=>c.cnpjDebito)){
+      const mapaUn=_lancctbIcmsUnidadesMapa(eid), UN_RESERVA={ '71810931000101':'163', '71810931000365':'164' }; // reserva: Fast Lube (informado pelo usuário em 30/10/2026); o mapa da empresa tem prioridade
+      achou.extraido={...achou.extraido,composicao:achou.extraido.composicao.map(c=>{ const un=c.cnpjDebito&&(mapaUn[c.cnpjDebito]||mapaUn['CNPJ '+String(c.cnpjDebito).slice(8,12)+'-'+String(c.cnpjDebito).slice(12)]||UN_RESERVA[c.cnpjDebito]); if(!un||/\sUN\s+\d+/.test(c.denominacao)) return c; const [a0,...resto]=String(c.denominacao).split(' - '); return {...c,un:String(un),denominacao:[a0+' UN '+un,...resto].join(' - ')}; })};
+    }
     // Divide o extrato quando o pagamento passou do valor do tributo.
     if(achou.diferenca>0.01){
       const valorTributo=Math.round(achou.extraido.valor*100)/100;
