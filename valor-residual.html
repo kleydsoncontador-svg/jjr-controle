@@ -650,6 +650,34 @@ function formatBRL(n) {
 // montadoras multinacionais) saem no segundo formato mesmo sendo documento
 // brasileiro. O separador que aparece por ÚLTIMO na string é o decimal.
 // Corta do nome do bem o texto de legislação/benefício fiscal que alguns emitentes (ex.: Zona Franca de Manaus) colam depois da descrição do produto
+// Leitura de itens "pelo bloco de números" (NCM + CST + CFOP + UN + QTD + VL.UNIT + VL.TOTAL), usada quando a leitura normal acha menos itens do que a NF tem:
+// código numérico curto (ex.: 21620) e/ou descrição quebrada em duas partes — um pedaço ANTES do NCM e o resto DEPOIS dos números (ex.: "...[ASS" ... "1] [BR 1] ... BR DIREITO").
+function _vrItensPorAncora(textoItens){
+  const rx=/(\d{4}\.?\d{2}\.?\d{2})\s+\d{1,3}(?:\s+\d{1,3})?\s+(?:\d\.?\d{3}|\d{3,4})(?:\/[A-Z0-9]{1,3})?\s+[A-Za-z]{2,3}\s+([\d.,]+)\s+([\d.,]+)\s+([\d.,]+)((?:\s+[\d.,]+(?=\s|$)){0,8})/g;
+  const ancoras=[...textoItens.matchAll(rx)];
+  if(!ancoras.length) return [];
+  const itens=[]; let prevEnd=0; let contAnterior=null;
+  const achaCodigo=(pre,primeiro)=>{
+    const cands=[...pre.matchAll(/(?<![\w.,\/-])((?=[A-Z0-9-]*\d)[A-Z0-9]{4,}(?:-\d+)?)(?![\w.,])(?=\s+\S)/g)];
+    if(!cands.length) return null;
+    if(primeiro) return cands[0];
+    const puros=cands.filter(c=>/^\d{4,6}$/.test(c[1]));
+    return (puros.length?puros:cands).slice(-1)[0];
+  };
+  ancoras.forEach((a,k)=>{
+    const pre=textoItens.slice(prevEnd,a.index);
+    const c=achaCodigo(pre,k===0);
+    let desc=pre, cont='';
+    if(c){ desc=pre.slice(c.index+c[1].length); cont=pre.slice(0,c.index); }
+    desc=desc.replace(/^.*(?:V\.?\s*APROX\.?\s*TRIBUTOS|AL[IÍ]Q\.?\s*(?:ICMS|IPI|ST))\s+/is,''); // sobra do cabeçalho da tabela, quando nenhum código foi achado
+    if(k>0&&contAnterior!==null) itens[k-1].descricao=(itens[k-1].descricao+' '+cont).replace(/\s+/g,' ').trim();
+    itens.push({ descricao:desc.replace(/\s+/g,' ').trim(), ncm:a[1], quantidade:Math.round(parseNum(a[2]))||1, valorUnitario:parseNum(a[3]), valorTotal:parseNum(a[4]) });
+    contAnterior=''; prevEnd=a.index+a[0].length;
+  });
+  const sobra=textoItens.slice(prevEnd).replace(/\s+/g,' ').trim();
+  if(sobra) itens[itens.length-1].descricao=(itens[itens.length-1].descricao+' '+sobra).replace(/\s+/g,' ').trim();
+  return itens.map(it=>({...it, descricao:_vrCortarLegislacao(it.descricao.replace(/\s*CEST\s*:?\s*[\d.]+\s*$/i,'').trim())}));
+}
 function _vrCortarLegislacao(d){
   d=String(d||'').trim();
   const rx=/\s+(?:DCRE\s*\d|Conv\.?\s*S\/N|Art\.?\s*\d|Ato\s+Declarat|Isento\s+do\s+IPI|Resol\.?\s*SUFRAMA|Proj\.?\s*Aprov|Recolhimento\s+de\s+IPI|Cofins\s+tributado|Pis\s+tributado|Lei\s+n\(?[oº]\)?|\(Pedido|\(ITEM|Dec\.?\s*\d)/i;
@@ -1991,6 +2019,10 @@ async function extrairDadosPDF(file){
     const descricaoSemLegis = _vrCortarLegislacao(descricaoLimpa);
     const qtdItem = Math.round(parseNum(mm[4])) || 1;
     itens.push({ descricao: descricaoSemLegis, ncm: mm[3], quantidade: qtdItem, valorUnitario: parseNum(mm[5]), valorTotal: parseNum(mm[6]) });
+  }
+  { // fallback: a NF tem mais itens do que a leitura normal achou (código numérico curto / descrição quebrada em duas partes)
+    const alt=_vrItensPorAncora(textoItens);
+    if(alt.length>itens.length){ itens.length=0; alt.forEach(x=>itens.push(x)); }
   }
 
   // O rateio de frete/desconto (_vrReconciliarItensComNF) ajusta valorTotal
