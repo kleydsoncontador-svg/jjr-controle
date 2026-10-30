@@ -32130,7 +32130,7 @@ async function salvarLancctbRegra(){
       if(vFx>0&&Math.abs(difAb)>=0.005){
         const histMain=String(linhasContrapartida[0].historico||(histModo==='fixo'?(_lancctbResolverHistFluxo(historicoFixo,fxr,{nome:extrato.cliente_fornecedor_nome||'',data:extrato.data_pagamento})||historicoFixo):(extrato.historico_bancario||descricao))||'').trim();
         const compAb=[{ codigo:null, denominacao:histMain, encargo:null, uf:null, valor:vFx, historico:histMain, conta_contabil_id:linhasContrapartida[0].conta_contabil_id, resumo:histMain.slice(0,120), competencia:null },
-          { codigo:null, denominacao:histMain, encargo:null, uf:null, valor:Math.abs(difAb), lado:difAb<0?'inverso':null, historico:(histMain.slice(0,105)+' (diferença)').trim(), conta_contabil_id:null, resumo:(histMain.slice(0,105)+' (diferença)').trim(), competencia:null }];
+          { codigo:null, denominacao:histMain, encargo:null, uf:null, valor:Math.abs(difAb), lado:difAb<0?'inverso':null, historico:(histMain.slice(0,105)+' (diferença)').trim(), conta_contabil_id:_lancctbDifContaLembrada(histMain,difAb<0), resumo:(histMain.slice(0,105)+' (diferença)').trim(), competencia:null }];
         const histAb='[TRIBUTO COMPOSTO: '+compAb.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+String(extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
         const { error: eAb } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:histAb.trim(), origem_importacao:'tributo_composicao', composicao_tributo:compAb }).eq('id',extrato.id);
         if(eAb){ toast('Erro ao abrir o lançamento com a diferença: '+eAb.message,'err'); return; }
@@ -32281,6 +32281,11 @@ const LANCCTB_MATCH_TOLERANCIA_VALOR=2.00;
 // Pedido do usuário 16/10/2026 (Kajuna: extrato R$ 300,00 sugerido com Fluxo de R$ 299,20): Fluxo de Caixa NUNCA casa com o extrato por valor aproximado, em nenhuma empresa — só valor exato (centavo).
 // Diferença ACEITA e aprendida (pedido do usuário 30/10/2026, IPTU Osasco: Fluxo R$ 6.599,47 × extrato R$ 6.599,43 todo mês): quando o usuário salva a Regra associando uma linha do Fluxo com diferença acima da tolerância,
 // o site guarda (empresa + Cliente/Fornecedor + Descrição da conta do Fluxo) com a diferença máxima aceita; nos meses seguintes a mesma linha passa a ser sugerida/associada dentro desse limite — e só dentro dele.
+// Conta da DIFERENÇA lembrada (pedido do usuário 30/10/2026): ao salvar o lançamento aberto (valor do Fluxo + diferença), a conta escolhida para a linha da diferença fica guardada por empresa + histórico da linha principal + lado
+// (a mais/a menos); nos meses seguintes a linha da diferença já abre com essa conta preenchida — só confere e salva (nada é classificado sozinho).
+function _lancctbDifContaChave(histMain,inverso){ return (inverso?'inv':'dir')+'|'+_fpNorm(String(histMain||'').replace(/\s*\(diferen[cç]a\)\s*$/i,'')); }
+function _lancctbDifContaLembrada(histMain,inverso){ try{ const m=S.g('lancctb_fluxo_difconta_'+_lancctbEidAtual)||{}; return m[_lancctbDifContaChave(histMain,inverso)]||null; }catch(e){ return null; } }
+function _lancctbDifContaGravar(histMain,inverso,contaId){ try{ if(!contaId) return; const k='lancctb_fluxo_difconta_'+_lancctbEidAtual, m=Object.assign({},S.g(k)||{}); m[_lancctbDifContaChave(histMain,inverso)]=contaId; S.s(k,m); }catch(e){} }
 function _lancctbFluxoDifChave(f){ return _fpNorm(String(f&&f.cliente_fornecedor_nome||''))+'|'+_fpNorm(String(f&&f.descricao_conta_origem||'')); }
 function _lancctbFluxoDifAprendida(f,valor,ehSaida){
   try{
@@ -37280,6 +37285,7 @@ async function _lancctbRegistroSalvarInline(extratoId){
   const { error: erroLanc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{linhas});
   if(erroLanc){ toast('Erro ao gerar lançamento: '+erroLanc.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; }
   await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',r.id);
+  try{ comp.forEach((c,ix)=>{ if(/\(diferen[cç]a\)\s*$/i.test(String(c&&c.historico||c&&c.resumo||''))) _lancctbDifContaGravar(String(comp[0].historico||comp[0].resumo||''),c.lado==='inverso',linhasContrapartida[ix]&&linhasContrapartida[ix].conta_contabil_id); }); }catch(e){}
   toast('Lançamento classificado — regra criada pros próximos meses.','ok');
   _lancctbInlineExpandidoId=null;
   renderLancctbRegistroContabil();
@@ -42570,7 +42576,7 @@ async function _lancctbFluxoExecutarAbertura(extrato,fluxoLinhas,ehSaida,campoV,
   // Pedido do usuário 30/10/2026: o extrato NUNCA é dividido em várias saídas bancárias. Fica 1 linha com o valor INTEIRO do extrato (1 crédito no banco) aberta em N débitos: um por linha do Fluxo e, se houver
   // diferença, mais 1 linha com a diferença (mesmo histórico, com "(diferença)" entre parênteses): no MESMO lado dos débitos quando o extrato é maior que o Fluxo, no lado OPOSTO (crédito) quando o Fluxo é maior (lado:'inverso').
   const comp=fluxoLinhas.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const txt=((f.descricao||'')+' '+(f.cliente_fornecedor_nome||'')).trim(); return { codigo:null, denominacao:txt, encargo:null, uf:null, valor:vf, resumo:txt.slice(0,120), competencia:null }; });
-  if(Math.abs(diferenca)>=0.005){ const txt=((fluxoLinhas[0].descricao||'')+' '+(fluxoLinhas[0].cliente_fornecedor_nome||'')).trim(); comp.push({ codigo:null, denominacao:txt, encargo:null, uf:null, valor:Math.round(Math.abs(diferenca)*100)/100, lado:diferenca<0?'inverso':null, resumo:(txt.slice(0,105)+' (diferença)').trim(), competencia:null }); }
+  if(Math.abs(diferenca)>=0.005){ const txt=((fluxoLinhas[0].descricao||'')+' '+(fluxoLinhas[0].cliente_fornecedor_nome||'')).trim(); comp.push({ codigo:null, denominacao:txt, encargo:null, uf:null, valor:Math.round(Math.abs(diferenca)*100)/100, lado:diferenca<0?'inverso':null, conta_contabil_id:_lancctbDifContaLembrada(txt,diferenca<0), resumo:(txt.slice(0,105)+' (diferença)').trim(), competencia:null }); }
   const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+String(extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
   const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',extrato.id);
   if(eUpd){ toast('Erro ao abrir o extrato em débitos: '+eUpd.message,'err'); return; }
