@@ -32122,6 +32122,7 @@ async function salvarLancctbRegra(){
       regraId=regraSalva.id;
       await _lancctbSalvarLinhasRateio(regraId,linhasContrapartida,dc);
     }
+    if(ehFluxo&&_lancctbRegraFluxoRowAtual) _lancctbFluxoDifAprender(_lancctbRegraFluxoRowAtual,valorTotal,ehSaida); // diferença Fluxo × extrato aceita ao salvar → vale nos próximos meses (dentro desse limite)
 
     const contaBancariaId=extrato.conta_bancaria_id||_lancctbExtratoContaSel;
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias')
@@ -32257,6 +32258,26 @@ async function excluirLancctbRegra(id){
 // regra: saída do extrato = banco Crédito, entrada = banco Débito).
 const LANCCTB_MATCH_TOLERANCIA_VALOR=2.00;
 // Pedido do usuário 16/10/2026 (Kajuna: extrato R$ 300,00 sugerido com Fluxo de R$ 299,20): Fluxo de Caixa NUNCA casa com o extrato por valor aproximado, em nenhuma empresa — só valor exato (centavo).
+// Diferença ACEITA e aprendida (pedido do usuário 30/10/2026, IPTU Osasco: Fluxo R$ 6.599,47 × extrato R$ 6.599,43 todo mês): quando o usuário salva a Regra associando uma linha do Fluxo com diferença acima da tolerância,
+// o site guarda (empresa + Cliente/Fornecedor + Descrição da conta do Fluxo) com a diferença máxima aceita; nos meses seguintes a mesma linha passa a ser sugerida/associada dentro desse limite — e só dentro dele.
+function _lancctbFluxoDifChave(f){ return _fpNorm(String(f&&f.cliente_fornecedor_nome||''))+'|'+_fpNorm(String(f&&f.descricao_conta_origem||'')); }
+function _lancctbFluxoDifAprendida(f,valor,ehSaida){
+  try{
+    const lista=S.g('lancctb_fluxo_difaceita_'+_lancctbEidAtual)||[]; if(!lista.length) return false;
+    const vF=(ehSaida?f.valor_saida:f.valor_entrada)||0; if(!vF) return false;
+    const e=lista.find(x=>x&&x.k===_lancctbFluxoDifChave(f));
+    return !!e&&Math.abs(vF-valor)<=Number(e.max||0)+0.005;
+  }catch(e){ return false; }
+}
+function _lancctbFluxoDifAprender(f,valorExtrato,ehSaida){
+  try{
+    const vF=(ehSaida?f.valor_saida:f.valor_entrada)||0; const dif=Math.round(Math.abs(vF-valorExtrato)*100)/100;
+    if(!vF||dif<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO||dif>5||!(f.cliente_fornecedor_nome||f.descricao_conta_origem)) return;
+    const k='lancctb_fluxo_difaceita_'+_lancctbEidAtual, lista=(S.g(k)||[]).slice(), ch=_lancctbFluxoDifChave(f), i=lista.findIndex(x=>x&&x.k===ch);
+    if(i>=0) lista[i]={...lista[i],max:Math.max(Number(lista[i].max||0),dif)}; else lista.push({k:ch,cli:f.cliente_fornecedor_nome||'',conta:f.descricao_conta_origem||'',max:dif});
+    S.s(k,lista);
+  }catch(e){}
+}
 const LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO=0.0201; // 20/10/2026: o usuário aceita diferença de até R$ 0,02 (positiva ou negativa) entre Fluxo e extrato — nunca além disso
 // Pedido do usuário 19/10/2026: com o FORNECEDOR CONFIRMADO (identidade 'ok'/parâmetro) aceita diferença de até 1 centavo (arredondamento) — preferindo sempre a exata. Só é usada no Processar Fluxo e na composição.
 const LANCCTB_FLUXO_TOL_CENTAVO=0.0201; // pedido do usuário 20/10/2026: diferença de até R$ 0,02 (positiva ou negativa) é processada
@@ -33192,7 +33213,7 @@ async function _lancctbProcessarFluxo(){
           .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFluxo))
-          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=(ehSaida?LANCCTB_FLUXO_TOL_CENTAVO:0.005)&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
+          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&(Math.abs(vF-valor)<=(ehSaida?LANCCTB_FLUXO_TOL_CENTAVO:0.005)||_lancctbFluxoDifAprendida(f,valor,ehSaida))&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
           .filter(f=>{
             const par=indicadaDe(f); if(!par) return true;
             if(par.status_conciliacao==='conciliado') return par.lancamento_extrato_id===l.id;
@@ -33361,7 +33382,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
       const jaLigado=_lancctbEscolherFluxoLigado((fluxoPend||[]).filter(f=>f.lancamento_extrato_id!=null&&String(f.lancamento_extrato_id)===String(l.id)),l); // ligação já confirmada pelo usuário (se houver várias, a que mais combina)
       const candidatos=jaLigado?[jaLigado]:(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado')
         .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
-        .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; });
+        .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&(Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO||_lancctbFluxoDifAprendida(f,valor,ehSaida))&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; });
       if(!candidatos.length) continue;
       candidatos.sort((a,b)=>(_lancctbNomeCompativel([l.historico_bancario],b.cliente_fornecedor_nome)?1:0)-(_lancctbNomeCompativel([l.historico_bancario],a.cliente_fornecedor_nome)?1:0)
         ||_lancctbTextoScoreSimilaridade(l.historico_bancario,b.descricao)-_lancctbTextoScoreSimilaridade(l.historico_bancario,a.descricao));
@@ -38510,7 +38531,7 @@ async function renderLancctbRegistroContabil(){
       if(!item.fluxoConfirmado&&ehSaida&&(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|SISPAG ABERTO|DIFEREN)/i.test(String(r.historico_bancario||''))||(String(eid)!=='89'&&_pessoasFolhaReg.length&&_lancctbHistEhTransfNome(r.historico_bancario)&&_pessoasFolhaReg.some(pp=>_lancctbPessoaNoTexto(pp,r.historico_bancario))))){ item.rotaFopag=true; }
       else if(!item.fluxoConfirmado&&!_lancctbContaSemNfVinculo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)){
         const _filtroFluxoSug=(semTextoTributo)=>_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
-          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(!semTextoTributo&&ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; if(semTextoTributo&&(!vF||Math.abs(vF-valor)>0.005||_lancctbDiffDias(f.data,r.data_pagamento)>1)) return false; return vF&&Math.abs(vF-valor)<=(ehTribHist?0.005:LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO); })
+          .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(!semTextoTributo&&ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; if(semTextoTributo&&(!vF||Math.abs(vF-valor)>0.005||_lancctbDiffDias(f.data,r.data_pagamento)>1)) return false; return vF&&(Math.abs(vF-valor)<=(ehTribHist?0.005:LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO)||_lancctbFluxoDifAprendida(f,valor,ehSaida)); })
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual,_lancctbHistEhTransfNome(r.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(r.historico_bancario,f,_lancctbFluxoParamLista))
