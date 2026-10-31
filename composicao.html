@@ -1311,8 +1311,27 @@ async function ca2LerDemocBalancete(eid,ano,mes){
     if(error){ console.error('ca2LerDemocBalancete',error); return null; }
     let v=data?data.value:null;
     if(typeof v==='string'){ try{ v=JSON.parse(v); }catch(e){ v=null; } }
-    return v;
+    if(v&&Array.isArray(v.contas)&&v.contas.length) return v;
+    return await ca2LerBalanceteNovo(eid,ano,mes); // Balancete importado pelo PDF do Domínio (sem IA) fica nas tabelas novas, não na chave antiga
   }catch(e){ console.error('ca2LerDemocBalancete',e); return null; }
+}
+// Balancete importado pelo "Importar Balancete (PDF do Domínio)" (tabelas trial_balance_accounts/accounting_imports) → mesmo formato do Balancete antigo (saldo com sinal: D positivo, C negativo).
+async function ca2LerBalanceteNovo(eid,ano,mes){
+  try{
+    const comp=String(ano)+'-'+String(mes).padStart(2,'0'); let rows=[], from=0;
+    for(;;){
+      const r=await _ca2SupaClient.from('trial_balance_accounts').select('code,classification,description,is_analytic,prev_balance,prev_side,debit,credit,balance,balance_side,import_id').eq('empresa_eid',String(eid)).eq('competence',comp).order('id').range(from,from+999);
+      if(r.error){ console.error('ca2LerBalanceteNovo',r.error); return null; }
+      rows=rows.concat(r.data||[]); if((r.data||[]).length<1000) break; from+=1000;
+    }
+    if(!rows.length) return null;
+    const sg=(v,side)=>(parseFloat(v)||0)*(side==='C'?-1:1);
+    let arquivo=''; try{ const im=await _ca2SupaClient.from('accounting_imports').select('file_name').eq('id',rows[0].import_id).maybeSingle(); arquivo=(im.data&&im.data.file_name)||''; }catch(e){}
+    return { arquivo, dataInclusao:null, contas:rows.map(x=>({
+      codigo_analitico:String(x.classification||''), codigo_reduzido:String(x.code||''), nome_conta:String(x.description||''), tipo:x.is_analytic?'analitica':'sintetica',
+      saldo_anterior:sg(x.prev_balance,x.prev_side), debito:parseFloat(x.debit)||0, credito:parseFloat(x.credit)||0, saldo_atual:sg(x.balance,x.balance_side), saldo:sg(x.balance,x.balance_side)
+    })) };
+  }catch(e){ console.error('ca2LerBalanceteNovo',e); return null; }
 }
 
 const S = {
@@ -2383,6 +2402,15 @@ function compBuscaFiltrar(){
     tr.style.display=q&&!tr.dataset.busca.includes(q)?'none':'';
   });
 }
+function compFiltrarLista(){
+  const v=id=>((document.getElementById(id)||{}).value||'').toLowerCase().trim();
+  const fId=v('compFId'), fEmp=v('compFEmp'), fCnpj=v('compFCnpj').replace(/\D/g,''), fResp=((document.getElementById('compFResp')||{}).value||''), fTrib=((document.getElementById('compFTrib')||{}).value||'');
+  document.querySelectorAll('#compEmpsTbody tr').forEach(function(tr){
+    const d=tr.dataset;
+    const ok=(!fId||d.eid.includes(fId))&&(!fEmp||d.nome.includes(fEmp)||d.eid.includes(fEmp))&&(!fCnpj||d.cnpj.includes(fCnpj))&&(!fResp||d.resp===fResp)&&(!fTrib||d.reg===fTrib);
+    tr.style.display=ok?'':'none';
+  });
+}
 function selecionarEmp(empId){
   curEmpId=empId;
   const sel=document.getElementById('empSel');
@@ -2415,27 +2443,48 @@ function renderComp(){
     // lista sem nenhum indício visual do porquê. A listagem geral deste
     // módulo nunca deve depender dessa seleção global.
     let emps=S.emps().filter(e=>e.status!=='ex').sort((a,b)=>Number(a.eid||0)-Number(b.eid||0));
-    let html=`<div style="margin-bottom:12px;display:flex;align-items:center;gap:10px">
-      <input type="search" id="compBuscaInput" placeholder="Buscar empresa por nome ou ID…" value="${compBusca.replace(/"/g,'&quot;')}"
-        style="padding:6px 10px;border:1px solid var(--border);border-radius:6px;font-size:13px;width:300px"
-        oninput="compBusca=this.value;compBuscaFiltrar()">
-      <span style="font-size:13px;color:var(--slate)">Clique na linha para abrir a composição.</span>
-    </div>
-    <div style="overflow-x:auto;max-height:calc(100vh - 220px)"><table><thead style="position:sticky;top:0;z-index:10"><tr><th>ID</th><th>Empresa</th><th>CNPJ</th><th>Responsável</th><th>Tributação</th><th>Última composição</th></tr></thead><tbody id="compEmpsTbody">`;
+    // Empresa selecionada no topo do app: só ela aparece na lista (pedido do usuário 31/10/2026); sem seleção, todas.
+    { let _eg=''; try{ _eg=String((window.parent&&window.parent._empresaGlobal)||''); }catch(e){} if(_eg) emps=emps.filter(e=>String(e.eid)===_eg); }
+    // Lista no MESMO layout da tela de Lançamentos Contábeis (pedido do usuário 31/10/2026): cabeçalho escuro, linha de filtros por coluna (ID, empresa, CNPJ, Resp., Tributação),
+    // ID em etiqueta preta, nome em destaque e linha azul quando a última composição já alcançou o Fechamento Atual.
+    const _uniq=a=>[...new Set(a.filter(Boolean))].sort((x,y)=>String(x).localeCompare(String(y),'pt-BR'));
+    const _resps=_uniq(emps.map(e=>e.resp)), _tribs=_uniq(emps.map(e=>e.reg));
+    let _fechAtual=''; try{ _fechAtual=(window.parent&&window.parent.S&&window.parent.S.fechAtual&&window.parent.S.fechAtual())||''; }catch(e){}
+    const _th='background:var(--ink2);color:#fff';
+    const _inp='width:100%;font-size:11px;padding:3px 6px;border:1px solid var(--border);border-radius:4px;background:var(--white,#fff);color:var(--ink)';
+    let html=`<div class="tw" style="overflow-x:auto;max-height:calc(100vh - 150px);overflow-y:auto">
+    <table class="data" style="width:100%">
+      <thead style="position:sticky;top:0;z-index:20"><tr style="background:var(--ink2)">
+        <th style="${_th};text-align:center;width:36px">ID</th>
+        <th style="${_th}">Empresa</th>
+        <th style="${_th};white-space:nowrap;min-width:160px">CNPJ</th>
+        <th style="${_th};white-space:nowrap">Resp.</th>
+        <th style="${_th};white-space:nowrap">Tributação</th>
+        <th style="${_th};text-align:center;white-space:nowrap">Última composição</th>
+      </tr><tr>
+        <th style="${_th};padding:4px 6px"><input id="compFId" style="${_inp}" placeholder="ID" oninput="compFiltrarLista()"></th>
+        <th style="${_th};padding:4px 6px"><input id="compFEmp" style="${_inp}" placeholder="Filtrar empresa…" value="${compBusca.replace(/"/g,'&quot;')}" oninput="compBusca=this.value;compFiltrarLista()"></th>
+        <th style="${_th};padding:4px 6px"><input id="compFCnpj" style="${_inp}" placeholder="CNPJ" oninput="compFiltrarLista()"></th>
+        <th style="${_th};padding:4px 6px"><select id="compFResp" style="${_inp}" onchange="compFiltrarLista()"><option value="">Todos</option>${_resps.map(r=>'<option>'+r+'</option>').join('')}</select></th>
+        <th style="${_th};padding:4px 6px"><select id="compFTrib" style="${_inp}" onchange="compFiltrarLista()"><option value="">Todas</option>${_tribs.map(r=>'<option>'+r+'</option>').join('')}</select></th>
+        <th style="${_th}"></th>
+      </tr></thead><tbody id="compEmpsTbody">`;
     emps.forEach(function(e){
       const comp=S.comp(e.id);const meses=Object.keys(comp).sort();const ult=meses[meses.length-1];
-      const txt=(e.nome||'')+(e.eid||'')+(e.resp||'')+(e.reg||'');
-      const hidden=compBusca&&!txt.toLowerCase().includes(compBusca.toLowerCase())?'display:none':'';
-      html+=`<tr style="cursor:pointer;${hidden}" onclick="selecionarEmp('${e.id}')" data-busca="${(e.nome||'').toLowerCase()} ${(e.eid||'').toLowerCase()} ${(e.resp||'').toLowerCase()} ${(e.reg||'').toLowerCase()}">
-        <td style="text-align:center">${e.eid?'<span style="font-family:var(--mono);font-size:11px;font-weight:600;background:var(--ink);color:#fff;padding:2px 8px;border-radius:5px">'+e.eid+'</span>':'—'}</td>
-        <td><b>${e.nome||'—'}</b></td>
-        <td style="font-family:var(--mono);color:var(--slate);font-size:11px">${e.cnpj||'—'}</td>
-        <td>${e.resp||'—'}</td><td>${e.reg||'—'}</td>
-        <td>${ult?mesLabel(ult):'<span style="color:var(--slate)">—</span>'}</td>
+      const rowBg=(ult&&_fechAtual&&ult>=_fechAtual)?'background:var(--blue-bg)':'';
+      const norm=t=>String(t||'').toLowerCase();
+      html+=`<tr style="cursor:pointer;${rowBg}" onclick="selecionarEmp('${e.id}')" data-eid="${norm(e.eid)}" data-nome="${norm(e.nome)}" data-cnpj="${String(e.cnpj||'').replace(/\D/g,'')}" data-resp="${e.resp||''}" data-reg="${e.reg||''}">
+        <td style="text-align:center">${e.eid?'<span class="idtag" style="font-family:var(--mono);font-size:11px;font-weight:600;background:var(--ink);color:#fff;padding:2px 8px;border-radius:5px">'+e.eid+'</span>':'—'}</td>
+        <td><b style="color:#1E3558">${e.nome||'—'}</b></td>
+        <td style="font-family:var(--mono);color:var(--slate)">${e.cnpj||'—'}</td>
+        <td>${e.resp||'—'}</td>
+        <td style="font-size:12px">${e.reg||'—'}</td>
+        <td style="text-align:center">${ult?mesLabel(ult):'<span style="color:var(--slate)">—</span>'}</td>
       </tr>`;
     });
     html+='</tbody></table></div>';
     el.innerHTML=html;
+    compFiltrarLista();
     return;
   }
   const comp=S.comp(curEmpId);const meses=Object.keys(comp).sort();
