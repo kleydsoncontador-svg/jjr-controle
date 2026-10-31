@@ -31954,6 +31954,33 @@ function _lancctbPagCompostoLinhasHtml(item,contaAtual){
   });
   return h;
 }
+// Comprovantes ↔ extratos PENDENTES de TODA a empresa (não só a página aberta do Registro): o achado de 31/10/2026 foi que o vínculo só era gravado para as linhas que apareciam na tela, então o comprovante
+// continuava "pendente" até o usuário filtrar o valor. Mesma regra de busca da tela (valor, data, histórico), um comprovante por extrato, por ordem de data. Só grava o vínculo — nada muda de valor ou status.
+async function _lancctbAssociarComprovantesTodos(){
+  const eid=_lancctbEidAtual; if(!eid||!_supaClient) return;
+  window.__cTodosTs=window.__cTodosTs||{}; if(Date.now()-(window.__cTodosTs[eid]||0)<120000) return; window.__cTodosTs[eid]=Date.now();
+  const { data: ags } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,descricao').eq('empresa_eid',eid);
+  const idsOk=(ags||[]).filter(a=>!_lancctbContaSemNfVinculo(a)).map(a=>a.id); if(!idsOk.length) return;
+  const { data: exts } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id').eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('conta_bancaria_id',idsOk).order('data_pagamento',{ascending:true}).order('id',{ascending:true}));
+  if(!exts||!exts.length) return;
+  const pares=[];
+  for(const [tab,ehSaida] of [['comprovantes_bancarios',true],['comprovantes_recebimento',false]]){
+    const { data: cps } = await _lancctbFetchTudo(()=>_supaClient.from(tab).select('*').eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+    if(!cps||!cps.length) continue;
+    const porData={}; cps.forEach(c=>{ (porData[c.data_pagamento]=porData[c.data_pagamento]||[]).push(c); });
+    const usados=new Set(); const add=(d,n)=>{ const dt=new Date(d+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+    for(const r of exts){
+      const valor=ehSaida?r.valor_saida:r.valor_entrada; if(!(valor>0)||!r.data_pagamento) continue;
+      const prox=[]; for(let d=-LANCCTB_MATCH_TOLERANCIA_DIAS;d<=LANCCTB_MATCH_TOLERANCIA_DIAS;d++){ const k=add(r.data_pagamento,d); if(porData[k]) prox.push(...porData[k]); }
+      if(!prox.length) continue;
+      const ehTrib=_lancctbHistoricoEhTributo(r.historico_bancario);
+      const m=_lancctbMelhorComprovante(prox,valor,r.data_pagamento,(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR:0.005),c=>!usados.has(c.id)&&(!ehTrib||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome))&&_lancctbComprovanteCombinaHistorico(c,r.historico_bancario));
+      if(m){ usados.add(m.id); if(m.lancamento_extrato_id!==r.id) pares.push({tab,id:m.id,ext:r.id}); }
+    }
+  }
+  for(let i=0;i<pares.length;i+=8){ await Promise.all(pares.slice(i,i+8).map(x=>_supaClient.from(x.tab).update({lancamento_extrato_id:x.ext}).eq('id',x.id).eq('status_conciliacao','pendente'))); }
+  if(pares.length) console.log('Comprovantes associados aos extratos (todos):',pares.length);
+}
 // Linha do Fluxo que o Registro Contábil já mostrou/sugeriu pra um extrato = ASSOCIADA (pedido do usuário 31/10/2026: "associado aqui significa que foi informado lá no Registro Contábil"). Grava só o vínculo
 // (status_associado + lancamento_extrato_id), em lotes, e só em linha ainda livre; nunca em Mercado Pago/Shopee (essas contas nem chegam aqui).
 function _lancctbFluxoPersistirSugestao(ids,extId){
@@ -38740,6 +38767,7 @@ async function renderLancctbRegistroContabil(){
   }
   })();
   _pConc.catch(()=>{});
+  _lancctbAssociarComprovantesTodos().catch(e=>console.warn('Associar comprovantes (todos os extratos):',e));
 
   // Pra pendente sem classificação ainda, sugere o Cliente/Fornecedor de um
   // comprovante que bate por valor+data — só visual (não altera nada),
