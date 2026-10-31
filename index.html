@@ -31811,13 +31811,14 @@ function _lancctbFluxoIdentPeloComprovante(cp,f){
 }
 // SEMPRE que o Fluxo é anexado em 2+ linhas (pedido do usuário 31/10/2026): o extrato fica inteiro (1 crédito no banco, nunca dividido) e abre em 1 DÉBITO por linha do Fluxo; se a soma difere do extrato, a diferença vira mais
 // 1 linha (mesmo histórico, "(diferença)"; lado oposto quando o Fluxo é maior). As contas de cada débito ficam pendentes no Registro Contábil. Não mexe em extrato já aberto/classificado.
-async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida){
+async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUma){
   try{
-    if(!fluxoRows||fluxoRows.length<2) return false;
+    if(!fluxoRows||fluxoRows.length<(permitirUma?1:2)) return false;
     const id=typeof extratoOuId==='object'?extratoOuId.id:extratoOuId;
     const eid=_lancctbEidAtual;
     const { data: ex } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,composicao_tributo,status_conciliacao,conta_bancaria_id').eq('id',id).maybeSingle();
     if(!ex||ex.status_conciliacao!=='pendente'||(ex.composicao_tributo||[]).length) return false;
+    if(/^\s*\[/.test(String(ex.historico_bancario||''))&&!/^\s*\[TRIBUTO COMPOSTO:/.test(String(ex.historico_bancario||''))) return false; // já identificado por outro processo (guia, NF…)
     // linhas COMPLETAS do Fluxo (a lista da tela traz só algumas colunas): fornecedor, descrição da conta, número, unidade…
     const { data: fxFull } = await _supaClient.from('fluxo_caixa_lancamentos').select('*').in('id',fluxoRows.map(f=>f.id));
     const fxPorId=new Map((fxFull||[]).map(f=>[f.id,f]));
@@ -31837,6 +31838,7 @@ async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida){
       const t=(rg&&rg.historico_fixo&&_lancctbResolverHistFluxo(rg.historico_fixo,f))||txtDe(f);
       return { codigo:null, denominacao:t, encargo:null, uf:null, valor:vf, historico:t, resumo:t.slice(0,120), competencia:null, conta_contabil_id:rg?rg.conta_contabil_id:null, regra_id:rg?rg.id:null, fx:{ id:f.id, cliente_fornecedor_nome:f.cliente_fornecedor_nome||'', descricao:f.descricao||'', descricao_conta_origem:f.descricao_conta_origem||'', documento_numero:f.documento_numero||'', numero:f.numero||'', unidade:f.unidade||'', cnpj_cpf:f.cnpj_cpf||'', data:f.data||'', parcela:f.parcela||'' } }; });
     const soma=Math.round(comp.reduce((a,c)=>a+c.valor,0)*100)/100, dif=Math.round((vExt-soma)*100)/100;
+    if(comp.length===1&&comp[0].regra_id&&Math.abs(dif)<0.005) return false; // 1 linha que já tem Regra: quem classifica é o Processar Fluxo (Regras)
     if(Math.abs(dif)>=0.005){ const t=(comp[0].historico.slice(0,105)+' (diferença)').trim(); comp.push({ codigo:null, denominacao:t, encargo:null, uf:null, valor:Math.abs(dif), lado:dif<0?'inverso':null, historico:t, conta_contabil_id:_lancctbDifContaLembrada(comp[0].historico,dif<0), resumo:t, competencia:null }); }
     const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+baseHist;
     const { error } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',id);
@@ -33420,6 +33422,8 @@ async function _lancctbProcessarFluxo(){
     let viaRegra=0;
     try{ viaRegra=Number(await _lancctbProcessarFluxoRegras(true))||0; }catch(e){ console.error('Regras de fluxo:',e); }
     try{ const nMarc=await _lancctbMarcarIdentificacaoFluxo(eid,contaId); if(nMarc) console.info(`Fluxo identificado: ${nMarc} pendência(s) com a identificação do Fluxo no campo Informação.`); }catch(e){ console.warn('Marca do Fluxo identificado:',e); }
+    // Extrato de UMA linha do Fluxo que ficou pendente (sem NF e sem Regra): abre no mesmo quadro das composições (Fluxo da linha, gatilho e modelo do histórico) — pedido do usuário 31/10/2026.
+    try{ const gr1=new Map(); pares.forEach(pr=>{ (gr1.get(pr.lId)||gr1.set(pr.lId,[]).get(pr.lId)).push(pr.fId); }); for(const [lId1,fids1] of gr1){ if(fids1.length!==1) continue; const l1=pendencias.find(x=>x.id===lId1); const rows1=(fluxoPend||[]).filter(f=>f.id===fids1[0]); if(l1&&rows1.length===1&&(l1.valor_saida||0)>0) await _lancctbFluxoAbrirLinhas(lId1,rows1,true,true); } }catch(e){ console.warn('Abrir linha única do Fluxo:',e); }
     const diag=(resNf&&resNf.diagAglutinado)||[];
     if(diag.length) console.info('Fluxo → pagamentos aglutinados que não abriram:\n'+diag.join('\n'));
     toast(`Fluxo: ${associados} linha(s) associada(s)${compostos?` (${compostos} pagamento(s) compostos por vários títulos do mesmo fornecedor)`:''}${centavosAceitos?` [${centavosAceitos} com diferença de até R$ 0,02 aceita]`:''}${particoes?` [${particoes} grupo(s) de pagamentos do mesmo fornecedor resolvidos em conjunto]`:''}${rotaFopag?` [${rotaFopag} pagamento(s) a funcionário da folha deixados pro Processar FOPAG]`:''}${ambiguosComp?` [${ambiguosComp} composição(ões) ambígua(s) — não associadas]`:''}${idsKar.size?` [Karater recebimentos: ${karRes.resolvidos} entrada(s) compostas pelo relatório, ${karRes.ambiguos.length} ambígua(s), ${karRes.semComponente} sem componente]`:''}${idsInterm.size?` [intermediadoras: ${intermRes.resolvidos} resolvida(s) pelo título real${intermRes.compostos?' ('+intermRes.compostos+' por composição)':''}, ${intermRes.ambiguos.length} ambígua(s) real(is)]`:''}${sispagAbertos?`; ${sispagAbertos} Sispag Salários aberto(s) em linhas por pessoa (rode o Processar FOPAG)`:''}; ${nfs} pendência(s) amarrada(s) à NF indicada pelo Fluxo; ${viaRegra} resolvida(s) por Regra + Fluxo${(resNf&&resNf.resolvAbertas)?`; ${resNf.resolvAbertas} pagamento(s) aberto(s) em uma linha por item do Fluxo (crie a Regra de cada uma)`:''}${associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas)?' — depois rode Processar FOPAG / Tributos.':'.'}${diag.length?'\nNão abriram: '+diag.slice(0,4).join(' | '):''}${sispagMotivos.length?'\nSispag Salários não aberto — '+sispagMotivos.slice(0,3).join(' | '):''}`, (associados||nfs||viaRegra||(resNf&&resNf.resolvAbertas))?'ok':'err');
@@ -37406,18 +37410,19 @@ async function _lancctbRegistroSalvarInline(extratoId){
     conta_contabil_id:linhasContrapartida[0].conta_contabil_id, agencia_bancaria_id:null,
   };
   let regraSalva, regrasPorItem=null;
-  const _abertoDoFluxo=comp.length>=2&&comp.every(c=>!c.codigo)&&/^\s*\[TRIBUTO COMPOSTO:/.test(String(r.historico_bancario||''));
+  const _abertoDoFluxo=comp.length>=1&&comp.every(c=>!c.codigo)&&comp.some(c=>c&&c.fx)&&/^\s*\[TRIBUTO COMPOSTO:/.test(String(r.historico_bancario||''));
   if(_abertoDoFluxo){ // aberto pelo Fluxo: uma Regra por linha (gatilho = Descrição da conta do Fluxo) quando o usuário deixou marcado; as que já têm Regra só reaproveitam
     regrasPorItem=[];
     const baseHistAb=String(r.historico_bancario||'').replace(/^\s*\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'').trim()||'Sispag Fornecedores';
     for(let ix=0;ix<comp.length;ix++){
       const c=comp[ix]; let rid=c&&c.regra_id?c.regra_id:null;
       if(!rid&&c&&c.fx&&!c.lado){
+        const tipoFx=((document.getElementById(`lancctbInlineFxTipo_${extratoId}_${ix}`)||{}).value||'descconta'), colFx=tipoFx==='cliente'?'fluxo_cliente_gatilho':(tipoFx==='numero'?'fluxo_numero_gatilho':'fluxo_descconta_gatilho');
         const chk=document.getElementById(`lancctbInlineFxChk_${extratoId}_${ix}`), gat=((document.getElementById(`lancctbInlineFxGat_${extratoId}_${ix}`)||{}).value||'').trim(), modelo=((document.getElementById(`lancctbInlineFxMod_${extratoId}_${ix}`)||{}).value||'').trim();
         if(chk&&chk.checked&&gat){
-          const { data: ja } = await _supaClient.from('regras_matching').select('id').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('historico_gatilho',baseHistAb).eq('fluxo_descconta_gatilho',gat).limit(1);
+          const { data: ja } = await _supaClient.from('regras_matching').select('id').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('historico_gatilho',baseHistAb).eq(colFx,gat).limit(1);
           if(ja&&ja.length) rid=ja[0].id;
-          else { const { data: nv, error: eNv } = await _supaClient.from('regras_matching').insert({ created_by:_lancctbCriadorRegra(), empresa_eid:_lancctbEidAtual, descricao:`[${gat}] ${baseHistAb}`, historico_fixo:modelo||null, tipo_regra:'historico', historico_gatilho:baseHistAb, valor_gatilho:null, cnpj_cpf_gatilho:null, dc, conta_contabil_id:linhasContrapartida[ix].conta_contabil_id, agencia_bancaria_id:null, fluxo_descconta_gatilho:gat }).select('id').single();
+          else { const { data: nv, error: eNv } = await _supaClient.from('regras_matching').insert({ created_by:_lancctbCriadorRegra(), empresa_eid:_lancctbEidAtual, descricao:`[${gat}] ${baseHistAb}`, historico_fixo:modelo||null, tipo_regra:'historico', historico_gatilho:baseHistAb, valor_gatilho:null, cnpj_cpf_gatilho:null, dc, conta_contabil_id:linhasContrapartida[ix].conta_contabil_id, agencia_bancaria_id:null, [colFx]:gat }).select('id').single();
             if(eNv){ toast('Erro ao criar a Regra da linha '+(ix+1)+': '+eNv.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; } rid=nv.id; }
         }
       }
@@ -37520,7 +37525,7 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
     if(c.fx){
       html+=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)"><td colspan="2"></td><td colspan="14" style="padding:0 10px 8px 12px;font-size:11px;color:var(--slate);line-height:1.9">📎 <b>Fluxo desta linha:</b> ${esc(c.fx.cliente_fornecedor_nome||'—')} · Conta: <b>${esc(c.fx.descricao_conta_origem||'—')}</b> · Desc.: ${esc(c.fx.descricao||'—')} · NF/Doc: ${esc(c.fx.documento_numero||c.fx.numero||'—')}${c.fx.parcela?' parc. '+esc(c.fx.parcela):''} · Unid.: ${esc(c.fx.unidade||'—')}${c.regra_id?` · <span style="color:var(--teal)">✓ Regra já existe</span>`:`
         <br><label style="margin-right:8px"><input type="checkbox" id="lancctbInlineFxChk_${r.id}_${idx}" checked> criar Regra</label>
-        Gatilho — Descrição da conta do Fluxo contém: <input class="fi" id="lancctbInlineFxGat_${r.id}_${idx}" value="${esc(c.fx.descricao_conta_origem||'')}" style="width:220px;font-size:11px">
+        Gatilho do Fluxo: <select class="si" id="lancctbInlineFxTipo_${r.id}_${idx}" style="font-size:11px;width:auto" onchange="var o=this.options[this.selectedIndex];document.getElementById('lancctbInlineFxGat_${r.id}_${idx}').value=o.getAttribute('data-v')||''"><option value="descconta" data-v="${esc(c.fx.descricao_conta_origem||'')}">Descrição da conta</option><option value="cliente" data-v="${esc(c.fx.cliente_fornecedor_nome||'')}">Fornecedor/Cliente</option><option value="numero" data-v="${esc(c.fx.documento_numero||c.fx.numero||'')}">Número/documento</option></select> contém: <input class="fi" id="lancctbInlineFxGat_${r.id}_${idx}" value="${esc(c.fx.descricao_conta_origem||'')}" style="width:220px;font-size:11px">
         &nbsp; Modelo do histórico: <input class="fi" id="lancctbInlineFxMod_${r.id}_${idx}" value="Pagamento a {FLUXO_CLIENTE}" style="width:280px;font-size:11px" title="Campos: {FLUXO_CLIENTE} {FLUXO_NUMERO} {FLUXO_DESCCONTA} {FLUXO_DESC} {FLUXO_UNIDADE} {FLUXO_PARCELA}">`}</td></tr>`;
     }
   });
