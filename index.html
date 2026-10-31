@@ -38541,6 +38541,11 @@ async function renderLancctbRegistroContabil(){
       (cps||[]).forEach(c=>{ _cpPorId[tb+':'+c.id]=c.cliente_fornecedor_nome||''; });
     }
     linhas.forEach(it=>{ const l=it.ctb.find(x=>x.comprovante_id&&_cpPorId[_tbCp(it)+':'+x.comprovante_id]!==undefined); if(l) it.comprovanteNome=_cpPorId[_tbCp(it)+':'+l.comprovante_id]; });
+    // Extrato PENDENTE com comprovante já amarrado a ele (status "associado" na tela de Comprovantes): o nome do fornecedor aparece na coluna Comprovante (pedido do usuário 31/10/2026).
+    try{ const _pend=linhas.filter(it=>!it.ctb.length&&it.comprovanteNome===undefined&&(it.extrato.valor_saida||0)>0); const _idsP=_pend.map(it=>it.extrato.id);
+      if(_idsP.length){ const _porExt={}; for(let i=0;i<_idsP.length;i+=200){ const { data: cpA } = await _supaClient.from('comprovantes_bancarios').select('lancamento_extrato_id,cliente_fornecedor_nome').in('lancamento_extrato_id',_idsP.slice(i,i+200)); (cpA||[]).forEach(c=>{ if(c.cliente_fornecedor_nome) _porExt[c.lancamento_extrato_id]=c.cliente_fornecedor_nome; }); }
+        _pend.forEach(it=>{ if(_porExt[it.extrato.id]) it.comprovanteNome=_porExt[it.extrato.id]; }); }
+    }catch(e){ console.warn('Comprovante amarrado ao extrato pendente:',e); }
     const _semCp=linhas.filter(it=>it.ctb.length&&it.comprovanteNome===undefined&&it.extrato.data_pagamento);
     if(_semCp.length){
       const _ds=_semCp.map(it=>it.extrato.data_pagamento).sort();
@@ -39897,7 +39902,7 @@ async function renderLancctbComprovantes(){
   const from=_lancctbComprovPagina*LANCCTB_PAGE_SIZE;
   const to=from+LANCCTB_PAGE_SIZE-1;
   let q=_supaClient.from('comprovantes_bancarios')
-    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,documento_numero,data_vencimento,valor_pago,status_conciliacao',{count:'exact'})
+    .select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,documento_numero,data_vencimento,valor_pago,status_conciliacao,lancamento_extrato_id',{count:'exact'})
     .eq('empresa_eid',eid);
   if(_lancctbComprovContaSel) q=q.eq('conta_bancaria_id',_lancctbComprovContaSel);
   if(_lancctbComprovMes){
@@ -39909,7 +39914,9 @@ async function renderLancctbComprovantes(){
   if(_lancctbComprovFiltroCpf.trim()) q=q.ilike('cnpj_cpf',`%${_lancctbComprovFiltroCpf.trim().replace(/[%_]/g,'')}%`);
   if(_lancctbComprovFiltroDocumento.trim()) q=q.ilike('documento_numero',`%${_lancctbComprovFiltroDocumento.trim().replace(/[%_]/g,'')}%`);
   if(String(_lancctbComprovFiltroValor).trim()!==''&&!isNaN(parseFloat(_lancctbComprovFiltroValor))) q=q.eq('valor_pago',parseFloat(_lancctbComprovFiltroValor));
-  if(_lancctbComprovFiltroStatus) q=q.eq('status_conciliacao',_lancctbComprovFiltroStatus);
+  if(_lancctbComprovFiltroStatus==='associado') q=q.eq('status_conciliacao','pendente').not('lancamento_extrato_id','is',null); // associado = amarrado a um extrato que ainda não foi classificado
+  else if(_lancctbComprovFiltroStatus==='pendente') q=q.eq('status_conciliacao','pendente').is('lancamento_extrato_id',null);
+  else if(_lancctbComprovFiltroStatus) q=q.eq('status_conciliacao',_lancctbComprovFiltroStatus);
   const { data: comprovantes, error, count } = await q.order('data_pagamento',{ascending:true}).order('id',{ascending:true}).range(from,to);
 
   // Página pedida passou do fim (o processamento/exclusão diminuiu os resultados): volta pra página 1 e recarrega — antes só mostrava "Requested range not satisfiable".
@@ -39947,14 +39954,14 @@ async function renderLancctbComprovantes(){
       <th style="padding:4px 6px"><input class="si" data-filtro="comprov-documento" style="width:100%;font-size:11px" placeholder="🔎 filtrar" value="${esc(_lancctbComprovFiltroDocumento)}" oninput="_lancctbComprovFiltroDebounced('documento',this.value)"></th>
       <th style="padding:4px 6px"></th>
       <th style="padding:4px 6px"><input class="si" data-filtro="comprov-valor" type="number" step="0.01" style="width:100%;font-size:11px" placeholder="🔎 valor" value="${esc(_lancctbComprovFiltroValor)}" oninput="_lancctbComprovFiltroDebounced('valor',this.value)"></th>
-      <th style="padding:4px 6px"><select class="si" data-filtro="comprov-status" style="width:100%;font-size:11px" onchange="_lancctbComprovFiltroDebounced('status',this.value)">${['','pendente','conciliado','ignorado'].map(o=>`<option value="${o}" ${_lancctbComprovFiltroStatus===o?'selected':''}>${o||'Todos'}</option>`).join('')}</select></th>
+      <th style="padding:4px 6px"><select class="si" data-filtro="comprov-status" style="width:100%;font-size:11px" onchange="_lancctbComprovFiltroDebounced('status',this.value)">${['','pendente','associado','conciliado','ignorado'].map(o=>`<option value="${o}" ${_lancctbComprovFiltroStatus===o?'selected':''}>${o||'Todos'}</option>`).join('')}</select></th>
     </tr></thead>
     <tbody>`;
   if(!comprovantes||!comprovantes.length){
     html+=`<tr><td colspan="7" style="padding:30px;text-align:center;color:var(--slate)">Nenhum comprovante importado ainda.</td></tr>`;
   } else {
     comprovantes.forEach(c=>{
-      const statusCor=c.status_conciliacao==='conciliado'?'var(--teal)':c.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
+      const _assoc=c.status_conciliacao==='pendente'&&c.lancamento_extrato_id; const statusCor=_assoc?'#0EA5E9':c.status_conciliacao==='conciliado'?'var(--teal)':c.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
       html+=`<tr style="border-bottom:1px solid var(--border)">
         <td style="padding:7px 10px">${c.data_pagamento?new Date(c.data_pagamento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
         <td style="padding:7px 10px">${esc(c.cliente_fornecedor_nome||'')}</td>
@@ -39962,7 +39969,7 @@ async function renderLancctbComprovantes(){
         <td style="padding:7px 10px">${esc(c.documento_numero||'')}</td>
         <td style="padding:7px 10px">${c.data_vencimento?new Date(c.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(c.valor_pago||0)}</td>
-        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(c.status_conciliacao||'')}</span></td>
+        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(_assoc?'associado':(c.status_conciliacao||''))}</span></td>
       </tr>`;
     });
   }
