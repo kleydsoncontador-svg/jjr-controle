@@ -31166,7 +31166,7 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
       const { data: comps } = await _supaClient.from(ehSaida?'comprovantes_bancarios':'comprovantes_recebimento')
         .select('cnpj_cpf,cliente_fornecedor_nome,valor_pago,data_pagamento')
         .eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente');
-      const match=(comps||[]).find(c=>c.cnpj_cpf&&Math.abs(c.valor_pago-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
+      const match=_lancctbMelhorComprovante(comps,valor,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_VALOR,c=>c.cnpj_cpf&&_lancctbDiffDias(c.data_pagamento,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS);
       if(match){ cnpjSugerido=match.cnpj_cpf; nomeSugerido=match.cliente_fornecedor_nome; }
     }
   }
@@ -32303,6 +32303,19 @@ function _lancctbFluxoDifAprender(f,valorExtrato,ehSaida){
     if(i>=0) lista[i]={...lista[i],max:Math.max(Number(lista[i].max||0),dif)}; else lista.push({k:ch,cli:f.cliente_fornecedor_nome||'',conta:f.descricao_conta_origem||'',max:dif});
     S.s(k,lista);
   }catch(e){}
+}
+// Comprovante MAIS PRÓXIMO (30/10/2026, achado real Fast Lube 22/07/2026): extrato de R$ 17,30 pegou o comprovante de R$ 18,60 (ACRISIO) em vez do exato de R$ 17,30 (RUDNEY), porque a busca parava no PRIMEIRO dentro da
+// tolerância de R$ 2,00. Agora entre os candidatos vale o de menor diferença de valor (depois o de data mais próxima) e, fora do centavo, a diferença aceita é no máximo 1% do valor (valor pequeno não aceita "quase").
+function _lancctbDiffComprovanteAceita(dif,valor,tol){ dif=Math.abs(dif); return dif<=0.0201||dif<=Math.min(tol,Math.max(0.0201,Math.abs(valor)*0.01)); }
+function _lancctbMelhorComprovante(lista,valor,dataRef,tol,filtro){
+  let melhor=null,mD=1e9,mT=1e9;
+  for(const c of (lista||[])){
+    const d=Math.abs((c.valor_pago||0)-valor); if(!_lancctbDiffComprovanteAceita(d,valor,tol)) continue;
+    if(filtro&&!filtro(c)) continue;
+    const t=_lancctbDiffDias(c.data_pagamento,dataRef);
+    if(d<mD-0.0001||(Math.abs(d-mD)<=0.0001&&t<mT)){ melhor=c; mD=d; mT=t; }
+  }
+  return melhor;
 }
 const LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO=0.0201; // 20/10/2026: o usuário aceita diferença de até R$ 0,02 (positiva ou negativa) entre Fluxo e extrato — nunca além disso
 // Pedido do usuário 19/10/2026: com o FORNECEDOR CONFIRMADO (identidade 'ok'/parâmetro) aceita diferença de até 1 centavo (arredondamento) — preferindo sempre a exata. Só é usada no Processar Fluxo e na composição.
@@ -34705,14 +34718,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // comprovantes_bancarios (Pagamento), entrada usa comprovantes_recebimento.
     let cnpjAncora=null,comprovanteMatch=null;
     if(modo!=='notas_fiscais'&&modo!=='ia'&&modo!=='recebimentos_so_regras'){
-      for(const c of comprovantesFonte){
-        if(comprovantesUsados.has(c.id)) continue;
-        if(Math.abs(c.valor_pago-valor)>tolComp) continue;
-        if(_lancctbDiffDias(c.data_pagamento,l.data_pagamento)>LANCCTB_MATCH_TOLERANCIA_DIAS) continue;
-        if(!_lancctbComprovanteCombinaHistorico(c,l.historico_bancario)) continue;
-        if(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome)) continue;
-        comprovanteMatch=c; cnpjAncora=c.cnpj_cpf; break;
-      }
+      { const _cm=_lancctbMelhorComprovante(comprovantesFonte,valor,l.data_pagamento,tolComp,c=>!comprovantesUsados.has(c.id)
+          &&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS
+          &&_lancctbComprovanteCombinaHistorico(c,l.historico_bancario)
+          &&!(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome)));
+        if(_cm){ comprovanteMatch=_cm; cnpjAncora=_cm.cnpj_cpf; } }
     }
     // Passo 1b: múltiplos comprovantes somando o valor total (pedido do
     // usuário 05/09/2026 — ex.: um único lançamento de banco "Sispag
@@ -38560,7 +38570,7 @@ async function renderLancctbRegistroContabil(){
       const ehTribHist=_lancctbHistoricoEhTributo(r.historico_bancario);
       // Comprovante: busca só nas datas próximas via índice (diffDias já garantido pelo índice)
       const compsProx=_idxRng(ehSaida?_idxCP:_idxCR,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS);
-      const match=compsProx.find(c=>Math.abs(c.valor_pago-valor)<=(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR:0.005)&&(!ehTribHist||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome))&&_lancctbComprovanteCombinaHistorico(c,r.historico_bancario));
+      const match=_lancctbMelhorComprovante(compsProx,valor,r.data_pagamento,(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR:0.005),c=>(!ehTribHist||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome))&&_lancctbComprovanteCombinaHistorico(c,r.historico_bancario));
       if(match) item.comprovanteSugerido=match;
       // NF: busca só nas datas próximas (tolerância 3× para NF)
       // O palpite também precisa combinar com QUEM é (CNPJ/CPF do histórico ou
