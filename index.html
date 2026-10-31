@@ -36147,6 +36147,17 @@ function _lancctbIcmsAcharPagamento(l,ctx){
     const ufsFx=new Set(fx.map(x=>x.uf).filter(Boolean));
     const todas=[]; for(const k of [-1,0,-2]) (ctx.rows[mesAdd(k)]||[]).forEach(r=>{ if((!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&(!ufH||r.uf===ufH)&&(!ufsFx.size||ufsFx.has(r.uf))) todas.push(r); });
     if(todas.length&&new Set(todas.map(r=>r.tipo+'|'+r.uf+'|'+r.unidade)).size===1&&Math.abs(todas.reduce((s,r)=>s+Math.round(r.valor*100),0)-cents)<=1) return {rows:todas,mes:todas[0].mes};
+    // PAGAMENTO EM PARTES (pedido do usuário 30/10/2026: NF 154990, R$ 1.241,77 + R$ 66,55 = R$ 1.308,32): o Fluxo cita a MESMA NF em mais de uma saída e a soma das saídas fecha EXATAMENTE o valor da NF na base.
+    // Cada saída é classificada pelo tipo da NF e a NF só sai do aberto quando as partes completam o valor. Última parte: o que falta fecha o valor.
+    if(todas.length&&new Set(todas.map(r=>r.tipo+'|'+r.uf+'|'+r.unidade)).size===1){
+      const totalNf=todas.reduce((s,r)=>s+Math.round(r.valor*100),0), pago=todas.reduce((s,r)=>s+((ctx.parcialPago&&ctx.parcialPago[r.id])||0),0), resta=totalNf-pago;
+      if(pago>0&&Math.abs(cents-resta)<=1) return {rows:todas,mes:todas[0].mes,parcial:true,ultima:true,total:totalNf};
+      if(cents<resta-1){
+        const irm=(ctx.pend||[]).filter(p=>p.id!==l.id&&!(ctx.feitos&&ctx.feitos.has(p.id))&&(p.valor_saida||0)>0&&_lancctbHistoricoEhTributo(String(p.historico_bancario||''))&&(ctx.fluxo[p.id]||[]).some(x=>x.nf&&nfsFx.has(x.nf)&&(!ufsFx.size||!x.uf||ufsFx.has(x.uf))));
+        const somaIrm=irm.reduce((s,p)=>s+Math.round((p.valor_saida||0)*100),0);
+        if(irm.length&&Math.abs(cents+somaIrm-resta)<=1) return {rows:todas,mes:todas[0].mes,parcial:true,total:totalNf};
+      }
+    }
   }
   return null;
 }
@@ -36157,9 +36168,12 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
   const rotulo=rows.length===1?`${tipo} ref. ${r0.compet} NF ${r0.doc} UF ${r0.uf} UN ${r0.unidade}`:`${tipo} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${rows.length} NFs)`;
   const valor=Math.round((l.valor_saida||0)*100)/100;
   const semMarca=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
-  const desfazer=()=>{ rows.forEach(x=>{ if(x.ext===l.id) x.ext=null; ctx.usados.delete(x.id); }); };
-  rows.forEach(x=>{ ctx.usados.add(x.id); x.ext=l.id; }); rows.forEach(x=>ctx.mesesTocados.add(x.mes));
-  const histItem=`Pagamento ref. ${rotulo}`;
+  const desfazer=()=>{ rows.forEach(x=>{ if(r.parcial){ ctx.parcialPago[x.id]=Math.max(0,(ctx.parcialPago[x.id]||0)-Math.round((l.valor_saida||0)*100)); x.extras=(x.extras||[]).filter(i=>i!==l.id); if(x.ext===l.id) x.ext=(x.extras||[])[0]||null; } else if(x.ext===l.id) x.ext=null; ctx.usados.delete(x.id); }); ctx.feitos.delete(l.id); };
+  const _cParte=Math.round(valor*100);
+  if(r.parcial){ rows.forEach(x=>{ ctx.parcialPago[x.id]=(ctx.parcialPago[x.id]||0)+_cParte; if(!x.ext) x.ext=l.id; x.extras=(x.extras||[]).concat([l.id]); if(ctx.parcialPago[x.id]>=Math.round(r.total)-1) ctx.usados.add(x.id); }); }
+  else rows.forEach(x=>{ ctx.usados.add(x.id); x.ext=l.id; });
+  rows.forEach(x=>ctx.mesesTocados.add(x.mes)); ctx.feitos.add(l.id);
+  const histItem=`Pagamento ref. ${rotulo}${r.parcial?' (pagamento em partes)':''}`;
   // Contas diferentes por unidade (pedido 29/10/2026): o gatilho sugerido leva a unidade ("ICMS-DIFAL Não Contribuinte UN 163"); vale primeiro a Regra da unidade, e a Regra antiga só com o tipo continua valendo como reserva.
   const gatUn=`${tipo} UN ${r0.unidade}`;
   const _regraIcmsDe=gat=>(regras||[]).find(g=>(!g.agencia_bancaria_id||String(g.agencia_bancaria_id)===String(contaId))&&g.historico_gatilho&&String(g.historico_gatilho).trim().toLowerCase()===gat.toLowerCase()&&g.plano_contas);
@@ -36228,7 +36242,7 @@ function _lancctbIcmsTipoPorValor(ctx,o){
   return ach.length===1?ach[0]:null;
 }
 async function _lancctbIcmsCarregarCtx(eid,pendencias){
-  const ctx={ rows:{}, usados:new Set(), mesesTocados:new Set(), total:0, fluxo:{} };
+  const ctx={ rows:{}, usados:new Set(), mesesTocados:new Set(), total:0, fluxo:{}, pend:pendencias||[], parcialPago:{}, feitos:new Set() };
   const meses=new Set();
   (pendencias||[]).forEach(l=>{ const [a,m]=String(l.data_pagamento||'').split('-').map(Number); if(!a||!m) return; for(let k=-2;k<=0;k++){ let y=a,mm=m+k; while(mm<1){mm+=12;y--;} meses.add(y+'-'+String(mm).padStart(2,'0')); } });
   meses.forEach(mes=>{ const r=_lancctbIcmsLer(eid,mes); if(r.length){ ctx.rows[mes]=r; ctx.total+=r.length; } });
@@ -36250,7 +36264,7 @@ async function _lancctbIcmsCarregarCtx(eid,pendencias){
         (data||[]).forEach(f=>{
           const d=String(f.descricao||''); const mNf=d.match(/\bNF\s*(\d+)/i);
           const nf=String((/PARTILHADO|ICMS|DIFAL/i.test(d)&&mNf?mNf[1]:null)||f.numero||f.documento_numero||(mNf&&mNf[1])||'').replace(/\D/g,'').replace(/^0+/,'');
-          const mUf=d.match(/(?:PARTILHADO|ICMS(?:\s+(?:ST|DIFAL))?|DIFAL|ST)\s*\/\s*([A-Z]{2})\b/i);
+          const mUf=d.match(/(?:PARTILHADO|ICMS(?:\s+(?:ST|DIFAL))?|DIFAL|ST|FCP)\s*\/\s*([A-Z]{2})\b/i);
           const uf=mUf?mUf[1].toUpperCase():_lancctbUfDoTexto(f.cliente_fornecedor_nome||'');
           (ctx.fluxo[f.lancamento_extrato_id]=ctx.fluxo[f.lancamento_extrato_id]||[]).push({nf,uf});
         });
@@ -36261,10 +36275,10 @@ async function _lancctbIcmsCarregarCtx(eid,pendencias){
     try{
       const dsF=(pendencias||[]).map(l=>l.data_pagamento).filter(Boolean).sort();
       if(dsF.length){
-        const { data: fxs } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('data,descricao,cliente_fornecedor_nome,valor_saida').eq('empresa_eid',eid).is('lancamento_extrato_id',null).gt('valor_saida',0).gte('data',dsF[0]).lte('data',dsF[dsF.length-1]).or('descricao.ilike.%PARTILHADO%,descricao.ilike.%DIFAL%,descricao.ilike.%GNRE%,descricao.ilike.%ICMS ST%'));
+        const { data: fxs } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('data,descricao,cliente_fornecedor_nome,valor_saida').eq('empresa_eid',eid).is('lancamento_extrato_id',null).gt('valor_saida',0).gte('data',dsF[0]).lte('data',dsF[dsF.length-1]).or('descricao.ilike.%PARTILHADO%,descricao.ilike.%DIFAL%,descricao.ilike.%GNRE%,descricao.ilike.%ICMS%,descricao.ilike.%FCP%'));
         const porVD=new Map(); (fxs||[]).forEach(f=>{ const k=f.data+'|'+Math.round(Number(f.valor_saida||0)*100); (porVD.get(k)||porVD.set(k,[]).get(k)).push(f); });
         (pendencias||[]).forEach(l=>{ if(ctx.fluxo[l.id]) return; const c=porVD.get(l.data_pagamento+'|'+Math.round(Number(l.valor_saida||0)*100)); if(!c||c.length!==1) return;
-          const d=String(c[0].descricao||''), mNf=d.match(/\bNF\s*(\d+)/i), mUf=d.match(/(?:PARTILHADO|ICMS(?:\s+(?:ST|DIFAL))?|DIFAL|ST)\s*\/\s*([A-Z]{2})\b/i);
+          const d=String(c[0].descricao||''), mNf=d.match(/\bNF\s*(\d+)/i), mUf=d.match(/(?:PARTILHADO|ICMS(?:\s+(?:ST|DIFAL))?|DIFAL|ST|FCP)\s*\/\s*([A-Z]{2})\b/i);
           ctx.fluxo[l.id]=[{ nf:mNf?mNf[1].replace(/^0+/,''):'', uf:mUf?mUf[1].toUpperCase():_lancctbUfDoTexto(c[0].cliente_fornecedor_nome||'') }]; });
       }
     }catch(e){ console.warn('ICMS: Fluxo não ligado não lido:',e); }
