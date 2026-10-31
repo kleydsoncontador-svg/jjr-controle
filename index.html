@@ -31821,7 +31821,7 @@ function _lancctbFluxoIdentPeloComprovante(cp,f){
 }
 // SEMPRE que o Fluxo é anexado em 2+ linhas (pedido do usuário 31/10/2026): o extrato fica inteiro (1 crédito no banco, nunca dividido) e abre em 1 DÉBITO por linha do Fluxo; se a soma difere do extrato, a diferença vira mais
 // 1 linha (mesmo histórico, "(diferença)"; lado oposto quando o Fluxo é maior). As contas de cada débito ficam pendentes no Registro Contábil. Não mexe em extrato já aberto/classificado.
-async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUma){
+async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUma,difMesmaConta){
   try{
     if(!fluxoRows||fluxoRows.length<(permitirUma?1:2)) return false;
     const id=typeof extratoOuId==='object'?extratoOuId.id:extratoOuId;
@@ -31853,6 +31853,7 @@ async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUm
     if(comp.length===1&&comp[0].regra_id&&Math.abs(dif)<0.005) return false; // 1 linha que já tem Regra: quem classifica é o Processar Fluxo (Regras)
     // Pedido do usuário 31/10/2026: a diferença de centavos dos pagamentos PUCOMEX vai SEMPRE na conta 576 (1.1.6.09.000001 Importações em andamento).
     let contaDif=_lancctbDifContaLembrada(comp[0].historico,dif<0);
+    if(difMesmaConta&&comp[0]&&comp[0].conta_contabil_id) contaDif=comp[0].conta_contabil_id; // parâmetro de diferença: a diferença vai contra a MESMA conta do valor cheio
     if(/PUCOMEX/i.test(baseHist)){ try{ const { data: pc } = await _supaClient.from('plano_contas').select('id').eq('empresa_eid',eid).eq('numero_conta',576).limit(1); if(pc&&pc[0]) contaDif=pc[0].id; }catch(e){} }
     if(Math.abs(dif)>=0.005){ const t=(comp[0].historico.slice(0,105)+' (diferença)').trim(); comp.push({ codigo:null, denominacao:t, encargo:null, uf:null, valor:Math.abs(dif), lado:dif<0?'inverso':null, historico:t, conta_contabil_id:contaDif, resumo:t, competencia:null }); }
     const hist='[PAGAMENTO COMPOSTO: '+comp.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+baseHist;
@@ -33310,6 +33311,8 @@ async function _lancctbProcessarFluxo(){
     const _extConcPF=await _lancctbExtratosLigadosConciliados(fluxoTodo,pendIds); // ligada a lançamento JÁ conciliado = ocupada (não é "associação velha")
     const fluxoPend=fluxoTodo.filter(f=>f.status_associado==='nao_associado'||!f.lancamento_extrato_id||(!pendIds.has(f.lancamento_extrato_id)&&!_extConcPF.has(f.lancamento_extrato_id)));
     fluxoPend.sort(_lancctbFluxoOrdemCmp); // ordem do Fluxo: data, depois id (determinístico)
+    { const _feitosDif=await _lancctbFluxoAplicarDifParam(eid,pendencias,fluxoPend,_compsPF); // parâmetros de diferença (ex.: SEM PARAR) abrem o extrato em linhas antes do restante
+      if(_feitosDif.size){ pendencias=pendencias.filter(p=>!_feitosDif.has(p.id)); for(let i=fluxoPend.length-1;i>=0;i--){ if(fluxoPend[i].__difUsada) fluxoPend.splice(i,1); } toast(`Parâmetro de diferença: ${_feitosDif.size} extrato(s) aberto(s) em linhas.`,'ok'); } }
     // O Fluxo é quem manda (pedido do usuário 18/09/2026): a NF+parcela que
     // ele indica decide a que extrato a linha pertence. Carrega as parcelas
     // (qualquer status) das NFs citadas no Fluxo.
@@ -38126,7 +38129,34 @@ function _lancctbFluxoParamSet(eid,lista){ S.s('lancctb_fluxo_param_'+eid,lista)
 function _fpNorm(t){ return _convMpRemoverAcentos(String(t||'').toUpperCase()).replace(/\s+/g,' ').trim(); }
 function _lancctbFluxoParamsDaLinha(hist,lista){
   const h=_fpNorm(hist); if(!h) return [];
-  return (lista||[]).filter(p=>p&&p.gatilho&&h.includes(_fpNorm(p.gatilho)));
+  return (lista||[]).filter(p=>p&&p.gatilho&&!p.dif&&h.includes(_fpNorm(p.gatilho)));
+}
+// Parâmetro de DIFERENÇA (pedido do usuário 31/10/2026, SEM PARAR): "no comprovante que contém X, associe à linha do Fluxo que contém Y mesmo com diferença de até R$ Z" — o extrato abre em
+// 1 crédito no banco + débito do valor do Fluxo + débito da diferença (mesma conta da linha cheia). Fica FORA dos parâmetros normais (p.dif) pra não restringir os demais lançamentos do mesmo histórico.
+async function _lancctbFluxoAplicarDifParam(eid,pendencias,fluxoPend,comps){
+  const feitos=new Set();
+  try{
+    const ps=_lancctbFluxoParamGet(eid).filter(p=>p&&p.dif&&p.gatilho&&Number(p.difMax)>0); if(!ps.length) return feitos;
+    const nz=t=>_fpNorm(t);
+    for(const ex of (pendencias||[])){
+      const vExt=Math.round(Number(ex.valor_saida||0)*100)/100; if(vExt<=0) continue;
+      const h=nz(ex.historico_bancario);
+      for(const p of ps){
+        if(!h.includes(nz(p.gatilho))) continue;
+        const cps=(p.comprovante||[]).map(nz).filter(Boolean), fls=(p.contem||[]).map(nz).filter(Boolean);
+        if(cps.length){ const ok=(comps||[]).some(c=>Math.abs(Number(c.valor_pago||0)-vExt)<=0.02&&_lancctbDiffDias(c.data_pagamento,ex.data_pagamento)<=3&&cps.some(t=>nz(c.cliente_fornecedor_nome).includes(t))); if(!ok) continue; }
+        const cand=(fluxoPend||[]).filter(f=>!feitos.has(f.id)&&!f.__difUsada&&Number(f.valor_saida||0)>0&&Number(f.valor_saida)<vExt-0.005&&vExt-Number(f.valor_saida)<=Number(p.difMax)+0.005&&_lancctbDiffDias(f.data,ex.data_pagamento)<=3&&(!fls.length||fls.some(t=>nz(f.cliente_fornecedor_nome).includes(t))));
+        if(cand.length!==1) continue; // só quando a linha é ÚNICA
+        const f=cand[0];
+        if((pendencias||[]).filter(o=>o.id!==ex.id&&(o.valor_saida||0)>vExt-Number(p.difMax)&&(o.valor_saida||0)<=vExt+Number(p.difMax)+0.005&&nz(o.historico_bancario).includes(nz(p.gatilho))&&_lancctbDiffDias(o.data_pagamento,ex.data_pagamento)<=3).length) continue; // outro extrato parecido disputa a mesma linha
+        if(await _lancctbFluxoAbrirLinhas(ex.id,[f],true,true,true)){
+          await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:ex.id}).eq('id',f.id);
+          f.__difUsada=true; feitos.add(ex.id); break;
+        }
+      }
+    }
+  }catch(e){ console.warn('Parâmetro de diferença do Fluxo:',e); }
+  return feitos;
 }
 function _lancctbFluxoParamOk(hist,f,lista){
   const ps=_lancctbFluxoParamsDaLinha(hist,lista); if(!ps.length) return true;
@@ -38220,6 +38250,13 @@ function abrirLancctbFluxoParam(extratoId,sugIdx){
     <div class="fg" style="margin-bottom:10px"><div class="fl">O fornecedor do Fluxo NÃO pode conter (opcional — pode ser mais de um)</div>
       <textarea class="fi" id="lancctbFpNaoContem" rows="2" style="width:100%" placeholder="ex.: FORT LUB, REDE ANCORA">${esc(((base&&base.naoContem)||[]).join(', '))}</textarea></div>
     <div style="font-size:11.5px;color:var(--slate);margin-bottom:12px">Sem nenhum parâmetro nada muda. Com parâmetro, o sistema <b>só</b> associa este histórico a linhas do Fluxo que respeitem o que você definiu.</div>
+    ${(function(){ const d=_lancctbFluxoParamGet(eid).find(p=>p&&p.dif&&_fpNorm(p.gatilho)===_fpNorm(gatPre))||{};
+      return `<div style="border-top:1px solid var(--border);padding-top:10px;margin-bottom:12px">
+      <div style="font-weight:700;font-size:12.5px;margin-bottom:4px">Aceitar DIFERENÇA de valor (opcional — não restringe os outros lançamentos desse histórico)</div>
+      <div style="font-size:11px;color:var(--slate);margin-bottom:8px">Quando o comprovante e a linha do Fluxo forem desse fornecedor mas o valor do Fluxo for MENOR que o do extrato, o site abre o extrato em linhas: 1 crédito no banco + débito do valor do Fluxo + débito da diferença (contra a mesma conta). Você só cria as regras.</div>
+      <div class="fl">O comprovante deve conter</div><input class="fi" id="lancctbFpDifComp" value="${esc((d.comprovante||[]).join(', '))}" placeholder="ex.: SEM PARAR" style="width:100%;margin-bottom:6px">
+      <div class="fl">O fornecedor do Fluxo deve conter</div><input class="fi" id="lancctbFpDifFlux" value="${esc((d.contem||[]).join(', '))}" placeholder="ex.: SEM PARAR" style="width:100%;margin-bottom:6px">
+      <div class="fl">Diferença máxima aceita (R$)</div><input class="fi" id="lancctbFpDifMax" value="${d.difMax||''}" placeholder="ex.: 150" style="width:140px"></div>`; })()}
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap">
       ${base?`<button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbFluxoParam('${esc(base.id)}')">Excluir parâmetro</button>`:''}
       <button class="btn bo" onclick="closeModal('mLancctbFluxoParam')">Cancelar</button>
@@ -38233,8 +38270,11 @@ async function salvarLancctbFluxoParam(idExistente){
   const gatilho=(document.getElementById('lancctbFpGatilho').value||'').trim();
   const contem=_fpLista(document.getElementById('lancctbFpContem').value), naoContem=_fpLista(document.getElementById('lancctbFpNaoContem').value);
   if(!gatilho){ toast('Informe o trecho do histórico bancário (gatilho).','err'); return; }
-  let lista=_lancctbFluxoParamGet(eid).filter(p=>p.id!==idExistente);
+  let lista=_lancctbFluxoParamGet(eid).filter(p=>p.id!==idExistente&&!(p.dif&&_fpNorm(p.gatilho)===_fpNorm(gatilho)));
   if(contem.length||naoContem.length) lista.push({ id:idExistente||('fp'+Date.now()), gatilho, contem, naoContem });
+  const _difMax=parseFloat(String((document.getElementById('lancctbFpDifMax')||{}).value||'').replace(/\./g,'').replace(',','.'))||0;
+  const _difComp=_fpLista((document.getElementById('lancctbFpDifComp')||{}).value), _difFlux=_fpLista((document.getElementById('lancctbFpDifFlux')||{}).value);
+  if(_difMax>0&&(_difComp.length||_difFlux.length)) lista.push({ id:'fpd'+Date.now(), gatilho, dif:true, comprovante:_difComp, contem:_difFlux, naoContem:[], difMax:_difMax });
   _lancctbFluxoParamSet(eid,lista);
   _lancctbFluxoParamLista=lista;
   closeModal('mLancctbFluxoParam');
