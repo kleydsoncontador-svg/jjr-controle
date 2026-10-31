@@ -31980,6 +31980,21 @@ async function _lancctbAssociarComprovantesTodos(){
   }
   for(let i=0;i<pares.length;i+=8){ await Promise.all(pares.slice(i,i+8).map(x=>_supaClient.from(x.tab).update({lancamento_extrato_id:x.ext}).eq('id',x.id).eq('status_conciliacao','pendente'))); }
   if(pares.length) console.log('Comprovantes associados aos extratos (todos):',pares.length);
+  // Fluxo: linha ÚNICA de valor exato, no máximo 1 dia de diferença, com identidade CONFIRMADA (CNPJ/nome/alias) e respeitando os parâmetros — o resto continua com o Processar Fluxo.
+  try{
+    const ds=exts.map(e=>e.data_pagamento).filter(Boolean).sort(); if(!ds.length) return;
+    const add2=(d,n)=>{ const dt=new Date(d+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+    const { data: fxl } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('id,data,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,cnpj_cpf,descricao,descricao_conta_origem,status_associado,lancamento_extrato_id').eq('empresa_eid',eid).eq('status_associado','nao_associado').is('lancamento_extrato_id',null).gte('data',add2(ds[0],-1)).lte('data',add2(ds[ds.length-1],1)));
+    if(!fxl||!fxl.length) return;
+    const params=_lancctbFluxoParamGet(eid), alias=_lancctbFluxoAliasGet(eid), usadoF=new Set(), parF=[];
+    for(const r of exts){
+      const ehS=(r.valor_saida||0)>0, v=ehS?r.valor_saida:r.valor_entrada; if(!(v>0)||!ehS) continue;
+      const cand=fxl.filter(f=>!usadoF.has(f.id)&&Math.abs((f.valor_saida||0)-v)<0.005&&_lancctbDiffDias(f.data,r.data_pagamento)<=1&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))&&!_lancctbFluxoEhIcms(f)&&_lancctbFluxoParamOk(r.historico_bancario,f,params)&&_lancctbFluxoIdentidade(r.historico_bancario,f,alias)==='ok');
+      if(cand.length===1){ usadoF.add(cand[0].id); parF.push({id:cand[0].id,ext:r.id}); }
+    }
+    for(let i=0;i<parF.length;i+=8){ await Promise.all(parF.slice(i,i+8).map(x=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:x.ext}).eq('id',x.id).eq('status_associado','nao_associado'))); }
+    if(parF.length) console.log('Fluxo associado aos extratos (todos):',parF.length);
+  }catch(e){ console.warn('Associar Fluxo (todos os extratos):',e); }
 }
 // Linha do Fluxo que o Registro Contábil já mostrou/sugeriu pra um extrato = ASSOCIADA (pedido do usuário 31/10/2026: "associado aqui significa que foi informado lá no Registro Contábil"). Grava só o vínculo
 // (status_associado + lancamento_extrato_id), em lotes, e só em linha ainda livre; nunca em Mercado Pago/Shopee (essas contas nem chegam aqui).
