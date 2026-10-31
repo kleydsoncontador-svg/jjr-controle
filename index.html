@@ -38426,6 +38426,54 @@ function excluirLancctbFluxoParam(id){
   _lancctbFluxoParamSet(eid,lista); _lancctbFluxoParamLista=lista;
   closeModal('mLancctbFluxoParam'); toast('Parâmetro excluído.','ok'); renderLancctbRegistroContabil();
 }
+// Saldo da conta no Registro Contábil (pedido do usuário 01/11/2026): saldo inicial da conta (editável, o mesmo do Extrato Bancário), saldo anterior do mês, entradas, saídas e saldo final do mês.
+// O saldo final NUNCA pode mudar sozinho: a 1ª vez que um mês é visto guardamos o saldo final (conta+mês); se depois ele for diferente, aparece um ALERTA VERMELHO no meio da tela (o usuário decide: aceitar o novo saldo ou investigar).
+async function _lancctbRegistroSaldoPreencher(tentativa){
+  const slot=document.getElementById('lancctbSaldoRegSlot');
+  if(!slot){ if(tentativa<40) setTimeout(()=>_lancctbRegistroSaldoPreencher(tentativa+1).catch(()=>{}),500); return; }
+  const conta=_lancctbExtratoContaSel, mes=_lancctbRegistroMes, eid=_lancctbEidAtual;
+  if(!conta||!/^\d+$/.test(String(conta))||!/^\d{4}-\d{2}$/.test(mes||'')){ slot.innerHTML=''; return; }
+  const { data: ag } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,saldo_inicial').eq('id',conta).maybeSingle(); if(!ag) return;
+  const { data: ls } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,status_conciliacao').eq('empresa_eid',eid).eq('conta_bancaria_id',conta).order('data_pagamento',{ascending:true}).order('id',{ascending:true}));
+  let ant=Number(ag.saldo_inicial)||0, ent=0, sai=0;
+  (ls||[]).forEach(l=>{ if(l.status_conciliacao==='ignorado'||!l.data_pagamento) return; const m=l.data_pagamento.slice(0,7), e=Number(l.valor_entrada)||0, x=Number(l.valor_saida)||0; if(m<mes) ant+=e-x; else if(m===mes){ ent+=e; sai+=x; } });
+  const r2=v=>Math.round(v*100)/100; ant=r2(ant); ent=r2(ent); sai=r2(sai); const fin=r2(ant+ent-sai);
+  const k='lancctb_saldo_base_'+conta+'_'+mes; let base=null; try{ base=S.g(k); }catch(e){}
+  if(!base||typeof base.final!=='number'){ try{ S.s(k,{final:fin,entradas:ent,saidas:sai,em:new Date().toISOString()}); }catch(e){} base={final:fin}; }
+  const mudou=Math.abs(base.final-fin)>=0.005;
+  const cx='padding:5px 10px;border-radius:6px;background:var(--bg2);border:1px solid var(--border);font-weight:600;font-variant-numeric:tabular-nums';
+  slot.innerHTML=`<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;font-size:12px">
+    <span style="color:var(--slate)">Saldo inicial da conta:</span><input class="si" id="lancctbSaldoIniReg" style="width:120px;text-align:right" value="${_fmt(Number(ag.saldo_inicial)||0)}" title="O mesmo saldo anterior do Extrato Bancário (âncora da conta)" onblur="_lancctbRegistroSalvarSaldoIni()" onkeydown="if(event.key==='Enter')this.blur()">
+    <span style="color:var(--slate)">Saldo anterior do mês:</span><span style="${cx}">R$ ${_fmt(ant)}</span>
+    <span style="color:var(--teal)">+ entradas</span><span style="${cx}">R$ ${_fmt(ent)}</span>
+    <span style="color:#dc2626">− saídas</span><span style="${cx}">R$ ${_fmt(sai)}</span>
+    <span style="color:var(--slate)">= Saldo final:</span><span style="${cx};${mudou?'background:#fee2e2;color:#b91c1c;border-color:#dc2626':''}">R$ ${_fmt(fin)}</span>
+    ${mudou?`<span style="color:#b91c1c;font-weight:700">⚠ era R$ ${_fmt(base.final)}</span>`:''}
+  </div>`;
+  if(mudou&&!window.__saldoAlertaVisto){ window.__saldoAlertaVisto=window.__saldoAlertaVisto||{}; }
+  if(mudou&&!(window.__saldoAlertaVisto||{})[k+'|'+fin]){
+    (window.__saldoAlertaVisto=window.__saldoAlertaVisto||{})[k+'|'+fin]=true;
+    const old=document.getElementById('lancctbSaldoAlerta'); if(old) old.remove();
+    const d=document.createElement('div'); d.id='lancctbSaldoAlerta';
+    d.style.cssText='position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);z-index:100000;background:#b91c1c;color:#fff;padding:22px 26px;border-radius:12px;max-width:520px;box-shadow:0 10px 40px rgba(0,0,0,.6);font-size:14px;line-height:1.5;border:3px solid #fecaca';
+    const dif=r2(fin-base.final);
+    d.innerHTML=`<div style="font-size:18px;font-weight:800;margin-bottom:8px">⚠ O SALDO DO BANCO MUDOU</div>
+      <div>${esc(ag.banco_nome||'Conta')} — ${mes.split('-').reverse().join('/')}:<br>saldo final <b>R$ ${_fmt(base.final)}</b> → <b>R$ ${_fmt(fin)}</b> (diferença de <b>R$ ${_fmt(dif)}</b>).</div>
+      <div style="margin-top:8px;font-size:12.5px;opacity:.95">Entrada e saída do extrato nunca deveriam mudar. Não corrija nada sozinho: me avise com esse número para eu investigar o que alterou.</div>
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:14px;flex-wrap:wrap">
+        <button style="background:#fff;color:#7f1d1d;border:none;border-radius:6px;padding:8px 14px;font-weight:700;cursor:pointer" onclick="_lancctbRegistroSaldoAceitar('${k}',${fin});this.closest('#lancctbSaldoAlerta').remove()">Aceitar R$ ${_fmt(fin)} como o saldo correto</button>
+        <button style="background:transparent;color:#fff;border:1px solid #fff;border-radius:6px;padding:8px 14px;cursor:pointer" onclick="this.closest('#lancctbSaldoAlerta').remove()">Fechar (o alerta continua na barra)</button></div>`;
+    document.body.appendChild(d);
+  }
+}
+function _lancctbRegistroSaldoAceitar(k,fin){ try{ S.s(k,{final:fin,em:new Date().toISOString(),aceito:true}); }catch(e){} renderLancctbRegistroContabil(); }
+async function _lancctbRegistroSalvarSaldoIni(){
+  const input=document.getElementById('lancctbSaldoIniReg'); if(!input||!_lancctbExtratoContaSel) return;
+  const valor=_lancctbParseValorInput(input.value);
+  const { error } = await _supaClient.from('agencias_bancarias').update({saldo_inicial:valor}).eq('id',_lancctbExtratoContaSel);
+  if(error){ toast('Erro ao salvar o saldo inicial: '+error.message,'err'); return; }
+  toast('Saldo inicial atualizado','ok'); renderLancctbRegistroContabil();
+}
 async function renderLancctbRegistroContabil(){
   _lancctbFluxoParamLista=_lancctbFluxoParamGet(_lancctbEidAtual);
   _lancctbFluxoAliasLista=_lancctbFluxoAliasGet(_lancctbEidAtual);
@@ -38813,6 +38861,7 @@ async function renderLancctbRegistroContabil(){
   })();
   _pConc.catch(()=>{});
   _lancctbAssociarComprovantesTodos().catch(e=>console.warn('Associar comprovantes (todos os extratos):',e));
+  setTimeout(()=>{ _lancctbRegistroSaldoPreencher(0).catch(e=>console.warn('Saldo do Registro:',e)); },400);
 
   // Pra pendente sem classificação ainda, sugere o Cliente/Fornecedor de um
   // comprovante que bate por valor+data — só visual (não altera nada),
@@ -39508,6 +39557,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
     <span style="font-size:11px;color:var(--slate)">— use os campos abaixo do cabeçalho da tabela pra filtrar por coluna</span>
     <span id="lancctbPercAutoSlot" style="margin-left:auto">${percAutomatico?_lancctbPercAutoHtml(percAutomatico):''}</span>
   </div>
+  <div id="lancctbSaldoRegSlot" style="margin-bottom:8px"></div>
   ${_lancctbRegistroPaginacaoHtml(count,from,to,totalPaginas,somaEntrada,somaSaida)}
   <div id="lancctbRegistroScrollTopo" style="overflow-x:auto;overflow-y:hidden;height:16px"><div id="lancctbRegistroScrollTopoEspacador" style="height:1px"></div></div>
   <div id="lancctbRegistroScrollWrap" style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 360px)">`;
