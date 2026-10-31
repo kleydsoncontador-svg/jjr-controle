@@ -23101,6 +23101,7 @@ function renderLancctbLista(){
   let html=_lancctbRenderBotoesAcessoPastas()+(_podeImportarEmLote(currentUser)?`<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px">
     <button class="btn bo bsm" onclick="abrirLancctbImportarMesTodasModal()" title="Roda 'Importar mês' (pasta SIEG + Portal NFS-e) pra CADA empresa desta listagem, uma de cada vez">📥 Importar NF de todas as empresas</button>
     <button class="btn bo bsm" onclick="abrirLancctbImportarExtratosLoteModal()" title="Busca o Extrato de UMA competência em todas as contas bancárias (de qualquer empresa) que já têm pasta de rede associada">📁 Importar Extratos de todas as empresas</button>
+    <button class="btn bo bsm" style="border-color:#dc2626;color:#dc2626;font-weight:700" onclick="abrirLancctbUnecontModal()" title="Lê as planilhas da pasta UneCont (NFS-e tomadas, com retenções) e importa só as notas que ainda não existem. Nota cancelada nunca entra.">📊 Importar UneCont</button>
   </div>`:'')+`
   <div class="tw" style="overflow-x:auto;max-height:calc(100vh - 320px);overflow-y:auto">
     <table class="data" style="width:100%">
@@ -45708,6 +45709,134 @@ function _lancctbPrepararUploadExtratoOculto(){
       <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
       <button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(false)">▶ Extrair</button>
     </div>`;
+}
+// ─── Importar UneCont (pedido do usuário 31/10/2026) ───────────────────────────────────────────────────────────────────────────────────────────────
+// Planilhas "UneCont - Tomados - <EMPRESA> - <período>.xlsx" (aba "Serviços Tomados": 1 linha por NFS-e tomada, com retenções, valor bruto e líquido) ficam em
+// X:\03 - CONTABIL\Documentação Suporte para Conciliação\UneCont\<ano>\. O botão lê a pasta, acha a empresa pelo CNPJ de cada linha (matriz OU filial → grava na MATRIZ, como o resto do site) e
+// importa só a NFS-e que ainda NÃO existe (mesma chave nacional, ou emitente+número+ano — igual ao importador de XML), nunca nota cancelada/excluída. Sem mês = tudo; planilha já lida por inteiro (mesmo tamanho/data) é pulada.
+const LANCCTB_UNECONT_PASTA='pastaUnecont';
+function abrirLancctbUnecontModal(){
+  if(!_podeImportarEmLote(currentUser)){ toast('Esta importação em lote é restrita ao Kleydson e à Claudiana.','err'); return; }
+  if(!document.getElementById('mLancctbUnecont')){
+    document.body.insertAdjacentHTML('beforeend',`<div class="mb" id="mLancctbUnecont" style="display:none"><div class="modal" style="max-width:560px">
+      <div class="mt"><h3>📊 Importar UneCont — NFS-e tomadas</h3><button onclick="closeModal('mLancctbUnecont')">&#x2715;</button></div>
+      <div class="mc">
+        <div style="font-size:12.5px;color:var(--slate);margin-bottom:10px">Lê as planilhas da pasta <b>UneCont</b> e importa as NFS-e tomadas que ainda não existem no site. <b>Nota cancelada nunca é importada.</b> Planilha que já foi lida por inteiro não é lida de novo.</div>
+        <div id="lancctbUnecontPasta" style="font-size:12.5px;margin-bottom:8px"></div>
+        <button class="btn bo bsm" onclick="_lancctbUnecontEscolherPasta()">📁 Escolher/trocar a pasta UneCont</button>
+        <div class="fg" style="margin:12px 0"><div class="fl">Mês (opcional — vazio = importa tudo que ainda não tiver)</div><input type="month" class="fi" id="lancctbUnecontMes" style="width:200px"></div>
+        <div id="lancctbUnecontStatus" style="font-size:12px;white-space:pre-wrap;margin-bottom:12px;max-height:240px;overflow:auto"></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn bo" onclick="closeModal('mLancctbUnecont')">Fechar</button><button class="btn bp" id="lancctbUnecontBtn" onclick="_lancctbUnecontRodar()">▶ Importar</button></div>
+      </div></div></div>`);
+  }
+  document.getElementById('lancctbUnecontStatus').textContent='';
+  openModal('mLancctbUnecont'); _lancctbUnecontMostrarPasta();
+}
+async function _lancctbUnecontMostrarPasta(){
+  const el=document.getElementById('lancctbUnecontPasta'); if(!el) return;
+  let h=null; try{ h=await _lancctbCarregarHandleGenerico(LANCCTB_UNECONT_PASTA); }catch(e){}
+  el.innerHTML=h?('📁 Pasta: <b>'+esc(h.name)+'</b>'):'📁 Pasta ainda não associada — escolha <b>…\\Documentação Suporte para Conciliação\\UneCont</b>.';
+}
+async function _lancctbUnecontEscolherPasta(){
+  if(!window.showDirectoryPicker){ toast('Seu navegador não suporta esse recurso.','err'); return; }
+  try{ const h=await window.showDirectoryPicker(); await _lancctbSalvarHandleGenerico(LANCCTB_UNECONT_PASTA,h); toast('Pasta UneCont associada: '+h.name,'ok'); _lancctbUnecontMostrarPasta(); }catch(e){ if(e.name!=='AbortError') toast('Erro: '+e.message,'err'); }
+}
+async function _lancctbUnecontListarXlsx(dir,caminho,prof,out){
+  for await (const [nome,fh] of dir.entries()){
+    if(fh.kind==='directory'){ if(prof<3) await _lancctbUnecontListarXlsx(fh,caminho+nome+'/',prof+1,out); }
+    else if(/\.xlsx$/i.test(nome)&&!/^~\$/.test(nome)) out.push({fh,nome,caminho:caminho+nome});
+  }
+}
+// Linha da planilha → NF no formato de notas_fiscais (ou {pula:'motivo'}). Funções puras: valor bruto = "Valor NFe"; retenções = colunas de valor (CSRF = PIS+COFINS+CSLL já detalhadas); ISS só quando retido.
+function _lancctbUnecontLinhaParaNf(r){
+  const dig=x=>String(x==null?'':x).replace(/\D/g,'');
+  const num=v=>{ const n=Number(v); return isFinite(n)&&n>0?Math.round(n*100)/100:null; };
+  const dIso=v=>{ if(!v) return ''; if(v instanceof Date) return v.getFullYear()+'-'+String(v.getMonth()+1).padStart(2,'0')+'-'+String(v.getDate()).padStart(2,'0'); const m=String(v).match(/^(\d{4})-(\d{2})-(\d{2})/); if(m) return m[0]; const b=String(v).match(/^(\d{2})\/(\d{2})\/(\d{4})/); return b?(b[3]+'-'+b[2]+'-'+b[1]):''; };
+  if(r['Cancelamento']) return {pula:'cancelada'};
+  if(r['Exclusão']) return {pula:'excluida'};
+  const numero=String(r['Número NFe']==null?'':r['Número NFe']).trim(); const cnpjEmit=_lancctbCnpj14(dig(r['Cnpj/Cpf Prestador']));
+  if(!numero||!cnpjEmit) return {pula:'incompleta'};
+  const emissao=dIso(r['Emissão NFe'])||dIso(r['Data Competência']); if(!emissao) return {pula:'incompleta'};
+  const valor=num(r['Valor NFe']); if(!valor) return {pula:'incompleta'};
+  const chaveNac=String(r['Chave Nota Nacional']||'').trim();
+  const issRet=(num(r['ISS Dentro do Município'])||0)+(num(r['ISS Fora do Município'])||0);
+  return { numero, cnpj_emitente:cnpjEmit, nome_emitente:String(r['Prestador']||'').trim(), cnpj_destinatario:dig(r['Cnpj Empresa']), nome_destinatario:String(r['Empresa']||'').trim(),
+    data_emissao:emissao, valor_total:valor, iss_valor:issRet>0?Math.round(issRet*100)/100:null, pis_valor:num(r['Valor PIS']), cofins_valor:num(r['Valor COFINS']), csll_valor:num(r['Valor CSLL']), irrf_valor:num(r['Valor IRRF']),
+    chave_acesso:chaveNac?('NFS'+chaveNac):('NFSUNE'+cnpjEmit+'-'+numero), valor_liquido:num(r['Valor Líquido']) };
+}
+async function _lancctbUnecontRodar(){
+  const statusEl=document.getElementById('lancctbUnecontStatus'), btn=document.getElementById('lancctbUnecontBtn');
+  const mes=(document.getElementById('lancctbUnecontMes').value||'').trim();
+  const say=t=>{ statusEl.textContent=t; };
+  let h=null; try{ h=await _lancctbCarregarHandleGenerico(LANCCTB_UNECONT_PASTA); }catch(e){}
+  if(!h){ say('Escolha primeiro a pasta UneCont.'); return; }
+  try{ let perm=await h.queryPermission({mode:'read'}); if(perm!=='granted') perm=await h.requestPermission({mode:'read'}); if(perm!=='granted'){ say('Sem permissão de leitura da pasta.'); return; } }catch(e){ say('Não consegui acessar a pasta: '+(e.message||e)); return; }
+  btn.disabled=true;
+  try{
+    const arquivos=[]; await _lancctbUnecontListarXlsx(h,'',0,arquivos);
+    if(!arquivos.length){ say('Nenhuma planilha .xlsx encontrada na pasta.'); return; }
+    // CNPJ (matriz ou filial) → eid da matriz
+    const mapaCnpj=new Map();
+    S.emps().forEach(e=>{ (_lancctbCnpjsDaEmpresa(e.eid)||[]).forEach(c=>{ const d=String(c).replace(/\D/g,''); if(d&&!mapaCnpj.has(d)) mapaCnpj.set(d,String(e.eid)); }); });
+    const lidos=Object.assign({},S.g('lancctb_unecont_lidos')||{}), conhecidasPorEid={}, log=[], tot={importadas:0,jaExistentes:0,canceladas:0,excluidas:0,incompletas:0,semEmpresa:0,foraMes:0,erros:0,arquivosPulados:0};
+    for(let i=0;i<arquivos.length;i++){
+      const a=arquivos[i]; const file=await a.fh.getFile(); const sig=file.size+'|'+file.lastModified;
+      say(`[${i+1}/${arquivos.length}] ${a.nome}…`);
+      if(!mes&&lidos[a.caminho]===sig){ tot.arquivosPulados++; log.push('⏭ '+a.nome+' — já lida por inteiro antes (pulada)'); continue; }
+      const wb=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true});
+      const sn=wb.SheetNames.find(n=>/tomad/i.test(n)); if(!sn){ log.push('⚠ '+a.nome+' — sem aba de Serviços Tomados (ignorada)'); continue; }
+      const linhas=XLSX.utils.sheet_to_json(wb.Sheets[sn],{defval:null,raw:true});
+      const c={importadas:0,jaExistentes:0,canceladas:0,excluidas:0,incompletas:0,semEmpresa:0,foraMes:0,erros:0};
+      const porEid=new Map();
+      for(const r of linhas){
+        const nf=_lancctbUnecontLinhaParaNf(r);
+        if(nf.pula){ if(nf.pula==='cancelada') c.canceladas++; else if(nf.pula==='excluida') c.excluidas++; else c.incompletas++; continue; }
+        if(mes&&nf.data_emissao.slice(0,7)!==mes){ c.foraMes++; continue; }
+        const eid=mapaCnpj.get(nf.cnpj_destinatario); if(!eid){ c.semEmpresa++; continue; }
+        if(!porEid.has(eid)) porEid.set(eid,[]); porEid.get(eid).push(nf);
+      }
+      for(const [eid,lista] of porEid){
+        if(!conhecidasPorEid[eid]){
+          conhecidasPorEid[eid]=await _lancctbChavesConhecidas(eid);
+          // NFS-e já gravadas: servem pra COMPLETAR retenção que ficou vazia (nota importada antes de existirem os campos de retenção) — só preenche campo vazio, nunca troca valor existente
+          const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('id,chave_acesso,cnpj_emitente,numero,data_emissao,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor').eq('empresa_eid',eid).eq('tipo','nfse').order('id'));
+          const m=new Map(); (ex||[]).forEach(r=>{ m.set(r.chave_acesso,r); m.set(_lancctbChaveNumeroNfse(r.cnpj_emitente,r.numero,r.data_emissao),r); }); conhecidasPorEid[eid+'_ex']=m;
+        }
+        const conh=conhecidasPorEid[eid], mapaEx=conhecidasPorEid[eid+'_ex'], novas=[];
+        for(const nf of lista){
+          const chNum=_lancctbChaveNumeroNfse(nf.cnpj_emitente,nf.numero,nf.data_emissao);
+          if(conh.has(nf.chave_acesso)||conh.has(chNum)){
+            c.jaExistentes++;
+            const ex=mapaEx.get(nf.chave_acesso)||mapaEx.get(chNum);
+            if(ex){ const patch={}; ['iss_valor','pis_valor','cofins_valor','csll_valor','irrf_valor'].forEach(k=>{ if((ex[k]==null||Number(ex[k])===0)&&nf[k]>0) patch[k]=nf[k]; });
+              if(Object.keys(patch).length){ const { error } = await _supaClient.from('notas_fiscais').update(patch).eq('id',ex.id); if(error) c.erros++; else { c.retCompletas=(c.retCompletas||0)+1; Object.assign(ex,patch); } } }
+            continue;
+          }
+          conh.add(nf.chave_acesso); conh.add(chNum); novas.push(nf);
+        }
+        for(let k=0;k<novas.length;k+=100){
+          const lote=novas.slice(k,k+100);
+          const regs=lote.map(nf=>({ empresa_eid:eid, tipo:'nfse', chave_acesso:nf.chave_acesso, numero:nf.numero, serie:null, modelo:'NFSe', cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
+            cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao:'compra', data_emissao:nf.data_emissao, valor_total:nf.valor_total, iss_valor:nf.iss_valor,
+            pis_valor:nf.pis_valor, cofins_valor:nf.cofins_valor, csll_valor:nf.csll_valor, irrf_valor:nf.irrf_valor, xml_storage_path:null, status_captura:'xml_completo', natureza_operacao:null }));
+          const { data: ins, error } = await _supaClient.from('notas_fiscais').upsert(regs,{onConflict:'empresa_eid,tipo,chave_acesso'}).select('id,chave_acesso');
+          if(error||!ins){ c.erros+=lote.length; console.warn('UneCont — erro ao gravar lote:',error); continue; }
+          const idPorChave=new Map(ins.map(x=>[x.chave_acesso,x.id]));
+          const parc=lote.filter(nf=>idPorChave.has(nf.chave_acesso)).map(nf=>({ nf_id:idPorChave.get(nf.chave_acesso), empresa_eid:eid, numero_parcela:1, data_vencimento:nf.data_emissao, valor_parcela:nf.valor_total, data_emissao:nf.data_emissao, tipo:'nfse', direcao:'compra' }));
+          const { error: eP } = await _supaClient.from('notas_fiscais_parcelas').upsert(parc,{onConflict:'nf_id,numero_parcela'});
+          if(eP){ c.erros+=lote.length; console.warn('UneCont — erro nas parcelas:',eP); continue; }
+          c.importadas+=lote.length;
+        }
+      }
+      Object.keys(tot).forEach(k=>{ if(c[k]!=null) tot[k]+=c[k]; }); tot.retCompletas=(tot.retCompletas||0)+(c.retCompletas||0);
+      log.push(`✔ ${a.nome}: ${c.importadas} importada(s), ${c.jaExistentes} já existente(s)`+(c.retCompletas?` (${c.retCompletas} com retenção completada)`:'')+`, ${c.canceladas} cancelada(s) ignorada(s)`+(c.excluidas?`, ${c.excluidas} excluída(s)`:'')+(c.incompletas?`, ${c.incompletas} incompleta(s)`:'')+(c.semEmpresa?`, ${c.semEmpresa} sem empresa cadastrada`:'')+(mes?`, ${c.foraMes} fora do mês`:'')+(c.erros?`, ${c.erros} ERRO(s)`:''));
+      if(!mes&&!c.erros) lidos[a.caminho]=sig; // só marca como lida quando leu TUDO (sem filtro de mês) e sem erro
+    }
+    S.s('lancctb_unecont_lidos',lidos);
+    say(log.join('\n')+`\n\nTotal: ${tot.importadas} NFS-e importada(s), ${tot.jaExistentes} já existente(s) (${tot.retCompletas||0} com retenção completada), ${tot.canceladas} cancelada(s) ignorada(s).`);
+    toast(`UneCont: ${tot.importadas} NFS-e importada(s), ${tot.jaExistentes} já existiam (${tot.retCompletas||0} com retenção completada), ${tot.canceladas} canceladas ignoradas.`,tot.erros?'err':'ok');
+  }catch(e){ console.error('Importar UneCont:',e); say('Erro: '+(e.message||e)); }
+  finally{ btn.disabled=false; }
 }
 function abrirLancctbImportarExtratosLoteModal(){
   if(!_podeImportarEmLote(currentUser)){ toast('Esta importação em lote é restrita ao Kleydson e à Claudiana.','err'); return; }
