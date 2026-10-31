@@ -30992,7 +30992,7 @@ function _lancctbResolverHistFluxo(texto,fluxo,extra){
   const dIso=String((fluxo&&fluxo.data)||ex.data||'').slice(0,10);
   const data=/^\d{4}-\d{2}-\d{2}$/.test(dIso)?dIso.split('-').reverse().join('/'):'';
   const descFx=String((fluxo&&fluxo.descricao)||'').trim(), descConta=String((fluxo&&fluxo.descricao_conta_origem)||'').trim(), unidade=String((fluxo&&fluxo.unidade)||'').trim();
-  let out=t.split('{FLUXO_CLIENTE}').join(nome).split('{FLUXO_NUMERO}').join(numero).split('{FLUXO_PARCELA}').join(parc).split('{FLUXO_DESCRICAO}').join(fluxo?_lancctbDescricaoGuiaDoFluxo(fluxo):'').split('{FLUXO_CNPJ}').join(cnpj).split('{FLUXO_DATA}').join(data).split('{FLUXO_DESC}').join(descFx).split('{FLUXO_DESCCONTA}').join(descConta).split('{FLUXO_UNIDADE}').join(unidade);
+  let out=t.split('{FLUXO_FORNECEDOR}').join('{FLUXO_CLIENTE}').split('{FLUXO_CLIENTE}').join(nome).split('{FLUXO_NUMERO}').join(numero).split('{FLUXO_PARCELA}').join(parc).split('{FLUXO_DESCRICAO}').join(fluxo?_lancctbDescricaoGuiaDoFluxo(fluxo):'').split('{FLUXO_CNPJ}').join(cnpj).split('{FLUXO_DATA}').join(data).split('{FLUXO_DESC}').join(descFx).split('{FLUXO_DESCCONTA}').join(descConta).split('{FLUXO_UNIDADE}').join(unidade);
   if(!parc) out=out.replace(/\s*-\s*parcela\s*$/i,'');
   if(!numero) out=out.replace(/\s*-\s*Documento\s*(?=-|$)/i,'');
   return out.replace(/\s{2,}/g,' ').replace(/\s+-\s*$/,'').trim();
@@ -31815,17 +31815,46 @@ async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida){
   try{
     if(!fluxoRows||fluxoRows.length<2) return false;
     const id=typeof extratoOuId==='object'?extratoOuId.id:extratoOuId;
-    const { data: ex } = await _supaClient.from('lancamentos_extrato').select('id,valor_saida,valor_entrada,historico_bancario,composicao_tributo,status_conciliacao').eq('id',id).maybeSingle();
+    const eid=_lancctbEidAtual;
+    const { data: ex } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,composicao_tributo,status_conciliacao,conta_bancaria_id').eq('id',id).maybeSingle();
     if(!ex||ex.status_conciliacao!=='pendente'||(ex.composicao_tributo||[]).length) return false;
+    // linhas COMPLETAS do Fluxo (a lista da tela traz só algumas colunas): fornecedor, descrição da conta, número, unidade…
+    const { data: fxFull } = await _supaClient.from('fluxo_caixa_lancamentos').select('*').in('id',fluxoRows.map(f=>f.id));
+    const fxPorId=new Map((fxFull||[]).map(f=>[f.id,f]));
+    const rows=fluxoRows.map(f=>Object.assign({},f,fxPorId.get(f.id)||{}));
     const vExt=Math.round(Number((ehSaida?ex.valor_saida:ex.valor_entrada)||0)*100)/100;
+    const baseHist=String(ex.historico_bancario||'').replace(/^\s*\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'').trim();
     const txtDe=f=>{ const nome=String(f.cliente_fornecedor_nome||'').trim(), doc=String(f.documento_numero||f.numero||'').trim(), desc=String(f.descricao||'').trim();
       if(!nome||_lancctbTextoParecidoTributo(nome+' '+desc)) return desc||nome; return (ehSaida?'Pagamento a ':'Recebimento de ')+nome+(doc?' - NF '+doc:'')+(f.parcela?' - parcela '+f.parcela:''); };
-    const comp=fluxoRows.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const t=txtDe(f); return { codigo:null, denominacao:t, encargo:null, uf:null, valor:vf, historico:t, resumo:t.slice(0,120), competencia:null }; });
+    // Regras já criadas (gatilho do extrato + gatilhos do Fluxo): cada linha aberta pega a conta e o histórico da sua Regra.
+    const { data: regras } = await _supaClient.from('regras_matching').select('id,historico_fixo,historico_gatilho,historico_excecao,conta_contabil_id,dc,agencia_bancaria_id,fluxo_historico_gatilho,fluxo_cliente_gatilho,fluxo_numero_gatilho,fluxo_descconta_gatilho,fluxo_unidade_gatilho,plano_contas(classificacao)').eq('empresa_eid',eid).eq('ativo',true);
+    const nzT=t=>_convMpRemoverAcentos(String(t||'').toLowerCase()).replace(/\s+/g,' ').trim();
+    const cont=(g,alvo)=>!g||nzT(alvo).includes(nzT(g));
+    const regraDa=f=>(regras||[]).find(r=>(r.fluxo_historico_gatilho||r.fluxo_cliente_gatilho||r.fluxo_numero_gatilho||r.fluxo_descconta_gatilho||r.fluxo_unidade_gatilho)
+      &&(!r.agencia_bancaria_id||String(r.agencia_bancaria_id)===String(ex.conta_bancaria_id))&&r.plano_contas&&cont(r.historico_gatilho,baseHist)&&(!r.historico_excecao||!cont(r.historico_excecao,baseHist))
+      &&cont(r.fluxo_historico_gatilho,f.descricao)&&cont(r.fluxo_cliente_gatilho,f.cliente_fornecedor_nome)&&cont(r.fluxo_numero_gatilho,f.numero||f.documento_numero)&&cont(r.fluxo_descconta_gatilho,f.descricao_conta_origem)&&cont(r.fluxo_unidade_gatilho,f.unidade));
+    const comp=rows.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const rg=regraDa(f);
+      const t=(rg&&rg.historico_fixo&&_lancctbResolverHistFluxo(rg.historico_fixo,f))||txtDe(f);
+      return { codigo:null, denominacao:t, encargo:null, uf:null, valor:vf, historico:t, resumo:t.slice(0,120), competencia:null, conta_contabil_id:rg?rg.conta_contabil_id:null, regra_id:rg?rg.id:null, fx:{ id:f.id, cliente_fornecedor_nome:f.cliente_fornecedor_nome||'', descricao:f.descricao||'', descricao_conta_origem:f.descricao_conta_origem||'', documento_numero:f.documento_numero||'', numero:f.numero||'', unidade:f.unidade||'', cnpj_cpf:f.cnpj_cpf||'', data:f.data||'', parcela:f.parcela||'' } }; });
     const soma=Math.round(comp.reduce((a,c)=>a+c.valor,0)*100)/100, dif=Math.round((vExt-soma)*100)/100;
     if(Math.abs(dif)>=0.005){ const t=(comp[0].historico.slice(0,105)+' (diferença)').trim(); comp.push({ codigo:null, denominacao:t, encargo:null, uf:null, valor:Math.abs(dif), lado:dif<0?'inverso':null, historico:t, conta_contabil_id:_lancctbDifContaLembrada(comp[0].historico,dif<0), resumo:t, competencia:null }); }
-    const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+String(ex.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+    const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+baseHist;
     const { error } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',id);
-    return !error;
+    if(error) return false;
+    // Todas as linhas já têm Regra (e a diferença, se houver, tem conta lembrada): classifica sozinho — 1 crédito no banco, 1 débito por linha.
+    if(ehSaida&&comp.every(c=>c.conta_contabil_id)){
+      const { data: ag } = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id',ex.conta_bancaria_id).single();
+      const idsC=[...new Set(comp.map(c=>c.conta_contabil_id))]; const { data: cs } = await _supaClient.from('plano_contas').select('id,classificacao').in('id',idsC); const cm=new Map((cs||[]).map(c=>[String(c.id),c]));
+      if(ag&&ag.conta_contabil_id&&idsC.every(i=>cm.has(String(i)))){
+        const dcL=ehSaida?'D':'C', hs=comp.map(c=>c.historico), hBanco=new Set(hs).size<=1?hs[0]:'Pagamentos Diversos';
+        const linhas=[{ empresa_eid:eid, data:ex.data_pagamento, classificacao:ag.plano_contas.classificacao, conta_contabil_id:ag.conta_contabil_id, tipo:ehSaida?'C':'D', valor:vExt, historico:hBanco, lancamento_extrato_id:ex.id, regra_matching_id:comp[0].regra_id||null, origem_match:'regra' }];
+        comp.forEach(c=>{ linhas.push({ empresa_eid:eid, data:ex.data_pagamento, classificacao:cm.get(String(c.conta_contabil_id)).classificacao, conta_contabil_id:c.conta_contabil_id, tipo:c.lado==='inverso'?(dcL==='D'?'C':'D'):dcL, valor:c.valor, historico:c.historico, lancamento_extrato_id:ex.id, regra_matching_id:c.regra_id||null, origem_match:'regra' }); });
+        const { error: eL } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+        if(!eL){ await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado' }).eq('id',ex.id); return true; }
+        console.warn('Abrir linhas do Fluxo: classificação automática falhou:',eL);
+      }
+    }
+    return true;
   }catch(e){ console.warn('Abrir linhas do Fluxo:',e); return false; }
 }
 async function aceitarLancctbFluxoSugestao(extratoId){
@@ -37308,6 +37337,8 @@ async function _lancctbRegistroSalvarInline(extratoId){
     if(!contaId){ toast('Selecione a conta em todas as linhas.','err'); return; }
     linhasContrapartida.push({ conta_contabil_id:contaId, historico:(histInput?histInput.value.trim():''), valor:_lancctbParseValorInput(valorInput?valorInput.value:'0'), inverso:comp[idx]&&comp[idx].lado==='inverso' });
   }
+  // linhas abertas pelo Fluxo: o histórico segue o MODELO escolhido ({FLUXO_CLIENTE} etc.) resolvido com o Fluxo de cada linha
+  comp.forEach((c,ix)=>{ if(!c||!c.fx||!linhasContrapartida[ix]) return; const m=(document.getElementById(`lancctbInlineFxMod_${extratoId}_${ix}`)||{}).value||''; if(/\{FLUXO_/.test(m)) linhasContrapartida[ix].historico=_lancctbResolverHistFluxo(m,c.fx); });
   const soma=linhasContrapartida.reduce((s,l)=>s+(l.inverso?-1:1)*(l.valor||0),0);
   if(Math.abs(soma-valorTotal)>0.01){ toast('A soma das linhas precisa bater com o valor do lançamento.','err'); return; }
   const btnSalvar=document.getElementById(`lancctbInlineSalvarBtn_${extratoId}`);
@@ -37376,7 +37407,24 @@ async function _lancctbRegistroSalvarInline(extratoId){
   };
   let regraSalva, regrasPorItem=null;
   const _abertoDoFluxo=comp.length>=2&&comp.every(c=>!c.codigo)&&/^\s*\[TRIBUTO COMPOSTO:/.test(String(r.historico_bancario||''));
-  if(_abertoDoFluxo){ regraSalva={id:null}; } // aberto pelo Fluxo (valor do Fluxo + diferença): a Regra já foi criada no modal "Cadastrar regra"; aqui só classifica
+  if(_abertoDoFluxo){ // aberto pelo Fluxo: uma Regra por linha (gatilho = Descrição da conta do Fluxo) quando o usuário deixou marcado; as que já têm Regra só reaproveitam
+    regrasPorItem=[];
+    const baseHistAb=String(r.historico_bancario||'').replace(/^\s*\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'').trim()||'Sispag Fornecedores';
+    for(let ix=0;ix<comp.length;ix++){
+      const c=comp[ix]; let rid=c&&c.regra_id?c.regra_id:null;
+      if(!rid&&c&&c.fx&&!c.lado){
+        const chk=document.getElementById(`lancctbInlineFxChk_${extratoId}_${ix}`), gat=((document.getElementById(`lancctbInlineFxGat_${extratoId}_${ix}`)||{}).value||'').trim(), modelo=((document.getElementById(`lancctbInlineFxMod_${extratoId}_${ix}`)||{}).value||'').trim();
+        if(chk&&chk.checked&&gat){
+          const { data: ja } = await _supaClient.from('regras_matching').select('id').eq('empresa_eid',_lancctbEidAtual).eq('ativo',true).eq('historico_gatilho',baseHistAb).eq('fluxo_descconta_gatilho',gat).limit(1);
+          if(ja&&ja.length) rid=ja[0].id;
+          else { const { data: nv, error: eNv } = await _supaClient.from('regras_matching').insert({ created_by:_lancctbCriadorRegra(), empresa_eid:_lancctbEidAtual, descricao:`[${gat}] ${baseHistAb}`, historico_fixo:modelo||null, tipo_regra:'historico', historico_gatilho:baseHistAb, valor_gatilho:null, cnpj_cpf_gatilho:null, dc, conta_contabil_id:linhasContrapartida[ix].conta_contabil_id, agencia_bancaria_id:null, fluxo_descconta_gatilho:gat }).select('id').single();
+            if(eNv){ toast('Erro ao criar a Regra da linha '+(ix+1)+': '+eNv.message,'err'); if(btnSalvar) btnSalvar.disabled=false; return; } rid=nv.id; }
+        }
+      }
+      regrasPorItem.push(rid);
+    }
+    regraSalva={id:regrasPorItem.find(Boolean)||null};
+  }
   else if(comp.length>=2&&comp.every(c=>c.codigo)){
     // Uma Regra POR CÓDIGO DE RECEITA (e uma pra Multa/Juros de cada), pedido 26/09/2026. Reaproveita a que já existir
     // com o mesmo gatilho (ex: o principal já ensinado antes) em vez de duplicar.
@@ -37468,6 +37516,13 @@ function _lancctbInlineLinhaHtml(item,contaAtual){
       <td style="padding:4px 10px"><input class="fi" id="lancctbInlineHist_${r.id}_${idx}" value="${esc(c.historico||_lancctbPrefixarPagtoRef(c.resumo||c.denominacao||''))}" style="width:100%;font-size:11.5px"></td>
       <td colspan="9"></td>
     </tr>`;
+    // Linha aberta pelo Fluxo (pedido do usuário 31/10/2026): mostra o que o Fluxo tem para ESTA linha e deixa escolher o gatilho (Descrição da conta do Fluxo) e o modelo do histórico — vira Regra pros próximos meses.
+    if(c.fx){
+      html+=`<tr style="border-bottom:1px solid var(--border);background:var(--teal-bg)"><td colspan="2"></td><td colspan="14" style="padding:0 10px 8px 12px;font-size:11px;color:var(--slate);line-height:1.9">📎 <b>Fluxo desta linha:</b> ${esc(c.fx.cliente_fornecedor_nome||'—')} · Conta: <b>${esc(c.fx.descricao_conta_origem||'—')}</b> · Desc.: ${esc(c.fx.descricao||'—')} · NF/Doc: ${esc(c.fx.documento_numero||c.fx.numero||'—')}${c.fx.parcela?' parc. '+esc(c.fx.parcela):''} · Unid.: ${esc(c.fx.unidade||'—')}${c.regra_id?` · <span style="color:var(--teal)">✓ Regra já existe</span>`:`
+        <br><label style="margin-right:8px"><input type="checkbox" id="lancctbInlineFxChk_${r.id}_${idx}" checked> criar Regra</label>
+        Gatilho — Descrição da conta do Fluxo contém: <input class="fi" id="lancctbInlineFxGat_${r.id}_${idx}" value="${esc(c.fx.descricao_conta_origem||'')}" style="width:220px;font-size:11px">
+        &nbsp; Modelo do histórico: <input class="fi" id="lancctbInlineFxMod_${r.id}_${idx}" value="Pagamento a {FLUXO_CLIENTE}" style="width:280px;font-size:11px" title="Campos: {FLUXO_CLIENTE} {FLUXO_NUMERO} {FLUXO_DESCCONTA} {FLUXO_DESC} {FLUXO_UNIDADE} {FLUXO_PARCELA}">`}</td></tr>`;
+    }
   });
   if(comp.length&&comp.every(c=>c&&c.origem==='folha')){
     const semCompUi=t=>String(t||'').replace(/\d{2}[-\/]\d{4}/g,' ').replace(/\s+/g,' ').trim();
