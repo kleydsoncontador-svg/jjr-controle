@@ -31918,11 +31918,18 @@ async function _lancctbPagCompostoPostarSePronto(extratoId){
     const idsC=[...new Set(comp.map(c=>c.conta_contabil_id))]; const { data: cs } = await _supaClient.from('plano_contas').select('id,classificacao').in('id',idsC); const cm=new Map((cs||[]).map(c=>[String(c.id),c]));
     if(!ag||!ag.conta_contabil_id||!idsC.every(i=>cm.has(String(i)))) return false;
     const dcL=ehSaida?'D':'C', hs=comp.map(c=>c.historico), hBanco=new Set(hs).size<=1?hs[0]:'Pagamentos Diversos';
-    const linhas=[{ empresa_eid:eid, data:ex.data_pagamento, classificacao:ag.plano_contas.classificacao, conta_contabil_id:ag.conta_contabil_id, tipo:ehSaida?'C':'D', valor:vExt, historico:hBanco, lancamento_extrato_id:ex.id, regra_matching_id:comp[0].regra_id||null, origem_match:'regra' }];
-    comp.forEach(c=>{ linhas.push({ empresa_eid:eid, data:ex.data_pagamento, classificacao:cm.get(String(c.conta_contabil_id)).classificacao, conta_contabil_id:c.conta_contabil_id, tipo:c.lado==='inverso'?(dcL==='D'?'C':'D'):dcL, valor:c.valor, historico:c.historico, lancamento_extrato_id:ex.id, regra_matching_id:c.regra_id||null, origem_match:'regra' }); });
+    // Cliente/Fornecedor, CNPJ e COMPROVANTE ficam gravados em cada lançamento (pedido do usuário 01/11/2026: depois de processar, essas colunas do Registro não podem esvaziar): vêm da linha do Fluxo de cada item
+    // (a linha de diferença herda a do 1º item) e do comprovante amarrado ao extrato.
+    const tabCp=ehSaida?'comprovantes_bancarios':'comprovantes_recebimento';
+    let cpV=null; try{ const { data: cps } = await _supaClient.from(tabCp).select('id,cliente_fornecedor_nome,cnpj_cpf').eq('lancamento_extrato_id',ex.id).limit(1); cpV=(cps||[])[0]||null; }catch(e){}
+    const fx0=(comp.find(c=>c&&c.fx)||{}).fx||null;
+    const terc=c=>{ const f=(c&&c.fx)||fx0; return { cliente_fornecedor_nome:(f&&f.cliente_fornecedor_nome)||(cpV&&cpV.cliente_fornecedor_nome)||null, cnpj_cpf:(f&&f.cnpj_cpf)||(cpV&&cpV.cnpj_cpf)||null, comprovante_id:(ehSaida&&cpV)?cpV.id:null }; };
+    const linhas=[Object.assign({ empresa_eid:eid, data:ex.data_pagamento, classificacao:ag.plano_contas.classificacao, conta_contabil_id:ag.conta_contabil_id, tipo:ehSaida?'C':'D', valor:vExt, historico:hBanco, lancamento_extrato_id:ex.id, regra_matching_id:comp[0].regra_id||null, origem_match:'regra' },terc(comp[0]))];
+    comp.forEach(c=>{ linhas.push(Object.assign({ empresa_eid:eid, data:ex.data_pagamento, classificacao:cm.get(String(c.conta_contabil_id)).classificacao, conta_contabil_id:c.conta_contabil_id, tipo:c.lado==='inverso'?(dcL==='D'?'C':'D'):dcL, valor:c.valor, historico:c.historico, lancamento_extrato_id:ex.id, regra_matching_id:c.regra_id||null, origem_match:'regra' },terc(c))); });
     const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
     if(error){ console.warn('Pagamento composto: lote não gravou:',error); return false; }
     await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado' }).eq('id',ex.id);
+    if(cpV) await _supaClient.from(tabCp).update({ status_conciliacao:'conciliado' }).eq('id',cpV.id);
     return true;
   }catch(e){ console.warn('Pagamento composto:',e); return false; }
 }
