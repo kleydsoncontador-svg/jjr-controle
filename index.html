@@ -32001,6 +32001,13 @@ function _lancctbPagCompostoLinhasHtml(item,contaAtual){
 }
 // Comprovantes ↔ extratos PENDENTES de TODA a empresa (não só a página aberta do Registro): o achado de 31/10/2026 foi que o vínculo só era gravado para as linhas que apareciam na tela, então o comprovante
 // continuava "pendente" até o usuário filtrar o valor. Mesma regra de busca da tela (valor, data, histórico), um comprovante por extrato, por ordem de data. Só grava o vínculo — nada muda de valor ou status.
+// Nome de pessoa do comprovante dentro da descrição do Fluxo (que costuma abreviar/errar: "ANA CAROLA JESUS" × "ANA CAROLINA SILVA DE JESUS"): o PRIMEIRO e o ÚLTIMO nome precisam aparecer (início de 4 letras basta), e o nome precisa ter 2+ palavras.
+function _lancctbNomeNaDescricao(nome,descricao){
+  const nz=t=>String(t||'').normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/[^A-Z ]/g,' ').split(/\s+/).filter(x=>x.length>=2&&!['DE','DA','DO','DOS','DAS','E'].includes(x));
+  const n=nz(nome), d=nz(descricao); if(n.length<2||!d.length) return false;
+  const tem=t=>d.some(x=>x===t||(t.length>=4&&x.length>=4&&(x.startsWith(t.slice(0,4))||t.startsWith(x.slice(0,4)))));
+  return tem(n[0])&&tem(n[n.length-1]);
+}
 async function _lancctbAssociarComprovantesTodos(){
   const eid=_lancctbEidAtual; if(!eid||!_supaClient) return;
   window.__cTodosTs=window.__cTodosTs||{}; if(Date.now()-(window.__cTodosTs[eid]||0)<120000) return; window.__cTodosTs[eid]=Date.now();
@@ -32008,7 +32015,7 @@ async function _lancctbAssociarComprovantesTodos(){
   const idsOk=(ags||[]).filter(a=>!_lancctbContaSemNfVinculo(a)).map(a=>a.id); if(!idsOk.length) return;
   const { data: exts } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id').eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('conta_bancaria_id',idsOk).order('data_pagamento',{ascending:true}).order('id',{ascending:true}));
   if(!exts||!exts.length) return;
-  const pares=[];
+  const pares=[]; const nomeCompPorExt=new Map(); // extrato → nome do comprovante achado (usado pra casar Sispag Salários com a descrição do Fluxo)
   for(const [tab,ehSaida] of [['comprovantes_bancarios',true],['comprovantes_recebimento',false]]){
     const { data: cps } = await _lancctbFetchTudo(()=>_supaClient.from(tab).select('*').eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
     if(!cps||!cps.length) continue;
@@ -32020,7 +32027,7 @@ async function _lancctbAssociarComprovantesTodos(){
       if(!prox.length) continue;
       const ehTrib=_lancctbHistoricoEhTributo(r.historico_bancario);
       const m=_lancctbMelhorComprovante(prox,valor,r.data_pagamento,(ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR:0.005),c=>!usados.has(c.id)&&(!ehTrib||_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome))&&_lancctbComprovanteCombinaHistorico(c,r.historico_bancario));
-      if(m){ usados.add(m.id); if(m.lancamento_extrato_id!==r.id) pares.push({tab,id:m.id,ext:r.id}); }
+      if(m){ usados.add(m.id); if(ehSaida&&m.cliente_fornecedor_nome) nomeCompPorExt.set(r.id,m.cliente_fornecedor_nome); if(m.lancamento_extrato_id!==r.id) pares.push({tab,id:m.id,ext:r.id}); }
     }
   }
   for(let i=0;i<pares.length;i+=8){ await Promise.all(pares.slice(i,i+8).map(x=>_supaClient.from(x.tab).update({lancamento_extrato_id:x.ext}).eq('id',x.id).eq('status_conciliacao','pendente'))); }
@@ -32034,7 +32041,7 @@ async function _lancctbAssociarComprovantesTodos(){
     const params=_lancctbFluxoParamGet(eid), alias=_lancctbFluxoAliasGet(eid), usadoF=new Set(), parF=[];
     for(const r of exts){
       const ehS=(r.valor_saida||0)>0, v=ehS?r.valor_saida:r.valor_entrada; if(!(v>0)||!ehS) continue;
-      const cand=fxl.filter(f=>!usadoF.has(f.id)&&Math.abs((f.valor_saida||0)-v)<0.005&&_lancctbDiffDias(f.data,r.data_pagamento)<=1&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))&&!_lancctbFluxoEhIcms(f)&&_lancctbFluxoParamOk(r.historico_bancario,f,params)&&(_lancctbFluxoIdentidade(r.historico_bancario,f,alias)==='ok'||(_lancctbHistoricoEhFolha(r.historico_bancario)&&/^A\d/.test(String(f.descricao_conta_origem||''))&&f.data===r.data_pagamento)));// Sispag Salários: não traz nome — vale a linha do Fluxo de conta de FOLHA (A01…A26) de MESMO valor e MESMO dia, se for a única
+      const cand=fxl.filter(f=>!usadoF.has(f.id)&&Math.abs((f.valor_saida||0)-v)<0.005&&_lancctbDiffDias(f.data,r.data_pagamento)<=1&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))&&!_lancctbFluxoEhIcms(f)&&_lancctbFluxoParamOk(r.historico_bancario,f,params)&&(_lancctbFluxoIdentidade(r.historico_bancario,f,alias)==='ok'||(_lancctbHistoricoEhFolha(r.historico_bancario)&&/^A\d/.test(String(f.descricao_conta_origem||''))&&f.data===r.data_pagamento)||(['163','165','166'].includes(String(eid))&&_lancctbHistoricoEhFolha(r.historico_bancario)&&/^A\d/.test(String(f.descricao_conta_origem||''))&&_lancctbNomeNaDescricao(nomeCompPorExt.get(r.id),f.descricao)))); // Fast Lube/RodaCentro/Super Troca: Sispag Salários com NOME no comprovante casa com a linha do Fluxo que traz o nome na DESCRIÇÃO ('VR DA SEMANA ANA CAROLA JESUS') — pedido do usuário 01/11/2026// Sispag Salários: não traz nome — vale a linha do Fluxo de conta de FOLHA (A01…A26) de MESMO valor e MESMO dia, se for a única
       if(cand.length===1){ usadoF.add(cand[0].id); parF.push({id:cand[0].id,ext:r.id}); }
     }
     for(let i=0;i<parF.length;i+=8){ await Promise.all(parF.slice(i,i+8).map(x=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:x.ext}).eq('id',x.id).eq('status_associado','nao_associado'))); }
