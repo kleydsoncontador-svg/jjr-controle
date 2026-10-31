@@ -33428,6 +33428,31 @@ async function _lancctbProcessarFluxoRegras(silencioso){
       if(!regra) continue;
       const bancoTipo=ehSaida?'C':'D', contrapartidaTipo=ehSaida?'D':'C';
       const historicoUtilizado=(regra.historico_fixo&&_lancctbHistoricoGnreFastLube(eid,fluxo))||_lancctbResolverHistFluxo(regra.historico_fixo,fluxo)||l.historico_bancario||fluxo.descricao||''; // "Manter o histórico do extrato" = EXATAMENTE o do extrato (nunca a descrição do Fluxo)
+      // Fluxo com valor DIFERENTE do extrato (30/10/2026): nunca classifica tudo pelo valor do extrato. Valor do Fluxo na conta da Regra + a DIFERENÇA em linha própria (mesmo histórico com "(diferença)";
+      // mesmo lado se o extrato é maior, lado oposto se o Fluxo é maior). Com a conta da diferença já lembrada (escolhida antes pelo usuário) classifica sozinho; sem ela, abre pendente só de conta.
+      { const vFxL=Math.round(Number((ehSaida?fluxo.valor_saida:fluxo.valor_entrada)||0)*100)/100, difL=Math.round((valor-vFxL)*100)/100;
+        if(vFxL>0&&Math.abs(difL)>=0.005){
+          const invL=difL<0, histDif=(String(historicoUtilizado).slice(0,105)+' (diferença)').trim(), contaDifId=_lancctbDifContaLembrada(historicoUtilizado,invL);
+          let contaDifInfo=null; if(contaDifId){ const { data: cdi } = await _supaClient.from('plano_contas').select('id,classificacao').eq('id',contaDifId).maybeSingle(); contaDifInfo=cdi||null; }
+          if(contaDifInfo){
+            const linhasD=[
+              { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+              { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:contrapartidaTipo, valor:vFxL, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+              { empresa_eid:eid, data:l.data_pagamento, classificacao:contaDifInfo.classificacao, conta_contabil_id:contaDifInfo.id, tipo:invL?bancoTipo:contrapartidaTipo, valor:Math.abs(difL), historico:histDif, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+            ];
+            const { error: eD } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasD });
+            if(eD){ console.error('Erro ao gerar lançamento (Regra+Fluxo com diferença):',eD); continue; }
+            await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+            await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxo.id);
+            resolvidos++; continue;
+          }
+          const compD=[{ codigo:null, denominacao:historicoUtilizado, encargo:null, uf:null, valor:vFxL, historico:historicoUtilizado, conta_contabil_id:regra.conta_contabil_id, resumo:String(historicoUtilizado).slice(0,120), competencia:null },
+            { codigo:null, denominacao:historicoUtilizado, encargo:null, uf:null, valor:Math.abs(difL), lado:invL?'inverso':null, historico:histDif, conta_contabil_id:null, resumo:histDif, competencia:null }];
+          const histMarca='[TRIBUTO COMPOSTO: '+compD.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+String(l.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+          const { error: eAb } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:histMarca.trim(), origem_importacao:'tributo_composicao', composicao_tributo:compD }).eq('id',l.id);
+          if(!eAb) await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fluxo.id);
+          continue;
+        } }
       const linhas=[
         { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
         { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:contrapartidaTipo, valor, historico:historicoUtilizado, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
