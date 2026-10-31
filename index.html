@@ -31779,19 +31779,42 @@ function abrirLancctbFluxoSugestao(extratoId){
     <div style="display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap"><button class="btn bo" onclick="document.getElementById('fxSugOverlay').remove();abrirLancctbRegraModalDeExtratoId(${r.id})">Não aceitar — procurar manualmente</button><button class="btn bp" onclick="aceitarLancctbFluxoSugestao(${r.id})">✓ Aceitar e associar ${c.itens.length} linha(s)</button></div></div>`;
   document.body.appendChild(ov);
 }
+// Identidade pelo COMPROVANTE (31/10/2026, NOVADEC: histórico "Sispag Fornecedores" é genérico, o comprovante diz quem recebeu): a linha do Fluxo vale quando o CNPJ (raiz) ou o nome é o do comprovante do extrato.
+function _lancctbFluxoIdentPeloComprovante(cp,f){
+  if(!cp||!f) return false;
+  const dc=String(cp.cnpj_cpf||'').replace(/\D/g,''), df=String(f.cnpj_cpf||'').replace(/\D/g,'');
+  if(dc.length===14&&df.length===14) return dc.slice(0,8)===df.slice(0,8);
+  if(dc.length===11&&df.length===11) return dc===df;
+  const nc=cp.cliente_fornecedor_nome||'', nf=f.cliente_fornecedor_nome||''; if(!nc||!nf) return false;
+  return _lancctbNomeCompativel([nc],nf);
+}
+// SEMPRE que o Fluxo é anexado em 2+ linhas (pedido do usuário 31/10/2026): o extrato fica inteiro (1 crédito no banco, nunca dividido) e abre em 1 DÉBITO por linha do Fluxo; se a soma difere do extrato, a diferença vira mais
+// 1 linha (mesmo histórico, "(diferença)"; lado oposto quando o Fluxo é maior). As contas de cada débito ficam pendentes no Registro Contábil. Não mexe em extrato já aberto/classificado.
+async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida){
+  try{
+    if(!fluxoRows||fluxoRows.length<2) return false;
+    const id=typeof extratoOuId==='object'?extratoOuId.id:extratoOuId;
+    const { data: ex } = await _supaClient.from('lancamentos_extrato').select('id,valor_saida,valor_entrada,historico_bancario,composicao_tributo,status_conciliacao').eq('id',id).maybeSingle();
+    if(!ex||ex.status_conciliacao!=='pendente'||(ex.composicao_tributo||[]).length) return false;
+    const vExt=Math.round(Number((ehSaida?ex.valor_saida:ex.valor_entrada)||0)*100)/100;
+    const txtDe=f=>{ const nome=String(f.cliente_fornecedor_nome||'').trim(), doc=String(f.documento_numero||f.numero||'').trim(), desc=String(f.descricao||'').trim();
+      if(!nome||_lancctbTextoParecidoTributo(nome+' '+desc)) return desc||nome; return (ehSaida?'Pagamento a ':'Recebimento de ')+nome+(doc?' - NF '+doc:'')+(f.parcela?' - parcela '+f.parcela:''); };
+    const comp=fluxoRows.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const t=txtDe(f); return { codigo:null, denominacao:t, encargo:null, uf:null, valor:vf, historico:t, resumo:t.slice(0,120), competencia:null }; });
+    const soma=Math.round(comp.reduce((a,c)=>a+c.valor,0)*100)/100, dif=Math.round((vExt-soma)*100)/100;
+    if(Math.abs(dif)>=0.005){ const t=(comp[0].historico.slice(0,105)+' (diferença)').trim(); comp.push({ codigo:null, denominacao:t, encargo:null, uf:null, valor:Math.abs(dif), lado:dif<0?'inverso':null, historico:t, conta_contabil_id:_lancctbDifContaLembrada(comp[0].historico,dif<0), resumo:t, competencia:null }); }
+    const hist='[TRIBUTO COMPOSTO: '+comp.map(x=>x.resumo+' '+(x.lado==='inverso'?'-':'')+_fmt(x.valor)).join(' + ')+'] '+String(ex.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
+    const { error } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',id);
+    return !error;
+  }catch(e){ console.warn('Abrir linhas do Fluxo:',e); return false; }
+}
 async function aceitarLancctbFluxoSugestao(extratoId){
   const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); const c=item&&item.fluxoComposicao; if(!c) return;
   const ids=c.itens.map(f=>f.id);
   const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:extratoId}).in('id',ids);
   if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
   try{ const eidM=_lancctbEidAtual, atuais=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); ids.forEach(i=>atuais.add(i)); S.s('lancctb_fluxo_manual_'+eidM,[...atuais]); }catch(e){}  // associação aceita à mão não é desfeita pelo Processar Fluxo
-  // Composição de TRIBUTO (soma exata do Fluxo): o valor do extrato abre em linhas no Registro Contábil (1 crédito banco : N débitos), uma por linha do Fluxo.
-  if(c.tributo&&item.extrato.valor_saida>0&&!(item.extrato.composicao_tributo||[]).length){
-    const comp=c.itens.map(f=>({codigo:null,denominacao:String(f.descricao||'').trim(),encargo:null,uf:null,valor:Math.round((f.valor_saida||0)*100)/100,resumo:String(f.descricao||'').trim().slice(0,120),competencia:null}));
-    const hist=`[TRIBUTO COMPOSTO: ${comp.map(x=>x.resumo+' '+_fmt(x.valor)).join(' + ')}] `+String(item.extrato.historico_bancario||'').replace(/^\[TRIBUTO COMPOSTO:[^\]]*\]\s*/,'');
-    const { error: eC } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:hist.trim(), origem_importacao:'tributo_composicao', composicao_tributo:comp }).eq('id',extratoId);
-    if(eC) toast('Fluxo associado, mas não consegui abrir a composição em linhas: '+eC.message,'err');
-  }
+  // SEMPRE que anexa 2+ linhas do Fluxo: abre o extrato em 1 crédito + N débitos (ver _lancctbFluxoAbrirLinhas).
+  { const _ehS=(item.extrato.valor_saida||0)>0; if(c.itens.length>=2){ const ok=await _lancctbFluxoAbrirLinhas(item.extrato.id,c.itens,_ehS); if(!ok) toast('Fluxo associado, mas não consegui abrir o extrato em linhas.','err'); } }
   document.getElementById('fxSugOverlay')?.remove();
   toast(`${ids.length} linha(s) do Fluxo associada(s) ao lançamento.`,'ok');
   try{ renderLancctbRegistroContabil(); }catch(e){}
@@ -31819,6 +31842,7 @@ async function _lancctbAssociarFluxoMarcadasDoModal(){
   const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:r.id}).in('id',ids);
   if(error){ toast('Erro ao associar: '+error.message,'err'); return; }
   try{ const eidM=_lancctbEidAtual, atuais=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); ids.forEach(i=>atuais.add(i)); S.s('lancctb_fluxo_manual_'+eidM,[...atuais]); }catch(e){} // associação feita à mão não é desfeita pela revalidação de identidade
+  if(ids.length>=2){ try{ const { data: fxm } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,documento_numero,numero,parcela,valor_saida,valor_entrada').in('id',ids); await _lancctbFluxoAbrirLinhas(r.id,fxm||[],(r.valor_saida||0)>0); }catch(e){} }
   toast(`${ids.length} linha(s) do Fluxo associada(s) ao lançamento.`,'ok');
   _lancctbFluxoMultiSel=new Map();
   _lancctbBuscarFluxoProLancamento();
@@ -33116,6 +33140,7 @@ async function _lancctbProcessarFluxo(){
     const _pfAddD=(d,n)=>{ const dt=new Date(d+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
     const _pfDmin=_pfDatas.length?_pfAddD(_pfDatas[0],-Math.max(LANCCTB_MATCH_TOLERANCIA_DIAS,LANCCTB_FLUXO_ATRASO_DIAS)):null; // a janela de atraso busca títulos que venceram até 7 dias antes
     const _pfDmax=_pfDatas.length?_pfAddD(_pfDatas[_pfDatas.length-1],LANCCTB_MATCH_TOLERANCIA_DIAS):null;
+    let _compsPF=[]; try{ _compsPF=(await _lancctbFetchTudo(()=>{ let q=_supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago').eq('empresa_eid',eid).eq('status_conciliacao','pendente'); if(_pfDmin) q=q.gte('data_pagamento',_pfDmin); if(_pfDmax) q=q.lte('data_pagamento',_pfDmax); return q; })).data||[]; }catch(e){ _compsPF=[]; } // comprovantes pendentes: nome/CNPJ do comprovante prova a identidade na composição
     const { data: fluxoTodo } = await _lancctbFetchTudoParalelo(()=>{ let q=_supaClient.from('fluxo_caixa_lancamentos')
       .select('id,data,descricao,valor_saida,valor_entrada,conta_bancaria_id,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,status_associado,lancamento_extrato_id,data_vencimento,tipo_receita,cliente_original')
       .eq('empresa_eid',eid);
@@ -33263,7 +33288,7 @@ async function _lancctbProcessarFluxo(){
         if(!cand.length&&candBase.length) _lancctbFluxoSugParamAdd(l.historico_bancario,`candidato de outro fornecedor apareceu (${candBase[0].cliente_fornecedor_nome||'sem nome'})`);
         if(!cand.length){
           // sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco, até R$ 0,02 de diferença; combinação única)
-          const comp=_lancctbFluxoComposicao(l.historico_bancario,valor,l.data_pagamento,fluxoPend.filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId)),{lista:_fpListaFluxo,aliases:_aliasFluxo,usados,ehSaida});
+          const comp=_lancctbFluxoComposicao(l.historico_bancario,valor,l.data_pagamento,fluxoPend.filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId)),{lista:_fpListaFluxo,aliases:_aliasFluxo,usados,ehSaida,comprovante:ehSaida?_lancctbMelhorComprovante(_compsPF,valor,l.data_pagamento,0.0201,c=>_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS):null});
           if(comp&&comp.itens&&Math.abs(comp.delta)<=LANCCTB_FLUXO_TOL_CENTAVO){ comp.itens.forEach(f=>{ usados.add(f.id); pares.push({fId:f.id,lId:l.id}); }); compostos++; if(Math.abs(comp.delta)>0.001) centavosAceitos++; }
           else if(comp&&comp.ambiguo) ambiguosComp++;
           continue;
@@ -33318,6 +33343,8 @@ async function _lancctbProcessarFluxo(){
         else associados++;
       }
     }
+    // SEMPRE que o Fluxo foi anexado em 2+ linhas ao mesmo extrato: abre em 1 crédito + N débitos (pedido do usuário 31/10/2026).
+    try{ const grpAb=new Map(); pares.forEach(pr=>{ (grpAb.get(pr.lId)||grpAb.set(pr.lId,[]).get(pr.lId)).push(pr.fId); }); for(const [lIdA,fidsA] of grpAb){ if(fidsA.length<2) continue; const lA=pendencias.find(x=>x.id===lIdA); const rowsA=(fluxoPend||[]).filter(f=>fidsA.includes(f.id)); if(lA&&rowsA.length>=2&&(lA.valor_saida||0)>0) await _lancctbFluxoAbrirLinhas(lIdA,rowsA,true); } }catch(e){ console.warn('Abrir linhas do Fluxo:',e); }
     // Auditoria das intermediadoras (quem é o fornecedor real, qual título, qual critério) — vai na coluna "informacao" do lançamento do extrato; nunca vira alias.
     try{
       for(const [lId,txt] of intermRes.info.entries()){
@@ -37776,7 +37803,7 @@ function _lancctbFluxoComposicao(hist,valor,dataPag,pool,ctx){
     if(usados.has(f.id)) return;
     const naJanela=_lancctbFluxoNaJanela(f,dataPag);
     if(!naJanela&&!(String(f.data||'')>String(dataPag||'')&&_lancctbDiffDias(f.data,dataPag)<=LANCCTB_FLUXO_ATRASO_DIAS)) return;
-    if(!_lancctbFluxoParamOk(hist,f,ctx.lista)||!_lancctbFluxoIdentConfirmada(hist,f,ctx.aliases,ctx.lista)) return;
+    if(!_lancctbFluxoParamOk(hist,f,ctx.lista)||!(_lancctbFluxoIdentConfirmada(hist,f,ctx.aliases,ctx.lista)||_lancctbFluxoIdentPeloComprovante(ctx.comprovante,f))) return;
     const v=Math.round(((ehSaida?f.valor_saida:f.valor_entrada)||0)*100); if(v<=0||v>alvo+2) return;
     const k=[f.documento_numero||f.numero||'',f.parcela||'',f.data,v,_fpNorm(f.cliente_fornecedor_nome)].join('|'); // duplicata repetida nunca entra duas vezes
     if(visto.has(k)) return; visto.add(k);
@@ -38644,7 +38671,7 @@ async function renderLancctbRegistroContabil(){
         } else {
           // Sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco); depois, "possível alias/intermediário" (só mostra, nunca associa sozinho)
           const poolC=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id));
-          let comp=_lancctbFluxoComposicao(r.historico_bancario,valor,r.data_pagamento,poolC,{lista:_lancctbFluxoParamLista,aliases:_lancctbFluxoAliasLista,usados:fluxoUsadoSugestao,ehSaida});
+          let comp=_lancctbFluxoComposicao(r.historico_bancario,valor,r.data_pagamento,poolC,{lista:_lancctbFluxoParamLista,aliases:_lancctbFluxoAliasLista,usados:fluxoUsadoSugestao,ehSaida,comprovante:item.comprovanteSugerido||null});
           // Tributo (pedido do usuário 30/10/2026): só sugere valor EXATO ou COMPOSIÇÃO cuja soma do Fluxo seja IGUAL ao valor do extrato (sem folga de centavos); ao aceitar, a composição abre em linhas no Registro Contábil.
           if(ehTribHist&&ehSaida){
             if(comp&&comp.itens&&Math.abs((comp.delta||0))>0.005) comp=null;
