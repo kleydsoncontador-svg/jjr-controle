@@ -23300,8 +23300,12 @@ function _lancctbHistNomeProprio(hist,emp){
   const cnpjProprio=String((emp&&(emp.cnpjNum||emp.cnpj))||'').replace(/\D/g,'');
   if(cnpjProprio.length>=11&&bruto.replace(/\D/g,'').includes(cnpjProprio)) return true;
   const ger=['LTDA','EIRELI','EPP','COMERCIO','COMERCIAL','SERVICOS','PECAS','DE','DA','DO','DAS','DOS','E','S/A','SA','ME','MEI','INDUSTRIA','EMPRESA','AUTO','MANUTENCOES','LEVES'];
-  const proprios=_convNfNorm((emp&&emp.nome)||'').split(' ').filter(t=>t.length>=4&&!ger.includes(t)).slice(0,2);
-  return proprios.some(t=>h.includes(t));
+  const nomeN=_convNfNorm((emp&&emp.nome)||'');
+  const proprios=nomeN.split(' ').filter(t=>t.length>=4&&!ger.includes(t)).slice(0,2);
+  if(proprios.some(t=>h.includes(t))) return true;
+  // nome TRUNCADO pelo banco (Itaú: "PIX TRANSF FAST LU10/07" = FAST LUBE…): o começo do nome da empresa (7+ letras, ex.: "FAST LU") aparece no histórico — achado 01/11/2026
+  for(let n=Math.min(nomeN.length,20);n>=7;n--){ const pre=nomeN.slice(0,n).trim(); if(pre.length>=7&&h.includes(pre)) return true; }
+  return false;
 }
 function _lancctbTransfLinhaPropria(hist,emp){
   const bruto=String(hist||''); const h=_convNfNorm(bruto); if(!h) return false;
@@ -23369,9 +23373,13 @@ async function _lancctbProcessarTransferencias(){
       g.E.forEach(e=>{ const x=escolha.get(e.id); if(x&&usadasX.get(x.id)===1){ pares.push({e,s:x}); resolvidas++; } });
       ambiguos+=Math.max(g.E.length,g.X.length)-resolvidas;
     });
-    if(!pares.length){ _lancctbEtapaMarcar('transf'); toast('Nenhuma transferência entre contas encontrada neste período'+(ambiguos?` (${ambiguos} lançamento(s) ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
+    // Lado ÚNICO (pedido do usuário 01/11/2026): o histórico traz o nome da PRÓPRIA empresa ("PIX TRANSF FAST LU…") mas o outro banco ainda não foi carregado (ou não está no período): é transferência mesmo assim — classifica só este
+    // lado contra a conta de transferência; o outro lado entra quando o extrato dele chegar. Só quando NÃO há ninguém do outro lado disputando o mesmo dia+valor (isso seria ambíguo).
+    const _paradas=new Set(); pares.forEach(p=>{ _paradas.add(p.e.id); _paradas.add(p.s.id); });
+    const soltas=L.filter(x=>!_paradas.has(x.id)&&_lancctbHistNomeProprio(x.historico_bancario,_empTransf)).filter(x=>{ const g=balde.get(_kT(x)); return g&&!(g.E.length&&g.X.length); });
+    if(!pares.length&&!soltas.length){ _lancctbEtapaMarcar('transf'); toast('Nenhuma transferência entre contas encontrada neste período'+(ambiguos?` (${ambiguos} lançamento(s) ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
     const total=pares.reduce((s,p)=>s+Number(p.e.valor_entrada),0);
-    if(!confirm(`Encontrei ${pares.length} transferência(s) entre contas correntes da empresa (R$ ${_fmt(total)} no total).\n\nCada lado será classificado com a conta ${cPad.numero_conta} - ${cPad.descricao}.\n${ambiguos?`\nFicam de fora ${ambiguos} lançamento(s) ambíguo(s): a quantidade de entradas e saídas do mesmo valor no mesmo dia não bate.\n`:''}\nConfirmar?`)){ fim(); return; }
+    if(!confirm(`Encontrei ${pares.length} transferência(s) entre contas correntes da empresa (R$ ${_fmt(total)} no total)${soltas.length?` e ${soltas.length} transferência(s) com o nome da própria empresa cujo outro lado ainda não está carregado (R$ ${_fmt(soltas.reduce((a,x)=>a+Number(x.valor_entrada>0?x.valor_entrada:x.valor_saida),0))}) — só este lado será classificado`:''}.\n\nCada lado será classificado com a conta ${cPad.numero_conta} - ${cPad.descricao}.\n${ambiguos?`\nFicam de fora ${ambiguos} lançamento(s) ambíguo(s): a quantidade de entradas e saídas do mesmo valor no mesmo dia não bate.\n`:''}\nConfirmar?`)){ fim(); return; }
     let ok=0; const erros=[];
     for(const {e,s} of pares){
       const bE=contas.get(e.conta_bancaria_id), bS=contas.get(s.conta_bancaria_id), v=Number(e.valor_entrada);
@@ -23386,6 +23394,18 @@ async function _lancctbProcessarTransferencias(){
       const r2=await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linS });
       if(r2.error){ await _supaClient.from('lancamentos_contabeis').delete().eq('lancamento_extrato_id',e.id); erros.push(`${s.data_pagamento} R$ ${_fmt(v)}: ${r2.error.message}`); continue; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).in('id',[e.id,s.id]);
+      ok++;
+    }
+    for(const x of soltas){ // lado único (o outro banco ainda não foi carregado)
+      const b=contas.get(x.conta_bancaria_id), ehE=Number(x.valor_entrada)>0, v=Number(ehE?x.valor_entrada:x.valor_saida);
+      const hx=`Transferência entre contas correntes - ${ehE?'recebida':'enviada'} (outro lado ainda não carregado)`;
+      const lin=ehE?[{ empresa_eid:eid, data:x.data_pagamento, classificacao:b.plano_contas.classificacao, conta_contabil_id:b.conta_contabil_id, tipo:'D', valor:v, historico:hx, lancamento_extrato_id:x.id, origem_match:'regra' },
+                     { empresa_eid:eid, data:x.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:'C', valor:v, historico:hx, lancamento_extrato_id:x.id, origem_match:'regra' }]
+                   :[{ empresa_eid:eid, data:x.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:'D', valor:v, historico:hx, lancamento_extrato_id:x.id, origem_match:'regra' },
+                     { empresa_eid:eid, data:x.data_pagamento, classificacao:b.plano_contas.classificacao, conta_contabil_id:b.conta_contabil_id, tipo:'C', valor:v, historico:hx, lancamento_extrato_id:x.id, origem_match:'regra' }];
+      const r=await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:lin });
+      if(r.error){ erros.push(`${x.data_pagamento} R$ ${_fmt(v)}: ${r.error.message}`); continue; }
+      await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',x.id);
       ok++;
     }
     if(!erros.length) _lancctbEtapaMarcar('transf');
