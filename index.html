@@ -31780,6 +31780,27 @@ function abrirLancctbFluxoSugestao(extratoId){
   document.body.appendChild(ov);
 }
 // Identidade pelo COMPROVANTE (31/10/2026, NOVADEC: histórico "Sispag Fornecedores" é genérico, o comprovante diz quem recebeu): a linha do Fluxo vale quando o CNPJ (raiz) ou o nome é o do comprovante do extrato.
+// PAGAMENTO DE GASTO PESSOAL DE SÓCIO (pedido do usuário 31/10/2026): boleto pago pela empresa em que o PAGADOR é um dos sócios (CPF no cadastro de sócios) não é despesa da empresa — vai para a conta do sócio no
+// grupo 1.2.9 (a que tem o nome dele) e o histórico diz "Pagamento ao sócio <nome> (<beneficiário>)". O pagador vem do texto do comprovante ("Pagador: ... CPF/CNPJ do pagador: ...").
+function _lancctbPagadorDoComprovante(raw){
+  const t=String(raw||''); if(!/Pagador:/i.test(t)) return null;
+  const m=t.match(/Pagador:[^\n]*\n\s*([A-ZÀ-Ü][A-ZÀ-Ü0-9 \.&'-]*?)\s+(\d{3}\.?\d{3}\.?\d{3}-?\d{2}|\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2})\s+\d{1,3}(?:\.?\d{3})*,\d{2}/);
+  return m?{ nome:m[1].trim(), doc:m[2].replace(/\D/g,'') }:null;
+}
+const _lancctbDocSemZeros=d=>String(d||'').replace(/\D/g,'').replace(/^0+/,'');
+// Mapa {comprovanteId → {sociNome, conta:{id,classificacao}, beneficiario}} só dos comprovantes pendentes cujo pagador é sócio. Lê o texto só dos boletos com bloco de pagador (poucos).
+async function _lancctbSociosPagadoresMapa(eid,dMin,dMax){
+  const mapa=new Map();
+  try{
+    const socios=(S.g('luc_soc2_'+eid)||[]).filter(x=>x&&x.nome&&x.doc); if(!socios.length) return mapa;
+    const { data: pl } = await _supaClient.from('plano_contas').select('id,classificacao,descricao').eq('empresa_eid',eid).like('classificacao','1.2.9.01.1%');
+    const nz=t=>_convMpRemoverAcentos(String(t||'').toUpperCase()).replace(/\s+/g,' ').trim();
+    const contaDe=nome=>{ const n=nz(nome); return (pl||[]).find(c=>nz(c.descricao)===n)||null; };
+    const { data: cps } = await _lancctbFetchTudo(()=>{ let q=_supaClient.from('comprovantes_bancarios').select('id,raw_text,beneficiary_name,cliente_fornecedor_nome').eq('empresa_eid',eid).eq('status_conciliacao','pendente').ilike('raw_text','%do pagador%'); if(dMin) q=q.gte('data_pagamento',dMin); if(dMax) q=q.lte('data_pagamento',dMax); return q; });
+    (cps||[]).forEach(c=>{ const pg=_lancctbPagadorDoComprovante(c.raw_text); if(!pg) return; const so=socios.find(x=>_lancctbDocSemZeros(x.doc)===_lancctbDocSemZeros(pg.doc)); if(!so) return; const conta=contaDe(so.nome); if(!conta) return; mapa.set(c.id,{ socioNome:so.nome, conta, beneficiario:String(c.beneficiary_name||c.cliente_fornecedor_nome||'').trim() }); });
+  }catch(e){ console.warn('Pagador sócio:',e); }
+  return mapa;
+}
 function _lancctbFluxoIdentPeloComprovante(cp,f){
   if(!cp||!f) return false;
   const dc=String(cp.cnpj_cpf||'').replace(/\D/g,''), df=String(f.cnpj_cpf||'').replace(/\D/g,'');
@@ -33663,6 +33684,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   const _temJFx=await _lancctbFluxoColunasJuros();
   // Conta Mercado Pago/Shopee/Maree NUNCA usa o Fluxo de Caixa (pedido do usuário 21/10/2026; 30/10/2026: 1.193 ligações erradas de ICMS/FCP/café a débitos do Mercado Livre foram desfeitas): o Fluxo nem é carregado aqui.
   const _semFluxoMP=_lancctbContaSemNfVinculo((await _pAgInfoNf).data);
+  const _socPagMapa=await _lancctbSociosPagadoresMapa(eid,_mDmin,_mDmax); // comprovantes cujo pagador é sócio (gasto pessoal)
   const [
     { data: comprovantesPag },
     { data: comprovantesReceb },
@@ -34753,6 +34775,24 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
           &&_lancctbComprovanteCombinaHistorico(c,l.historico_bancario)
           &&!(_lancctbHistoricoEhTributo(l.historico_bancario)&&!_lancctbTextoParecidoTributo(c.cliente_fornecedor_nome)));
         if(_cm){ comprovanteMatch=_cm; cnpjAncora=_cm.cnpj_cpf; } }
+    }
+    // Pagador do boleto é SÓCIO → gasto pessoal dele: D na conta do sócio (1.2.9…), C no banco; histórico "Pagamento ao sócio <nome> (<beneficiário>)" (pedido do usuário 31/10/2026).
+    if(!resolvido&&comprovanteMatch&&ehSaida&&_socPagMapa&&_socPagMapa.has(comprovanteMatch.id)){
+      const sp=_socPagMapa.get(comprovanteMatch.id);
+      const histSoc='Pagamento ao sócio '+sp.socioNome+(sp.beneficiario?' ('+sp.beneficiario+')':'');
+      const linhasSoc=[
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBanco.classificacao, conta_contabil_id:contaBanco.id, tipo:'C', valor, historico:histSoc, cliente_fornecedor_nome:sp.socioNome, cnpj_cpf:null, lancamento_extrato_id:l.id, comprovante_id:comprovanteMatch.id, origem_match:'automatico_triangular' },
+        { empresa_eid:eid, data:l.data_pagamento, classificacao:sp.conta.classificacao, conta_contabil_id:sp.conta.id, tipo:'D', valor, historico:histSoc, cliente_fornecedor_nome:sp.socioNome, cnpj_cpf:null, lancamento_extrato_id:l.id, comprovante_id:comprovanteMatch.id, origem_match:'automatico_triangular' },
+      ];
+      const { error:erroSoc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasSoc });
+      if(erroSoc){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${erroSoc.message}`); }
+      else {
+        await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+        comprovantesUsados.add(comprovanteMatch.id);
+        await _supaClient.from(tabelaComprovante).update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',comprovanteMatch.id);
+        resolvRegra++; resolvido=true;
+      }
+      if(resolvido) continue;
     }
     // Passo 1b: múltiplos comprovantes somando o valor total (pedido do
     // usuário 05/09/2026 — ex.: um único lançamento de banco "Sispag
