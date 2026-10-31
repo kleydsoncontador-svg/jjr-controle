@@ -34198,53 +34198,16 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     if(new Set(idsPar).size!==idsPar.length) return false;
     let desfazerParcial=null, novasLinhasFluxo=[]; const idsFluxoNovos=[];
     if(parcial){
-      const R=escolhidos.filter(x=>x.resolvido), U=escolhidos.filter(x=>!x.resolvido);
-      const somaU=U.reduce((a,x)=>a+Math.round(x.valor*100),0)/100;
-      const valorR=Math.round((valor-somaU)*100)/100;
-      if(!R.length){
-        // Pedido do usuário 04/10/2026: "mesmo ele não encontrando a NF, deveria ao menos abrir as linhas" — o pagamento é aberto numa pendência
-        // por linha do Fluxo (a 1ª reaproveita a linha do extrato original), cada uma já ligada ao seu Fluxo; o usuário decide a Regra de cada uma.
-        const campoV=ehSaida?'valor_saida':'valor_entrada', valorOrig=valor;
-        const criadasA=[];
-        for(const x of U.slice(1)){
-          const { data: nova, error: eIns } = await _supaClient.from('lancamentos_extrato').insert({
-            empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento,
-            valor_saida:ehSaida?Math.round(x.valor*100)/100:0, valor_entrada:ehSaida?0:Math.round(x.valor*100)/100,
-            historico_bancario:l.historico_bancario, origem_importacao:'manual',
-            informacao:`Separada pelo Fluxo de Caixa do pagamento de R$ ${_fmt(valorOrig)} em ${l.data_pagamento}: ${x.nome||x.f?.descricao||''}`.trim(),
-            hash_dedup:`fluxo_split_${l.id}_${x.f.id}_${Date.now()}`
-          }).select('id').single();
-          if(eIns||!nova){ for(const c of criadasA) await _supaClient.from('lancamentos_extrato').delete().eq('id',c.id); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valorOrig)}): não consegui abrir as linhas (${eIns?eIns.message:'sem retorno'})`); return false; }
-          criadasA.push({ id:nova.id, fluxoId:x.f.id });
-        }
-        const { error: eUpdA } = await _supaClient.from('lancamentos_extrato').update({ [campoV]:Math.round(U[0].valor*100)/100 }).eq('id',l.id);
-        if(eUpdA){ for(const c of criadasA) await _supaClient.from('lancamentos_extrato').delete().eq('id',c.id); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valorOrig)}): ${eUpdA.message}`); return false; }
-        await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',U[0].f.id); fluxoPonteUsados.add(U[0].f.id);
-        for(const c of criadasA){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:c.id}).eq('id',c.fluxoId); fluxoPonteUsados.add(c.fluxoId); }
-        l[campoV]=Math.round(U[0].valor*100)/100;
-        resolvAbertas++; return true;
-      }
-      if(!(valorR>0)) return false;
-      const criadas=[];
-      const desfazerCriadas=async()=>{ for(const c of criadas) await _supaClient.from('lancamentos_extrato').delete().eq('id',c.id); };
-      for(const x of U){
-        const { data: nova, error: eIns } = await _supaClient.from('lancamentos_extrato').insert({
-          empresa_eid:eid, conta_bancaria_id:contaId, data_pagamento:l.data_pagamento,
-          valor_saida:ehSaida?Math.round(x.valor*100)/100:0, valor_entrada:ehSaida?0:Math.round(x.valor*100)/100,
-          historico_bancario:l.historico_bancario, origem_importacao:'manual',
-          informacao:`Separada pelo Fluxo de Caixa do pagamento de R$ ${_fmt(valor)} em ${l.data_pagamento}: ${x.nome||x.f?.descricao||''}`.trim(),
-          hash_dedup:`fluxo_split_${l.id}_${x.f.id}_${Date.now()}`
-        }).select('id').single();
-        if(eIns||!nova){ await desfazerCriadas(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): não consegui separar a linha sem NF (${eIns?eIns.message:'sem retorno'})`); return false; }
-        criadas.push({ id:nova.id, fluxoId:x.f.id });
-      }
-      const campoValor=ehSaida?'valor_saida':'valor_entrada';
-      const { error: eUpd } = await _supaClient.from('lancamentos_extrato').update({ [campoValor]:valorR }).eq('id',l.id);
-      if(eUpd){ await desfazerCriadas(); erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${eUpd.message}`); return false; }
-      const valorOriginal=valor;
-      desfazerParcial=async()=>{ await desfazerCriadas(); await _supaClient.from('lancamentos_extrato').update({ [campoValor]:valorOriginal }).eq('id',l.id); };
-      novasLinhasFluxo=criadas;
-      escolhidos=R; valor=valorR; l[campoValor]=valorR;
+      // Pedido do usuário 31/10/2026: o extrato NUNCA é dividido em várias linhas ("Separada pelo Fluxo"). É UM lançamento: 1 crédito no banco com o valor total e 1 débito por linha do Fluxo.
+      // Abre a composição no próprio extrato (cada linha com o seu Fluxo, Regra e conta quando já existe). Parte com NF e parte sem NF: não divide — fica pendente pra resolver à mão.
+      const R=escolhidos.filter(x=>x.resolvido);
+      if(R.some(x=>x.par)){ diagAglutinado.push(`${rotuloL}: parte com NF e parte sem — o extrato não é dividido; resolva à mão`); return false; }
+      const fxRows=escolhidos.map(x=>x.f).filter(Boolean);
+      if(fxRows.length!==escolhidos.length||fxRows.length<2){ diagAglutinado.push(`${rotuloL}: nem todas as partes vêm do Fluxo — o extrato não é dividido`); return false; }
+      const okAb=await _lancctbFluxoAbrirLinhas(l.id,fxRows,ehSaida);
+      if(!okAb){ diagAglutinado.push(`${rotuloL}: não consegui abrir o extrato em linhas`); return false; }
+      for(const f of fxRows){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',f.id); fluxoPonteUsados.add(f.id); }
+      resolvAbertas++; return true;
     }
     const hists=[]; const linhas=[]; let somaAnt=0;
     escolhidos.forEach((x,i)=>{
