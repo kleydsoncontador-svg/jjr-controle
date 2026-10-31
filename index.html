@@ -37176,10 +37176,28 @@ let _lancctbRegistroSelecionadosDesclass=new Map();
 // linha por vez fica expandida (guarda o id do lancamentos_extrato).
 let _lancctbInlineExpandidoId=null;
 let _lancctbInlineContasOptions=[];
+// Composição aberta por OUTRO caminho (ex.: NFs do mesmo fornecedor, sem Fluxo gravado na linha): ao abrir o quadro, procura no Fluxo a linha de MESMO valor (e data próxima) de cada item e mostra "Fluxo desta linha" com a
+// escolha de como criar a Regra (pedido do usuário 31/10/2026, ADUACOMEX). Só preenche quando há UMA linha candidata; nunca associa nem muda valor.
+async function _lancctbInlineEnriquecerFluxo(extratoId){
+  try{
+    const item=(_lancctbUltimoRegistro||[]).find(i=>i.extrato.id===extratoId); const r=item&&item.extrato;
+    if(!r||!Array.isArray(r.composicao_tributo)||!r.composicao_tributo.length||(r.valor_saida||0)<=0) return;
+    const comp=r.composicao_tributo;
+    if(comp.some(c=>c&&(c.codigo||c.origem==='folha'))||comp.every(c=>c&&(c.fx||c.lado))) return; // guia de imposto/folha: não é deste quadro
+    const d=r.data_pagamento, add=(x,n)=>{ const dt=new Date(x+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+    const { data: fx } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,data,valor_saida,cliente_fornecedor_nome,descricao,descricao_conta_origem,documento_numero,numero,unidade,cnpj_cpf,parcela,lancamento_extrato_id,status_associado').eq('empresa_eid',_lancctbEidAtual).gte('data',add(d,-4)).lte('data',add(d,4)).gt('valor_saida',0);
+    const usados=new Set(); let mudou=false;
+    comp.forEach(c=>{ if(!c||c.fx||c.lado) return;
+      const cand=(fx||[]).filter(f=>!usados.has(f.id)&&Math.abs((f.valor_saida||0)-(c.valor||0))<0.005&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===extratoId)&&(f.status_associado==='nao_associado'||f.lancamento_extrato_id===extratoId));
+      if(cand.length>=1){ cand.sort((a,b)=>_lancctbDiffDias(a.data,d)-_lancctbDiffDias(b.data,d)); const f=cand[0]; usados.add(f.id); c.fx={ id:f.id, cliente_fornecedor_nome:f.cliente_fornecedor_nome||'', descricao:f.descricao||'', descricao_conta_origem:f.descricao_conta_origem||'', documento_numero:f.documento_numero||'', numero:f.numero||'', unidade:f.unidade||'', cnpj_cpf:f.cnpj_cpf||'', data:f.data||'', parcela:f.parcela||'' }; mudou=true; } });
+    if(mudou){ await _supaClient.from('lancamentos_extrato').update({ composicao_tributo:comp }).eq('id',extratoId); }
+  }catch(e){ console.warn('Enriquecer composição com o Fluxo:',e); }
+}
 async function _lancctbRegistroAbrirInline(extratoId){
   const { data } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas')
     .select('id,numero_conta,classificacao,descricao,tipo,grau').eq('empresa_eid',_lancctbEidAtual).eq('ignorada_em_regras',false).order('classificacao'));
   _lancctbInlineContasOptions=data||[];
+  await _lancctbInlineEnriquecerFluxo(extratoId);
   _lancctbInlineExpandidoId=extratoId;
   renderLancctbRegistroContabil();
 }
