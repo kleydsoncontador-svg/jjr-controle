@@ -45726,7 +45726,7 @@ function abrirLancctbUnecontModal(){
         <button class="btn bo bsm" onclick="_lancctbUnecontEscolherPasta()">📁 Escolher/trocar a pasta UneCont</button>
         <div class="fg" style="margin:12px 0"><div class="fl">Mês (opcional — vazio = importa tudo que ainda não tiver)</div><input type="month" class="fi" id="lancctbUnecontMes" style="width:200px"></div>
         <div id="lancctbUnecontStatus" style="font-size:12px;white-space:pre-wrap;margin-bottom:12px;max-height:240px;overflow:auto"></div>
-        <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn bo" onclick="closeModal('mLancctbUnecont')">Fechar</button><button class="btn bp" id="lancctbUnecontBtn" onclick="_lancctbUnecontRodar()">▶ Importar</button></div>
+        <div style="display:flex;gap:8px;justify-content:flex-end"><button class="btn bo" onclick="closeModal('mLancctbUnecont')">Fechar</button><button class="btn bo" onclick="_lancctbUnecontRodar(true)" title="Mostra quantas notas entrariam, sem gravar nada">🔍 Simular</button><button class="btn bp" id="lancctbUnecontBtn" onclick="_lancctbUnecontRodar()">▶ Importar</button></div>
       </div></div></div>`);
   }
   document.getElementById('lancctbUnecontStatus').textContent='';
@@ -45764,7 +45764,7 @@ function _lancctbUnecontLinhaParaNf(r){
     data_emissao:emissao, valor_total:valor, iss_valor:issRet>0?Math.round(issRet*100)/100:null, pis_valor:num(r['Valor PIS']), cofins_valor:num(r['Valor COFINS']), csll_valor:num(r['Valor CSLL']), irrf_valor:num(r['Valor IRRF']),
     chave_acesso:chaveNac?('NFS'+chaveNac):('NFSUNE'+cnpjEmit+'-'+numero), valor_liquido:num(r['Valor Líquido']) };
 }
-async function _lancctbUnecontRodar(){
+async function _lancctbUnecontRodar(simular){
   const statusEl=document.getElementById('lancctbUnecontStatus'), btn=document.getElementById('lancctbUnecontBtn');
   const mes=(document.getElementById('lancctbUnecontMes').value||'').trim();
   const say=t=>{ statusEl.textContent=t; };
@@ -45782,7 +45782,7 @@ async function _lancctbUnecontRodar(){
     for(let i=0;i<arquivos.length;i++){
       const a=arquivos[i]; const file=await a.fh.getFile(); const sig=file.size+'|'+file.lastModified;
       say(`[${i+1}/${arquivos.length}] ${a.nome}…`);
-      if(!mes&&lidos[a.caminho]===sig){ tot.arquivosPulados++; log.push('⏭ '+a.nome+' — já lida por inteiro antes (pulada)'); continue; }
+      if(!simular&&!mes&&lidos[a.caminho]===sig){ tot.arquivosPulados++; log.push('⏭ '+a.nome+' — já lida por inteiro antes (pulada)'); continue; }
       const wb=XLSX.read(await file.arrayBuffer(),{type:'array',cellDates:true});
       const sn=wb.SheetNames.find(n=>/tomad/i.test(n)); if(!sn){ log.push('⚠ '+a.nome+' — sem aba de Serviços Tomados (ignorada)'); continue; }
       const linhas=XLSX.utils.sheet_to_json(wb.Sheets[sn],{defval:null,raw:true});
@@ -45809,7 +45809,7 @@ async function _lancctbUnecontRodar(){
             c.jaExistentes++;
             const ex=mapaEx.get(nf.chave_acesso)||mapaEx.get(chNum);
             if(ex){ const patch={}; ['iss_valor','pis_valor','cofins_valor','csll_valor','irrf_valor'].forEach(k=>{ if((ex[k]==null||Number(ex[k])===0)&&nf[k]>0) patch[k]=nf[k]; });
-              if(Object.keys(patch).length){ const { error } = await _supaClient.from('notas_fiscais').update(patch).eq('id',ex.id); if(error) c.erros++; else { c.retCompletas=(c.retCompletas||0)+1; Object.assign(ex,patch); } } }
+              if(Object.keys(patch).length){ const { error } = simular?{error:null}:await _supaClient.from('notas_fiscais').update(patch).eq('id',ex.id); if(error) c.erros++; else { c.retCompletas=(c.retCompletas||0)+1; Object.assign(ex,patch); } } }
             continue;
           }
           conh.add(nf.chave_acesso); conh.add(chNum); novas.push(nf);
@@ -45819,6 +45819,7 @@ async function _lancctbUnecontRodar(){
           const regs=lote.map(nf=>({ empresa_eid:eid, tipo:'nfse', chave_acesso:nf.chave_acesso, numero:nf.numero, serie:null, modelo:'NFSe', cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
             cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao:'compra', data_emissao:nf.data_emissao, valor_total:nf.valor_total, iss_valor:nf.iss_valor,
             pis_valor:nf.pis_valor, cofins_valor:nf.cofins_valor, csll_valor:nf.csll_valor, irrf_valor:nf.irrf_valor, xml_storage_path:null, status_captura:'xml_completo', natureza_operacao:null }));
+          if(simular){ c.importadas+=lote.length; continue; }
           const { data: ins, error } = await _supaClient.from('notas_fiscais').upsert(regs,{onConflict:'empresa_eid,tipo,chave_acesso'}).select('id,chave_acesso');
           if(error||!ins){ c.erros+=lote.length; console.warn('UneCont — erro ao gravar lote:',error); continue; }
           const idPorChave=new Map(ins.map(x=>[x.chave_acesso,x.id]));
@@ -45830,10 +45831,10 @@ async function _lancctbUnecontRodar(){
       }
       Object.keys(tot).forEach(k=>{ if(c[k]!=null) tot[k]+=c[k]; }); tot.retCompletas=(tot.retCompletas||0)+(c.retCompletas||0);
       log.push(`✔ ${a.nome}: ${c.importadas} importada(s), ${c.jaExistentes} já existente(s)`+(c.retCompletas?` (${c.retCompletas} com retenção completada)`:'')+`, ${c.canceladas} cancelada(s) ignorada(s)`+(c.excluidas?`, ${c.excluidas} excluída(s)`:'')+(c.incompletas?`, ${c.incompletas} incompleta(s)`:'')+(c.semEmpresa?`, ${c.semEmpresa} sem empresa cadastrada`:'')+(mes?`, ${c.foraMes} fora do mês`:'')+(c.erros?`, ${c.erros} ERRO(s)`:''));
-      if(!mes&&!c.erros) lidos[a.caminho]=sig; // só marca como lida quando leu TUDO (sem filtro de mês) e sem erro
+      if(!simular&&!mes&&!c.erros) lidos[a.caminho]=sig; // só marca como lida quando leu TUDO (sem filtro de mês) e sem erro
     }
-    S.s('lancctb_unecont_lidos',lidos);
-    say(log.join('\n')+`\n\nTotal: ${tot.importadas} NFS-e importada(s), ${tot.jaExistentes} já existente(s) (${tot.retCompletas||0} com retenção completada), ${tot.canceladas} cancelada(s) ignorada(s).`);
+    if(!simular) S.s('lancctb_unecont_lidos',lidos);
+    say((simular?'SIMULAÇÃO — nada foi gravado:\n':'')+log.join('\n')+`\n\nTotal: ${tot.importadas} NFS-e importada(s), ${tot.jaExistentes} já existente(s) (${tot.retCompletas||0} com retenção completada), ${tot.canceladas} cancelada(s) ignorada(s).`);
     toast(`UneCont: ${tot.importadas} NFS-e importada(s), ${tot.jaExistentes} já existiam (${tot.retCompletas||0} com retenção completada), ${tot.canceladas} canceladas ignoradas.`,tot.erros?'err':'ok');
   }catch(e){ console.error('Importar UneCont:',e); say('Erro: '+(e.message||e)); }
   finally{ btn.disabled=false; }
