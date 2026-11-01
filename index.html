@@ -44862,8 +44862,8 @@ async function confirmarLancctbFluxoImport(){
     // Nome com o CNPJ colado no fim ("AMIGO DO CARRO - CENTRO AUTOMOTIVO LTDA - 05919350000170"): o CNPJ (14 dígitos) vai pra coluna CPF/CNPJ
     // e sai do nome (03/10/2026). CNPJ zerado ("00000000000000") não é CNPJ de verdade — só sai do nome.
     { const mc=clienteNome.match(/^(.*?)\s*[-–]\s*(\d{14})\s*$/); if(mc&&mc[1].trim()){ clienteNome=mc[1].trim(); if(!/^0+$/.test(mc[2])&&!cnpjCpf) cnpjCpf=mc[2]; } }
-    const docNumero=_lancctbExtrairNumeroNF(pegar(row,'documento_numero'));
     let descricao=pegar(row,'descricao');
+    const docNumero=_lancctbNfDaDescricaoGuia(_lancctbEidAtual,descricao)||_lancctbExtrairNumeroNF(pegar(row,'documento_numero')); // guia FCP/ICMS PARTILHADO…: o número da NF vem da descrição, não o nº da guia
     if(!descricao) descricao=[descontoOrigem,clienteNome,docNumero?'Doc '+docNumero:''].filter(Boolean).join(' — ');
     if(!descricao) descricao='(sem descrição)';
     const parcelaStr=pegar(row,'parcela');
@@ -44992,16 +44992,25 @@ let _lancctbExclusaoFluxoQtd=0;
 // limpo é DIFERENTE do que já está salvo (nunca mexe em quem já está OK).
 // Escopo: empresa atual inteira (não só a página/filtro visível na tela),
 // já que o problema é do arquivo de origem, não de uma página específica.
+// Fast Lube (163), RodaCentro (165) e Super Troca 2000 (166): nas linhas de GNRE do Fluxo ("FCP/PI - PEDRO CARVALHO - NF 183283 - Data ref…", "ICMS PARTILHADO/PI - … - NF 183283 …") a coluna Número traz o nº da GUIA (7864, 73658),
+// mas o que interessa é o nº da NF que está na DESCRIÇÃO — pedido do usuário 01/11/2026 (regra de importação, e vale também pro "Corrigir números").
+function _lancctbNfDaDescricaoGuia(eid,descricao){
+  if(!['163','165','166'].includes(String(eid))) return '';
+  const d=String(descricao||'');
+  if(!/^\s*(?:ICMS\s+(?:ST|PARTILHADO|DIFAL)|FCP|PARTILHADO|DIFAL)\b/i.test(d)) return '';
+  const m=d.match(/\bNF\s*[:.\-]?\s*0*(\d{1,12})\b/i);
+  return m?m[1]:'';
+}
 async function _lancctbFluxoLimparNumeros(){
   const eid=_lancctbEidAtual;
   const { data: linhas, error } = await _lancctbFetchTudo(()=>_supaClient
     .from('fluxo_caixa_lancamentos')
-    .select('id,documento_numero')
+    .select('id,documento_numero,descricao')
     .eq('empresa_eid',eid)
     .not('documento_numero','is',null));
   if(error){ toast('Erro ao buscar lançamentos: '+error.message,'err'); return; }
   const alteracoes=(linhas||[])
-    .map(l=>({ id:l.id, de:l.documento_numero, para:_lancctbExtrairNumeroNF(l.documento_numero) }))
+    .map(l=>({ id:l.id, de:l.documento_numero, para:_lancctbNfDaDescricaoGuia(eid,l.descricao)||_lancctbExtrairNumeroNF(l.documento_numero) }))
     .filter(a=>a.para&&a.para!==a.de);
   if(!alteracoes.length){ toast('Nenhum número de documento precisa de correção.','ok'); return; }
   const amostra=alteracoes.slice(0,5).map(a=>`"${a.de}" → "${a.para}"`).join('\n');
