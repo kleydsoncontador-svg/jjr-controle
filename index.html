@@ -31891,6 +31891,15 @@ async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUm
     const baseHist=String(ex.historico_bancario||'').replace(/^\s*\[(?:TRIBUTO|PAGAMENTO) COMPOSTO:[^\]]*\]\s*/,'').trim();
     // FUNIL ÚNICO (pedido do usuário 01/11/2026: "Sispag Salários não é imposto"): linha de tributo (ICMS/GNRE/FCP…) nunca abre pagamento que não seja de tributo — vale pra QUALQUER caminho que chegue aqui (sugestão, partição, associação já gravada).
     if(!_lancctbHistoricoEhTributo(baseHist.replace(/^\s*(?:\[[^\]]*\]\s*)+/,'')||baseHist)&&rows.some(f=>_lancctbFluxoEhIcms(f)||_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||'')))) return false;
+    // VALOR EXATO PRIMEIRO (pedido do usuário 01/11/2026, Sispag Fornecedores R$ 3.580,15 aberto em 9 linhas + diferença de R$ 0,01 enquanto o Fluxo tinha UMA linha de R$ 3.580,15): se existe, livre, UMA linha do Fluxo com o valor EXATO do extrato
+    // (±3 dias, mesma natureza), nunca abre em várias — associa a exata (quando é única) e sai; o Registro mostra essa linha.
+    if(rows.length>=2){
+      const dd=n=>{ const dt=new Date(ex.data_pagamento+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+      const campoV=ehSaida?'valor_saida':'valor_entrada';
+      const { data: exatas } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,descricao,descricao_conta_origem,cliente_fornecedor_nome,status_associado,lancamento_extrato_id,'+campoV).eq('empresa_eid',eid).gte(campoV,vExt-0.005).lte(campoV,vExt+0.005).gte('data',dd(-3)).lte('data',dd(3));
+      const livres=(exatas||[]).filter(f=>(f.status_associado==='nao_associado'||!f.lancamento_extrato_id||f.lancamento_extrato_id===ex.id)&&!rows.some(r=>r.id===f.id)&&(_lancctbHistoricoEhTributo(baseHist.replace(/^\s*(?:\[[^\]]*\]\s*)+/,'')||baseHist)||!(_lancctbFluxoEhIcms(f)||_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||'')))));
+      if(livres.length){ if(livres.length===1&&livres[0].status_associado==='nao_associado') await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:ex.id}).eq('id',livres[0].id).eq('status_associado','nao_associado'); return false; }
+    }
     const txtDe=f=>{ const nome=String(f.cliente_fornecedor_nome||'').trim(), doc=String(f.documento_numero||f.numero||'').trim(), desc=String(f.descricao||'').trim();
       if(!nome||_lancctbTextoParecidoTributo(nome+' '+desc)) return desc||nome; return (ehSaida?'Pagamento a ':'Recebimento de ')+nome+(doc?' - NF '+doc:'')+(f.parcela?' - parcela '+f.parcela:''); };
     // Regras já criadas (gatilho do extrato + gatilhos do Fluxo): cada linha aberta pega a conta e o histórico da sua Regra.
