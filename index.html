@@ -46955,9 +46955,11 @@ async function _lancctbParsearExtratoMercadoPagoPdf(pdf){
   const mSi=t1.match(/Saldo inicial:\s*R\$\s*([\d.,-]+)/i); if(mSi) saldoAnteriorDoc=_lancctbParseValorFlex(mSi[1]);
   const mSf=t1.match(/Saldo final:\s*R\$\s*([\d.,-]+)/i); if(mSf) saldoFinalDoc=_lancctbParseValorFlex(mSf[1]);
   const lancamentos=[];
+  let carryTxt=''; // início da descrição que ficou no FIM da página anterior (descrição quebrada entre páginas: "Pagamento com Código QR / Pix VALTENCIR SILVA DA" | próxima página: "CRUZ") — achado 01/11/2026
   for(let p=1;p<=pdf.numPages;p++){
     const itens=await _lancctbExtrairItensPagina(p===1?await pdf.getPage(1):await pdf.getPage(p));
     const linhas=_lancctbAgruparLinhasPorY(itens,3).sort((a,b)=>b.y-a.y);
+    let primeiraDatada=true, ultK=-1;
     // colunas: Data~41, Descrição~89, ID~198, Valor~300, Saldo~360
     for(let k=0;k<linhas.length;k++){
       const L=linhas[k];
@@ -46977,9 +46979,11 @@ async function _lancctbParsearExtratoMercadoPagoPdf(pdf){
       // também era colada no "Dinheiro recebido cancelado" de 12/08 logo abaixo, que não tem nome nenhum no PDF).
       const ehFrag=ln=>!!ln&&!ln.itens.some(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str))&&!ln.itens.some(i=>/^R\$/.test(i.str))&&!ln.itens.some(i=>/^(Descri[çc][ãa]o|Saldo|Valor|ID)$/i.test(String(i.str).trim())); // o cabeçalho "Data Descrição ID da operação Valor Saldo" de cada página nunca é fragmento
       const ehDatada=ln=>!!ln&&ln.itens.some(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str));
-      const fragAcima=(()=>{ if(!ehFrag(acima)) return false; let dPrev=Infinity; for(let j=k-2;j>=0;j--){ if(ehDatada(linhas[j])){ dPrev=Math.abs(linhas[j].y-acima.y); break; } } return Math.abs(acima.y-L.y)<=dPrev; })();
-      const fragAbaixo=(()=>{ if(!ehFrag(abaixo)) return false; let dNext=Infinity; for(let j=k+2;j<linhas.length;j++){ if(ehDatada(linhas[j])){ dNext=Math.abs(linhas[j].y-abaixo.y); break; } } return Math.abs(L.y-abaixo.y)<dNext; })();
+      const fragAcima=(()=>{ if(!ehFrag(acima)) return false; let dPrev=Infinity; for(let j=k-2;j>=0;j--){ if(ehDatada(linhas[j])){ dPrev=Math.abs(linhas[j].y-acima.y); break; } } return Math.abs(acima.y-L.y)<=dPrev&&Math.abs(acima.y-L.y)<=15; })();
+      const fragAbaixo=(()=>{ if(!ehFrag(abaixo)) return false; let dNext=Infinity; for(let j=k+2;j<linhas.length;j++){ if(ehDatada(linhas[j])){ dNext=Math.abs(linhas[j].y-abaixo.y); break; } } return Math.abs(L.y-abaixo.y)<dNext&&Math.abs(L.y-abaixo.y)<=15; })();
+      const preCarry=primeiraDatada?carryTxt:''; primeiraDatada=false; ultK=k;
       const desc=[
+        preCarry,
         fragAcima?fragDe(acima):'',
         fragDe(L),
         fragAbaixo?fragDe(abaixo):'',
@@ -46987,6 +46991,9 @@ async function _lancctbParsearExtratoMercadoPagoPdf(pdf){
       const hist=[desc,itId.str].filter(Boolean).join(' - ');
       lancamentos.push({ data:dataIso, historico:hist, valor_entrada:v>0?v:0, valor_saida:v<0?-v:0, documento:itId.str });
     }
+    // Fragmentos depois da ÚLTIMA linha datada da página que não pertencem a ela (longe demais) = começo da descrição da 1ª linha da PRÓXIMA página.
+    carryTxt='';
+    if(ultK>=0){ const fr=[]; for(let j=ultK+1;j<linhas.length;j++){ const ln=linhas[j]; if(ln.itens.some(i=>/^\d{2}-\d{2}-\d{4}$/.test(i.str))||ln.itens.some(i=>/^R\$/.test(i.str))) break; if(Math.abs(ln.y-linhas[ultK].y)<=15) continue; const t=ln.itens.filter(i=>i.x>=70&&i.x<180).map(i=>i.str).join(' ').trim(); if(t&&!/^(Descri[çc][ãa]o|Data)$/i.test(t)) fr.push(t); } carryTxt=fr.join(' '); }
   }
   return lancamentos.length?{lancamentos,saldoAnteriorDoc,saldoFinalDoc,layout:'Mercado Pago (PDF)'}:null;
 }
