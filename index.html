@@ -36488,7 +36488,42 @@ function _lancctbIcmsAcharPagamento(l,ctx){
   }
   return null;
 }
+// FCP PAGO À PARTE (pedido do usuário 01/11/2026, NF 270982 UF PI: aba ICMS tem DIFAL R$ 7,91; o Fluxo cita a mesma NF 2x — "ICMS PARTILHADO/PI" 7,91 e "FCP/PI" 0,43, e o banco paga os 0,43 sozinhos): o FCP não faz parte do
+// total da aba ICMS, então não casa com nenhuma linha dela. Reconhece quando (1) o Fluxo ligado ao extrato é só FCP/UF de UMA NF, (2) existe linha da aba ICMS com essa NF+UF, e (3) as OUTRAS linhas do Fluxo da mesma NF somam
+// EXATAMENTE o valor da aba — aí o FCP é extra. Contabiliza contra a conta 68704 (Conta Transitória - Tributos Estaduais). Se o FCP já está dentro do total da aba (soma de tudo = aba), NÃO é tratado aqui (é pagamento em partes).
+async function _lancctbIcmsFcpExtra({l,contaBancoInfo,eid,ctx}){
+  try{
+    const { data: lig } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,descricao,numero,documento_numero,valor_saida').eq('empresa_eid',eid).eq('lancamento_extrato_id',l.id);
+    if(!lig||!lig.length||!lig.every(f=>/^\s*FCP\s*\/\s*[A-Z]{2}\b/i.test(String(f.descricao||'')))) return null;
+    const valor=Math.round((l.valor_saida||0)*100);
+    if(Math.round(lig.reduce((a,f)=>a+Number(f.valor_saida||0)*100,0))!==valor) return null;
+    const nfs=[...new Set(lig.map(f=>String(f.numero||f.documento_numero||'').replace(/^0+/,'')).filter(Boolean))]; if(nfs.length!==1) return null;
+    const nf=nfs[0], uf=(String(lig[0].descricao).match(/FCP\s*\/\s*([A-Z]{2})/i)||[])[1].toUpperCase();
+    const [a,m]=String(l.data_pagamento||'').split('-').map(Number); if(!a||!m) return null;
+    let row=null, mesRow=null;
+    for(const k of [0,-1,-2]){ let y=a,mm=m+k; while(mm<1){mm+=12;y--;} const mes=y+'-'+String(mm).padStart(2,'0'); const h=(ctx.rows[mes]||[]).filter(r=>r.uf===uf&&String(r.doc).replace(/^0+/,'')===nf); if(h.length===1){ row=h[0]; mesRow=mes; break; } if(h.length>1) return null; }
+    if(!row) return null;
+    const { data: todas } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,descricao,valor_saida').eq('empresa_eid',eid).or(`numero.eq.${nf},documento_numero.eq.${nf}`);
+    const outras=(todas||[]).filter(f=>!lig.some(x=>x.id===f.id)&&!/^\s*FCP\s*\//i.test(String(f.descricao||'')));
+    const somaOutras=Math.round(outras.reduce((s,f)=>s+Number(f.valor_saida||0)*100,0));
+    if(!outras.length||Math.abs(somaOutras-Math.round(row.valor*100))>1) return null; // o resto do Fluxo precisa fechar com a aba; senão pode ser parte do total dela
+    if(Math.round(row.valor*100)===valor) return null;
+    const { data: cT } = await _supaClient.from('plano_contas').select('id,classificacao').eq('empresa_eid',eid).eq('numero_conta','68704').maybeSingle(); if(!cT) return null;
+    const hist=`Pagamento ref. ${row.tipo} FCP UF ${row.uf} UN ${row.unidade} ${row.compet}`;
+    const v=Math.round((l.valor_saida||0)*100)/100;
+    const linhas=[
+      { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:v, historico:hist, lancamento_extrato_id:l.id, origem_match:'regra' },
+      { empresa_eid:eid, data:l.data_pagamento, classificacao:cT.classificacao, conta_contabil_id:cT.id, tipo:'D', valor:v, historico:hist, lancamento_extrato_id:l.id, origem_match:'regra' }];
+    const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+    if(error){ console.warn('ICMS FCP à parte:',error); return null; }
+    const semMarca=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
+    await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado', historico_bancario:`[${hist}] ${semMarca}`.trim() }).eq('id',l.id);
+    ctx.feitos.add(l.id);
+    return 'resolvido';
+  }catch(e){ console.warn('ICMS FCP à parte:',e); return null; }
+}
 async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir}){
+  { const fc=await _lancctbIcmsFcpExtra({l,contaBancoInfo,eid,ctx}); if(fc) return fc; }
   const r=_lancctbIcmsAcharPagamento(l,ctx);
   if(!r) return null; if(r.ambiguo) return 'ambiguo';
   const rows=r.rows, r0=rows[0], tipo=r0.tipo;
