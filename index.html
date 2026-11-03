@@ -2935,6 +2935,29 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
         </div>
         <div id="lancctbRegraBuscaFluxoResultado" style="margin-top:8px;max-height:220px;overflow-y:auto"></div>
       </div>
+      <div id="lancctbRegraBuscaIcmsWrap" class="box-amarelo" style="display:none;flex:1 1 460px;min-width:0;border-radius:6px;padding:10px;margin-bottom:12px">
+        <div style="font-weight:600;font-size:12.5px;color:var(--ink);margin-bottom:6px">🔎 Amarrar manualmente ao ICMS (aba ICMS)</div>
+        <div style="font-size:11.5px;color:var(--slate);margin-bottom:8px">Busca nas NFs da aba ICMS ainda não associadas a nenhum pagamento, por valor, data, UF e unidade. Marque várias — a soma precisa fechar com o lançamento.</div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:11.5px;color:var(--slate)">
+          Valor de R$
+          <input class="fi" id="lancctbRegraBuscaIcmsVMin" type="number" step="0.01" placeholder="mínimo" style="width:100px" oninput="_lancctbBuscarIcmsProLancamentoDebounced()">
+          até R$
+          <input class="fi" id="lancctbRegraBuscaIcmsVMax" type="number" step="0.01" placeholder="máximo" style="width:100px" oninput="_lancctbBuscarIcmsProLancamentoDebounced()">
+          ou exato R$
+          <input class="fi" id="lancctbRegraBuscaIcmsVExato" type="number" step="0.01" placeholder="exato" style="width:100px" oninput="_lancctbBuscarIcmsProLancamentoDebounced()">
+        </div>
+        <div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:6px;font-size:11.5px;color:var(--slate)">
+          Data da NF de
+          <input class="fi" id="lancctbRegraBuscaIcmsDataDe" type="date" style="width:140px" oninput="_lancctbBuscarIcmsProLancamentoDebounced()">
+          até
+          <input class="fi" id="lancctbRegraBuscaIcmsDataAte" type="date" style="width:140px" oninput="_lancctbBuscarIcmsProLancamentoDebounced()">
+          UF
+          <input class="fi" id="lancctbRegraBuscaIcmsUf" maxlength="2" placeholder="UF" style="width:60px;text-transform:uppercase" oninput="_lancctbBuscarIcmsProLancamentoDebounced()">
+          Unidade
+          <input class="fi" id="lancctbRegraBuscaIcmsUn" placeholder="ex.: 114" style="width:80px" oninput="_lancctbBuscarIcmsProLancamentoDebounced()">
+        </div>
+        <div id="lancctbRegraBuscaIcmsResultado" style="margin-top:8px;max-height:260px;overflow-y:auto"></div>
+      </div>
       </div><!-- /Nota Fiscal e Fluxo lado a lado -->
       <div id="lancctbRegraTributosArea"></div>
       <!-- Multi-gatilho por Fluxo de Caixa (pedido do usuário 09/09/2026):
@@ -30935,6 +30958,9 @@ async function abrirLancctbRegraModal(id){
   document.getElementById('lancctbRegraBuscaNfTermo').value='';
   document.getElementById('lancctbRegraBuscaNfValor').value='';
   document.getElementById('lancctbRegraBuscaNfResultado').innerHTML='';
+  document.getElementById('lancctbRegraBuscaIcmsWrap').style.display='none';
+  document.getElementById('lancctbRegraBuscaIcmsResultado').innerHTML='';
+  _lancctbIcmsManualSel=new Map();
   document.getElementById('lancctbRegraBuscaFluxoWrap').style.display='none';
   document.getElementById('lancctbRegraBuscaFluxoTermo').value='';
   document.getElementById('lancctbRegraBuscaFluxoValor').value='';
@@ -31308,12 +31334,20 @@ async function abrirLancctbRegraModalDeLinha(item,opts){
     // ter achado nada (ex: descrição muito diferente pra bater na
     // tolerância, ou o Fluxo ainda não foi importado quando a tela
     // carregou). Mesmo espírito da busca de NF acima.
-    buscaFluxoWrap.style.display='';
-    document.getElementById('lancctbRegraBuscaFluxoValor').value=valor;
-    _lancctbBuscarFluxoProLancamento();
+    // Empresa sem Fluxo de Caixa não mostra a busca de Fluxo (pedido 03/11/2026); a busca de ICMS só aparece em empresa que tem a base da aba ICMS
+    if(_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false){
+      buscaFluxoWrap.style.display='';
+      document.getElementById('lancctbRegraBuscaFluxoValor').value=valor;
+      _lancctbBuscarFluxoProLancamento();
+    } else buscaFluxoWrap.style.display='none';
+    if(r.valor_saida>0&&_lancctbIcmsMesesGet(_lancctbEidAtual).length){
+      document.getElementById('lancctbRegraBuscaIcmsWrap').style.display='';
+      _lancctbBuscarIcmsProLancamento();
+    }
   } else {
     buscaNfWrap.style.display='none';
     buscaFluxoWrap.style.display='none';
+    document.getElementById('lancctbRegraBuscaIcmsWrap').style.display='none';
   }
 
   let cnpjSugerido=opts.cnpjSugerido||null, nomeSugerido=opts.nomeSugerido||null;
@@ -36661,9 +36695,67 @@ async function _lancctbIcmsFcpExtra({l,contaBancoInfo,eid,ctx}){
     return 'resolvido';
   }catch(e){ console.warn('ICMS FCP à parte:',e); return null; }
 }
-async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir}){
-  { const fc=await _lancctbIcmsFcpExtra({l,contaBancoInfo,eid,ctx}); if(fc) return fc; }
-  const r=_lancctbIcmsAcharPagamento(l,ctx);
+// ── Amarração MANUAL de NFs da aba ICMS a um pagamento (modal "Cadastrar regra"; pedido do usuário 03/11/2026): só NFs ainda sem pagamento, filtro por valor, data, UF e unidade; várias de uma vez ──
+let _lancctbIcmsManualSel=new Map(), _lancctbIcmsManualLista=[], _lancctbIcmsManualTimer=null;
+function _lancctbBuscarIcmsProLancamentoDebounced(){ clearTimeout(_lancctbIcmsManualTimer); _lancctbIcmsManualTimer=setTimeout(_lancctbBuscarIcmsProLancamento,350); }
+function _lancctbBuscarIcmsProLancamento(){
+  const el=document.getElementById('lancctbRegraBuscaIcmsResultado'), r=_lancctbRegraExtratoAlvo; if(!el||!r) return;
+  const eid=_lancctbEidAtual, alvo=Number(r.valor_saida)||0;
+  const num=id=>{ const v=parseFloat((document.getElementById(id)||{}).value); return isNaN(v)?null:v; };
+  const ex=num('lancctbRegraBuscaIcmsVExato'), vMin=ex!=null?ex-0.005:num('lancctbRegraBuscaIcmsVMin'), vMax=ex!=null?ex+0.005:num('lancctbRegraBuscaIcmsVMax');
+  const dtDe=(document.getElementById('lancctbRegraBuscaIcmsDataDe')||{}).value||'', dtAte=(document.getElementById('lancctbRegraBuscaIcmsDataAte')||{}).value||'';
+  const uf=((document.getElementById('lancctbRegraBuscaIcmsUf')||{}).value||'').trim().toUpperCase(), un=((document.getElementById('lancctbRegraBuscaIcmsUn')||{}).value||'').trim();
+  const filtrou=!!(ex!=null||vMin!=null||vMax!=null||dtDe||dtAte||uf||un);
+  let lista=[]; _lancctbIcmsMesesGet(eid).forEach(mes=>{ _lancctbIcmsLer(eid,mes).forEach(x=>{ if(x.ext) return; lista.push(x); }); });
+  lista=lista.filter(x=>(vMin==null||x.valor>=vMin-0.005)&&(vMax==null||x.valor<=vMax+0.005)&&(!dtDe||x.data>=dtDe)&&(!dtAte||x.data<=dtAte)&&(!uf||x.uf===uf)&&(!un||String(x.unidade)===un));
+  lista.sort((a,b)=>filtrou?(String(a.data).localeCompare(String(b.data))||a.valor-b.valor):(Math.abs(a.valor-alvo)-Math.abs(b.valor-alvo)));
+  const total=lista.length; lista=lista.slice(0,filtrou?150:25); _lancctbIcmsManualLista=lista;
+  if(!lista.length){ el.innerHTML='<div style="color:var(--slate);font-size:12px;padding:6px 0">Nenhuma NF do ICMS sem pagamento encontrada com esse filtro.</div>'; return; }
+  el.innerHTML=lista.map((x,i)=>{ const bate=Math.abs(x.valor-alvo)<=0.01, d=x.data?new Date(x.data+'T00:00:00').toLocaleDateString('pt-BR'):'';
+    return '<label style="display:flex;gap:8px;align-items:flex-start;padding:5px 8px;border-bottom:1px solid var(--border);font-size:12px;cursor:pointer"><input type="checkbox" '+(_lancctbIcmsManualSel.has(x.id)?'checked':'')+' onchange="_lancctbIcmsManualToggle('+i+',this.checked)"><span><strong>'+esc(x.tipo)+'</strong> — UF '+esc(x.uf)+' · UN '+esc(String(x.unidade))+' · NF '+esc(String(x.doc))+(x.dev?' (devolução)':'')+'<br><span style="color:var(--slate)">'+d+' · compet. '+esc(x.compet)+' — <span style="color:'+(bate?'var(--teal)':'var(--red)')+'">R$ '+_fmt(x.valor)+'</span></span></span></label>'; }).join('')
+    +(total>lista.length?'<div style="font-size:11.5px;color:var(--slate);padding:4px 8px">Há mais '+(total-lista.length)+' — refine o filtro.</div>':'')+'<div id="lancctbIcmsManualBarra"></div>';
+  _lancctbIcmsManualBarra();
+}
+function _lancctbIcmsManualToggle(i,on){ const x=_lancctbIcmsManualLista[i]; if(!x) return; if(on) _lancctbIcmsManualSel.set(x.id,x); else _lancctbIcmsManualSel.delete(x.id); _lancctbIcmsManualBarra(); }
+function _lancctbIcmsManualBarra(){
+  const el=document.getElementById('lancctbIcmsManualBarra'), r=_lancctbRegraExtratoAlvo; if(!el||!r) return;
+  const alvo=Number(r.valor_saida)||0, sel=[..._lancctbIcmsManualSel.values()], soma=Math.round(sel.reduce((a,x)=>a+Math.round(x.valor*100),0))/100, fecha=sel.length>0&&Math.abs(soma-alvo)<=0.02;
+  el.innerHTML='<div style="position:sticky;bottom:0;display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px;background:var(--bg2,#0f172a);font-size:12px">Marcadas: <b>'+sel.length+'</b> — soma <b style="color:'+(fecha?'var(--teal)':'var(--red)')+'">R$ '+_fmt(soma)+'</b> de R$ '+_fmt(alvo)+'<button class="btn bp bsm" type="button" '+(fecha?'':'disabled')+' onclick="_lancctbIcmsManualAssociar(this)">✓ Associar marcadas'+(fecha?'':' (a soma precisa fechar)')+'</button></div>';
+}
+async function _lancctbIcmsManualAssociar(btn){
+  const l=_lancctbRegraExtratoAlvo; if(!l){ toast('Lançamento de origem não encontrado — feche e reabra o modal.','err'); return; }
+  const sel=[..._lancctbIcmsManualSel.values()]; if(!sel.length) return;
+  const eid=_lancctbEidAtual, contaId=l.conta_bancaria_id;
+  if(new Set(sel.map(x=>x.uf+'|'+x.unidade)).size>1){ toast('Marque NFs da MESMA UF e da MESMA unidade (os tipos DIFAL e ST podem misturar).','err'); return; }
+  if(btn){ btn.disabled=true; btn.textContent='Associando…'; }
+  try{
+    const ctx={ rows:{}, usados:new Set(), mesesTocados:new Set(), total:1, fluxo:{}, pend:[], parcialPago:{}, feitos:new Set() };
+    [...new Set(sel.map(x=>x.mes))].forEach(m=>{ ctx.rows[m]=_lancctbIcmsLer(eid,m); });
+    const rows=sel.map(x=>(ctx.rows[x.mes]||[]).find(y=>y.id===x.id));
+    if(rows.some(x=>!x||x.ext)){ toast('Alguma NF marcada já foi associada a outro pagamento — refaça a busca.','err'); return; }
+    const soma=Math.round(rows.reduce((a,x)=>a+Math.round(x.valor*100),0))/100;
+    if(Math.abs(soma-(Number(l.valor_saida)||0))>0.02){ toast('A soma das NFs não fecha com o lançamento.','err'); return; }
+    const tipos=[...new Set(rows.map(x=>x.tipo))];
+    if(!confirm('Associar '+rows.length+' NF(s) do ICMS (UF '+rows[0].uf+', unidade '+rows[0].unidade+', soma R$ '+_fmt(soma)+') a este pagamento de R$ '+_fmt(l.valor_saida)+'?')) return;
+    const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
+      .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
+      .eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico').is('fluxo_historico_gatilho',null).is('fluxo_cliente_gatilho',null).is('fluxo_numero_gatilho',null).is('fluxo_descconta_gatilho',null).is('fluxo_unidade_gatilho',null));
+    const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
+    if(!contaBancoInfo||!contaBancoInfo.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
+    const composicoesParaAbrir=[];
+    const res=await _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir,forcado:{rows,multiTipo:tipos.length>1}});
+    if(!res){ toast('Não consegui gravar a associação — nada foi alterado.','err'); return; }
+    ctx.mesesTocados.forEach(m=>_lancctbIcmsSalvar(eid,m,ctx.rows[m]));
+    _lancctbIcmsManualSel=new Map();
+    closeModal('mLancctbRegra');
+    toast(res==='resolvido'?'ICMS associado e classificado pela Regra.':'ICMS associado — classifique o pagamento (crie a Regra do imposto).','ok');
+    try{ await renderLancctbRegistroContabil(); }catch(e){}
+    if(res==='marcado'&&composicoesParaAbrir.length){ try{ await _lancctbRegistroAbrirInline(composicoesParaAbrir[0].id); }catch(e){} }
+  } finally { if(btn){ btn.disabled=false; } }
+}
+async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir,forcado}){
+  if(!forcado){ const fc=await _lancctbIcmsFcpExtra({l,contaBancoInfo,eid,ctx}); if(fc) return fc; }
+  const r=forcado?{rows:forcado.rows,multiTipo:!!forcado.multiTipo}:_lancctbIcmsAcharPagamento(l,ctx);
   if(!r) return null; if(r.ambiguo) return 'ambiguo';
   const rows=r.rows, r0=rows[0], tipo=r0.tipo;
   const rotulo=rows.length===1?`${tipo} ref. ${r0.compet} NF ${r0.doc} UF ${r0.uf} UN ${r0.unidade}`:`${tipo} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${rows.length} NFs)`;
