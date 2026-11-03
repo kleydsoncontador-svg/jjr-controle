@@ -23101,6 +23101,27 @@ let _lancctbNfeFiltroNumParcela='';
 let _lancctbNfeFiltroQtdParcelas='';
 let _lancctbNfeFiltroModelo='';
 let _lancctbNfeFiltroCodServ='', _lancctbNfeFiltroDescServ=''; // código e descrição do serviço (NFS-e) — pedido 03/11/2026
+// Retenções (ISS/PIS/COFINS/CSLL/IRRF) filtradas no servidor; Valor Líquido (calculado) filtrado no navegador sobre TODAS as filtradas. Aceitam "100", "100,50", ">0", ">=50", "<200".
+let _lancctbNfeFiltroRet={iss:'',pis:'',cofins:'',csll:'',irrf:''}, _lancctbNfeFiltroLiquido='';
+function _lancctbFiltroNumPred(txt){
+  txt=String(txt||'').trim(); if(!txt) return null;
+  const m=txt.match(/^(>=|<=|>|<|=)?\s*(-?[\d.,]+)$/); if(!m) return null;
+  let n=m[2]; n=n.indexOf(',')>=0?n.replace(/\./g,'').replace(',','.'):n; n=parseFloat(n); if(isNaN(n)) return null;
+  const op=m[1]||'=';
+  return op==='>'?(v=>v>n+0.005):op==='>='?(v=>v>=n-0.005):op==='<'?(v=>v<n-0.005):op==='<='?(v=>v<=n+0.005):(v=>Math.abs(v-n)<=0.011);
+}
+// o mesmo filtro, como condição da consulta (retenções são colunas de notas_fiscais)
+function _lancctbFiltroNumQuery(q,coluna,txt){
+  txt=String(txt||'').trim(); if(!txt) return q;
+  const m=txt.match(/^(>=|<=|>|<|=)?\s*(-?[\d.,]+)$/); if(!m) return q;
+  let n=m[2]; n=n.indexOf(',')>=0?n.replace(/\./g,'').replace(',','.'):n; n=parseFloat(n); if(isNaN(n)) return q;
+  const op=m[1]||'=';
+  if(op==='>') return q.gt(coluna,n+0.005);
+  if(op==='>=') return q.gte(coluna,n-0.005);
+  if(op==='<') return q.lt(coluna,n-0.005);
+  if(op==='<=') return q.lte(coluna,n+0.005);
+  return q.gte(coluna,n-0.011).lte(coluna,n+0.011);
+}
 let _lancctbNfeFiltroTimer=null;
 function _lancctbNfeFiltroDebounced(campo,v){
   if(campo==='nome') _lancctbNfeBuscaNome=v;
@@ -23114,6 +23135,8 @@ function _lancctbNfeFiltroDebounced(campo,v){
   else if(campo==='natureza') _lancctbNfeFiltroNatureza=v;
   else if(campo==='codServ') _lancctbNfeFiltroCodServ=v;
   else if(campo==='descServ') _lancctbNfeFiltroDescServ=v;
+  else if(campo==='liquido') _lancctbNfeFiltroLiquido=v;
+  else if(_lancctbNfeFiltroRet.hasOwnProperty(campo)) _lancctbNfeFiltroRet[campo]=v;
   _lancctbNfePagina=0;
   clearTimeout(_lancctbNfeFiltroTimer);
   _lancctbNfeFiltroTimer=setTimeout(renderLancctbConteudo,350);
@@ -28166,6 +28189,7 @@ function _lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,ehSer
   }
   if(ehServico){
     // Código do serviço: só os dígitos ("01.05" ou "0105" casam com "0105"; "010201" com "01.02.01") — o código fica gravado só com dígitos.
+    [['iss','iss_valor'],['pis','pis_valor'],['cofins','cofins_valor'],['csll','csll_valor'],['irrf','irrf_valor']].forEach(([k,col])=>{ q=_lancctbFiltroNumQuery(q,'notas_fiscais.'+col,_lancctbNfeFiltroRet[k]); });
     const cod=String(_lancctbNfeFiltroCodServ||'').replace(/\D/g,'');
     if(cod) q=q.ilike('notas_fiscais.cod_servico','%'+cod+'%');
     // Descrição: letras que podem ter acento viram "_" (digitar "informacao" acha "informação")
@@ -28186,6 +28210,7 @@ function _lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,ehSer
 // exclusão em massa.
 function _lancctbNotasAplicarFiltrosCliente(lista,ehServico){
   let out=lista;
+  if(ehServico){ const fl=_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido); if(fl) out=out.filter(l=>fl(Number(_lancctbNfValorLiquido(l.nf))||0)); }
   if(_lancctbNfeFiltroQtdParcelas.trim()){
     const v=parseInt(_lancctbNfeFiltroQtdParcelas,10);
     if(!isNaN(v)) out=out.filter(l=>l.qtdParcelas===v);
@@ -28259,10 +28284,19 @@ async function renderLancctbNotas(aba){
     .eq('tipo', aba.tipoDoc)
     .eq('direcao', aba.direcaoNf);
   q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,ehServico);
-  const { data: parcelas, error, count } = await q
-    .order('data_emissao', { ascending: true })
-    .order('numero_parcela', { ascending: true })
-    .range(from, to);
+  let parcelas, error, count;
+  if(ehServico&&_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)){
+    // Valor Líquido é calculado (bruto − retenções, com as "Retenções desconsideradas"): não dá pra filtrar na consulta — busca todas as que batem com os outros filtros, filtra aqui e pagina.
+    const fl=_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido);
+    const r=await _lancctbFetchTudo(()=>q.order('data_emissao',{ascending:true}).order('numero_parcela',{ascending:true}).order('id',{ascending:true}));
+    error=r.error; const todas=(r.data||[]).filter(pp=>fl(Number(_lancctbNfValorLiquido(pp.notas_fiscais))||0));
+    count=todas.length; parcelas=todas.slice(from,to+1);
+  } else {
+    ({ data: parcelas, error, count } = await q
+      .order('data_emissao', { ascending: true })
+      .order('numero_parcela', { ascending: true })
+      .range(from, to));
+  }
 
   if(error){
     el.innerHTML=`<div style="padding:20px;color:var(--red)">Erro ao carregar: ${esc(error.message)}</div>`;
@@ -28351,7 +28385,7 @@ async function renderLancctbNotas(aba){
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-valor-parcela" placeholder="🔎 valor" inputmode="decimal" value="${esc(_lancctbNfeFiltroValorParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('valorParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-num-parcela" placeholder="🔎 nº" inputmode="numeric" value="${esc(_lancctbNfeFiltroNumParcela)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('numParcela',this.value)"></th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-qtd-parcelas" placeholder="🔎 qtd" inputmode="numeric" value="${esc(_lancctbNfeFiltroQtdParcelas)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('qtdParcelas',this.value)"></th>
-        ${ehServico?'<th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th><th style="padding:4px 6px"></th>':`<th style="padding:4px 6px"><input class="si" list="lancctbNfeNaturezaDatalist" data-filtro="nf-natureza" placeholder="🔎 filtrar" value="${esc(_lancctbNfeFiltroNatureza)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('natureza',this.value)"><datalist id="lancctbNfeNaturezaDatalist">${naturezasSugeridas.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></th>`}
+        ${ehServico?['iss','pis','cofins','csll','irrf'].map(k=>`<th style="padding:4px 3px"><input class="si" data-filtro="nf-${k}" placeholder="🔎" title="Valor exato ou >0, >=50, <200 (ex.: >0 = só as NFs com ${k.toUpperCase()})" value="${esc(_lancctbNfeFiltroRet[k])}" style="width:100%;min-width:54px;font-size:11px" oninput="_lancctbNfeFiltroDebounced('${k}',this.value)"></th>`).join('')+`<th style="padding:4px 3px"><input class="si" data-filtro="nf-liquido" placeholder="🔎 valor" title="Valor exato ou >1000, <500, >=100…" value="${esc(_lancctbNfeFiltroLiquido)}" style="width:100%;min-width:80px;font-size:11px" oninput="_lancctbNfeFiltroDebounced('liquido',this.value)"></th>`:`<th style="padding:4px 6px"><input class="si" list="lancctbNfeNaturezaDatalist" data-filtro="nf-natureza" placeholder="🔎 filtrar" value="${esc(_lancctbNfeFiltroNatureza)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('natureza',this.value)"><datalist id="lancctbNfeNaturezaDatalist">${naturezasSugeridas.map(n=>`<option value="${esc(n)}">`).join('')}</datalist></th>`}
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-modelo" placeholder="🔎 modelo" value="${esc(_lancctbNfeFiltroModelo)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('modelo',this.value)"></th>
         <th style="padding:4px 6px"><select class="si" data-filtro="nf-status" style="width:100%;font-size:11px" onchange="_lancctbNfeFiltroStatusMudar(this.value)">
           <option value="" ${!_lancctbNfeFiltroStatus?'selected':''}>Todos</option>
@@ -28406,9 +28440,10 @@ async function renderLancctbNotas(aba){
 // Soma do Valor Líquido de TODAS as NFS-e que batem com os filtros da tela (não só da página), mostrada na barra de cima (pedido do usuário 03/11/2026). Só aparece quando há algum filtro ativo;
 // cada NF conta uma vez (NF com mais de uma parcela não duplica). Usa a MESMA consulta e os mesmos filtros do Excel/Excluir filtradas.
 let _lancctbSomaLiqSeq=0;
+function _lancctbNfeFiltroRetValores(){ return Object.keys(_lancctbNfeFiltroRet).map(k=>_lancctbNfeFiltroRet[k]); }
 async function _lancctbNfeAtualizarSomaLiquido(aba){
   const el=document.getElementById('lancctbNfeSomaLiq'); if(!el) return;
-  const ativo=[_lancctbNfeBuscaNome,_lancctbNfeBuscaNumero,_lancctbNfeBuscaCnpj,_lancctbNfeEmissaoDe,_lancctbNfeEmissaoAte,_lancctbNfeParcelaDe,_lancctbNfeParcelaAte,_lancctbNfeFiltroStatus,_lancctbNfeFiltroValorBruto,_lancctbNfeFiltroValorParcela,_lancctbNfeFiltroNumParcela,_lancctbNfeFiltroQtdParcelas,_lancctbNfeFiltroModelo,_lancctbNfeFiltroCodServ,_lancctbNfeFiltroDescServ].some(v=>String(v||'').trim());
+  const ativo=[_lancctbNfeBuscaNome,_lancctbNfeBuscaNumero,_lancctbNfeBuscaCnpj,_lancctbNfeEmissaoDe,_lancctbNfeEmissaoAte,_lancctbNfeParcelaDe,_lancctbNfeParcelaAte,_lancctbNfeFiltroStatus,_lancctbNfeFiltroValorBruto,_lancctbNfeFiltroValorParcela,_lancctbNfeFiltroNumParcela,_lancctbNfeFiltroQtdParcelas,_lancctbNfeFiltroModelo,_lancctbNfeFiltroCodServ,_lancctbNfeFiltroDescServ,_lancctbNfeFiltroLiquido,..._lancctbNfeFiltroRetValores()].some(v=>String(v||'').trim());
   if(!ativo){ el.innerHTML=''; return; }
   const seq=++_lancctbSomaLiqSeq; el.innerHTML='<span style="color:var(--slate)">Somando as filtradas…</span>';
   try{
@@ -28429,8 +28464,8 @@ async function _lancctbNfeAtualizarSomaLiquido(aba){
       const ids=[...new Set(lista.map(x=>x.p.nf_id))], qtd={};
       for(let i=0;i<ids.length;i+=200){ const { data: rs } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas').select('nf_id').in('nf_id',ids.slice(i,i+200)).order('id')); (rs||[]).forEach(r=>{ qtd[r.nf_id]=(qtd[r.nf_id]||0)+1; }); }
       lista.forEach(x=>{ x.qtdParcelas=qtd[x.p.nf_id]||1; });
-      lista=_lancctbNotasAplicarFiltrosCliente(lista,true);
     }
+    lista=_lancctbNotasAplicarFiltrosCliente(lista,true); // Qtd Parcelas e Valor Líquido (calculados no navegador)
     const nfs=new Map(); lista.forEach(x=>{ if(!nfs.has(x.p.nf_id)) nfs.set(x.p.nf_id,x.nf); });
     let liq=0, bruto=0; nfs.forEach(nf=>{ liq+=Math.round((Number(_lancctbNfValorLiquido(nf))||0)*100); bruto+=Math.round((Number(nf.valor_total)||0)*100); });
     if(seq!==_lancctbSomaLiqSeq) return;
@@ -28511,6 +28546,7 @@ let _lancctbExclusaoNotasFiltro=null; // {tipoDoc,direcaoNf,idsApagar,qtdBloquea
 // em notas_fiscais_parcelas) só as parcelas PENDENTES das NFs que batem com os
 // filtros da tela; nunca mexe em conciliadas. Reativar faz o caminho inverso.
 async function ignorarLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico,ignorar){
+  if(ehServico&&_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)){ toast('Tire o filtro de Valor Líquido para usar este botão — ele é calculado e não entra na seleção em lote.','err'); return; }
   const eid=_lancctbEidAtual;
   const btn=event&&event.target; if(btn) btn.disabled=true;
   try{
@@ -28541,6 +28577,7 @@ async function ignorarLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico,ignorar)
   } finally { if(btn) btn.disabled=false; }
 }
 async function excluirLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico){
+  if(ehServico&&_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)){ toast('Tire o filtro de Valor Líquido para usar este botão — ele é calculado e não entra na seleção em lote.','err'); return; }
   const eid=_lancctbEidAtual;
   const btn=event?.target;
   if(btn) btn.disabled=true;
