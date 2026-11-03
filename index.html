@@ -46584,6 +46584,29 @@ async function _lancctbFolhaExcluirFiltradas(){
 // quando é imagem) e guarda SÓ OS DADOS em tributos_guias: UMA LINHA POR CÓDIGO DE RECEITA, cada uma sabendo de qual guia faz parte (valor da guia + vencimento). A aba "Tributos" mostra tudo, com a coluna "Conciliado"
 // (qual extrato pagou aquela guia). Duplicidade: a mesma guia aparece em mais de uma pasta ("(Fiscal)" e "(Pessoal)") — vale uma só (chave = empresa + vencimento + valor + tipo + códigos).
 function _lancctbTributosSetorDoNome(n){ const m=String(n||'').match(/\((Pessoal|Fiscal|Contabilidade|Contábil|Societ[áa]rio|Legal[^)]*)\)\s*(?:\.pdf)?\s*$/i); return m?m[1]:null; }
+// Código de receita federal -> imposto (para dar nome à guia: "DARF (INSS/IRRF)", "DARF (IRPJ/CSLL)"…)
+const _LANCCTB_TRIB_CODIGOS={ '1082':'INSS','1099':'INSS','1138':'INSS','1646':'INSS','1170':'INSS','1176':'INSS','1191':'INSS','1196':'INSS','1200':'INSS','1120':'INSS','1141':'INSS','1163':'INSS','1180':'INSS',
+  '0561':'IRRF','3208':'IRRF','1708':'IRRF','8045':'IRRF','5952':'IRRF','0588':'IRRF','1889':'IRRF','3280':'IRRF','5979':'IRRF','5987':'IRRF',
+  '5993':'IRPJ','2089':'IRPJ','2362':'IRPJ','2484':'CSLL','2372':'CSLL','6012':'CSLL','5856':'COFINS','2172':'COFINS','6912':'PIS','8109':'PIS','5123':'IPI','1097':'IPI' };
+function _lancctbTribRotulo(descricao,ex,itens){
+  const d=String(descricao||'');
+  if(ex&&ex.gnre) return 'GNRE'+(ex.gnre.uf?' '+ex.gnre.uf:'');
+  if(ex&&ex.composicao&&ex.composicao.length){
+    const cls=[]; ex.composicao.forEach(c=>{ const k=_LANCCTB_TRIB_CODIGOS[String(c.codigo||'').replace(/\D/g,'').padStart(4,'0')]; if(k&&!cls.includes(k)) cls.push(k); });
+    return 'DARF'+(cls.length?' ('+cls.join('/')+')':'');
+  }
+  if(/\bDAS\b/i.test(d)) return /parcel/i.test(d)?'DAS Parcelamento':'DAS';
+  if(/FGTS/i.test(d)) return 'FGTS';
+  if(/ISS\s*retido/i.test(d)) return 'ISS Retido';
+  if(/\bISS\b|ISSQN/i.test(d)) return 'ISS';
+  if(/TFE|taxa de fiscaliza/i.test(d)) return 'TFE';
+  if(/DAE|DARE/i.test(d)&&/DIFAL/i.test(d)) return 'ICMS DIFAL';
+  if(/DAE|DARE/i.test(d)&&/ICMS\s*ST/i.test(d)) return 'ICMS ST';
+  if(/DAE|DARE/i.test(d)&&/ICMS/i.test(d)) return 'ICMS';
+  if(/DAE/i.test(d)) return 'DAE';
+  if(/DARE/i.test(d)) return 'DARE';
+  return (_lancctbNomeTributoLegivel(d).nomeCompleto)||d;
+}
 function _lancctbTributosAbrirImportar(){
   let inp=document.getElementById('lancctbTributosArqInput');
   if(!inp){ inp=document.createElement('input'); inp.type='file'; inp.accept='.pdf'; inp.multiple=true; inp.id='lancctbTributosArqInput'; inp.style.display='none'; inp.onchange=()=>{ const fs=[...inp.files]; inp.value=''; if(fs.length) _lancctbTributosImportar(fs); }; document.body.appendChild(inp); }
@@ -46617,17 +46640,18 @@ async function _lancctbTributosImportar(arquivos){
         ex=await _lancctbExtrairValorPdfTributo(pdf,false,s=>_lancctbFolhaPainel('🧾 Importando tributos…','<b>'+esc(f.name)+'</b><br>'+esc(s),false));
       }catch(e){ console.warn('Tributos: falha ao ler',f.name,e); }
       if(!ex||(!(ex.valor>0)&&!ex.multiGnre)){ rep.naoLidos.push(f.name); continue; }
-      const nomeTrib=(_lancctbNomeTributoLegivel(info.descricao).nomeCompleto)||info.descricao;
+      const nomeTrib=_lancctbTribRotulo(info.descricao,ex.multiGnre?null:ex);
       const compNome=_lancctbExtrairCompetenciaDoNome(info.descricao);
       const guias=ex.multiGnre?ex.multiGnre.map(g=>({ex:g.extraido,pag:g.pagina})):[{ex,pag:null}];
       for(const g of guias){
         if(!g.ex.competencia&&compNome) g.ex.competencia=compNome.replace('.','/');
-        const ls=_lancctbTributosLinhasDaGuia(g.ex,nomeTrib,g.pag);
+        const nomeG=ex.multiGnre?_lancctbTribRotulo(info.descricao,g.ex):nomeTrib;
+        const ls=_lancctbTributosLinhasDaGuia(g.ex,nomeG,g.pag);
         if(!ls.length) continue;
         const soma=Math.round(ls.reduce((s,l)=>s+Math.round(l.valor*100),0))/100;
         if(Math.abs(soma-ls[0].valor_guia)>0.02) rep.divergeSoma.push(f.name+' (itens R$ '+_fmt(soma)+' × guia R$ '+_fmt(ls[0].valor_guia)+')');
         const codigos=ls.map(l=>l.codigo||'-').sort().join(',');
-        const docChave=[info.eid,info.vencimento||'sem-venc',ls[0].valor_guia.toFixed(2),(nomeTrib||'').toUpperCase().replace(/[^A-Z0-9]/g,'').slice(0,24),g.pag||0,codigos].join('|');
+        const docChave=[info.eid,info.vencimento||'sem-venc',ls[0].valor_guia.toFixed(2),g.pag||0,codigos].join('|'); // sem o NOME na chave: o rótulo pode melhorar sem duplicar o que já foi importado
         if(guiasVistas.has(info.eid+'|'+docChave)){ rep.duplicadas+=ls.length; continue; }
         guiasVistas.add(info.eid+'|'+docChave); rep.guias++;
         ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:String(info.eid), doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:info.vencimento||null, unidade:(getFiliais(info.eid).length?String(info.eid):null), setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
