@@ -36565,7 +36565,7 @@ function _lancctbIcmsAcharPagamento(l,ctx){
   const hist=String(l.historico_bancario||'');
   if(!_lancctbHistoricoEhTributo(hist)) return null; // só histórico que NORMALMENTE é tributo (Sispag Tributos, Impostos GNRE…) — nunca Sispag Fornecedores/PIX comum
   const h=_convMpRemoverAcentos(hist.toUpperCase());
-  if(!/GNRE|\bDUA\b|\bDAE\b|SEFAZ|\bGOV\b|FAZENDA|ICMS|TRIBUTOS|IMPOSTOS/.test(h)) return null;
+  if(!/GNRE|\bDUA\b|\bDAE\b|SEFAZ|\bGOV\b|FAZENDA|ICMS|TRIBUTOS|\bTRIB\b|IMPOSTOS/.test(h)) return null; // 'Sispag TRIB COD BARRAS' (Itaú da Kazangil) também é tributo
   if(/DARF|RECEITA FEDERAL|\bGPS\b|FGTS|\bDAS\b|SIMPLES|\bINSS\b|ISS\b/.test(h)) return null;
   const ufH=_lancctbUfDoTexto(hist);
   const cents=Math.round((l.valor_saida||0)*100); if(cents<=0) return null;
@@ -36777,9 +36777,13 @@ async function _lancctbIcmsCarregarCtx(eid,pendencias){
       const dsF=(pendencias||[]).map(l=>l.data_pagamento).filter(Boolean).sort();
       if(dsF.length){
         const { data: fxs } = await _lancctbFetchTudo(()=>_supaClient.from('fluxo_caixa_lancamentos').select('data,descricao,cliente_fornecedor_nome,valor_saida').eq('empresa_eid',eid).is('lancamento_extrato_id',null).gt('valor_saida',0).gte('data',dsF[0]).lte('data',dsF[dsF.length-1]).or('descricao.ilike.%PARTILHADO%,descricao.ilike.%DIFAL%,descricao.ilike.%GNRE%,descricao.ilike.%ICMS%,descricao.ilike.%FCP%'));
-        const porVD=new Map(); (fxs||[]).forEach(f=>{ const k=f.data+'|'+Math.round(Number(f.valor_saida||0)*100); (porVD.get(k)||porVD.set(k,[]).get(k)).push(f); });
-        (pendencias||[]).forEach(l=>{ if(ctx.fluxo[l.id]) return; const c=porVD.get(l.data_pagamento+'|'+Math.round(Number(l.valor_saida||0)*100)); if(!c||c.length!==1) return;
-          const d=String(c[0].descricao||''), mNf=d.match(/\bNF\s*(\d+)/i), mUf=d.match(/(?:PARTILHADO|ICMS(?:\s+(?:ST|DIFAL))?|DIFAL|ST|FCP)\s*\/\s*([A-Z]{2})\b/i);
+        const porV=new Map(); (fxs||[]).forEach(f=>{ const k=Math.round(Number(f.valor_saida||0)*100); (porV.get(k)||porV.set(k,[]).get(k)).push(f); });
+        (pendencias||[]).forEach(l=>{ if(ctx.fluxo[l.id]) return;
+          // mesmo valor e mesma data; se não houver, a ÚNICA linha de mesmo valor até 3 dias de distância (Kazangil: GNRE PA no Fluxo dia 20, pago dia 21)
+          let c=(porV.get(Math.round(Number(l.valor_saida||0)*100))||[]).filter(f=>f.data===l.data_pagamento);
+          if(!c.length) c=(porV.get(Math.round(Number(l.valor_saida||0)*100))||[]).filter(f=>Math.abs(new Date(f.data+'T00:00:00')-new Date(l.data_pagamento+'T00:00:00'))<=3*86400000);
+          if(c.length!==1) return;
+          const d=String(c[0].descricao||''), mNf=d.match(/\bNF\s*(\d+)/i), mUf=d.match(/(?:PARTILHADO|ICMS(?:\s+(?:ST|DIFAL))?|DIFAL|ST|FCP)\s*\/\s*([A-Z]{2})\b/i)||d.match(/\bGNRE\s*[-/ ]\s*([A-Z]{2})\b/i)||String(c[0].cliente_fornecedor_nome||'').match(/\bGNRE\s*[-/ ]\s*([A-Z]{2})\b/i);
           ctx.fluxo[l.id]=[{ nf:mNf?mNf[1].replace(/^0+/,''):'', uf:mUf?mUf[1].toUpperCase():_lancctbUfDoTexto(c[0].cliente_fornecedor_nome||'') }]; });
       }
     }catch(e){ console.warn('ICMS: Fluxo não ligado não lido:',e); }
