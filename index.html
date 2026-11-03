@@ -26273,8 +26273,21 @@ async function _lancctbProcessarFopag(){
             if(!conta){ ok=false; return; }
             linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta.classificacao, conta_contabil_id:conta.id, tipo:'D', valor:Math.round(Number(cp.valor_pago)*100)/100, historico:`Pagamento ao sócio ${cp.cliente_fornecedor_nome}`, cliente_fornecedor_nome:cp.cliente_fornecedor_nome||null, cnpj_cpf:cp.cnpj_cpf||null, comprovante_id:cp.id, lancamento_extrato_id:l.id, origem_match:'regra' });
           });
-          if(ok){
+          // O RESTO pode ser mais de uma folha (04/09: salário 08/2026 R$ 7.373,81 + férias 09/2026 R$ 2.564,54 = R$ 9.938,35): procura a ÚNICA combinação de relatórios de líquidos (menor nº deles) que fecha o resto
+          // exato e abre POR PESSOA, cada uma na sua conta; sem combinação única, o resto inteiro vai como salário do mês anterior.
+          let relsSel=null;
+          { const rels=relatorios.filter(r=>r.dados&&r.dados.total>0&&(r.dados.pessoas||[]).length).slice(0,10), alvoC=Math.round(resto*100), achados=[];
+            for(let m=1;m<(1<<rels.length);m++){ let t=0; for(let k=0;k<rels.length;k++) if(m&(1<<k)) t+=Math.round(rels[k].dados.total*100); if(t===alvoC) achados.push(m); }
+            if(achados.length){ const nb=m=>m.toString(2).split('1').length-1, menor=Math.min(...achados.map(nb)), melhores=achados.filter(m=>nb(m)===menor); if(melhores.length===1) relsSel=rels.filter((r,k)=>melhores[0]&(1<<k)); } }
+          if(ok&&relsSel){
+            relsSel.forEach(r=>(r.dados.pessoas||[]).forEach(pp=>{
+              const c=contaDaPessoa(pp,r.tipo); if(!c){ ok=false; return; }
+              linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:c.classificacao, conta_contabil_id:c.id, tipo:'D', valor:Math.round(pp.valor*100)/100, historico:(String(c.classificacao||'').startsWith('1.2.9')?`Pagamento ao sócio ${pp.nome}`:`Pagamento ref. ${_rotP(pp,r.tipo)} ${r.dados.competencia||r.competencia} - ${pp.nome}`), cliente_fornecedor_nome:pp.nome||null, cnpj_cpf:pp.cpf||null, lancamento_extrato_id:l.id, origem_match:'regra' });
+            }));
+          } else if(ok){
             linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:contaSalario.classificacao, conta_contabil_id:contaSalario.id, tipo:'D', valor:resto, historico:`Pagamento ref. salário ${cAnt.replace('-','/')}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+          }
+          if(ok){
             const somaD=Math.round(linhas.filter(x=>x.tipo==='D').reduce((a,x)=>a+x.valor,0)*100)/100;
             if(Math.abs(somaD-l.valor_saida)<=0.01){
               const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
