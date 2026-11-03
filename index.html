@@ -22805,6 +22805,7 @@ const LANCCTB_ABAS=[
   {id:'fluxo-caixa', label:'Fluxo de Caixa'},
   {id:'aplicacoes', label:'Aplicações Financeiras'},
   {id:'icms', label:'ICMS'}, // oculta por padrão (liga no ⚙️): base de DIFAL/ST por NF que o Processar Tributos usa pra reconhecer pagamentos de ICMS
+  {id:'folha', label:'Folha'}, // Relação Geral dos Líquidos importada em lote (PDF de várias empresas) — conciliação com o extrato
   {id:'plano', label:'Plano de Contas'},
   {id:'regras', label:'Regras'},
   {id:'agencias', label:'Agência Bancária'},
@@ -23224,6 +23225,7 @@ function renderLancctbLista(){
     <button class="btn bo bsm" onclick="abrirLancctbImportarMesTodasModal()" title="Roda 'Importar mês' (pasta SIEG + Portal NFS-e) pra CADA empresa desta listagem, uma de cada vez">📥 Importar NF de todas as empresas</button>
     <button class="btn bo bsm" onclick="abrirLancctbImportarExtratosLoteModal()" title="Busca o Extrato de UMA competência em todas as contas bancárias (de qualquer empresa) que já têm pasta de rede associada">📁 Importar Extratos de todas as empresas</button>
     <button class="btn bo bsm" style="border-color:#dc2626;color:#dc2626;font-weight:700" onclick="abrirLancctbUnecontModal()" title="Lê as planilhas da pasta UneCont (NFS-e tomadas, com retenções) e importa só as notas que ainda não existem. Nota cancelada nunca entra.">📊 Importar UneCont</button>
+    <button class="btn bo bsm" style="border-color:#0f766e;color:#0f766e;font-weight:700" onclick="_lancctbFolhaAbrirImportar()" title="Importa os PDFs de folha (Relação Geral dos Líquidos: salário, adiantamento, férias, 13º, rescisão) de TODAS as empresas de uma vez. A empresa, o tipo e a competência vêm do próprio PDF; o que já foi importado é ignorado.">👥 Importar Folha (PDF)</button>
   </div>`:'')+`
   <div class="tw" style="overflow-x:auto;max-height:calc(100vh - 320px);overflow-y:auto">
     <table class="data" style="width:100%">
@@ -23740,6 +23742,7 @@ function renderLancctbConteudo(){
   const aba=LANCCTB_ABAS.find(a=>a.id===_lancctbAbaAtiva);
   if(aba&&aba.tipoDoc){ renderLancctbNotas(aba); return; }
   if(_lancctbAbaAtiva==='importar-xmls'){ renderLancctbImportarXmls(); return; }
+  if(_lancctbAbaAtiva==='folha'){ renderLancctbFolha(); return; }
   if(_lancctbAbaAtiva==='plano'){ renderLancctbPlanoContas(); return; }
   if(_lancctbAbaAtiva==='agencias'){ renderLancctbAgencias(); return; }
   if(_lancctbAbaAtiva==='comprovantes'){ renderLancctbComprovantes(); return; }
@@ -23768,7 +23771,7 @@ function renderLancctbConteudo(){
 // Quem espera uma dessas telas (await renderLancctbRegistroContabil() em "Processar Tributos") continua esperando até a tela final.
 // Se uma tela ficar presa por mais de 30s, um novo pedido passa por cima dela (não trava a navegação).
 window.addEventListener('load',function(){
-  const NOMES=['renderLancctbImportarXmls','renderLancctbNotas','renderLancctbPlanoContas','renderLancctbAgencias','renderLancctbAplicacoes','renderLancctbRegras','renderLancctbRegistroContabil','renderLancctbComprovantes','renderLancctbComprovantesReceb','renderLancctbComprovantesSalarios','renderLancctbFluxoCaixa','renderLancctbExtrato'];
+  const NOMES=['renderLancctbFolha','renderLancctbImportarXmls','renderLancctbNotas','renderLancctbPlanoContas','renderLancctbAgencias','renderLancctbAplicacoes','renderLancctbRegras','renderLancctbRegistroContabil','renderLancctbComprovantes','renderLancctbComprovantesReceb','renderLancctbComprovantesSalarios','renderLancctbFluxoCaixa','renderLancctbExtrato'];
   let emAndamento=false, inicio=0, pendente=null;
   function mostrarErro(e){
     console.error('Erro ao carregar a tela:',e);
@@ -46328,6 +46331,181 @@ function _lancctbPrepararUploadExtratoOculto(){
       <button class="btn bo" onclick="closeModal('mLancctbUpload')">Cancelar</button>
       <button class="btn bp" id="lancctbExtratoProcessarBtn" onclick="processarLancctbUploadExtrato(false)">▶ Extrair</button>
     </div>`;
+}
+// ═══ FOLHA (Relação Geral dos Líquidos) — pedido do usuário 03/11/2026 ═══════════════════════════════════════════════════════════════════════════════════════════
+// O contador sobe, todo mês, os PDFs de folha (salário, adiantamento, férias, 13º, rescisão) de VÁRIAS empresas num só arquivo. O site lê a empresa (CNPJ), o tipo de cálculo e a competência no próprio PDF
+// (mesmo leitor do "FOPAG do Mês"), guarda SÓ OS DADOS (nunca o arquivo) na tabela folha_liquidos e a aba "Folha" de cada empresa mostra tudo, com a coluna "Conciliado" (qual extrato matou cada linha).
+// Duplicidade: a mesma pessoa/tipo/competência já gravada é ignorada (contada no relatório); valor diferente do já gravado NÃO sobrescreve — fica avisado.
+const _LANCCTB_FOLHA_ROTULO_TIPO={ salario:'Salário', adiantamento:'Adiantamento', ferias:'Férias', decimo13:'13º salário', rescisao:'Rescisão' };
+function _lancctbFolhaRotuloLinha(r){ return r.categoria==='CONTRIBUTOR'||r.categoria==='contribuinte'?'pró-labore':(LIQ_ROTULO_FOLHA[r.tipo]||'salário'); }
+function _lancctbFolhaMapaCnpjEid(){
+  const dig=x=>String(x||'').replace(/\D/g,''), m=new Map();
+  (S.g('emps')||[]).forEach(e=>{
+    const eid=String(e.eid);
+    [e.cnpjNum,e.cnpj].forEach(c=>{ const d=dig(c); if(d.length===14||d.length===11) m.set(d,eid); });
+    try{ (getFiliais(eid)||[]).forEach(f=>{ const d=dig(f.cnpj); if(d.length===14||d.length===11) m.set(d,eid); }); }catch(e2){}
+  });
+  return m;
+}
+function _lancctbFolhaAbrirImportar(){
+  let inp=document.getElementById('lancctbFolhaArqInput');
+  if(!inp){ inp=document.createElement('input'); inp.type='file'; inp.accept='.pdf'; inp.multiple=true; inp.id='lancctbFolhaArqInput'; inp.style.display='none'; inp.onchange=()=>{ const fs=[...inp.files]; inp.value=''; if(fs.length) _lancctbFolhaImportar(fs); }; document.body.appendChild(inp); }
+  inp.click();
+}
+function _lancctbFolhaPainel(titulo,html,fechavel){
+  let p=document.getElementById('lancctbFolhaPainel');
+  if(!p){ p=document.createElement('div'); p.id='lancctbFolhaPainel'; p.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px'; document.body.appendChild(p); }
+  p.innerHTML='<div style="background:var(--bg,#0f172a);color:var(--ink,#e2e8f0);border:1px solid var(--border);border-radius:10px;max-width:760px;width:100%;max-height:86vh;overflow:auto;padding:18px 20px">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px"><h3 style="margin:0;font-size:15px">'+titulo+'</h3>'+(fechavel?'<button class="btn bo bsm" onclick="document.getElementById(\'lancctbFolhaPainel\').remove()">Fechar</button>':'')+'</div>'
+    +'<div style="font-size:12.5px;line-height:1.55">'+html+'</div></div>';
+}
+async function _lancctbFolhaImportar(arquivos){
+  const mapa=_lancctbFolhaMapaCnpjEid();
+  const rep={ arquivos:arquivos.length, naoLidos:[], blocos:0, tipoDesconhecido:0, semEmpresa:new Map(), novas:0, duplicadas:0, valorDiferente:[], erros:0, divergeTotal:[], porEmp:new Map() };
+  const linhas=new Map(); // chave completa -> linha (já tira duplicidade dentro do próprio envio)
+  try{
+    for(let i=0;i<arquivos.length;i++){
+      const f=arquivos[i];
+      _lancctbFolhaPainel('👥 Importando folha…','Lendo <b>'+esc(f.name)+'</b> ('+(i+1)+' de '+arquivos.length+')…',false);
+      let r=null;
+      try{ const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise; r=await _lancctbParsearLiquidosDominio(pdf); }catch(e){ console.warn('Folha: falha ao ler',f.name,e); }
+      if(!r){ rep.naoLidos.push(f.name); continue; }
+      for(const b of r.blocks){
+        rep.blocos++;
+        const tipo=LIQ_TIPO_PARA_FOPAG[b.calculationType]; if(!tipo){ rep.tipoDesconhecido++; continue; }
+        const eid=mapa.get(String(b.entityDocument||'').replace(/\D/g,''));
+        if(!eid){ rep.semEmpresa.set(b.entityDocument,b.entityName||''); continue; }
+        if(b.flags&&b.flags.includes('PAYROLL_TOTAL_MISMATCH')) rep.divergeTotal.push((b.entityName||b.entityDocument)+' — '+(_LANCCTB_FOLHA_ROTULO_TIPO[tipo]||tipo)+' '+String(b.competenceMonth).padStart(2,'0')+'/'+b.competenceYear);
+        const comp=b.competence;
+        for(const p of b.people){
+          const chavePessoa=p.cpf?String(p.cpf).replace(/\D/g,''):('N:'+p.nameNormalized);
+          const k=[eid,tipo,comp,chavePessoa].join('|');
+          const valor=Math.round(p.amountCents)/100;
+          if(linhas.has(k)){ if(Math.abs(linhas.get(k).valor-valor)>0.004) rep.valorDiferente.push(p.name+' ('+(_LANCCTB_FOLHA_ROTULO_TIPO[tipo]||tipo)+' '+comp+')'); else rep.duplicadas++; continue; }
+          linhas.set(k,{ empresa_eid:eid, tipo, competencia:comp, chave_pessoa:chavePessoa, codigo:p.code||null, nome:p.name, cpf:p.cpf||null, categoria:p.category||null, valor, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null });
+        }
+      }
+    }
+    // confere com o que já está gravado (mesma empresa e competência)
+    _lancctbFolhaPainel('👥 Importando folha…','Conferindo duplicidades…',false);
+    const porEidComp=new Map(); linhas.forEach(l=>{ const k=l.empresa_eid+'|'+l.competencia; if(!porEidComp.has(k)) porEidComp.set(k,[]); porEidComp.get(k).push(l); });
+    const novas=[];
+    for(const [k,lista] of porEidComp){
+      const [eid,comp]=k.split('|');
+      const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('folha_liquidos').select('tipo,chave_pessoa,valor,nome').eq('empresa_eid',eid).eq('competencia',comp).order('id'));
+      const jaTem=new Map((ex||[]).map(x=>[x.tipo+'|'+x.chave_pessoa,x]));
+      lista.forEach(l=>{
+        const x=jaTem.get(l.tipo+'|'+l.chave_pessoa);
+        if(!x) novas.push(l);
+        else if(Math.abs(Number(x.valor)-l.valor)>0.004) rep.valorDiferente.push(l.nome+' ('+(_LANCCTB_FOLHA_ROTULO_TIPO[l.tipo]||l.tipo)+' '+l.competencia+': já gravado R$ '+_fmt(Number(x.valor))+', no arquivo R$ '+_fmt(l.valor)+')');
+        else rep.duplicadas++;
+      });
+    }
+    for(let i=0;i<novas.length;i+=200){
+      const lote=novas.slice(i,i+200);
+      _lancctbFolhaPainel('👥 Importando folha…','Gravando '+Math.min(i+200,novas.length)+' de '+novas.length+' linha(s)…',false);
+      const { error } = await _supaClient.from('folha_liquidos').upsert(lote,{onConflict:'empresa_eid,tipo,competencia,chave_pessoa',ignoreDuplicates:true});
+      if(error){ console.error('Folha: erro ao gravar',error); rep.erros+=lote.length; } else { rep.novas+=lote.length; lote.forEach(l=>rep.porEmp.set(l.empresa_eid,(rep.porEmp.get(l.empresa_eid)||0)+1)); }
+    }
+  }catch(e){ console.error('Folha: importação',e); rep.erros++; }
+  const nomeEmp=eid=>{ const e=(S.g('emps')||[]).find(x=>String(x.eid)===String(eid)); return e?e.nome:eid; };
+  const lista=(arr,max)=>arr.slice(0,max).map(x=>'<li>'+esc(x)+'</li>').join('')+(arr.length>max?'<li>… e mais '+(arr.length-max)+'</li>':'');
+  let h='<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin-bottom:8px">'
+    +'<b style="color:var(--teal)">'+rep.novas+'</b><span>linha(s) nova(s) gravada(s) em '+rep.porEmp.size+' empresa(s)</span>'
+    +'<b>'+rep.duplicadas+'</b><span>repetida(s) — já estavam gravadas ou apareceram 2x nos arquivos (ignoradas)</span>'
+    +'<b>'+rep.arquivos+'</b><span>arquivo(s) · '+rep.blocos+' relatório(s) de empresa lidos</span></div>';
+  if(rep.valorDiferente.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ '+rep.valorDiferente.length+' com valor diferente do já gravado (mantive o que estava; se o novo está certo, exclua o antigo e importe de novo):</b><ul style="margin:4px 0 0 18px">'+lista(rep.valorDiferente,12)+'</ul></div>';
+  if(rep.semEmpresa.size) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ '+rep.semEmpresa.size+' CNPJ/CPF sem empresa cadastrada (não importados):</b><ul style="margin:4px 0 0 18px">'+[...rep.semEmpresa].slice(0,12).map(([d,n])=>'<li>'+esc(n||'')+' — '+esc(_fmtCnpjCpf(d))+'</li>').join('')+'</ul></div>';
+  if(rep.divergeTotal.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ A soma das pessoas não bate com o "Total da Empresa" do relatório:</b><ul style="margin:4px 0 0 18px">'+lista(rep.divergeTotal,8)+'</ul></div>';
+  if(rep.naoLidos.length) h+='<div style="margin-top:8px;color:var(--red)"><b>Não reconheci como Relação Geral dos Líquidos:</b><ul style="margin:4px 0 0 18px">'+lista(rep.naoLidos,8)+'</ul></div>';
+  if(rep.tipoDesconhecido) h+='<div style="margin-top:8px;color:#d97706">'+rep.tipoDesconhecido+' relatório(s) de tipo de cálculo que não conheço (ignorados).</div>';
+  if(rep.erros) h+='<div style="margin-top:8px;color:var(--red)"><b>'+rep.erros+' linha(s) deram erro ao gravar</b> — veja o console.</div>';
+  _lancctbFolhaPainel('👥 Folha importada',h,true);
+  if(_lancctbAbaAtiva==='folha') renderLancctbFolha();
+}
+
+let _lancctbFolhaFiltro={ mes:'', tipo:'', status:'', busca:'' };
+let _lancctbFolhaLinhasCache=[];
+async function renderLancctbFolha(){
+  const el=document.getElementById('lancctbConteudoAba'); const eid=_lancctbEidAtual; if(!el||!eid||!_supaClient) return;
+  _lancctbCarregando(el);
+  const { data: rows, error } = await _lancctbFetchTudo(()=>_supaClient.from('folha_liquidos').select('id,tipo,competencia,codigo,nome,cpf,categoria,valor,arquivo,importado_em').eq('empresa_eid',eid).order('competencia',{ascending:false}).order('tipo').order('nome'));
+  if(error){ el.innerHTML='<div style="padding:20px;color:var(--red)">Erro ao carregar a folha: '+esc(error.message)+'</div>'; return; }
+  // Conciliação: lançamentos contábeis gerados pelo Processar FOPAG ("Pagamento ref. salário 08-2026 - NOME") apontam o extrato que matou a linha
+  const re=/^Pagamento ref\. (salário|adiantamento|férias|13º salário|rescisão|pró-labore) (\d{2})[-\/](\d{4}) - (.+)$/;
+  const concil=new Map(); const extIds=new Set();
+  try{
+    const { data: lcs } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_contabeis').select('historico,lancamento_extrato_id,valor').eq('empresa_eid',eid).eq('estornado',false).eq('tipo','D').like('historico','Pagamento ref.%').order('id'));
+    (lcs||[]).forEach(x=>{ const m=String(x.historico||'').match(re); if(!m||!x.lancamento_extrato_id) return; const k=m[1]+'|'+m[3]+'-'+m[2]+'|'+_liqNormalizarNome(m[4]); if(!concil.has(k)) concil.set(k,{ext:x.lancamento_extrato_id,valor:Number(x.valor)}); extIds.add(x.lancamento_extrato_id); });
+  }catch(e){ console.warn('Folha: conciliação não carregada',e); }
+  const extMap=new Map(); const bancos=new Map();
+  try{
+    const ids=[...extIds];
+    for(let i=0;i<ids.length;i+=200){ const { data: xs } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,conta_bancaria_id').in('id',ids.slice(i,i+200)); (xs||[]).forEach(x=>extMap.set(x.id,x)); }
+    const { data: ags } = await _supaClient.from('agencias_bancarias').select('id,banco_nome').eq('empresa_eid',eid); (ags||[]).forEach(a=>bancos.set(a.id,a.banco_nome));
+  }catch(e){ console.warn('Folha: extratos não carregados',e); }
+  _lancctbFolhaLinhasCache=(rows||[]).map(r=>{
+    const k=_lancctbFolhaRotuloLinha(r)+'|'+r.competencia+'|'+_liqNormalizarNome(r.nome);
+    const c=concil.get(k), x=c&&extMap.get(c.ext);
+    return {...r, conciliado:!!c, extrato:x?{data:x.data_pagamento,valor:x.valor_saida,banco:bancos.get(x.conta_bancaria_id)||''}:null };
+  });
+  _lancctbFolhaDesenhar();
+}
+function _lancctbFolhaFiltrar(){
+  const f=_lancctbFolhaFiltro, b=_convMpRemoverAcentos(String(f.busca||'').toLowerCase()).trim();
+  return _lancctbFolhaLinhasCache.filter(r=>(!f.mes||r.competencia===f.mes)&&(!f.tipo||(f.tipo==='prolabore'?(r.categoria==='CONTRIBUTOR'):(r.tipo===f.tipo&&r.categoria!=='CONTRIBUTOR')))&&(!f.status||(f.status==='conc'?r.conciliado:!r.conciliado))&&(!b||_convMpRemoverAcentos((r.nome||'').toLowerCase()).includes(b)||String(r.cpf||'').includes(b.replace(/\D/g,'')||'§')));
+}
+function _lancctbFolhaSet(campo,v){ _lancctbFolhaFiltro[campo]=v; _lancctbFolhaDesenhar(); }
+function _lancctbFolhaDesenhar(){
+  const el=document.getElementById('lancctbConteudoAba'); if(!el) return;
+  const todas=_lancctbFolhaLinhasCache, lista=_lancctbFolhaFiltrar(), f=_lancctbFolhaFiltro;
+  const soma=a=>Math.round(a.reduce((s,r)=>s+Math.round(Number(r.valor)*100),0))/100;
+  const conc=lista.filter(r=>r.conciliado), pend=lista.filter(r=>!r.conciliado);
+  const mesesDisp=[...new Set(todas.map(r=>r.competencia))].sort().reverse();
+  const nomeTipo=r=>r.categoria==='CONTRIBUTOR'?'Pró-labore':(_LANCCTB_FOLHA_ROTULO_TIPO[r.tipo]||r.tipo);
+  const corTipo=r=>r.categoria==='CONTRIBUTOR'?'#7c3aed':({salario:'#0f766e',adiantamento:'#2563eb',ferias:'#d97706',decimo13:'#be185d',rescisao:'#dc2626'}[r.tipo]||'var(--slate)');
+  const fmtD=d=>d?new Date(d+'T00:00:00').toLocaleDateString('pt-BR'):'';
+  let h='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
+    +'<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--slate);border:1px solid var(--border);border-radius:6px;padding:3px 8px">Competência <select class="si" style="font-size:12px" onchange="_lancctbFolhaSet(\'mes\',this.value)"><option value="">Todas</option>'+mesesDisp.map(m=>'<option value="'+m+'" '+(f.mes===m?'selected':'')+'>'+m.slice(5)+'/'+m.slice(0,4)+'</option>').join('')+'</select></span>'
+    +'<select class="si" style="font-size:12px" onchange="_lancctbFolhaSet(\'tipo\',this.value)"><option value="">Todos os tipos</option>'+[['salario','Salário'],['adiantamento','Adiantamento'],['ferias','Férias'],['decimo13','13º salário'],['rescisao','Rescisão'],['prolabore','Pró-labore']].map(([v,t])=>'<option value="'+v+'" '+(f.tipo===v?'selected':'')+'>'+t+'</option>').join('')+'</select>'
+    +'<select class="si" style="font-size:12px" onchange="_lancctbFolhaSet(\'status\',this.value)"><option value="">Conciliado: todos</option><option value="conc" '+(f.status==='conc'?'selected':'')+'>Conciliados</option><option value="pend" '+(f.status==='pend'?'selected':'')+'>Pendentes</option></select>'
+    +'<input class="si" placeholder="🔎 empregado ou CPF" value="'+esc(f.busca)+'" style="font-size:12px;min-width:190px" oninput="_lancctbFolhaFiltro.busca=this.value;clearTimeout(window.__folhaT);window.__folhaT=setTimeout(_lancctbFolhaDesenhar,300)">'
+    +'<span style="margin-left:auto;display:flex;gap:8px;align-items:center"><button class="btn bo bsm" onclick="_lancctbFolhaAbrirImportar()" title="Importa os PDFs de folha de TODAS as empresas de uma vez (a empresa vem do próprio PDF)">⬆ Importar PDFs de folha</button>'
+    +'<button class="action-btn action-btn-excel" onclick="_lancctbFolhaExcel()">📊 Gerar Excel</button>'
+    +'<button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="_lancctbFolhaExcluirFiltradas()" title="Apaga da Folha as linhas que estão filtradas na tela (os dados vêm do PDF e podem ser importados de novo)">🗑️ Excluir filtradas</button></span></div>';
+  h+='<div style="font-size:12.5px;margin-bottom:8px;color:var(--ink)">'+lista.length+' linha(s) · Total <b>R$ '+_fmt(soma(lista))+'</b> · <span style="color:var(--teal)">Conciliado <b>R$ '+_fmt(soma(conc))+'</b> ('+conc.length+')</span> · <span style="color:#d97706">Pendente <b>R$ '+_fmt(soma(pend))+'</b> ('+pend.length+')</span></div>';
+  if(!todas.length){
+    h+='<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma folha importada para esta empresa ainda.<br>Use <b>⬆ Importar PDFs de folha</b> — o mesmo botão também fica na lista de Lançamentos Contábeis e importa todas as empresas do arquivo.</div>';
+  } else {
+    h+='<div style="overflow:auto;max-height:calc(100vh - 330px)"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">'
+      +['Competência','Tipo','Empregado','CPF','Cód.','Valor','Conciliado','Extrato que matou','Importado em'].map((t,i)=>'<th style="padding:8px 10px;text-align:'+(i===5?'right':(i===6?'center':'left'))+'">'+t+'</th>').join('')+'</tr></thead><tbody>'
+      +lista.slice(0,1500).map(r=>'<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 10px">'+r.competencia.slice(5)+'/'+r.competencia.slice(0,4)+'</td>'
+        +'<td style="padding:6px 10px"><span style="color:'+corTipo(r)+';font-weight:600">'+esc(nomeTipo(r))+'</span></td>'
+        +'<td style="padding:6px 10px">'+esc(r.nome)+'</td><td style="padding:6px 10px;font-family:var(--mono);font-size:11.5px">'+esc(r.cpf?r.cpf.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/,'$1.$2.$3-$4'):'—')+'</td>'
+        +'<td style="padding:6px 10px">'+esc(r.codigo||'')+'</td><td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums">R$ '+_fmt(Number(r.valor))+'</td>'
+        +'<td style="padding:6px 10px;text-align:center">'+(r.conciliado?'<span style="color:var(--teal);font-weight:700">✔ sim</span>':'<span style="color:#d97706">pendente</span>')+'</td>'
+        +'<td style="padding:6px 10px;font-size:11.5px">'+(r.extrato?esc((r.extrato.banco||'Banco')+' · '+fmtD(r.extrato.data)+' · R$ '+_fmt(Number(r.extrato.valor))+' (extrato de '+(r.extrato.data?r.extrato.data.slice(5,7)+'/'+r.extrato.data.slice(0,4):'')+')'):(r.conciliado?'<span style="color:var(--slate)">baixado (extrato não localizado)</span>':'—'))+'</td>'
+        +'<td style="padding:6px 10px;font-size:11px;color:var(--slate)" title="'+esc(r.arquivo||'')+'">'+(r.importado_em?new Date(r.importado_em).toLocaleDateString('pt-BR'):'')+'</td></tr>').join('')
+      +'</tbody></table>'+(lista.length>1500?'<div style="padding:8px;color:var(--slate)">Mostrando 1.500 de '+lista.length+' — refine o filtro.</div>':'')+'</div>';
+  }
+  _lancctbSetConteudo(el,h);
+}
+function _lancctbFolhaExcel(){
+  const lista=_lancctbFolhaFiltrar(); if(!lista.length){ toast('Nada para exportar com os filtros atuais.','err'); return; }
+  const nomeTipo=r=>r.categoria==='CONTRIBUTOR'?'Pró-labore':(_LANCCTB_FOLHA_ROTULO_TIPO[r.tipo]||r.tipo);
+  const aoa=[['Competência','Tipo','Empregado','CPF','Cód.','Valor','Conciliado','Banco do extrato','Data do extrato','Valor do extrato','Arquivo'],
+    ...lista.map(r=>[r.competencia.slice(5)+'/'+r.competencia.slice(0,4),nomeTipo(r),r.nome,r.cpf||'',r.codigo||'',Number(r.valor),r.conciliado?'Sim':'Não',r.extrato?r.extrato.banco:'',r.extrato&&r.extrato.data?new Date(r.extrato.data+'T00:00:00').toLocaleDateString('pt-BR'):'',r.extrato?Number(r.extrato.valor):'',r.arquivo||''])];
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Folha');
+  const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
+  XLSX.writeFile(wb,'Folha_'+String(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.xlsx');
+}
+async function _lancctbFolhaExcluirFiltradas(){
+  if(!_ehKleydson(currentUser)){ toast('Só o Kleydson pode excluir.','err'); return; }
+  const lista=_lancctbFolhaFiltrar(); if(!lista.length){ toast('Nenhuma linha filtrada.','err'); return; }
+  if(!confirm('Excluir '+lista.length+' linha(s) da Folha (as que estão filtradas na tela)?\n\nOs dados vêm do PDF — dá para importar de novo. Nenhum lançamento contábil é alterado.')) return;
+  const ids=lista.map(r=>r.id);
+  for(let i=0;i<ids.length;i+=200){ const { error } = await _supaClient.from('folha_liquidos').delete().in('id',ids.slice(i,i+200)).eq('empresa_eid',_lancctbEidAtual); if(error){ toast('Erro ao excluir: '+error.message,'err'); return; } }
+  toast(ids.length+' linha(s) excluída(s).','ok'); renderLancctbFolha();
 }
 // ─── Importar UneCont (pedido do usuário 31/10/2026) ───────────────────────────────────────────────────────────────────────────────────────────────
 // Planilhas "UneCont - Tomados - <EMPRESA> - <período>.xlsx" (aba "Serviços Tomados": 1 linha por NFS-e tomada, com retenções, valor bruto e líquido) ficam em
