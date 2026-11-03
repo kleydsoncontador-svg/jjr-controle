@@ -46459,7 +46459,7 @@ async function _lancctbFolhaImportar(arquivos){
   if(_lancctbAbaAtiva==='folha') renderLancctbFolha();
 }
 
-let _lancctbFolhaFiltro={ mes:'', tipo:'', status:'', busca:'' };
+let _lancctbFolhaFiltro={ mes:null, comp:'', tipo:'', nome:'', cpf:'', cod:'', valor:'', status:'', extrato:'', imp:'' }; // mes: null = 1ª abertura (competência mais recente); '' = todos os meses
 let _lancctbFolhaLinhasCache=[];
 async function renderLancctbFolha(){
   const el=document.getElementById('lancctbConteudoAba'); const eid=_lancctbEidAtual; if(!el||!eid||!_supaClient) return;
@@ -46479,6 +46479,7 @@ async function renderLancctbFolha(){
     for(let i=0;i<ids.length;i+=200){ const { data: xs } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,conta_bancaria_id').in('id',ids.slice(i,i+200)); (xs||[]).forEach(x=>extMap.set(x.id,x)); }
     const { data: ags } = await _supaClient.from('agencias_bancarias').select('id,banco_nome').eq('empresa_eid',eid); (ags||[]).forEach(a=>bancos.set(a.id,a.banco_nome));
   }catch(e){ console.warn('Folha: extratos não carregados',e); }
+  if(_lancctbFolhaFiltro.mes===null){ const ms=(rows||[]).map(r=>r.competencia).sort(); _lancctbFolhaFiltro.mes=ms.length?ms[ms.length-1]:''; }
   _lancctbFolhaLinhasCache=(rows||[]).map(r=>{
     const k=_lancctbFolhaRotuloLinha(r)+'|'+r.competencia+'|'+_liqNormalizarNome(r.nome);
     const c=concil.get(k), x=c&&extMap.get(c.ext);
@@ -46486,44 +46487,77 @@ async function renderLancctbFolha(){
   });
   _lancctbFolhaDesenhar();
 }
+function _lancctbFolhaNorm(t){ return _convMpRemoverAcentos(String(t||'').toLowerCase()).trim(); }
+function _lancctbFolhaExtratoTexto(r){ return r.extrato?((r.extrato.banco||'')+' '+(r.extrato.data?new Date(r.extrato.data+'T00:00:00').toLocaleDateString('pt-BR'):'')+' '+_fmt(Number(r.extrato.valor))):''; }
 function _lancctbFolhaFiltrar(){
-  const f=_lancctbFolhaFiltro, b=_convMpRemoverAcentos(String(f.busca||'').toLowerCase()).trim();
-  return _lancctbFolhaLinhasCache.filter(r=>(!f.mes||r.competencia===f.mes)&&(!f.tipo||(f.tipo==='prolabore'?(r.categoria==='CONTRIBUTOR'):(r.tipo===f.tipo&&r.categoria!=='CONTRIBUTOR')))&&(!f.status||(f.status==='conc'?r.conciliado:!r.conciliado))&&(!b||_convMpRemoverAcentos((r.nome||'').toLowerCase()).includes(b)||String(r.cpf||'').includes(b.replace(/\D/g,'')||'§')));
+  const f=_lancctbFolhaFiltro, pv=_lancctbFiltroNumPred(f.valor), nm=_lancctbFolhaNorm(f.nome), cp=String(f.cpf||'').replace(/\D/g,''), cod=_lancctbFolhaNorm(f.cod), ex=_lancctbFolhaNorm(f.extrato), im=String(f.imp||'').trim(), cm=String(f.comp||'').trim();
+  return _lancctbFolhaLinhasCache.filter(r=>{
+    if(f.mes&&r.competencia!==f.mes) return false;
+    if(cm&&!(r.competencia.slice(5)+'/'+r.competencia.slice(0,4)).includes(cm)) return false;
+    if(f.tipo&&!(f.tipo==='prolabore'?(r.categoria==='CONTRIBUTOR'):(r.tipo===f.tipo&&r.categoria!=='CONTRIBUTOR'))) return false;
+    if(nm&&!_lancctbFolhaNorm(r.nome).includes(nm)) return false;
+    if(cp&&!String(r.cpf||'').includes(cp)) return false;
+    if(cod&&!_lancctbFolhaNorm(r.codigo).includes(cod)) return false;
+    if(pv&&!pv(Number(r.valor))) return false;
+    if(f.status&&(f.status==='conc')!==r.conciliado) return false;
+    if(ex&&!_lancctbFolhaNorm(_lancctbFolhaExtratoTexto(r)).includes(ex)) return false;
+    if(im&&!(r.importado_em?new Date(r.importado_em).toLocaleDateString('pt-BR'):'').includes(im)) return false;
+    return true;
+  });
 }
-function _lancctbFolhaSet(campo,v){ _lancctbFolhaFiltro[campo]=v; _lancctbFolhaDesenhar(); }
+function _lancctbFolhaSet(campo,v){ _lancctbFolhaFiltro[campo]=v; _lancctbFolhaPintar(); }
+function _lancctbFolhaMudarMes(v){ _lancctbFolhaFiltro.mes=v||''; _lancctbFolhaDesenhar(); } // '' = todos os meses
+let _lancctbFolhaTimer=null;
+function _lancctbFolhaFiltroDeb(campo,v){ _lancctbFolhaFiltro[campo]=v; clearTimeout(_lancctbFolhaTimer); _lancctbFolhaTimer=setTimeout(_lancctbFolhaPintar,250); }
+function _lancctbFolhaNomeTipo(r){ return r.categoria==='CONTRIBUTOR'?'Pró-labore':(_LANCCTB_FOLHA_ROTULO_TIPO[r.tipo]||r.tipo); }
+// Tela inteira (barra de cima + tabela com a linha de filtros sob o cabeçalho). Digitar num filtro repinta só o resumo e o corpo — o campo não perde o foco.
 function _lancctbFolhaDesenhar(){
   const el=document.getElementById('lancctbConteudoAba'); if(!el) return;
-  const todas=_lancctbFolhaLinhasCache, lista=_lancctbFolhaFiltrar(), f=_lancctbFolhaFiltro;
-  const soma=a=>Math.round(a.reduce((s,r)=>s+Math.round(Number(r.valor)*100),0))/100;
-  const conc=lista.filter(r=>r.conciliado), pend=lista.filter(r=>!r.conciliado);
-  const mesesDisp=[...new Set(todas.map(r=>r.competencia))].sort().reverse();
-  const nomeTipo=r=>r.categoria==='CONTRIBUTOR'?'Pró-labore':(_LANCCTB_FOLHA_ROTULO_TIPO[r.tipo]||r.tipo);
-  const corTipo=r=>r.categoria==='CONTRIBUTOR'?'#7c3aed':({salario:'#0f766e',adiantamento:'#2563eb',ferias:'#d97706',decimo13:'#be185d',rescisao:'#dc2626'}[r.tipo]||'var(--slate)');
-  const fmtD=d=>d?new Date(d+'T00:00:00').toLocaleDateString('pt-BR'):'';
-  let h='<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
-    +'<span style="display:inline-flex;align-items:center;gap:6px;font-size:12px;color:var(--slate);border:1px solid var(--border);border-radius:6px;padding:3px 8px">Competência <select class="si" style="font-size:12px" onchange="_lancctbFolhaSet(\'mes\',this.value)"><option value="">Todas</option>'+mesesDisp.map(m=>'<option value="'+m+'" '+(f.mes===m?'selected':'')+'>'+m.slice(5)+'/'+m.slice(0,4)+'</option>').join('')+'</select></span>'
-    +'<select class="si" style="font-size:12px" onchange="_lancctbFolhaSet(\'tipo\',this.value)"><option value="">Todos os tipos</option>'+[['salario','Salário'],['adiantamento','Adiantamento'],['ferias','Férias'],['decimo13','13º salário'],['rescisao','Rescisão'],['prolabore','Pró-labore']].map(([v,t])=>'<option value="'+v+'" '+(f.tipo===v?'selected':'')+'>'+t+'</option>').join('')+'</select>'
-    +'<select class="si" style="font-size:12px" onchange="_lancctbFolhaSet(\'status\',this.value)"><option value="">Conciliado: todos</option><option value="conc" '+(f.status==='conc'?'selected':'')+'>Conciliados</option><option value="pend" '+(f.status==='pend'?'selected':'')+'>Pendentes</option></select>'
-    +'<input class="si" placeholder="🔎 empregado ou CPF" value="'+esc(f.busca)+'" style="font-size:12px;min-width:190px" oninput="_lancctbFolhaFiltro.busca=this.value;clearTimeout(window.__folhaT);window.__folhaT=setTimeout(_lancctbFolhaDesenhar,300)">'
-    +'<span style="margin-left:auto;display:flex;gap:8px;align-items:center"><button class="btn bo bsm" onclick="_lancctbFolhaAbrirImportar()" title="Importa os PDFs de folha de TODAS as empresas de uma vez (a empresa vem do próprio PDF)">⬆ Importar PDFs de folha</button>'
+  const f=_lancctbFolhaFiltro, todas=_lancctbFolhaLinhasCache;
+  const inp=(campo,ph,w)=>'<input class="si" placeholder="'+ph+'" value="'+esc(f[campo])+'" style="width:100%;min-width:'+(w||60)+'px;font-size:11px" oninput="_lancctbFolhaFiltroDeb(\''+campo+'\',this.value)">';
+  let h='<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:10px">'
+    +'<span title="Competência da folha (mês a que o salário, adiantamento ou férias se refere)">'+_lancctbMesPickerHtml(f.mes||'','_lancctbFolhaMudarMes')+'</span>'
+    +'<span id="folhaResumo" style="flex:1;min-width:260px;border:1px solid var(--teal);border-radius:8px;padding:5px 12px;background:var(--teal-bg);font-size:12.5px"></span>'
+    +'<span style="display:flex;gap:8px;align-items:center"><button class="btn bo bsm" onclick="_lancctbFolhaAbrirImportar()" title="Importa os PDFs de folha de TODAS as empresas de uma vez (a empresa vem do próprio PDF)">⬆ Importar PDFs de folha</button>'
     +'<button class="action-btn action-btn-excel" onclick="_lancctbFolhaExcel()">📊 Gerar Excel</button>'
     +'<button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="_lancctbFolhaExcluirFiltradas()" title="Apaga da Folha as linhas que estão filtradas na tela (os dados vêm do PDF e podem ser importados de novo)">🗑️ Excluir filtradas</button></span></div>';
-  h+='<div style="font-size:12.5px;margin-bottom:8px;color:var(--ink)">'+lista.length+' linha(s) · Total <b>R$ '+_fmt(soma(lista))+'</b> · <span style="color:var(--teal)">Conciliado <b>R$ '+_fmt(soma(conc))+'</b> ('+conc.length+')</span> · <span style="color:#d97706">Pendente <b>R$ '+_fmt(soma(pend))+'</b> ('+pend.length+')</span></div>';
   if(!todas.length){
     h+='<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma folha importada para esta empresa ainda.<br>Use <b>⬆ Importar PDFs de folha</b> — o mesmo botão também fica na lista de Lançamentos Contábeis e importa todas as empresas do arquivo.</div>';
-  } else {
-    h+='<div style="overflow:auto;max-height:calc(100vh - 330px)"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">'
-      +['Competência','Tipo','Empregado','CPF','Cód.','Valor','Conciliado','Extrato que matou','Importado em'].map((t,i)=>'<th style="padding:8px 10px;text-align:'+(i===5?'right':(i===6?'center':'left'))+'">'+t+'</th>').join('')+'</tr></thead><tbody>'
-      +lista.slice(0,1500).map(r=>'<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 10px">'+r.competencia.slice(5)+'/'+r.competencia.slice(0,4)+'</td>'
-        +'<td style="padding:6px 10px"><span style="color:'+corTipo(r)+';font-weight:600">'+esc(nomeTipo(r))+'</span></td>'
-        +'<td style="padding:6px 10px">'+esc(r.nome)+'</td><td style="padding:6px 10px;font-family:var(--mono);font-size:11.5px">'+esc(r.cpf?r.cpf.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/,'$1.$2.$3-$4'):'—')+'</td>'
-        +'<td style="padding:6px 10px">'+esc(r.codigo||'')+'</td><td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums">R$ '+_fmt(Number(r.valor))+'</td>'
-        +'<td style="padding:6px 10px;text-align:center">'+(r.conciliado?'<span style="color:var(--teal);font-weight:700">✔ sim</span>':'<span style="color:#d97706">pendente</span>')+'</td>'
-        +'<td style="padding:6px 10px;font-size:11.5px">'+(r.extrato?esc((r.extrato.banco||'Banco')+' · '+fmtD(r.extrato.data)+' · R$ '+_fmt(Number(r.extrato.valor))+' (extrato de '+(r.extrato.data?r.extrato.data.slice(5,7)+'/'+r.extrato.data.slice(0,4):'')+')'):(r.conciliado?'<span style="color:var(--slate)">baixado (extrato não localizado)</span>':'—'))+'</td>'
-        +'<td style="padding:6px 10px;font-size:11px;color:var(--slate)" title="'+esc(r.arquivo||'')+'">'+(r.importado_em?new Date(r.importado_em).toLocaleDateString('pt-BR'):'')+'</td></tr>').join('')
-      +'</tbody></table>'+(lista.length>1500?'<div style="padding:8px;color:var(--slate)">Mostrando 1.500 de '+lista.length+' — refine o filtro.</div>':'')+'</div>';
+    _lancctbSetConteudo(el,h); return;
   }
+  const th=(t,al)=>'<th style="padding:8px 10px;text-align:'+(al||'left')+'">'+t+'</th>';
+  h+='<div style="overflow:auto;max-height:calc(100vh - 300px)"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead>'
+    +'<tr style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">'+th('Competência')+th('Tipo')+th('Empregado')+th('CPF')+th('Cód.')+th('Valor','right')+th('Conciliado','center')+th('Extrato que matou')+th('Importado em')+'</tr>'
+    +'<tr style="background:var(--bg2);position:sticky;top:34px;z-index:5">'
+    +'<th style="padding:4px 6px">'+inp('comp','🔎 mm/aaaa',70)+'</th>'
+    +'<th style="padding:4px 6px"><select class="si" style="width:100%;font-size:11px" onchange="_lancctbFolhaSet(\'tipo\',this.value)"><option value="">Todos</option>'+[['salario','Salário'],['adiantamento','Adiantamento'],['ferias','Férias'],['decimo13','13º salário'],['rescisao','Rescisão'],['prolabore','Pró-labore']].map(([v,t])=>'<option value="'+v+'" '+(f.tipo===v?'selected':'')+'>'+t+'</option>').join('')+'</select></th>'
+    +'<th style="padding:4px 6px">'+inp('nome','🔎 empregado',150)+'</th>'
+    +'<th style="padding:4px 6px">'+inp('cpf','🔎 CPF',100)+'</th>'
+    +'<th style="padding:4px 6px">'+inp('cod','🔎',40)+'</th>'
+    +'<th style="padding:4px 6px"><input class="si" placeholder="🔎 valor, >500…" title="Valor exato ou >1000, <500, >=100…" value="'+esc(f.valor)+'" style="width:100%;min-width:90px;font-size:11px;text-align:right" oninput="_lancctbFolhaFiltroDeb(\'valor\',this.value)"></th>'
+    +'<th style="padding:4px 6px"><select class="si" style="width:100%;font-size:11px" onchange="_lancctbFolhaSet(\'status\',this.value)"><option value="">Todos</option><option value="conc" '+(f.status==='conc'?'selected':'')+'>Conciliados</option><option value="pend" '+(f.status==='pend'?'selected':'')+'>Pendentes</option></select></th>'
+    +'<th style="padding:4px 6px">'+inp('extrato','🔎 banco, data ou valor',150)+'</th>'
+    +'<th style="padding:4px 6px">'+inp('imp','🔎 dd/mm/aaaa',80)+'</th></tr></thead><tbody id="folhaCorpo"></tbody></table><div id="folhaRodape"></div></div>';
   _lancctbSetConteudo(el,h);
+  _lancctbFolhaPintar();
+}
+function _lancctbFolhaPintar(){
+  const corpo=document.getElementById('folhaCorpo'), resumo=document.getElementById('folhaResumo'); if(!corpo||!resumo) return;
+  const lista=_lancctbFolhaFiltrar();
+  const soma=a=>Math.round(a.reduce((s,r)=>s+Math.round(Number(r.valor)*100),0))/100;
+  const conc=lista.filter(r=>r.conciliado), pend=lista.filter(r=>!r.conciliado);
+  resumo.innerHTML='Σ filtrado: <b>'+lista.length+'</b> linha(s) · Total <b style="font-size:14px">R$ '+_fmt(soma(lista))+'</b> · <span style="color:var(--teal)">Conciliado <b>R$ '+_fmt(soma(conc))+'</b> ('+conc.length+')</span> · <span style="color:#d97706">Pendente <b>R$ '+_fmt(soma(pend))+'</b> ('+pend.length+')</span>';
+  const corTipo=r=>r.categoria==='CONTRIBUTOR'?'#7c3aed':({salario:'#0f766e',adiantamento:'#2563eb',ferias:'#d97706',decimo13:'#be185d',rescisao:'#dc2626'}[r.tipo]||'var(--slate)');
+  const fmtD=d=>d?new Date(d+'T00:00:00').toLocaleDateString('pt-BR'):'';
+  corpo.innerHTML=lista.slice(0,1500).map(r=>'<tr style="border-bottom:1px solid var(--border)"><td style="padding:6px 10px">'+r.competencia.slice(5)+'/'+r.competencia.slice(0,4)+'</td>'
+    +'<td style="padding:6px 10px"><span style="color:'+corTipo(r)+';font-weight:600">'+esc(_lancctbFolhaNomeTipo(r))+'</span></td>'
+    +'<td style="padding:6px 10px">'+esc(r.nome)+'</td><td style="padding:6px 10px;font-family:var(--mono);font-size:11.5px">'+esc(r.cpf?r.cpf.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/,'$1.$2.$3-$4'):'—')+'</td>'
+    +'<td style="padding:6px 10px">'+esc(r.codigo||'')+'</td><td style="padding:6px 10px;text-align:right;font-variant-numeric:tabular-nums">R$ '+_fmt(Number(r.valor))+'</td>'
+    +'<td style="padding:6px 10px;text-align:center">'+(r.conciliado?'<span style="color:var(--teal);font-weight:700">✔ sim</span>':'<span style="color:#d97706">pendente</span>')+'</td>'
+    +'<td style="padding:6px 10px;font-size:11.5px">'+(r.extrato?esc((r.extrato.banco||'Banco')+' · '+fmtD(r.extrato.data)+' · R$ '+_fmt(Number(r.extrato.valor))+' (extrato de '+(r.extrato.data?r.extrato.data.slice(5,7)+'/'+r.extrato.data.slice(0,4):'')+')'):(r.conciliado?'<span style="color:var(--slate)">baixado (extrato não localizado)</span>':'—'))+'</td>'
+    +'<td style="padding:6px 10px;font-size:11px;color:var(--slate)" title="'+esc(r.arquivo||'')+'">'+(r.importado_em?new Date(r.importado_em).toLocaleDateString('pt-BR'):'')+'</td></tr>').join('')
+    +(lista.length?'':'<tr><td colspan="9" style="padding:24px;text-align:center;color:var(--slate)">Nenhuma linha com esses filtros.</td></tr>');
+  const rod=document.getElementById('folhaRodape'); if(rod) rod.innerHTML=lista.length>1500?'<div style="padding:8px;color:var(--slate)">Mostrando 1.500 de '+lista.length+' — refine o filtro.</div>':'';
 }
 function _lancctbFolhaExcel(){
   const lista=_lancctbFolhaFiltrar(); if(!lista.length){ toast('Nada para exportar com os filtros atuais.','err'); return; }
