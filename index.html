@@ -25672,7 +25672,39 @@ async function _lancctbBlocosFopagMes(handleRaiz,anoMes){
 // — nunca por nome (o nome vem truncado) e nunca pesquisando pessoas de outras empresas. Olha a pasta
 // do mês do pagamento, a ANTERIOR e a SEGUINTE (férias às vezes ficam salvas no mês posterior a um
 // pagamento feito no fim do mês anterior).
+// Relatórios de líquidos da empresa para um pagamento: PRIMEIRO os que o usuário importou no site (aba Folha / tabela folha_liquidos — pedido do usuário 03/11/2026: "o Processar FOPAG não vai mais até a pasta"),
+// e só o que NÃO foi importado (mesmo tipo + competência) é completado pela pasta "FOPAG do Mês", se o navegador ainda tiver acesso a ela. Mesmo formato de antes.
+const _lancctbFolhaDbCache=new Map();
+async function _lancctbFolhaRelatoriosDoBanco(eid,dataPagamento){
+  const [a,m]=String(dataPagamento).slice(0,7).split('-').map(Number);
+  const ym=(dm)=>{ const t=a*12+(m-1)+dm; return Math.floor(t/12)+'-'+String(t%12+1).padStart(2,'0'); };
+  const k=eid+'|'+ym(0), c=_lancctbFolhaDbCache.get(k);
+  if(c&&Date.now()-c.t<30000) return c.d;
+  const comps=[ym(-2),ym(-1),ym(0),ym(1)];
+  const { data: rows, error } = await _lancctbFetchTudo(()=>_supaClient.from('folha_liquidos').select('tipo,competencia,codigo,nome,cpf,categoria,valor,arquivo').eq('empresa_eid',String(eid)).in('competencia',comps).order('id'));
+  if(error) throw error;
+  const blocos=new Map();
+  (rows||[]).forEach(r=>{
+    const comp=r.competencia.slice(5)+'-'+r.competencia.slice(0,4), kb=r.tipo+'|'+comp;
+    if(!blocos.has(kb)) blocos.set(kb,{ tipo:r.tipo, competencia:comp, fonte:'Folha (site)', pastaMes:ym(0), arquivo:r.arquivo, flags:[], dados:{ competencia:comp, total:0, pessoas:[] } });
+    const b=blocos.get(kb);
+    b.dados.pessoas.push({ codigo:r.codigo, nome:r.nome, cpf:r.cpf, valor:Number(r.valor), tipo:r.categoria==='CONTRIBUTOR'?'contribuinte':'empregado', categoria:r.categoria });
+  });
+  const out=[...blocos.values()]; out.forEach(b=>{ b.dados.total=Math.round(b.dados.pessoas.reduce((s,p)=>s+Math.round(p.valor*100),0))/100; });
+  _lancctbFolhaDbCache.set(k,{t:Date.now(),d:out});
+  return out;
+}
+async function _lancctbFolhaTemDados(eid){
+  try{ const { count } = await _supaClient.from('folha_liquidos').select('id',{count:'exact',head:true}).eq('empresa_eid',String(eid)); return (count||0)>0; }catch(e){ return false; }
+}
 async function _lancctbRelatoriosFopagDoMes(eid,dataPagamento){
+  let db=[]; try{ db=await _lancctbFolhaRelatoriosDoBanco(eid,dataPagamento); }catch(e){ console.warn('Folha do site não lida (usa só a pasta):',e); }
+  let pasta=[]; try{ pasta=await _lancctbRelatoriosFopagDoMesPasta(eid,dataPagamento); }catch(e){}
+  if(!db.length) return pasta;
+  const tem=new Set(db.map(r=>r.tipo+'|'+r.competencia));
+  return db.concat(pasta.filter(r=>!tem.has(r.tipo+'|'+r.competencia)));
+}
+async function _lancctbRelatoriosFopagDoMesPasta(eid,dataPagamento){
   try{
     const handleRaiz=await _lancctbCarregarHandleFopagMes();
     if(!handleRaiz||(await handleRaiz.queryPermission({mode:'read'}))!=='granted') return [];
@@ -25837,9 +25869,10 @@ async function _lancctbProcessarFopag(){
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
   if(!contaId){ toast('Selecione uma conta bancária primeiro','err'); return; }
   if(await _lancctbContaMktDaFastLube(eid,contaId)){ toast('Na Fast Lube, o Processar FOPAG não roda nas contas Mercado Pago/Shopee/Maree.','info'); return; }
-  const temFopagMes=await _lancctbTemAcessoPastaFopagMes();
+  const temFolhaSite=await _lancctbFolhaTemDados(eid); // folha importada no site (aba Folha): dispensa a pasta
+  const temFopagMes=(await _lancctbTemAcessoPastaFopagMes())||temFolhaSite;
   const temAcesso=await _lancctbTemAcessoPastaConfiBackup();
-  if(!temAcesso&&!temFopagMes){ toast('Conceda acesso à pasta "FOPAG do Mês" (ou ConfiBackup) primeiro — os botões ficam na tela de listagem de empresas (Lançamentos Contábeis, antes de abrir a empresa).','err'); return; }
+  if(!temAcesso&&!temFopagMes){ toast('Importe a folha (botão "Importar Folha (PDF)" na lista de Lançamentos Contábeis) ou conceda acesso à pasta "FOPAG do Mês" (ou ConfiBackup) primeiro — os botões ficam na tela de listagem de empresas (Lançamentos Contábeis, antes de abrir a empresa).','err'); return; }
   let handleRaiz=null;
   if(temAcesso){
     handleRaiz=await _lancctbCarregarHandleConfiBackup();
@@ -46361,6 +46394,7 @@ function _lancctbFolhaPainel(titulo,html,fechavel){
 }
 async function _lancctbFolhaImportar(arquivos){
   const mapa=_lancctbFolhaMapaCnpjEid();
+  _lancctbFolhaDbCache.clear();
   const rep={ arquivos:arquivos.length, naoLidos:[], blocos:0, tipoDesconhecido:0, semEmpresa:new Map(), novas:0, duplicadas:0, valorDiferente:[], erros:0, divergeTotal:[], porEmp:new Map() };
   const linhas=new Map(); // chave completa -> linha (já tira duplicidade dentro do próprio envio)
   try{
@@ -46420,6 +46454,7 @@ async function _lancctbFolhaImportar(arquivos){
   if(rep.naoLidos.length) h+='<div style="margin-top:8px;color:var(--red)"><b>Não reconheci como Relação Geral dos Líquidos:</b><ul style="margin:4px 0 0 18px">'+lista(rep.naoLidos,8)+'</ul></div>';
   if(rep.tipoDesconhecido) h+='<div style="margin-top:8px;color:#d97706">'+rep.tipoDesconhecido+' relatório(s) de tipo de cálculo que não conheço (ignorados).</div>';
   if(rep.erros) h+='<div style="margin-top:8px;color:var(--red)"><b>'+rep.erros+' linha(s) deram erro ao gravar</b> — veja o console.</div>';
+  _lancctbFolhaDbCache.clear();
   _lancctbFolhaPainel('👥 Folha importada',h,true);
   if(_lancctbAbaAtiva==='folha') renderLancctbFolha();
 }
