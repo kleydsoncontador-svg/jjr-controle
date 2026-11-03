@@ -26255,6 +26255,38 @@ async function _lancctbProcessarFopag(){
         }
       }
 
+      // ── Caminho 1b-2 (pedido do usuário 03/11/2026, Peixoto Serviços 157 — talvez Peixoto Auto Peças 156): "nos pagamentos de início de mês, parte é dos sócios e o resto é salário do mês anterior".
+      // SISPAG SALARIOS pago até o dia 10: os comprovantes dos SÓCIOS (Lucros/Dividendos) da mesma data entram como pagamento ao sócio e TUDO que sobra vira "Pagamento ref. salário <mês anterior>"
+      // (conta de salário), mesmo que o resto não feche com o total do Relatório de Líquidos (quando fecha, o Caminho 1b acima já abre por pessoa). Só vale com resto positivo e sócio com conta.
+      if(['156','157'].includes(String(eid))&&diaPgto<=10&&/SISPAG/.test(_norm(l.historico_bancario))&&/SALARIO/.test(_norm(l.historico_bancario))&&socios&&socios.length&&contaSalario){
+        const _wd=new Date(l.data_pagamento+'T00:00:00').getDay();
+        const _mesmaData=c=>c.data_pagamento===l.data_pagamento||(_wd===1&&_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=3); // o comprovante sai com a data do agendamento (fim de semana) e o banco debita na segunda
+        const _cands=(comprovSociosCache[l.id]||[]).filter(_mesmaData);
+        const somaSoc=Math.round(_cands.reduce((a,c)=>a+Math.round(Number(c.valor_pago)*100),0))/100;
+        const resto=Math.round((l.valor_saida-somaSoc)*100)/100;
+        if(_cands.length&&resto>0.009){
+          const linhas=[{ empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor:l.valor_saida, historico:'Pagamentos Diversos', lancamento_extrato_id:l.id, origem_match:'regra' }];
+          let ok=true;
+          _cands.forEach(cp=>{
+            const socio=_lancctbAcharSocioPorHistorico(socios,(cp.cliente_fornecedor_nome||'')+' '+(cp.cnpj_cpf||''));
+            const conta=socio?_lancctbContaDoSocio(contasSocios,socio):null;
+            if(!conta){ ok=false; return; }
+            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:conta.classificacao, conta_contabil_id:conta.id, tipo:'D', valor:Math.round(Number(cp.valor_pago)*100)/100, historico:`Pagamento ao sócio ${cp.cliente_fornecedor_nome}`, cliente_fornecedor_nome:cp.cliente_fornecedor_nome||null, cnpj_cpf:cp.cnpj_cpf||null, comprovante_id:cp.id, lancamento_extrato_id:l.id, origem_match:'regra' });
+          });
+          if(ok){
+            linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:contaSalario.classificacao, conta_contabil_id:contaSalario.id, tipo:'D', valor:resto, historico:`Pagamento ref. salário ${cAnt.replace('-','/')}`, lancamento_extrato_id:l.id, origem_match:'regra' });
+            const somaD=Math.round(linhas.filter(x=>x.tipo==='D').reduce((a,x)=>a+x.valor,0)*100)/100;
+            if(Math.abs(somaD-l.valor_saida)<=0.01){
+              const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+              if(error){ console.error('Erro FOPAG (sócios + salário do mês anterior):',error); semAchado++; continue; }
+              await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+              await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',_cands.map(x=>x.id));
+              resolvidos++; continue;
+            }
+          }
+        }
+      }
+
       // ── Caminho 1c (pedido do usuário 18/10/2026, Kajuna: SISPAG SALARIOS de R$ 8.716,00 em 06/08): "SISPAG SALARIOS são pra pessoas que estão na folha — cruzar folha, fluxo e sispag". O Sispag paga só ALGUMAS
       // pessoas da folha (nem o total da folha, nem só sócios), então: pega as linhas do FLUXO do mesmo dia (±1 dia) cujo nome é de pessoa que está na folha (Relatório de Líquidos de salário/adiantamento/etc., ou Recibo
       // de Férias da empresa) e procura a combinação delas que soma EXATO o valor do banco. Só resolve se houver UMA combinação (com a menor quantidade de pessoas); ambígua/sem combinação/pessoa sem conta = nada é gravado.
