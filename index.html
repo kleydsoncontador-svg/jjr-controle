@@ -26328,6 +26328,18 @@ async function _lancctbProcessarFopag(){
         const todasP=[]; relatoriosPessoas.forEach(r=>(r.dados.pessoas||[]).forEach(pp=>{ if(!todasP.some(x=>(x.cpf&&x.cpf===pp.cpf)||x.nome===pp.nome)) todasP.push(pp); }));
         const fortes=_lancctbPessoasForteNoTexto(textoIdent+' '+compIdentTxt,todasP), pe=fortes.length===1?fortes[0]:null;
         // Pedido do usuário 20/10/2026: a marca só vale para EMPREGADO identificado da folha desta empresa — nunca para fornecedor, sócio ou pessoa que só aparece no Fluxo.
+        // 03/11/2026 (Kazangil, eid 114): salário pago a MENOR que o líquido da folha vale como salário (valor pago); o que faltou é completado pela sobra do adiantamento seguinte.
+        if(pe&&pe.tipo==='empregado'&&String(eid)==='114'&&/SISPAG/.test(_norm(l.historico_bancario))){
+          let achouSal=null;
+          for(const r of relatorios){ if(r.tipo!=='salario'||!calOk(r)) continue; const pp=(r.dados.pessoas||[]).find(x=>x.tipo!=='contribuinte'&&((x.cpf&&pe.cpf&&x.cpf===pe.cpf)||_norm(x.nome)===_norm(pe.nome))); if(pp&&l.valor_saida<pp.valor-0.01&&!consEx.has(chaveConsumoFolha(r,pp))){ achouSal={r,pp}; break; } }
+          if(achouSal){
+            const cS=contaDaPessoa(achouSal.pp,'salario'), compS=achouSal.r.dados.competencia||achouSal.r.competencia;
+            if(cS){
+              const parteS=[{ origem:'folha', valor:Math.round(l.valor_saida*100)/100, historico:`Pagamento ref. ${_rotP(achouSal.pp,'salario')} ${compS} - ${achouSal.pp.nome}`, conta_contabil_id:cS.id, nome:achouSal.pp.nome, cpf:achouSal.pp.cpf||null, comprovante_id:null }];
+              if(await postarFolhaAberta(l,parteS)){ consEx.add(chaveConsumoFolha(achouSal.r,achouSal.pp)); resolvidos++; continue; }
+            }
+          }
+        }
         if(pe&&pe.tipo==='empregado'){
           if(await marcarPessoaIdentificada(l,'PESSOA IDENTIFICADA',pe.nome,pe.cpf)) pessoasMarcadas++;
           semAchado++; continue;
@@ -26367,11 +26379,36 @@ async function _lancctbProcessarFopag(){
         const rotP=_rotP(p,r.tipo), cpComp=matchIndiv.comprovante||null;
         const partes=[
           { origem:'folha', valor:liquido, historico:`Pagamento ref. ${rotP} ${comp} - ${p.nome}`, conta_contabil_id:contaP.id, nome:p.nome, cpf:p.cpf||null, comprovante_id:cpComp?cpComp.id:null },
-          { origem:'folha', valor:diferenca, historico:`Diferença folha ${comp} - ${p.nome}`, conta_contabil_id:await contaPelaRegraDaParte(`Diferença folha ${comp} - ${p.nome}`), nome:p.nome, cpf:p.cpf||null, comprovante_id:null },
         ];
+        let difRest=diferenca, compSalTxt='', valCompl=0;
+        // 03/11/2026 (Kazangil, eid 114): a sobra do ADIANTAMENTO primeiro "mata" o que faltou do SALÁRIO do mês anterior (pago a menor); só o que restar vira diferença.
+        if(String(eid)==='114'&&r.tipo==='adiantamento'){
+          try{
+            let rs=relatorios.find(x=>x.tipo==='salario'&&_compDig(x.dados.competencia||x.competencia)===_compDig(cAnt));
+            if(!rs&&pastaEmpresa){
+              const chv='salario|'+cAnt;
+              if(!(chv in relatoriosExtraCache)){ relatoriosExtraCache[chv]=null; try{ const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,cAnt,'salario'); if(file){ const dd=await _lancctbParsearRelatorioLiquidos(file); if(dd) relatoriosExtraCache[chv]={tipo:'salario',competencia:cAnt,dados:dd}; } }catch(e){ console.warn('Salário anterior (complemento):',e); } }
+              rs=relatoriosExtraCache[chv];
+            }
+            const ps=rs&&(rs.dados.pessoas||[]).find(x=>(x.cpf&&p.cpf&&x.cpf===p.cpf)||_norm(x.nome)===_norm(p.nome));
+            const cSal=ps?contaDaPessoa(ps,'salario'):null;
+            if(ps&&cSal){
+              compSalTxt=rs.dados.competencia||rs.competencia;
+              const rotS=_rotP(ps,'salario'), hS=`Pagamento ref. ${rotS} ${compSalTxt} - ${p.nome}`;
+              const { data: pagos } = await _supaClient.from('lancamentos_contabeis').select('historico,valor').eq('empresa_eid',eid).eq('estornado',false).eq('tipo','D').like('historico','Pagamento ref. '+rotS+' %');
+              const pago=(pagos||[]).filter(x=>_norm(String(x.historico||'').replace(/^Pagamento ref\. \S+ (\d{2}[-\/]\d{4}) - /,''))===_norm(p.nome)&&_compDig(String(x.historico).match(/(\d{2}[-\/]\d{4})/)?.[1])===_compDig(compSalTxt)).reduce((a,x)=>a+Number(x.valor||0),0);
+              const falta=Math.round((ps.valor-pago)*100)/100;
+              if(falta>0.01){
+                valCompl=Math.round(Math.min(diferenca,falta)*100)/100; difRest=Math.round((diferenca-valCompl)*100)/100;
+                partes.push({ origem:'folha', valor:valCompl, historico:hS, conta_contabil_id:cSal.id, nome:p.nome, cpf:p.cpf||null, comprovante_id:null });
+              }
+            }
+          }catch(e){ console.warn('Complemento do salário anterior:',e); }
+        }
+        if(difRest>0.01) partes.push({ origem:'folha', valor:difRest, historico:`Diferença folha ${comp} - ${p.nome}`, conta_contabil_id:await contaPelaRegraDaParte(`Diferença folha ${comp} - ${p.nome}`), nome:p.nome, cpf:p.cpf||null, comprovante_id:null });
         if(partes.every(x=>x.conta_contabil_id)&&await postarFolhaAberta(l,partes)){ resolvidos++; continue; } // as duas partes já têm conta (líquido + Regra da diferença): grava direto
         const hOrig=String(l.historico_bancario||'').replace(/^\s*(?:\[(?:DIFEREN|FOLHA ABERTA)[^\]]*\]\s*)+/i,'');
-        const marca=`[FOLHA ABERTA ${rotP} ${comp} - ${p.nome}: líquido R$ ${_fmt(liquido)} + diferença R$ ${_fmt(diferenca)}] `;
+        const marca=`[FOLHA ABERTA ${rotP} ${comp} - ${p.nome}: líquido R$ ${_fmt(liquido)}${valCompl>0?' + salário '+compSalTxt+' R$ '+_fmt(valCompl):''}${difRest>0.01?' + diferença R$ '+_fmt(difRest):''}] `;
         const { error: eAb } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:marca+hOrig, composicao_tributo:partes }).eq('id',l.id).eq('status_conciliacao','pendente');
         if(eAb){ console.error('Erro ao abrir pagamento da folha:',eAb); consEx.delete(chaveConsumoFolha(r,p)); semAchado++; continue; }
         diferencasAbertas++; continue;
