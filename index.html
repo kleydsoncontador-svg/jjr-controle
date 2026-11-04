@@ -24419,6 +24419,11 @@ function _lancctbContaSemNfVinculo(ag){
   if(!ag) return false;
   return /MERCADO\s*PAGO|SHOPEE|MAREE/i.test(`${ag.banco_nome||''} ${ag.descricao||''}`);
 }
+// FLUXO DE CAIXA nas contas Mercado Pago/Shopee/Maree: nunca, em nenhuma empresa — EXCETO a #250 NASA TRUCK, que tem Fluxo de Caixa bom e pode associar com o Mercado Pago (pedido do usuário 04/11/2026).
+// A exceção é só do Fluxo: a regra de NÃO vincular NF nessas contas (_lancctbContaSemNfVinculo) continua valendo na #250 também.
+function _lancctbContaSemFluxo(ag){
+  return _lancctbContaSemNfVinculo(ag)&&String(_lancctbEidAtual)!=='250';
+}
 // Achados reais 03/10/2026 (ACCI, FGTS Digital): "DB.CONV.TR FD-RFB" (débito de convênio da Receita/FGTS Digital) e
 // "PIX EMIT.OUTRA IF | Pagamento Pix | 00.360.305 0001-04" (PIX pra Caixa Econômica Federal = guia do FGTS) não tinham
 // "cara de tributo" e o Processar Tributos nem olhava essas linhas.
@@ -32537,7 +32542,7 @@ async function _lancctbAssociarComprovantesTodos(){
   const eid=_lancctbEidAtual; if(!eid||!_supaClient) return;
   window.__cTodosTs=window.__cTodosTs||{}; if(Date.now()-(window.__cTodosTs[eid]||0)<120000) return; window.__cTodosTs[eid]=Date.now();
   const { data: ags } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,descricao').eq('empresa_eid',eid);
-  const idsOk=(ags||[]).filter(a=>!_lancctbContaSemNfVinculo(a)).map(a=>a.id); if(!idsOk.length) return;
+  const idsOk=(ags||[]).filter(a=>!_lancctbContaSemFluxo(a)).map(a=>a.id); if(!idsOk.length) return;
   const { data: exts } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario,conta_bancaria_id').eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('conta_bancaria_id',idsOk).order('data_pagamento',{ascending:true}).order('id',{ascending:true}));
   if(!exts||!exts.length) return;
   const pares=[]; const nomeCompPorExt=new Map(); // extrato → nome do comprovante achado (usado pra casar Sispag Salários com a descrição do Fluxo)
@@ -33930,7 +33935,7 @@ async function _lancctbProcessarFluxo(){
   const _manuaisFluxo=new Set((()=>{ try{ return S.g('lancctb_fluxo_manual_'+eid)||[]; }catch(e){ return []; } })());
   let _agNubFx=null; try{ const { data: _ag } = await _supaClient.from('agencias_bancarias').select('banco_nome').eq('id',contaId).maybeSingle(); _agNubFx=_ag; }catch(e){}
   _lancctbFluxoBancoAtual=_lancctbBancoDoTexto(_agNubFx&&_agNubFx.banco_nome);
-  if(_lancctbContaSemNfVinculo(_agNubFx)){ toast('O Fluxo de Caixa não é usado nas contas Mercado Pago e Shopee/Maree (as Regras já resolvem).','ok'); return; }
+  if(_lancctbContaSemFluxo(_agNubFx)){ toast('O Fluxo de Caixa não é usado nas contas Mercado Pago e Shopee/Maree (as Regras já resolvem).','ok'); return; }
   const btn=document.getElementById('lancctbProcessarFluxoBtn');
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn){ btn.disabled=true; }
@@ -34212,7 +34217,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
     if(!silencioso) toast('Já tem um processamento rodando pra esta conta — aguarde terminar antes de clicar em outro "Processar..." (evita duplicar lançamento).','err');
     return;
   }
-  { const _agPF=(_lancctbRegistroAgenciasCache||[]).find(a=>String(a.id)===String(contaId)); if(_lancctbContaSemNfVinculo(_agPF)){ if(!silencioso) toast('Esta conta (Mercado Pago/Shopee) não usa o Fluxo de Caixa — as Regras já resolvem.','info'); return; } }
+  { const _agPF=(_lancctbRegistroAgenciasCache||[]).find(a=>String(a.id)===String(contaId)); if(_lancctbContaSemFluxo(_agPF)){ if(!silencioso) toast('Esta conta (Mercado Pago/Shopee) não usa o Fluxo de Caixa — as Regras já resolvem.','info'); return; } }
   _lancctbMatchingEmExecucao.add(_chaveLock);
   const btn=document.getElementById('lancctbProcessarFluxoRegrasBtn');
   if(btn){ btn.disabled=true; btn.textContent='Processando…'; }
@@ -34546,7 +34551,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   const _pulaParcelasNf=_lancctbContaSemNfVinculo(agenciaInfoNf)&&(modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento'||modo==='recebimentos_so_regras');
   const _temJFx=await _lancctbFluxoColunasJuros();
   // Conta Mercado Pago/Shopee/Maree NUNCA usa o Fluxo de Caixa (pedido do usuário 21/10/2026; 30/10/2026: 1.193 ligações erradas de ICMS/FCP/café a débitos do Mercado Livre foram desfeitas): o Fluxo nem é carregado aqui.
-  const _semFluxoMP=_lancctbContaSemNfVinculo((await _pAgInfoNf).data);
+  const _semFluxoMP=_lancctbContaSemFluxo((await _pAgInfoNf).data);
   const _socPagMapa=await _lancctbSociosPagadoresMapa(eid,_mDmin,_mDmax); // comprovantes cujo pagador é sócio (gasto pessoal)
   const [
     { data: comprovantesPag },
@@ -39593,7 +39598,7 @@ async function renderLancctbRegistroContabil(){
     conciliadosItens.forEach(item=>{
       const r=item.extrato;
       if(fluxoPorExtrato[r.id]){ item.fluxoConciliado=fluxoPorExtrato[r.id]; item.fluxoConciliadoLigado=true; return; }
-      if(_lancctbContaSemNfVinculo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)) return; // Mercado Pago/Shopee/Maree: sem palpite de Fluxo
+      if(_lancctbContaSemFluxo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)) return; // Mercado Pago/Shopee/Maree: sem palpite de Fluxo
       const ehSaida=r.valor_saida>0, valor=r.valor_saida||r.valor_entrada;
       const cand=livres.filter(f=>!usados.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))).filter(f=>{
         const vF=ehSaida?f.valor_saida:f.valor_entrada;
@@ -39809,7 +39814,7 @@ async function renderLancctbRegistroContabil(){
       // bancário — nunca escolhe uma descrição completamente diferente
       // se existir uma parecida também dentro da tolerância.
       if(!item.fluxoConfirmado&&ehSaida&&(/^\s*\[(PESSOA IDENTIFICADA|SÓCIO\/CONTRIBUINTE IDENTIFICADO|SISPAG ABERTO|DIFEREN)/i.test(String(r.historico_bancario||''))||(String(eid)!=='89'&&_pessoasFolhaReg.length&&_lancctbHistEhTransfNome(r.historico_bancario)&&_pessoasFolhaReg.some(pp=>_lancctbPessoaNoTexto(pp,r.historico_bancario))))){ item.rotaFopag=true; }
-      else if(!item.fluxoConfirmado&&!_lancctbContaSemNfVinculo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)){
+      else if(!item.fluxoConfirmado&&!_lancctbContaSemFluxo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)){
         const _filtroFluxoSug=(semTextoTributo)=>_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(!semTextoTributo&&ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; if(semTextoTributo&&(!vF||Math.abs(vF-valor)>0.005||_lancctbDiffDias(f.data,r.data_pagamento)>1)) return false; return vF&&(Math.abs(vF-valor)<=(ehTribHist?0.005:LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO)||_lancctbFluxoDifAprendida(f,valor,ehSaida)); })
           .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
@@ -40019,7 +40024,7 @@ function _lancctbRegistroLinhaHtml(item,contaAtual){
   const _verCompKar=(String(_lancctbEidAtual)==='15'&&!ehSaida)?`<br><a href="#" style="font-size:9px;color:var(--teal);font-weight:600" onclick="event.stopPropagation();event.preventDefault();abrirLancctbVerComposicaoKarater(${r.id})">🧩 Ver composição</a>`:'';
   const fluxoCelHtml=()=>{
     // Pedido do usuário 21/10/2026: Fast Lube não usa o Fluxo de Caixa nas contas Mercado Pago e Shopee (as Regras já resolvem) — a coluna não sugere nem oferece buscar no Fluxo.
-    { const _agF=(_lancctbRegistroAgenciasCache||[]).find(a=>String(a.id)===String(r.conta_bancaria_id)); if(_lancctbContaSemNfVinculo(_agF)) return '<td style="padding:7px 6px;color:var(--slate)">—</td>'; } // Mercado Pago/Shopee/Maree: nunca sugere nem oferece buscar no Fluxo (pedido do usuário 24/10/2026, vale pra todas as empresas)
+    { const _agF=(_lancctbRegistroAgenciasCache||[]).find(a=>String(a.id)===String(r.conta_bancaria_id)); if(_lancctbContaSemFluxo(_agF)) return '<td style="padding:7px 6px;color:var(--slate)">—</td>'; } // Mercado Pago/Shopee/Maree: nunca sugere nem oferece buscar no Fluxo (pedido do usuário 24/10/2026, vale pra todas as empresas)
     if(item.fluxoComposicao){
       const c=item.fluxoComposicao, nomeC=(c.itens[0]&&c.itens[0].cliente_fornecedor_nome)||'', tipC=c.itens.map(x=>`${x.documento_numero||x.descricao||''} R$ ${_fmt(x.valor_saida||x.valor_entrada)}`).join(' | ');
       return `<td style="padding:7px 6px;font-size:9px;white-space:normal;line-height:1.25;word-break:break-word;cursor:pointer;color:#b45309" title="Composição de ${c.itens.length} títulos — Fluxo R$ ${_fmt(c.soma)} × Banco R$ ${_fmt(valor)} (Δ R$ ${_fmt(c.delta)}): ${esc(tipC)}. O Processar Fluxo associa quando a diferença é de até R$ 0,02." onclick="event.stopPropagation();abrirLancctbFluxoSugestao(${r.id})">🧩 ${esc(nomeC)} — Composição: ${c.itens.length} títulos | Δ R$ ${_fmt(c.delta)}</td>`;
@@ -40300,7 +40305,7 @@ function _lancctbRegistroHtml({agencias,contaAtual,linhas,count,pendenciasTotais
   ${todasContas?'<div style="margin:0 0 8px;padding:8px 12px;border:1px solid var(--teal);border-radius:8px;font-size:12.5px;color:var(--slate)">📚 Visualizando <b>todas as contas</b> juntas — os botões de processar rodam <b>uma conta de cada vez</b>, em sequência (nunca misturando contas) e pedem confirmação antes. <b>Transf. entre C/C</b> já olha todas as contas de uma vez.</div>':''}
   <div class="action-bar-sticky" ${todasContas?'data-todas="1"':''}>
       ${agencias.length>=2?`<button class="btn-etapa${_lancctbEtapaFeitaCls('transf')}" data-etapa="transf" id="lancctbTransfBtn" onclick="_lancctbProcessarTransferencias()" title="Procura em TODAS as contas correntes da empresa uma entrada que é a saída de outra conta (mesmo valor, mesmo dia) e classifica os dois lados com a conta padrão 'Transferência entre contas correntes'">Transf. entre C/C</button>`:''}
-      ${(_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false&&!_lancctbContaSemNfVinculo((_lancctbRegistroAgenciasCache||[]).find(ag=>String(ag.id)===String(_lancctbExtratoContaSel))))?`<button class="btn bo bsm btn-etapa${_lancctbEtapaFeitaCls('fluxo')}" data-etapa="fluxo" id="lancctbProcessarFluxoBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFluxo',[])" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo) e, quando o Fluxo indica NF + parcela e essa NF está importada, já amarra a NF (inclusive pagamento aglutinado aberto em vários pagamentos do Fluxo). Não aplica Regra — o resto fica pro FOPAG, Tributos e Pagamentos.">🔗 Processar Fluxo</button>`:''}
+      ${(_lancctbTemFluxoCache[String(_lancctbEidAtual)]!==false&&!_lancctbContaSemFluxo((_lancctbRegistroAgenciasCache||[]).find(ag=>String(ag.id)===String(_lancctbExtratoContaSel))))?`<button class="btn bo bsm btn-etapa${_lancctbEtapaFeitaCls('fluxo')}" data-etapa="fluxo" id="lancctbProcessarFluxoBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFluxo',[])" title="1º PASSO: associa cada linha do Fluxo de Caixa do cliente à pendência que bate valor+data (preenche a coluna Fluxo) e, quando o Fluxo indica NF + parcela e essa NF está importada, já amarra a NF (inclusive pagamento aglutinado aberto em vários pagamentos do Fluxo). Não aplica Regra — o resto fica pro FOPAG, Tributos e Pagamentos.">🔗 Processar Fluxo</button>`:''}
       <button class="btn bo bsm btn-etapa${_lancctbEtapaFeitaCls('pagamentos')}" data-etapa="pagamentos" id="lancctbProcessarComprovBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFonteRegistro',['comprovantes_pagamento'])" title="Roda o matching pra pendências de PAGAMENTO (saída): tenta Comprovante e, sem achar ou depois de achar, também tenta bater direto com uma Nota Fiscal. Também aplica as Regras com gatilho de Fluxo de Caixa.">🔄 Processar Pagamentos</button>
       <button class="btn bo bsm btn-etapa${_lancctbEtapaFeitaCls('recebimentos')}" data-etapa="recebimentos" id="lancctbProcessarComprovRecebBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFonteRegistro',['comprovantes_recebimento'])" title="Roda o matching pra pendências de RECEBIMENTO (entrada): grupo de operações do Comprovante de Recebimento (valor boleto/liquidação/tarifa/juros), Comprovante avulso e Nota Fiscal">🔄 Processar Recebimentos</button>
       ${LANCCTB_EIDS_RECEB_SO_REGRAS.includes(String(_lancctbEidAtual))?`<button class="btn bo bsm btn-etapa${_lancctbEtapaFeitaCls('recebimentos')}" data-etapa="recebimentos" id="lancctbProcessarRecebSoRegrasBtn" onclick="_lancctbRodarBotao('_lancctbProcessarFonteRegistro',['recebimentos_so_regras'])" title="Só pra esta empresa (pedido do usuário 15/09/2026): roda o matching pra pendências de RECEBIMENTO usando SÓ as Regras por histórico — nunca tenta amarrar com Comprovante nem Nota Fiscal.">🎯 Processar Recebimentos (só Regras)</button>`:''}
@@ -41133,7 +41138,7 @@ function _lancctbComprovTabela(tipo){
 async function _lancctbTemExtratoParaComprovante(){
   try{
     const { data: ags } = await _supaClient.from('agencias_bancarias').select('id,banco_nome,descricao').eq('empresa_eid',_lancctbEidAtual);
-    const ids=(ags||[]).filter(a=>!_lancctbContaSemNfVinculo(a)).map(a=>a.id); if(!ids.length) return true; // sem conta cadastrada: não trava
+    const ids=(ags||[]).filter(a=>!_lancctbContaSemFluxo(a)).map(a=>a.id); if(!ids.length) return true; // sem conta cadastrada: não trava
     const r=await _supaClient.from('lancamentos_extrato').select('id',{count:'exact',head:true}).eq('empresa_eid',_lancctbEidAtual).in('conta_bancaria_id',ids);
     return r.error?true:(r.count||0)>0;
   }catch(e){ return true; }
@@ -43708,7 +43713,7 @@ async function renderLancctbFluxoCaixa(){
     ${somaFiltrada>0?'<span style="color:#1d4ed8;font-size:12px;border-left:1px solid #bae6fd;padding-left:12px">∑ filtrados: R$ '+_fmt(somaFiltrada)+(totalPaginas>1?' (pág. atual)':'')+'</span>':''}
     <select id="lancctbFluxoAssociacaoContaId" class="si" style="min-width:260px">
       <option value="">— Selecione a conta —</option>
-      ${(agencias||[]).filter(a=>!_lancctbContaSemNfVinculo(a)).map(a=>`<option value="${a.id}">${esc(_lancctbNomeBancoExibicao(a.banco_nome))} Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('')}
+      ${(agencias||[]).filter(a=>!_lancctbContaSemFluxo(a)).map(a=>`<option value="${a.id}">${esc(_lancctbNomeBancoExibicao(a.banco_nome))} Ag ${esc(a.agencia)} Cc ${esc(a.conta_corrente)}</option>`).join('')}
     </select>
     <button class="btn bp bsm" title="Só diz que estas linhas devem ser casadas com ESTE banco. Nenhuma linha some da lista — a coluna Conta passa a mostrar o banco." onclick="associarLancctbFluxoEmLote()">✓ Amarrar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'} ao banco</button>
     <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="desassociarLancctbFluxoEmLote()">↩ Desassociar ${_lancctbFluxoSelecionarTodosMode?'TODOS':'selecionados'}</button>
@@ -43816,7 +43821,7 @@ async function renderLancctbFluxoCaixa(){
 async function associarLancctbFluxoEmLote(){
   const contaId=document.getElementById('lancctbFluxoAssociacaoContaId')?.value;
   if(!contaId){ toast('Selecione uma conta.','err'); return; }
-  try{ const { data: _agBl } = await _supaClient.from('agencias_bancarias').select('banco_nome,descricao').eq('id',contaId).maybeSingle(); if(_lancctbContaSemNfVinculo(_agBl)){ toast('O Fluxo de Caixa não é amarrado a Mercado Pago, Shopee ou Maree.','err'); return; } }catch(e){}
+  try{ const { data: _agBl } = await _supaClient.from('agencias_bancarias').select('banco_nome,descricao').eq('id',contaId).maybeSingle(); if(_lancctbContaSemFluxo(_agBl)){ toast('O Fluxo de Caixa não é amarrado a Mercado Pago, Shopee ou Maree.','err'); return; } }catch(e){}
 
   let ids=[];
   let primeiroLancamento=null;
@@ -43902,7 +43907,7 @@ async function abrirLancctbFluxoNoExtrato(){
   if(eE){ toast('Erro ao buscar extratos: '+eE.message,'err'); return; }
   const _vExt=e=>Number(e.valor_saida||0)>0?Number(e.valor_saida):Number(e.valor_entrada||0);
   const _dtDiff=e=>{ if(!_dFluxo||!e.data_pagamento) return 9999; return Math.abs((new Date(e.data_pagamento+'T12:00:00')-new Date(_dFluxo+'T12:00:00'))/86400000); };
-  const _agsMP=((await _supaClient.from('agencias_bancarias').select('id,banco_nome,descricao').eq('empresa_eid',_lancctbEidAtual)).data||[]).filter(a=>_lancctbContaSemNfVinculo(a)).map(a=>String(a.id)); // Mercado Pago/Shopee/Maree: nunca recebem Fluxo
+  const _agsMP=((await _supaClient.from('agencias_bancarias').select('id,banco_nome,descricao').eq('empresa_eid',_lancctbEidAtual)).data||[]).filter(a=>_lancctbContaSemFluxo(a)).map(a=>String(a.id)); // Mercado Pago/Shopee/Maree: nunca recebem Fluxo
   const extratos=(_todosExt||[]).filter(e=>!_agsMP.includes(String(e.conta_bancaria_id))&&(Number(e.valor_saida||0)>0)===ehSaidaFluxo).sort((a,b)=>{ const da=Math.abs(_vExt(a)-somaFluxo), db=Math.abs(_vExt(b)-somaFluxo); const ea=da<0.01?0:1, eb=db<0.01?0:1; return (ea-eb)||(ea===0?(_dtDiff(a)-_dtDiff(b)):((da-db)||(_dtDiff(a)-_dtDiff(b)))); }).slice(0,120);
   let html='<div style="margin-bottom:10px;font-size:13px"><strong>Soma das linhas selecionadas:</strong> R$ '+_fmt(somaFluxo)+' ('+ids.length+' linha'+(ids.length>1?'s':'')+' do Fluxo)<br><span style="color:var(--slate);font-size:12px">Escolha o extrato pendente que corresponde a esse pagamento.</span></div>';
   html+='<div style="overflow-x:auto;overflow-y:auto;max-height:380px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead><tr style="background:var(--ink2);color:#fff"><th style="padding:7px 10px">Data</th><th style="padding:7px 10px">Histórico bancário</th><th style="padding:7px 10px;text-align:right">Valor</th><th style="padding:7px 10px;text-align:right">Diferença</th><th style="padding:7px 10px"></th></tr></thead><tbody>';
