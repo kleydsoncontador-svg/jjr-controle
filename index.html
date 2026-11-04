@@ -61048,7 +61048,10 @@ function lucRenderFiscalEmpBody(eid){
   var tdTotal='padding:6px 10px;text-align:right;font-family:var(--mono);font-weight:700;background:#F0FDF9;border-left:2px solid #0F9C8C';
   var h=h0+'<div style="overflow-x:auto;padding:0 16px 6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12.5px;margin-top:10px">'
     +'<thead><tr><th style="'+thStyleL+'">Trimestre</th>';
-  trims.forEach(function(t){ h+='<th style="'+thStyle+'">'+t+'º Trim/'+ano+'</th>'; });
+  trims.forEach(function(t){
+    var on=!!getLucFiscalDados(eid,ano,t).usarNoExcel;
+    h+='<th style="'+thStyle+'"><span onclick="lucToggleFlagTrimFiscal(\''+esc(eid)+'\','+t+')" title="'+(on?'Marcado: no Excel, o crédito deste trimestre vai todo no último mês ('+LUC_FISCAL_MES_FINAL[t]+') com o valor daqui, e os outros 2 meses saem zerados. Clique para desmarcar.':'Clique para usar o valor deste trimestre no Excel (tudo no último mês; os outros 2 meses saem zerados).')+'" style="cursor:pointer;margin-right:6px;font-size:13px;opacity:'+(on?'1':'.45')+'">'+(on?'🚩':'⚑')+'</span>'+t+'º Trim/'+ano+'</th>';
+  });
   h+='<th style="'+thTotal+'">Total '+ano+'</th>';
   h+='</tr></thead><tbody>';
   linhasBase.forEach(function(linha){
@@ -61139,6 +61142,37 @@ function lucRenderFiscalEmpBody(eid){
   });
   h+='</tbody></table></div>';
   return h;
+}
+// Bandeirinha do trimestre (Lucros Fiscal): marcada = no Excel, o crédito dos 3 meses do trimestre vira UM valor, no último mês (Mar/Jun/Set/Dez), igual à distribuição daqui; os outros 2 meses saem zerados.
+function lucToggleFlagTrimFiscal(eid,trim){
+  var ano=lucCurrentAno||'2026';
+  var d=getLucFiscalDados(eid,ano,trim);
+  d.usarNoExcel=!d.usarNoExcel;
+  setLucFiscalDados(eid,ano,trim,d);
+  var container=document.getElementById('lucFiscalEmpBody_'+eid);
+  if(container) container.innerHTML=lucRenderFiscalEmpBody(eid);
+  toast(d.usarNoExcel?'Trimestre marcado: o Excel usa o valor do Lucros Fiscal no último mês.':'Trimestre desmarcado: o Excel volta a usar os créditos mensais.','ok');
+}
+// Distribuição do sócio no trimestre (manual, se houver; senão Resultado × % do último mês) — mesma conta da tela e da aba "Lucro Fiscal".
+function _lucFiscalDistribSocio(eid,ano,trim,soc){
+  var d=getLucFiscalDados(eid,ano,trim);
+  var manual=(d.distribuicaoManual||{})[soc.id];
+  if(manual!==undefined&&manual!==null) return parseFloat(manual)||0;
+  var pctKey=ano+'-'+LUC_FISCAL_MES_FINAL[trim];
+  var pct=soc.pct&&soc.pct[pctKey]!==undefined?soc.pct[pctKey]:(soc.pct_ant||0);
+  return _lucFiscalResultado(d)*(parseFloat(pct)||0)/100;
+}
+// Valor de crédito que vai pro EXCEL: igual a lucCalcCreditoEfetivo, exceto trimestre com bandeirinha no Lucros Fiscal (último mês = distribuição do trimestre; demais meses = 0). Telas e saldos não usam isto.
+function lucCreditoParaExcel(eid,ano,mes,sid){
+  try{
+    var trim=_lucTrimDoMes(mes);
+    if(getLucFiscalEmpresas().map(String).indexOf(String(eid))>=0&&getLucFiscalDados(eid,ano,trim).usarNoExcel){
+      if(String(mes)!==LUC_FISCAL_MES_FINAL[trim]) return 0;
+      var soc=lucSocGet(eid).find(function(x){ return x.id===sid; });
+      return soc?_lucFiscalDistribSocio(eid,ano,trim,soc):0;
+    }
+  }catch(e){ console.warn('lucCreditoParaExcel:',e); }
+  return lucCalcCreditoEfetivo(eid,ano,mes,sid);
 }
 function lucSalvarFiscalCampo(inp){
   var eid=inp.dataset.eid, trim=parseInt(inp.dataset.trim,10), campo=inp.dataset.campo;
@@ -62058,7 +62092,7 @@ async function lucExportarCreditadoTrim(trim){
     var socios=lucSocGet(eid);
     var linhas=[];
     socios.forEach(function(soc){
-      var valores=meses.map(function(m){ return lucCalcCreditoEfetivo(eid,ano,m,soc.id); });
+      var valores=meses.map(function(m){ return lucCreditoParaExcel(eid,ano,m,soc.id); });
       var total=valores.reduce(function(a,b){ return a+b; },0);
       if(!total) return; // só sócio com crédito em algum mês do trimestre
       linhas.push({soc:soc, valores:valores, total:total, conta:soc.conta||''});
@@ -62235,8 +62269,9 @@ async function lucConfirmExportAll(){
       socios.forEach(function(soc){
         var row=lucGetMesRow(eid,ano,m,soc.id);
         var saldoAnt=lucCalcSaldoAnt(eid,ano,m,soc.id);
-        var creditoVal=lucCalcCreditoEfetivo(eid,ano,m,soc.id);
-        var saldoProx=lucCalcSaldoProx(saldoAnt,creditoVal,row.baixas);
+        var creditoRaw=lucCalcCreditoEfetivo(eid,ano,m,soc.id);
+        var creditoVal=lucCreditoParaExcel(eid,ano,m,soc.id);
+        var saldoProx=lucCalcSaldoProx(saldoAnt,creditoRaw,row.baixas);
         var excelRow=ws3.addRow([
           isFirst?emp.nome:'', isFirst?fmtDoc(emp.cnpj):'',
           mLabels[mi], soc.nome, fmtDoc(soc.doc),
@@ -62372,8 +62407,9 @@ function lucConfirmExportAllPDF(){
       socios.forEach(function(soc){
         var row=lucGetMesRow(eid,ano,m,soc.id);
         var saldoAnt=lucCalcSaldoAnt(eid,ano,m,soc.id);
-        var creditoVal=lucCalcCreditoEfetivo(eid,ano,m,soc.id);
-        var saldoProx=lucCalcSaldoProx(saldoAnt,creditoVal,row.baixas);
+        var creditoRaw=lucCalcCreditoEfetivo(eid,ano,m,soc.id);
+        var creditoVal=lucCreditoParaExcel(eid,ano,m,soc.id);
+        var saldoProx=lucCalcSaldoProx(saldoAnt,creditoRaw,row.baixas);
         corpoDist.push([
           isFirst?emp.nome:'', mLabels[mi], soc.nome,
           fmtMoedaPdf(saldoAnt), fmtMoedaPdf(creditoVal), fmtMoedaPdf(parseFloat(row.baixas)||0), fmtMoedaPdf(saldoProx)
