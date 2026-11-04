@@ -60880,7 +60880,7 @@ function _lucFiscalLucroPresumido(d){
        +(parseFloat(d.servicos)||0)*LUC_FISCAL_COEF.servicos
        +(parseFloat(d.outros)||0)*LUC_FISCAL_COEF.outros;
 }
-function _lucFiscalResultado(d){ return _lucFiscalLucroPresumido(d)-(parseFloat(d.pis)||0)-(parseFloat(d.cofins)||0)-(parseFloat(d.csll)||0)-(parseFloat(d.irpj)||0); }
+function _lucFiscalResultado(d){ return _lucFiscalLucroPresumido(d)-(parseFloat(d.pis)||0)-(parseFloat(d.cofins)||0)-(parseFloat(d.csll)||0)-(parseFloat(d.irpj)||0)-(parseFloat(d.simples)||0); }
 // Mês → trimestre (1º Trim = Jan/Fev/Mar, etc.) — usado pra saber em qual
 // coluna trimestral o valor extraído do PDF de faturamento deve entrar.
 function _lucTrimDoMes(mes){ return Math.ceil(parseInt(mes,10)/3); }
@@ -60990,11 +60990,40 @@ function _lucSincronizarFaturamentoDemonstrativos(eid,ano){
     return mudou;
   }catch(e){ console.warn('Sincronizar faturamento Demonstrativos → Fiscal:',e); return 0; }
 }
+// PIS/COFINS/CSLL/IRPJ/Simples Nacional do trimestre = soma das guias de Lançamentos Contábeis > Tributos (pedido do usuário 04/11/2026).
+// Classifica pelo código da receita (PIS 8109/6912, COFINS 2172/5856, CSLL 2372/6012/2484, IRPJ 2089/5993/2362) e o DAS (Simples) pelo tipo; trimestre pela COMPETÊNCIA da guia.
+// DAS de parcelamento não entra (não é do período). Só sobrescreve o campo do trimestre quando EXISTE guia daquele tributo nele; sem guia, o valor digitado à mão fica. Idempotente.
+const _LUC_TRIB_FISCAL_CAMPO={ '8109':'pis','6912':'pis','2172':'cofins','5856':'cofins','2372':'csll','6012':'csll','2484':'csll','2089':'irpj','5993':'irpj','2362':'irpj' };
+const _lucTribFiscalEmAndamento={};
+async function _lucSincronizarTributosFiscal(eid,ano){
+  var chave=eid+'|'+ano; if(_lucTribFiscalEmAndamento[chave]) return; _lucTribFiscalEmAndamento[chave]=true;
+  try{
+    var r=await _lancctbFetchTudo(function(){ return _supaClient.from('tributos_guias').select('tipo,codigo,denominacao,valor,competencia').eq('empresa_eid',String(eid)).like('competencia',String(ano)+'-%'); });
+    var rows=(r&&r.data)||[]; if(!rows.length) return;
+    var soma={}; // trim -> campo -> total
+    rows.forEach(function(x){
+      var mes=parseInt(String(x.competencia||'').slice(5,7),10); if(!(mes>=1&&mes<=12)) return;
+      var campo=_LUC_TRIB_FISCAL_CAMPO[String(x.codigo||'').replace(/\D/g,'').padStart(4,'0')];
+      if(!campo&&/^DAS/i.test(String(x.tipo||''))&&!/parcel/i.test(String(x.tipo||''))&&!/^PARCSN|parcelamento/i.test(String(x.denominacao||''))) campo='simples';
+      if(!campo) return;
+      var t=_lucTrimDoMes(mes); soma[t]=soma[t]||{}; soma[t][campo]=Math.round(((soma[t][campo]||0)+(parseFloat(x.valor)||0))*100)/100;
+    });
+    var mudou=false;
+    Object.keys(soma).forEach(function(t){
+      var d=getLucFiscalDados(eid,ano,parseInt(t,10)), sujo=false;
+      Object.keys(soma[t]).forEach(function(c){ if(Math.abs((parseFloat(d[c])||0)-soma[t][c])>0.004){ d[c]=soma[t][c]; sujo=true; } });
+      if(sujo){ setLucFiscalDados(eid,ano,parseInt(t,10),d); mudou=true; }
+    });
+    if(mudou){ var el=document.getElementById('lucFiscalEmpBody_'+eid); if(el) el.innerHTML=lucRenderFiscalEmpBody(eid); }
+  }catch(e){ console.warn('Tributos → Lucros Fiscal:',e); }
+  finally{ delete _lucTribFiscalEmAndamento[chave]; }
+}
 function lucRenderFiscalEmpBody(eid){
   var ano=lucCurrentAno||'2026';
   var trims=[1,2,3,4];
   var socios=lucSocGet(eid);
   _lucSincronizarFaturamentoDemonstrativos(eid,ano);
+  _lucSincronizarTributosFiscal(eid,ano); // assíncrono: se achar valor novo nas guias, grava e redesenha
 
   var h0='';
 
@@ -61008,6 +61037,7 @@ function lucRenderFiscalEmpBody(eid){
     {campo:'cofins',  label:'(-) COFINS'},
     {campo:'csll',    label:'(-) CSLL'},
     {campo:'irpj',    label:'(-) IRPJ'},
+    {campo:'simples', label:'(-) Simples Nacional'},
   ];
   var thStyle='padding:7px 10px;font-size:11px;font-weight:700;text-align:right;white-space:nowrap;background:var(--ink2);color:#fff;border-bottom:1px solid var(--border)';
   var thStyleL=thStyle+';text-align:left';
