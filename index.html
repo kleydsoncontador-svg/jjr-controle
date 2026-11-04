@@ -46665,9 +46665,6 @@ async function _lancctbTributosDeduplicar(eids){
     const grupos=new Map();
     guias.forEach((ls,dc)=>{ const r0=ls[0]; if(!r0.competencia) return; const sig=[r0.competencia,Number(r0.valor_guia).toFixed(2),ls.map(x=>(x.codigo||'-')+':'+Number(x.valor).toFixed(2)).sort().join(',')].join('|'); if(!grupos.has(sig)) grupos.set(sig,[]); grupos.get(sig).push({dc,ls}); });
     const apagar=[];
-    // Mesma guia (competência + valor da guia) gravada uma vez como LINHA ÚNICA sem código (leitura antiga) e outra aberta por código (leitura nova, ex.: DAS em IRPJ/CSLL/COFINS/PIS/INSS/ISS): fica a detalhada.
-    { const porVal=new Map(); guias.forEach((ls,dc)=>{ const r0=ls[0]; if(!r0.competencia) return; const k=r0.competencia+'|'+Number(r0.valor_guia).toFixed(2); if(!porVal.has(k)) porVal.set(k,[]); porVal.get(k).push({dc,ls}); });
-      porVal.forEach(g=>{ if(g.length<2) return; const det=g.filter(x=>x.ls.length>=2); if(!det.length) return; g.filter(x=>x.ls.length===1&&!x.ls[0].codigo).forEach(x=>x.ls.forEach(r=>apagar.push(r.id))); }); }
     { const { data: rel } = await _supaClient.from('tributos_guias').select('id').eq('empresa_eid',String(eid)).ilike('arquivo','%Relat_rio RE %'); (rel||[]).forEach(r=>apagar.push(r.id)); } // relatórios RE (não são guias) gravados antes desta regra
     grupos.forEach(g=>{ if(g.length<2) return; g.sort((a,b)=>((b.dc.startsWith('DOC|')?1:0)-(a.dc.startsWith('DOC|')?1:0))||String(b.ls[0].vencimento||'').localeCompare(String(a.ls[0].vencimento||''))); g.slice(1).forEach(x=>x.ls.forEach(r=>apagar.push(r.id))); });
     for(let i=0;i<apagar.length;i+=200){ const { error } = await _supaClient.from('tributos_guias').delete().in('id',apagar.slice(i,i+200)).eq('empresa_eid',String(eid)); if(!error) apagadas+=Math.min(200,apagar.length-i); }
@@ -46722,7 +46719,6 @@ async function _lancctbTributosImportar(arquivos){
         dp=await _lancctbTribDadosDoPdf(pdf);
         if(dp.relatorioTrabalhadores) ex=null; else
         ex=await _lancctbExtrairValorPdfTributo(pdf,false,s=>_lancctbFolhaPainel('🧾 Importando tributos…','<b>'+esc(f.name)+'</b><br>'+esc(s),false));
-        if(ex&&!ex.multiGnre&&!(ex.composicao&&ex.composicao.length)&&/\bDAS\b/i.test(info.descricao)&&!/parcel/i.test(info.descricao)){ const itDas=await _lancctbTribItensDas(pdf,ex.valor); if(itDas) ex.composicao=itDas; }
       }catch(e){ console.warn('Tributos: falha ao ler',f.name,e); errLeitura=String((e&&e.message)||e); }
       if(dp.relatorioTrabalhadores){ mark(f.name,'Lido (ignorado)','O PDF é o "Detalhe da Guia a Ser Emitida" (relação de trabalhadores) — não é uma guia; ignorado de propósito'); continue; }
       if(!ex||(!(ex.valor>0)&&!ex.multiGnre)){ rep.naoLidos.push(f.name); mark(f.name,errLeitura?'Erro ao ler':'Não lido',errLeitura?('Erro ao abrir/ler o PDF: '+errLeitura):'Não consegui achar o valor da guia (PDF sem texto reconhecível, imagem ilegível ou modelo de guia que o site ainda não conhece)'); continue; }
@@ -46811,6 +46807,13 @@ async function renderLancctbTributos(){
   if(_lancctbTribFiltro.mes===null){ const ms=_lancctbTribLinhas.map(r=>r.vencimento?r.vencimento.slice(0,7):'').filter(Boolean).sort(); _lancctbTribFiltro.mes=ms.length?ms[ms.length-1]:''; }
   _lancctbTribDesenhar();
 }
+// DAS: a denominação é sempre "Simples Nacional" (pedido do usuário 03/11/2026); aparece assim também nas linhas gravadas antes com "DAS".
+function _lancctbTribDenom(r){
+  const t=String(r.tipo||''), d=String(r.denominacao||'');
+  if(/^DAS Parcelamento/i.test(t)) return 'Parcelamento do Simples Nacional';
+  if(/^DAS\b/i.test(t)&&(!d||/^DAS\b/i.test(d))) return 'Simples Nacional';
+  return d;
+}
 function _lancctbTribNorm(t){ return _convMpRemoverAcentos(String(t||'').toLowerCase()).trim(); }
 function _lancctbTribFmtD(d){ return d?new Date(d+'T00:00:00').toLocaleDateString('pt-BR'):''; }
 function _lancctbTribExtratoTexto(r){ return r.extrato?((r.extrato.banco||'')+' '+_lancctbTribFmtD(r.extrato.data)+' '+_fmt(Number(r.extrato.valor))):''; }
@@ -46823,7 +46826,7 @@ function _lancctbTribFiltrar(){
     if(f.comp&&!((r.competencia?r.competencia.slice(5)+'/'+r.competencia.slice(0,4):'')).includes(f.comp.trim())) return false;
     if(t&&!_lancctbTribNorm(r.tipo).includes(t)) return false;
     if(cd&&!_lancctbTribNorm(r.codigo).includes(cd)) return false;
-    if(dn&&!_lancctbTribNorm(r.denominacao).includes(dn)) return false;
+    if(dn&&!_lancctbTribNorm(_lancctbTribDenom(r)).includes(dn)) return false;
     if(pv&&!pv(Number(r.valor))) return false;
     if(pg&&!pg(Number(r.valor_guia))) return false;
     if(un&&!_lancctbTribNorm(r.unidade).includes(un)) return false;
@@ -46881,7 +46884,7 @@ function _lancctbTribPintar(){
       +'<td style="padding:6px 8px">'+(r.competencia?r.competencia.slice(5)+'/'+r.competencia.slice(0,4):'—')+'</td>'
       +'<td style="padding:6px 8px;font-weight:600">'+esc(r.tipo||'')+'</td>'
       +'<td style="padding:6px 8px;font-family:var(--mono)">'+esc(r.codigo||'—')+'</td>'
-      +'<td style="padding:6px 8px;font-size:11.5px">'+esc(r.denominacao||'')+'</td>'
+      +'<td style="padding:6px 8px;font-size:11.5px">'+esc(_lancctbTribDenom(r))+'</td>'
       +'<td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">R$ '+_fmt(Number(r.valor))+'</td>'
       +'<td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;color:var(--slate)" title="'+esc(r.arquivo||'')+'">'+(nSeq>1?'<b>R$ '+_fmt(Number(r.valor_guia))+'</b> <span style="font-size:10.5px">('+nSeq+' códigos)</span>':'<span style="font-size:10.5px">guia única</span>')+'</td>'
       +(temUn?'<td style="padding:6px 8px">'+esc(r.unidade||'')+'</td>':'')
@@ -46894,7 +46897,7 @@ function _lancctbTribPintar(){
 function _lancctbTribExcel(){
   const lista=_lancctbTribFiltrar(); if(!lista.length){ toast('Nada para exportar com os filtros atuais.','err'); return; }
   const aoa=[['Vencimento','Competência','Tributo','Código','Denominação','Valor','Valor da guia','Unidade','Setor','Conciliado','Banco do extrato','Data do extrato','Valor do extrato','Arquivo'],
-    ...lista.map(r=>[_lancctbTribFmtD(r.vencimento),r.competencia?r.competencia.slice(5)+'/'+r.competencia.slice(0,4):'',r.tipo||'',r.codigo||'',r.denominacao||'',Number(r.valor),Number(r.valor_guia),r.unidade||'',r.setor||'',r.conciliado?'Sim':'Não',r.extrato?r.extrato.banco:'',r.extrato?_lancctbTribFmtD(r.extrato.data):'',r.extrato?Number(r.extrato.valor):'',r.arquivo||''])];
+    ...lista.map(r=>[_lancctbTribFmtD(r.vencimento),r.competencia?r.competencia.slice(5)+'/'+r.competencia.slice(0,4):'',r.tipo||'',r.codigo||'',_lancctbTribDenom(r),Number(r.valor),Number(r.valor_guia),r.unidade||'',r.setor||'',r.conciliado?'Sim':'Não',r.extrato?r.extrato.banco:'',r.extrato?_lancctbTribFmtD(r.extrato.data):'',r.extrato?Number(r.extrato.valor):'',r.arquivo||''])];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Tributos');
   const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
   XLSX.writeFile(wb,'Tributos_'+String(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.xlsx');
