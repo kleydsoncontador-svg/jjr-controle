@@ -26723,7 +26723,42 @@ function _lancctbTributosUnidadesDaEmpresa(eid){
   if(String(eid)==='163') ids.add('164');
   return [...ids];
 }
+// ── Guias importadas no site (aba Tributos): o Processar Tributos passa a ler DAQUI (pedido do usuário 04/11/2026). Cada guia vira uma "entrada" no mesmo formato dos arquivos da pasta, já com o conteúdo lido
+// (valor, composição por código, GNRE, DARE…), então nenhum PDF é aberto. O mês é o do VENCIMENTO (a pasta "Tributos do Mês_AAAA-MM" sempre foi organizada assim). Sem guia importada no mês, cai na pasta, como antes.
+const _lancctbGuiasSiteCache=new Map();
+async function _lancctbTributosTemGuiasSite(eid){ try{ const { count } = await _supaClient.from('tributos_guias').select('id',{count:'exact',head:true}).eq('empresa_eid',String(eid)); return (count||0)>0; }catch(e){ return false; } }
+async function _lancctbGuiasSiteDoMes(eid,anoMes){
+  const k=String(eid)+'|'+anoMes, c=_lancctbGuiasSiteCache.get(k);
+  if(c&&Date.now()-c.t<20000) return c.d;
+  let out=[];
+  try{
+    const { data: rows, error } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('doc_chave,seq,tipo,codigo,denominacao,valor,valor_guia,competencia,vencimento,uf,arquivo,encargo,meta').eq('empresa_eid',String(eid)).gte('vencimento',anoMes+'-01').lte('vencimento',anoMes+'-31').order('doc_chave').order('seq'));
+    if(error) throw error;
+    const porDoc=new Map(); (rows||[]).forEach(r=>{ if(!porDoc.has(r.doc_chave)) porDoc.set(r.doc_chave,[]); porDoc.get(r.doc_chave).push(r); });
+    const nomes=new Map();
+    porDoc.forEach((ls,dc)=>{
+      const r0=ls[0], m=r0.meta||{}, comp=r0.competencia?(r0.competencia.slice(5)+'/'+r0.competencia.slice(0,4)):null;
+      const composicao=(m.temComp!==undefined?m.temComp:ls.length>1)?ls.map(x=>({ codigo:x.codigo, denominacao:x.denominacao, valor:Number(x.valor), ...(x.encargo?{encargo:x.encargo}:{}) })):null;
+      let gnre=m.gnre||null;
+      if(!gnre&&/^GNRE/i.test(r0.tipo||'')){ const cod=String(r0.codigo||''), tp=LANCCTB_GNRE_COD_TIPO[cod]||null; gnre={ uf:r0.uf||null, codigo:cod||null, referencia:comp, tipo:tp, tipoNome:tp?LANCCTB_ICMS_TIPOS[tp]:null }; }
+      const ex={ valor:Number(r0.valor_guia), composicao, competencia:comp, ...(gnre?{gnre}:{}), ...(m.dare?{dare:m.dare}:{}), ...(m.parcelamento?{parcelamento:m.parcelamento}:{}), viaOcr:!!m.viaOcr };
+      const dt=String(r0.vencimento).split('-');
+      let nome=String(r0.arquivo||'').replace(/vencimento\s*\d{2}-\d{2}-\d{4}/i,'vencimento '+dt[2]+'-'+dt[1]+'-'+dt[0]); // o vencimento IMPRESSO na guia vale mais que o do nome do arquivo
+      const n=nomes.get(nome)||0; nomes.set(nome,n+1); if(n) nome=nome.replace(/\.pdf$/i,' #'+(n+1)+'.pdf'); // várias guias no mesmo arquivo (GNRE por UF): nomes distintos
+      out.push({ nome, fileHandle:null, _dbExtraido:ex, _docChave:dc });
+    });
+  }catch(e){ console.warn('Guias do site não lidas (usa a pasta):',e); out=[]; }
+  _lancctbGuiasSiteCache.set(k,{t:Date.now(),d:out});
+  return out;
+}
+// Lê o conteúdo de uma entrada de guia: já vem pronto quando é do site; senão abre o PDF da pasta.
+async function _lancctbExtrairDeEntrada(f,permitirIA,statusCb){
+  if(f._dbExtraido) return f._dbExtraido;
+  const pdf=await _lancctbAbrirPdfTributo(f.fileHandle);
+  return await _lancctbExtrairValorPdfTributo(pdf,permitirIA,statusCb);
+}
 async function _lancctbBuscarPdfsTributosDoMes(eid,anoMes){
+  { const doSite=await _lancctbGuiasSiteDoMes(eid,anoMes); if(doSite.length) return doSite; }
   const handleRaiz=await _lancctbCarregarHandleTributos();
   if(!handleRaiz) return [];
   const perm=await handleRaiz.queryPermission({mode:'read'});
@@ -27545,7 +27580,7 @@ let _lancctbTributosPermitirIA=false;
 async function _lancctbAtualizarSugestoesTributos(){
   const area=document.getElementById('lancctbRegraTributosArea');
   if(!area||!_lancctbRegraExtratoAlvo) return;
-  const temAcesso=await _lancctbTemAcessoPastaTributos();
+  const temAcesso=(await _lancctbTemAcessoPastaTributos())||(await _lancctbTributosTemGuiasSite(_lancctbEidAtual));
   if(!temAcesso){
     area.innerHTML=`<div style="font-size:12px;color:var(--slate);margin-bottom:10px">📁 <a href="#" onclick="_lancctbConcederAcessoPastaTributos();return false;">Conceder acesso à pasta "Tributos do Mês"</a> pra ver sugestões de PDF de imposto pra este lançamento.</div>`;
     return;
@@ -27566,8 +27601,7 @@ async function _lancctbAtualizarSugestoesTributos(){
   const encontrados=[];
   for(const f of todosDoMes){
     try{
-      const pdfDoc=await _lancctbAbrirPdfTributo(f.fileHandle);
-      const extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA);
+      const extraido=await _lancctbExtrairDeEntrada(f,_lancctbTributosPermitirIA);
       if(extraido&&Math.abs(extraido.valor-valorAlvo)<=LANCCTB_MATCH_TOLERANCIA_VALOR&&_lancctbJurisdicaoCompativel(_lancctbRegraExtratoAlvo.historico_bancario,f.nome,extraido)) encontrados.push(f);
     }catch(e){ console.error('Falha ao conferir valor do PDF de tributo '+f.nome+':',e); }
   }
@@ -27637,11 +27671,14 @@ async function _lancctbUsarSugestaoTributo(idx){
   const nomeLegivel=_lancctbNomeTributoLegivel(info.descricao);
   let darf=null, parcPdf=null;
   try{
+    if(f._dbExtraido){ const ed=f._dbExtraido; darf=(ed.composicao&&ed.composicao.length)?{ itens:ed.composicao, valorTotal:ed.valor, competencia:ed.competencia }:null; parcPdf=ed.parcelamento||null; }
+    else {
     const arquivo=await f.fileHandle.getFile();
     const pdfDoc=await pdfjsLib.getDocument({data:await arquivo.arrayBuffer()}).promise;
     darf=await _lancctbExtrairComposicaoDarf(pdfDoc)||await _lancctbExtrairComposicaoDamsp(pdfDoc)
       ||(_lancctbTributosPermitirIA?await _lancctbExtrairComposicaoTributoViaIA(pdfDoc):null);
     parcPdf=await _lancctbExtrairParcelamentoPdf(pdfDoc).catch(()=>null);
+    }
   }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); }
   // Descarta o rótulo genérico "Tributo" (não achou o campo "Receita" no
   // PDF) em favor do nome tirado do arquivo, sempre mais específico.
@@ -35971,7 +36008,7 @@ async function _lancctbLerGuiasDoMes(eid,anoMes,permitirIA,cacheLeitura,statusCb
     let extraido=null;
     if(cacheLeitura&&chave in cacheLeitura) extraido=cacheLeitura[chave];
     else {
-      try{ const pdf=await _lancctbAbrirPdfTributo(f.fileHandle); extraido=await _lancctbExtrairValorPdfTributo(pdf,permitirIA,statusCb?s=>statusCb(f.nome,s):undefined); }catch(e){ console.warn('guia ilegível',f.nome,e); }
+      try{ extraido=await _lancctbExtrairDeEntrada(f,permitirIA,statusCb?s=>statusCb(f.nome,s):undefined); }catch(e){ console.warn('guia ilegível',f.nome,e); }
       if(cacheLeitura) cacheLeitura[chave]=extraido;
     }
     out.push({ f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave });
@@ -36368,7 +36405,7 @@ async function _lancctbPreLerGuiasTributos(eid,pendencias,cacheLeituraPdf,cacheP
     while(idx<total){
       const [chave,f]=lista[idx++];
       let extraido=null;
-      try{ const pdf=await _lancctbAbrirPdfTributo(f.fileHandle); extraido=await _lancctbExtrairValorPdfTributo(pdf,_lancctbTributosPermitirIA); }
+      try{ extraido=await _lancctbExtrairDeEntrada(f,_lancctbTributosPermitirIA); }
       catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); extraido=null; }
       cacheLeituraPdf[chave]=extraido; feitos++; msg();
     }
@@ -37191,8 +37228,8 @@ async function _lancctbProcessarTributos(){
   if(_lancctbMatchingEmExecucao.has(_chaveLock)){ toast('Já tem um processamento rodando pra esta conta — aguarde terminar antes de clicar em outro "Processar..." (evita duplicar lançamento).','err'); return; }
   _lancctbMatchingEmExecucao.add(_chaveLock);
   if(btn) btn.disabled=true;
-  const temAcesso=await _lancctbTemAcessoPastaTributos();
-  if(!temAcesso){ toast('Conceda acesso à pasta "Tributos do Mês" primeiro — o botão fica na tela de listagem de empresas (Lançamentos Contábeis).','err'); if(btn) btn.disabled=false; _lancctbMatchingEmExecucao.delete(_chaveLock); return; }
+  const temAcesso=(await _lancctbTemAcessoPastaTributos())||(await _lancctbTributosTemGuiasSite(_lancctbEidAtual)); // guias importadas na aba Tributos dispensam a pasta
+  if(!temAcesso){ toast('Importe as guias (botão "Importar Tributos (PDF)" na lista de Lançamentos Contábeis) ou conceda acesso à pasta "Tributos do Mês" primeiro — o botão fica na tela de listagem de empresas (Lançamentos Contábeis).','err'); if(btn) btn.disabled=false; _lancctbMatchingEmExecucao.delete(_chaveLock); return; }
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel;
 
@@ -37304,8 +37341,7 @@ async function _lancctbProcessarTributos(){
       else if(chaveArquivo in cacheLeituraPdf) extraido=cacheLeituraPdf[chaveArquivo];
       else {
         try{
-          const pdfDoc=await _lancctbAbrirPdfTributo(f.fileHandle);
-          extraido=await _lancctbExtrairValorPdfTributo(pdfDoc,_lancctbTributosPermitirIA,s=>{ if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length} — ${s}`; });
+          extraido=await _lancctbExtrairDeEntrada(f,_lancctbTributosPermitirIA,s=>{ if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length} — ${s}`; });
         }catch(e){ console.error('Falha ao ler PDF de tributo '+f.nome+':',e); extraido=null; }
         cacheLeituraPdf[chaveArquivo]=extraido;
       }
@@ -37355,7 +37391,7 @@ async function _lancctbProcessarTributos(){
           const chave=f._mesPasta+'|'+f.nome;
           let extraido=null;
           if(chave in cacheLeituraPdf) extraido=cacheLeituraPdf[chave];
-          else { try{ const pdf=await _lancctbAbrirPdfTributo(f.fileHandle); extraido=await _lancctbExtrairValorPdfTributo(pdf,_lancctbTributosPermitirIA,s=>{ if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length} — ${s}`; }); }catch(e){} cacheLeituraPdf[chave]=extraido; }
+          else { try{ extraido=await _lancctbExtrairDeEntrada(f,_lancctbTributosPermitirIA,s=>{ if(statusEl) statusEl.textContent=`Processando tributos ${i+1}/${pendencias.length} — ${s}`; }); }catch(e){} cacheLeituraPdf[chave]=extraido; }
           extrasLidos.push({ f, info:_lancctbParsearNomeArquivoTributo(f.nome), extraido, chave });
         }
         leiturasPorMes[anoMes]=[...leitMes,...extrasLidos];
@@ -46731,13 +46767,14 @@ function _lancctbTributosAbrirImportar(){
 function _lancctbTributosLinhasDaGuia(ex,nomeTrib,pagina){
   const comp=(ex.competencia||'').match(/^(\d{2})\/(\d{4})$/);
   const base={ competencia:comp?(comp[2]+'-'+comp[1]):null, valor_guia:Math.round((ex.valor||0)*100)/100, uf:(ex.gnre&&ex.gnre.uf)||null };
-  let itens=(ex.composicao&&ex.composicao.length)?ex.composicao.map(c=>({ codigo:c.codigo||null, denominacao:c.denominacao||nomeTrib, valor:Math.round(Number(c.valor)*100)/100 })):null;
+  let itens=(ex.composicao&&ex.composicao.length)?ex.composicao.map(c=>({ codigo:c.codigo||null, denominacao:c.denominacao||nomeTrib, valor:Math.round(Number(c.valor)*100)/100, encargo:c.encargo||null })):null;
   if(!itens){
     const cod=(ex.dare&&ex.dare.codigo)||(ex.gnre&&ex.gnre.codigo)||null;
     const den=(ex.dare&&ex.dare.descricao)?('Dívida ativa/'+ex.dare.descricao):((ex.gnre&&ex.gnre.tipoNome)?(ex.gnre.tipoNome+(ex.gnre.uf?' — '+ex.gnre.uf:'')):nomeTrib);
     itens=[{ codigo:cod, denominacao:/^DAS Parcelamento/i.test(nomeTrib)?'Parcelamento do Simples Nacional':(/^DAS/i.test(nomeTrib)?'Simples Nacional':den), valor:base.valor_guia }];
   }
-  return itens.filter(i=>i.valor!==0||itens.length===1).map((i,k)=>({ ...base, tipo:nomeTrib+(pagina?' (pág. '+pagina+')':''), seq:k+1, codigo:i.codigo, denominacao:i.denominacao, valor:i.valor }));
+  const meta={ temComp:!!(ex.composicao&&ex.composicao.length), gnre:ex.gnre||null, dare:ex.dare||null, viaOcr:!!ex.viaOcr, parcelamento:ex.parcelamento||null }; // o Processar Tributos precisa disso pra ler da aba
+  return itens.filter(i=>i.valor!==0||itens.length===1).map((i,k)=>({ ...base, tipo:nomeTrib+(pagina?' (pág. '+pagina+')':''), seq:k+1, codigo:i.codigo, denominacao:i.denominacao, valor:i.valor, encargo:i.encargo||null, meta }));
 }
 async function _lancctbTributosImportar(arquivos){
   const emps=new Set((S.g('emps')||[]).map(e=>String(e.eid)));
@@ -46781,7 +46818,7 @@ async function _lancctbTributosImportar(arquivos){
         const docChave=(dp.documento&&!ex.multiGnre)?['DOC',info.eid,dp.documento].join('|'):[info.eid,ls[0].competencia||venc||'sem-data',ls[0].valor_guia.toFixed(2),g.pag||0,codigos].join('|');
         if(guiasVistas.has(info.eid+'|'+docChave)){ rep.duplicadas+=ls.length; nDupArq++; continue; }
         guiasVistas.add(info.eid+'|'+docChave); rep.guias++; nGuiasArq++; nLinhasArq+=ls.length;
-        ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:resEmp.eid, doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:venc, unidade:resEmp.unidade, setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
+        ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:resEmp.eid, doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:venc, unidade:resEmp.unidade, setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, encargo:l.encargo||null, meta:l.meta||null, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
       }
       mark(f.name,alertaArq?'Lido com alerta':(nGuiasArq?'Lido':'Lido (repetido)'),alertaArq||(nGuiasArq?(nGuiasArq+' guia(s), '+nLinhasArq+' código(s)'):'Esta guia já veio em outro arquivo desta seleção (mesmo número de documento ou mesmos valores) — ignorada'));
     }
@@ -46790,14 +46827,18 @@ async function _lancctbTributosImportar(arquivos){
     const novas=[];
     for(const [eid,lista] of porEid){
       const chaves=[...new Set(lista.map(l=>l.doc_chave))]; const jaTem=new Map();
-      for(let i=0;i<chaves.length;i+=50){ const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('id,doc_chave,seq,codigo,valor').eq('empresa_eid',eid).in('doc_chave',chaves.slice(i,i+50)).order('id')); (ex||[]).forEach(x=>{ if(!jaTem.has(x.doc_chave)) jaTem.set(x.doc_chave,[]); jaTem.get(x.doc_chave).push(x); }); }
+      for(let i=0;i<chaves.length;i+=50){ const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('id,doc_chave,seq,codigo,valor,meta').eq('empresa_eid',eid).in('doc_chave',chaves.slice(i,i+50)).order('id')); (ex||[]).forEach(x=>{ if(!jaTem.has(x.doc_chave)) jaTem.set(x.doc_chave,[]); jaTem.get(x.doc_chave).push(x); }); }
       const porDoc=new Map(); lista.forEach(l=>{ if(!porDoc.has(l.doc_chave)) porDoc.set(l.doc_chave,[]); porDoc.get(l.doc_chave).push(l); });
       for(const [dc,novos] of porDoc){
         const velhos=jaTem.get(dc);
         if(!velhos){ novos.forEach(l=>novas.push(l)); continue; }
         const sig=a=>a.map(x=>(x.codigo||'-')+':'+Number(x.valor).toFixed(2)).sort().join(',');
         const somaN=Math.round(novos.reduce((a,x)=>a+Math.round(x.valor*100),0))/100, somaV=Math.round(velhos.reduce((a,x)=>a+Math.round(Number(x.valor)*100),0))/100;
-        if(sig(novos)===sig(velhos)){ rep.duplicadas+=novos.length; continue; }
+        if(sig(novos)===sig(velhos)){ // mesma guia: ignorada, mas completa o detalhe (encargo/metadados) das linhas gravadas antes dele existir
+          rep.duplicadas+=novos.length;
+          for(const v of velhos.filter(x=>!x.meta)){ const nv=novos.find(n=>n.seq===v.seq); if(nv&&nv.meta) await _supaClient.from('tributos_guias').update({ encargo:nv.encargo||null, meta:nv.meta }).eq('id',v.id).eq('empresa_eid',eid); }
+          continue;
+        }
         if(novos.length>velhos.length&&Math.abs(somaN-somaV)<=0.02){ // mesma guia, agora lida com mais detalhe (ex.: DAS aberto em IRPJ, CSLL, COFINS, PIS, INSS, ISS)
           const ids=velhos.map(v=>v.id); for(let i=0;i<ids.length;i+=200) await _supaClient.from('tributos_guias').delete().in('id',ids.slice(i,i+200)).eq('empresa_eid',eid);
           novos.forEach(l=>novas.push(l)); mark(novos[0].arquivo,'Lido','Guia já existia como 1 linha — atualizada com o detalhe por código ('+novos.length+' códigos)'); continue;
@@ -46819,6 +46860,7 @@ async function _lancctbTributosImportar(arquivos){
     +(rep.limpas?'<b>'+rep.limpas+'</b><span>linha(s) duplicada(s) que já estavam gravadas foram removidas</span>':'')
     +(rep.erros?'<b style="color:var(--red)">'+rep.erros+'</b><span style="color:var(--red)">linha(s) deram erro ao gravar — veja o console</span>':'')+'</div>';
   const h=_lancctbImportRelatorioHtml('tributos',rep.arq,resumo);
+  _lancctbGuiasSiteCache.clear();
   _lancctbFolhaPainel('🧾 Tributos importados',h,true);
   if(_lancctbAbaAtiva==='tributos') renderLancctbTributos();
 }
