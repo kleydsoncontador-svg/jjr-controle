@@ -9765,6 +9765,7 @@ function _democAplicarFaturamento(eid, dadosResposta, arquivoNome){
     incluidos.push(mes+'/'+ano);
   });
   if(!incluidos.length && !jaExistiam.length) return {ok:false, motivo:'Nenhum lançamento de faturamento identificado no arquivo.'};
+  if(typeof _lucSincronizarFaturamentoDemonstrativos==='function'){ var anosSync={}; lancamentos.forEach(function(l){ if(l.ano) anosSync[String(l.ano)]=true; }); Object.keys(anosSync).forEach(function(a){ _lucSincronizarFaturamentoDemonstrativos(eid,a); }); }
   return {ok:true, incluidos:incluidos, jaExistiam:jaExistiam};
 }
 
@@ -60904,7 +60905,6 @@ function lucRenderLucrosFiscal(el){
     +'</select>'
     +'<button class="btn bp bsm" onclick="lucAdicionarEmpresaFiscal()">+ Adicionar Empresa</button>'
     +'</div>'
-    +'<div style="margin-top:10px">'+_lucRenderBulkForm()+'</div>'
     +'</div>';
 
   var empsAdicionadas=eids.map(function(eid){return todasEmps.find(function(e){return String(e.eid)===String(eid);});}).filter(Boolean);
@@ -60958,12 +60958,45 @@ function lucRemoverEmpresaFiscal(eid){
   renderLucros();
   toast('Empresa removida.','ok');
 }
+// Faturamento de Demonstrativos Contábeis → Receita do trimestre (pedido do usuário 04/11/2026). Os botões de anexar PDF aqui saíram: a fonte única agora é o módulo Demonstrativos.
+// Por mês: compara o que o histórico (faturamentoPdfLog) já tem daquele mês com o valor de Demonstrativos; se diferir, aplica SÓ a diferença no trimestre e troca as linhas do mês por uma só.
+// Valores digitados à mão (sem histórico) nunca são tocados. Só age em empresa que já está em Lucros/Dividendos Fiscal. Idempotente: rodar de novo sem mudança não grava nada.
+function _lucSincronizarFaturamentoDemonstrativos(eid,ano){
+  try{
+    if(getLucFiscalEmpresas().map(String).indexOf(String(eid))<0) return 0;
+    var lista=democGetFaturamentoLista(eid).filter(function(x){ return String(x.ano)===String(ano); });
+    if(!lista.length) return 0;
+    var cache={}, sujo={}, mudou=0;
+    lista.forEach(function(x){
+      var mes=String(x.mes).padStart(2,'0');
+      var dd=democGetFaturamento(eid,ano,x.mes); if(!dd) return;
+      var trim=_lucTrimDoMes(mes);
+      var dados=cache[trim]||(cache[trim]=getLucFiscalDados(eid,ano,trim));
+      dados.faturamentoPdfLog=dados.faturamentoPdfLog||[];
+      var s=0,v=0,o=0;
+      dados.faturamentoPdfLog.forEach(function(l){ if(String(l.mes).padStart(2,'0')===mes){ s+=parseFloat(l.saidas)||0; v+=parseFloat(l.servicos)||0; o+=parseFloat(l.outros)||0; } });
+      var ns=parseFloat(dd.saidas)||0, nv=parseFloat(dd.servicos)||0, no=parseFloat(dd.outros)||0;
+      var igual=Math.abs(s-ns)<0.005&&Math.abs(v-nv)<0.005&&Math.abs(o-no)<0.005;
+      var qtd=dados.faturamentoPdfLog.filter(function(l){ return String(l.mes).padStart(2,'0')===mes; }).length;
+      if(igual&&qtd===1) return;
+      dados.saidas=(parseFloat(dados.saidas)||0)+(ns-s);
+      dados.servicos=(parseFloat(dados.servicos)||0)+(nv-v);
+      dados.outros=(parseFloat(dados.outros)||0)+(no-o);
+      dados.faturamentoPdfLog=dados.faturamentoPdfLog.filter(function(l){ return String(l.mes).padStart(2,'0')!==mes; });
+      dados.faturamentoPdfLog.push({mes:mes, arquivo:'Demonstrativos Contábeis'+(dd.arquivo?' — '+dd.arquivo:''), saidas:ns, servicos:nv, outros:no, dataInclusao:new Date().toLocaleDateString('pt-BR')});
+      sujo[trim]=true; mudou++;
+    });
+    Object.keys(sujo).forEach(function(t){ setLucFiscalDados(eid,ano,parseInt(t,10),cache[t]); });
+    return mudou;
+  }catch(e){ console.warn('Sincronizar faturamento Demonstrativos → Fiscal:',e); return 0; }
+}
 function lucRenderFiscalEmpBody(eid){
   var ano=lucCurrentAno||'2026';
   var trims=[1,2,3,4];
   var socios=lucSocGet(eid);
+  _lucSincronizarFaturamentoDemonstrativos(eid,ano);
 
-  var h0='<div style="padding:10px 16px 0">'+_lucRenderFaturamentoForm(eid)+'</div>';
+  var h0='';
 
   var linhasBase=[
     {campo:'saidas',   label:'Saídas (Vendas) — presunção 8%'},
@@ -61033,7 +61066,6 @@ function lucRenderFiscalEmpBody(eid){
   });
   h+='<td style="'+tdTotal+';color:'+(totalResultado<0?'var(--red)':'var(--teal)')+'">'+lucFmt2025(totalResultado)+'</td>';
   h+='</tr></tbody></table></div>';
-  h+='<div style="padding:0 16px 10px">'+_lucRenderFaturamentoHistorico(eid,ano,trims)+'</div>';
 
   if(!socios.length){
     h+='<div style="padding:0 16px 14px;color:var(--slate);font-size:12.5px">Nenhum sócio cadastrado em "Percentual de Participação".</div>';
