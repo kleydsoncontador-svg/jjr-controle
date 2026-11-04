@@ -24973,7 +24973,6 @@ function _lancctbRenderBotoesAcessoPastas(){
   const btn=(id,fn,label)=>`<button class="btn bo bsm" id="${id}" onclick="${fn}()" title="Concede acesso 1x — vale pra todas as empresas, inclusive novas. Guardado no navegador.">🔑 ${label}</button>`;
   return `<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-bottom:10px">
     <span style="font-size:11.5px;color:var(--slate)">Acesso a pastas locais (1x pra todas as empresas):</span>
-    ${btn('lancctbAcessoConfiBackupBtn','_lancctbConcederAcessoPastaConfiBackup','ConfiBackup')}
     ${btn('lancctbAcessoExtratosMisterBtn','_lancctbConcederAcessoPastaExtratosMister','Extratos Mister Contador')}
   </div>`;
 }
@@ -25481,6 +25480,19 @@ async function _lancctbAcharPastaEmpresaConfiBackup(handleRaiz,eid){
 // Acha o PDF "Relatorio de Liquidos" (salário) ou "Relatorio de Liquidos
 // Adiantamento" pra uma competência — tenta a pasta típica primeiro,
 // sem_tipo_tarefa como 2ª tentativa (mesmo espírito do resto do módulo).
+// Dados de UM relatório de líquidos (salário/adiantamento…) de uma competência 'MM-AAAA': PRIMEIRO o que foi importado na aba Folha (tabela folha_liquidos); só se não houver, a pasta ConfiBackup (se ainda houver acesso). Devolve {competencia,total,pessoas} ou null. (ConfiBackup aposentado em 04/11/2026: a lógica de identificar pessoas por 3 meses passou a ler daqui.)
+async function _lancctbLiquidosDados(pastaEmpresa,eid,competenciaMMAAAA,tipo){
+  try{
+    const [mm,aaaa]=String(competenciaMMAAAA).split('-');
+    const { data: rows } = await _lancctbFetchTudo(()=>_supaClient.from('folha_liquidos').select('codigo,nome,cpf,categoria,valor').eq('empresa_eid',String(eid)).eq('tipo',tipo).eq('competencia',aaaa+'-'+mm).order('id'));
+    if(rows&&rows.length){
+      const pessoas=rows.map(r=>({ codigo:r.codigo, nome:r.nome, cpf:r.cpf, valor:Number(r.valor), tipo:r.categoria==='CONTRIBUTOR'?'contribuinte':'empregado', categoria:r.categoria }));
+      return { competencia:competenciaMMAAAA, total:Math.round(pessoas.reduce((a,x)=>a+Math.round(x.valor*100),0))/100, pessoas };
+    }
+  }catch(e){ console.warn('Líquidos do site não lidos (tenta a pasta):',e); }
+  if(pastaEmpresa){ try{ const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,competenciaMMAAAA,tipo); if(file) return await _lancctbParsearRelatorioLiquidos(file); }catch(e){} }
+  return null;
+}
 async function _lancctbBuscarRelatorioLiquidos(pastaEmpresa,competenciaMMAAAA,tipo){
   const pastaTipica=tipo==='salario'?'Folha de Pagamento':'Adiantamento Mensal';
   const nomeArquivo=tipo==='salario'?`${competenciaMMAAAA} Relatorio de Liquidos.pdf`:`${competenciaMMAAAA} Relatorio de Liquidos Adiantamento.pdf`;
@@ -25878,7 +25890,7 @@ async function _lancctbProcessarFopag(){
   const temFolhaSite=await _lancctbFolhaTemDados(eid); // folha importada no site (aba Folha): dispensa a pasta
   const temFopagMes=(await _lancctbTemAcessoPastaFopagMes())||temFolhaSite;
   const temAcesso=await _lancctbTemAcessoPastaConfiBackup();
-  if(!temAcesso&&!temFopagMes){ toast('Importe a folha (botão "Importar Folha (PDF)" na lista de Lançamentos Contábeis) ou conceda acesso à pasta "FOPAG do Mês" (ou ConfiBackup) primeiro — os botões ficam na tela de listagem de empresas (Lançamentos Contábeis, antes de abrir a empresa).','err'); return; }
+  if(!temAcesso&&!temFopagMes){ toast('Importe a folha (botão "Importar Folha (PDF)" na lista de Lançamentos Contábeis)primeiro — o botão fica na tela de listagem de empresas (Lançamentos Contábeis, antes de abrir a empresa).','err'); return; }
   let handleRaiz=null;
   if(temAcesso){
     handleRaiz=await _lancctbCarregarHandleConfiBackup();
@@ -26358,14 +26370,14 @@ async function _lancctbProcessarFopag(){
         }
         // Pedido do usuário 18/10/2026: o Sispag serve também pra saber QUEM procurar no Fluxo — qualquer pessoa que esteja em alguma folha do mês, do mês anterior ou do próximo (salário, adiantamento…).
         // Pelo ConfiBackup só vinham os relatórios da regra de calendário; aqui completa com salário e adiantamento dos 3 meses (se existirem), só pra identificar as pessoas.
-        if(pastaEmpresa){
+        if(pastaEmpresa||temFolhaSite){
           const cProx=(mmaaaa)=>{ let [mm,aaaa]=mmaaaa.split('-').map(Number); mm++; if(mm>12){mm=1;aaaa++;} return `${String(mm).padStart(2,'0')}-${aaaa}`; };
           const jaTem=new Set(relatorios.map(r=>r.tipo+'|'+(r.competencia||r.dados.competencia)));
           for(const tp of ['salario','adiantamento']) for(const cp of [cAnt,cMes,cProx(cMes)]){
             const chave=tp+'|'+cp; if(jaTem.has(chave)) continue; jaTem.add(chave);
             if(!(chave in relatoriosExtraCache)){
               relatoriosExtraCache[chave]=null;
-              try{ const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,cp,tp); if(file){ const dd=await _lancctbParsearRelatorioLiquidos(file); if(dd) relatoriosExtraCache[chave]={tipo:tp,competencia:cp,dados:dd}; } }catch(e){ console.warn('Relatório extra (Caminho 1c):',e); }
+              try{ const dd=await _lancctbLiquidosDados(pastaEmpresa,eid,cp,tp); if(dd) relatoriosExtraCache[chave]={tipo:tp,competencia:cp,dados:dd}; }catch(e){ console.warn('Relatório extra (Caminho 1c):',e); }
             }
             const rx=relatoriosExtraCache[chave];
             if(rx&&!_compAposPagamento(rx.dados.competencia||rx.competencia,l.data_pagamento)) (rx.dados.pessoas||[]).forEach(pp=>pessoasFolha.push({p:pp,tipo:rx.tipo,comp:rx.dados.competencia||rx.competencia}));
@@ -26571,9 +26583,9 @@ async function _lancctbProcessarFopag(){
         if(String(eid)==='114'&&r.tipo==='adiantamento'){
           try{
             let rs=relatorios.find(x=>x.tipo==='salario'&&_compDig(x.dados.competencia||x.competencia)===_compDig(cAnt));
-            if(!rs&&pastaEmpresa){
+            if(!rs&&(pastaEmpresa||temFolhaSite)){
               const chv='salario|'+cAnt;
-              if(!(chv in relatoriosExtraCache)){ relatoriosExtraCache[chv]=null; try{ const file=await _lancctbBuscarRelatorioLiquidos(pastaEmpresa,cAnt,'salario'); if(file){ const dd=await _lancctbParsearRelatorioLiquidos(file); if(dd) relatoriosExtraCache[chv]={tipo:'salario',competencia:cAnt,dados:dd}; } }catch(e){ console.warn('Salário anterior (complemento):',e); } }
+              if(!(chv in relatoriosExtraCache)){ relatoriosExtraCache[chv]=null; try{ const dd=await _lancctbLiquidosDados(pastaEmpresa,eid,cAnt,'salario'); if(dd) relatoriosExtraCache[chv]={tipo:'salario',competencia:cAnt,dados:dd}; }catch(e){ console.warn('Salário anterior (complemento):',e); } }
               rs=relatoriosExtraCache[chv];
             }
             const ps=rs&&(rs.dados.pessoas||[]).find(x=>(x.cpf&&p.cpf&&x.cpf===p.cpf)||_norm(x.nome)===_norm(p.nome));
