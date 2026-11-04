@@ -42232,7 +42232,7 @@ async function _itauExtrairParesPagina(page){
     l.itens.push({x:it.transform[4]||0,str:str});
   });
   linhas.sort(function(a,b){ return b.y-a.y; });
-  var pares=[], titulo=null, marcador=null, secao='', textoLinhas=[], pendenteLabel=null;
+  var pares=[], titulo=null, marcador=null, secao='', textoLinhas=[], pendenteLabel=null, barrasSolta=null;
   linhas.forEach(function(l){
     l.itens.sort(function(a,b){ return a.x-b.x; });
     var esq=l.itens.filter(function(i){ return i.x<150; }).map(function(i){ return i.str; }).join(' ').trim();
@@ -42244,10 +42244,14 @@ async function _itauExtrairParesPagina(page){
     if(esq&&!dir){
       if(/^dados d/i.test(esq)){ secao=_itauNorm(esq); pendenteLabel=null; return; }
       if(/^\d{20,}$/.test(esq.replace(/\s/g,''))&&pendenteLabel){ pares.push({secao:secao,label:pendenteLabel,valor:esq.replace(/\s/g,'')}); pendenteLabel=null; return; }
-      pendenteLabel=_itauNorm(esq); return;
+      pendenteLabel=_itauNorm(esq);
+      // Concessionária: o código de barras fica em 2 linhas, uma ACIMA e outra ABAIXO do rótulo — a de cima já passou (barrasSolta); a de baixo entra pela regra de continuação.
+      if(pendenteLabel==='codigo de barras'&&barrasSolta){ pares.push({secao:secao,label:pendenteLabel,valor:barrasSolta}); pendenteLabel=null; }
+      barrasSolta=null; return;
     }
     if(esq&&dir){ pares.push({secao:secao,label:_itauNorm(esq),valor:dir}); pendenteLabel=null; return; }
-    // só valor à direita sem rótulo: ignora
+    // Só valor à direita, sem rótulo: é a CONTINUAÇÃO do campo de cima quando este é o código de barras (vem em 2 linhas: '85890000058-8 59050328262-2 …' / '64072026255-5 …').
+    if(!esq&&dir&&/^[\d\s.-]+$/.test(dir)&&dir.replace(/\D/g,'').length>=10){ if(pares.length&&/^codigo de barras$/.test(pares[pares.length-1].label)) pares[pares.length-1].valor+=' '+dir; else barrasSolta=dir; }
   });
   return { titulo:titulo, marcador:marcador, pares:pares, texto:textoLinhas.join('\n') };
 }
@@ -42257,7 +42261,7 @@ function _itauParsearSispagColunas(pares, texto, titulo){
   var qualquer=function(labRe){ for(var i=0;i<pares.length;i++){ if(labRe.test(pares[i].label)) return pares[i].valor; } return null; };
   var dinheiro=function(v){ return v==null?null:_itauParseValorBR(String(v).replace(/R\$\s*/i,'')); };
   r.ctrl=qualquer(/^controle$/)||null;
-  var ehBoleto=/pagamento de boleto/.test(tit);
+  var ehBoleto=/pagamento de boleto|pagamento - boleto/.test(tit);
   if(ehBoleto){
     r._tipo='BOLETO_NOVO';
     var nomeB=get(/beneficiario$/,/^nome$/), razao=get(/beneficiario$/,/^razao social$/), docB=get(/beneficiario$/,/^cpf\/cnpj$/);
@@ -42290,6 +42294,54 @@ function _itauParsearSispagColunas(pares, texto, titulo){
   if(!r.data_pagamento) r.warnings.push('PAYMENT_DATE_NOT_FOUND');
   return r;
 }
+// ── LAYOUT "RÓTULO | VALOR" DE 1 PÁGINA (Itaú Empresas na Internet / Sispag — EDG #149, 09/2026) ───────────────────────────────────────────
+// Rótulos à esquerda (x≈44), valor à direita (x≈204), mesma linha, SEM dois-pontos. Serve para: Comprovante de transferência (PIX/TED), de Pagamento - Boleto, de pagamento (concessionária), - DARF, - Simples Nacional,
+// - Tributos Municipais/Estaduais. O pagador vem em seção própria ("Dados de quem está pagando"/"da conta debitada") e NUNCA é confundido com o favorecido (busca por seção).
+function _itauParsearColunasGeral(pares, texto, titulo){
+  var tit=_itauNorm(titulo||'');
+  if(/pagamento de boleto|pagamento - boleto/.test(tit)){
+    var rb=_itauParsearSispagColunas(pares,texto,titulo);
+    var ref=null; for(var i=0;i<pares.length;i++){ if(/^identificacao do comprovante$/.test(pares[i].label)) ref=pares[i].valor; }
+    rb.payment_reference=ref||null; return rb;
+  }
+  var r=_itauRegistroVazio();
+  var get=function(secRe,labRe){ for(var i=0;i<pares.length;i++){ if(secRe.test(pares[i].secao)&&labRe.test(pares[i].label)) return pares[i].valor; } return null; };
+  var qualquer=function(labRe){ for(var i=0;i<pares.length;i++){ if(labRe.test(pares[i].label)) return pares[i].valor; } return null; };
+  var dinheiro=function(v){ return v==null?null:_itauParseValorBR(String(v).replace(/R\$\s*/i,'')); };
+  r.ctrl=qualquer(/^controle$/)||null;
+  if(/transferencia/.test(tit)){
+    var nome=get(/recebe(ndo|dor)/,/^nome( do recebedor)?$/)||qualquer(/^nome do recebedor$/);
+    var doc=get(/recebe(ndo|dor)/,/^cpf( ou |\s*\/\s*)cnpj( do recebedor)?$/);
+    var msg=qualquer(/^mensagem ao recebedor$/), idc=qualquer(/^identificacao no comprovante$/);
+    r.cliente_fornecedor_nome=nome||null; r.cnpj_cpf=doc||null; r.beneficiary_name=r.cliente_fornecedor_nome; r.beneficiary_document=r.cnpj_cpf;
+    r.transaction_id=qualquer(/^id da transacao$/)||null;
+    r.payment_reference=(msg&&msg.trim())||(idc&&idc.trim())||null;
+    r.documento_numero=(idc&&idc.trim())||(msg&&msg.trim())||r.transaction_id||r.ctrl||null;
+    r.valor_pago=dinheiro(qualquer(/^valor$/));
+    var dt=qualquer(/^data da transferencia$/); r.data_pagamento=dt?_itauParseDataBR(dt):_itauDataConfirmacao(texto);
+    r._tipo=/pix/.test(_itauNorm(qualquer(/^tipo de pagamento$/)||''))?'PIX_TRANSFERENCIA':'TRANSFERENCIA_CONTA';
+    if(!r.cliente_fornecedor_nome) r.warnings.push('BENEFICIARY_NOT_FOUND');
+  } else {
+    var barras=qualquer(/^codigo de barras$/), numDoc=qualquer(/^numero do documento$/);
+    var desc=qualquer(/^descricao$/), conc=qualquer(/^nome da concessionaria$/);
+    var obs=qualquer(/^informacoes fornecidas pelo pagador$/)||qualquer(/^identificacao do comprovante$/);
+    r.barcode=barras||null; r.barcode_normalized=barras?String(barras).replace(/\D/g,''):null;
+    r.documento_numero=(numDoc&&numDoc.trim())||r.barcode||r.ctrl||null;
+    r.payment_reference=(obs&&obs.trim())||null;
+    r.valor_pago=dinheiro(qualquer(/^valor do pagamento$/))||dinheiro(qualquer(/^valor do documento$/));
+    var dp=qualquer(/^data do pagamento$/); r.data_pagamento=dp?_itauParseDataBR(dp):_itauDataConfirmacao(texto);
+    if(/darf/.test(tit)){ r._tipo='DARF'; r.cliente_fornecedor_nome='DARF'; }
+    else if(/simples nacional/.test(tit)){ r._tipo='DARF'; r.cliente_fornecedor_nome='SIMPLES NACIONAL'; }
+    else if(/tributos municipais/.test(tit)){ r._tipo='TRIBUTO_MUNICIPAL'; r.cliente_fornecedor_nome='TRIBUTOS MUNICIPAIS'; r.beneficiary_name=desc||null; }
+    else if(/tributos estaduais/.test(tit)){ r._tipo='TRIBUTO_ESTADUAL'; r.cliente_fornecedor_nome='TRIBUTOS ESTADUAIS'; r.beneficiary_name=desc||null; }
+    else if(/e-?social|arrecadacao do e/.test(tit)){ r._tipo='ESOCIAL'; r.cliente_fornecedor_nome='E-SOCIAL'; }
+    else { r._tipo='CONCESSIONARIA'; r.cliente_fornecedor_nome=conc||desc||'CONCESSIONÁRIA'; r.beneficiary_name=r.cliente_fornecedor_nome; }
+    if(!r.documento_numero) r.warnings.push('DOCUMENT_NOT_FOUND');
+  }
+  if(r.valor_pago==null) r.warnings.push('VALUE_NOT_FOUND');
+  if(!r.data_pagamento) r.warnings.push('PAYMENT_DATE_NOT_FOUND');
+  return r;
+}
 // Data de confirmação do layout novo: "transação efetuada em DD/MM/AAAA às …"
 // Hash determinístico de dedup (spec): chave por tipo, nunca só fornecedor+valor.
 function _itauHashComprovante(tipo, r){
@@ -42308,7 +42360,7 @@ function _itauParsearPaginaComprovante(linhas, texto, numeroPagina, sispag){
   var tipoNovo=sispag?'SISPAG_COLUNAS':_itauDetectarTipoPagamento(texto);
   var tipo, extraido;
   if(tipoNovo==='SISPAG_COLUNAS'){
-    extraido=_itauParsearSispagColunas(sispag.pares,texto,sispag.titulo); tipo=extraido._tipo;
+    extraido=sispag.geral?_itauParsearColunasGeral(sispag.pares,texto,sispag.titulo):_itauParsearSispagColunas(sispag.pares,texto,sispag.titulo); tipo=extraido._tipo;
   } else if(tipoNovo){
     tipo=tipoNovo;
     if(tipo==='BOLETO_NOVO') extraido=_itauParsearBoletoNovo(linhas,texto);
@@ -42339,7 +42391,7 @@ function _itauParsearPaginaComprovante(linhas, texto, numeroPagina, sispag){
   }
   if(!extraido.warnings) extraido.warnings=[];
 
-  var temConfirmacao=/(?:opera[çc][ãa]o|pagamento|transa[çc][ãa]o|transfer[êe]ncia)\s+(?:efetuad[oa]|realizad[oa])/i.test(texto);
+  var temConfirmacao=/(?:opera[çc][ãa]o|pagamento|transa[çc][ãa]o|transfer[êe]ncia)\s+(?:efetuad[oa]|realizad[oa])/i.test(texto)||/(?:^|\n)\s*efetuad[oa]\s+em\s+\d{2}\/\d{2}\/\d{4}/i.test(texto);
   var status=(temConfirmacao&&extraido.valor_pago>0)?'PAGO':'VERIFICAR';
   if(status==='VERIFICAR'&&extraido.warnings.indexOf('STATUS_NAO_CONFIRMADO')<0) extraido.warnings.push('STATUS_NAO_CONFIRMADO');
 
@@ -42388,6 +42440,10 @@ async function _itauProcessarPdfDeterministico(pdf, onProgresso){
       registros.push(_itauParsearPaginaComprovante([],textoDoc,p,{pares:paresDoc,titulo:pg.titulo}));
       paginasJuntadas+=Math.min(totalDoc,pdf.numPages-p+1)-1; p+=Math.min(totalDoc,pdf.numPages-p+1)-1;
       continue;
+    }
+    // Layout "rótulo | valor" de 1 página (sem '1 de N'): tenta o leitor por colunas; só vale se achar valor e data — senão cai nos leitores antigos (Peixoto/Fast Lube).
+    if(pg.titulo&&/^comprovante de /i.test(pg.titulo)&&!pg.marcador&&pg.pares.length>=4){
+      try{ var rg=_itauParsearPaginaComprovante([],pg.texto,p,{pares:pg.pares,titulo:pg.titulo,geral:true}); if(rg.valor_pago>0&&rg.data_pagamento){ registros.push(rg); continue; } }catch(eg){}
     }
     var extraida=await _itauExtrairLinhasPagina(page);
     registros.push(_itauParsearPaginaComprovante(extraida.linhas,extraida.texto,p));
