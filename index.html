@@ -46692,7 +46692,7 @@ function _lancctbTribRotulo(descricao,ex,itens){
   const d=String(descricao||'');
   if(ex&&ex.gnre) return 'GNRE'+(ex.gnre.uf?' '+ex.gnre.uf:'');
   if(/\bDAE\b|\bDARE\b/i.test(d)){ if(/DIFAL/i.test(d)) return 'ICMS DIFAL'; if(/ICMS\s*ST/i.test(d)) return 'ICMS ST'; if(/ICMS/i.test(d)) return 'ICMS'; return /DARE/i.test(d)?'DARE':'DAE'; } // DAE/DARE (Minas, São Paulo…) tem código próprio, não é DARF
-  if(/\bDAS\b/i.test(d)) return /parcel/i.test(d)?'DAS Parcelamento':'DAS';
+  if(/\bDAS\b|Parc\.?\s*SN|PARCSN/i.test(d)) return /parcel/i.test(d)?'DAS Parcelamento':'DAS';
   if(ex&&ex.composicao&&ex.composicao.length){
     const cls=[]; ex.composicao.forEach(c=>{ const k=_LANCCTB_TRIB_CODIGOS[String(c.codigo||'').replace(/\D/g,'').padStart(4,'0')]; if(k&&!cls.includes(k)) cls.push(k); });
     return 'DARF'+(cls.length?' ('+cls.join('/')+')':'');
@@ -46771,7 +46771,7 @@ function _lancctbTributosLinhasDaGuia(ex,nomeTrib,pagina){
   if(!itens){
     const cod=(ex.dare&&ex.dare.codigo)||(ex.gnre&&ex.gnre.codigo)||null;
     const den=(ex.dare&&ex.dare.descricao)?('Dívida ativa/'+ex.dare.descricao):((ex.gnre&&ex.gnre.tipoNome)?(ex.gnre.tipoNome+(ex.gnre.uf?' — '+ex.gnre.uf:'')):nomeTrib);
-    itens=[{ codigo:cod, denominacao:/^DAS Parcelamento/i.test(nomeTrib)?'Parcelamento do Simples Nacional':(/^DAS/i.test(nomeTrib)?'Simples Nacional':den), valor:base.valor_guia }];
+    itens=[{ codigo:cod, denominacao:(/^DAS/i.test(nomeTrib)&&ex.parcelamento&&ex.parcelamento.numero)?('PARCSN Número do Parcelamento: '+ex.parcelamento.numero):(/^DAS Parcelamento/i.test(nomeTrib)?'Parcelamento do Simples Nacional':(/^DAS/i.test(nomeTrib)?'Simples Nacional':den)), valor:base.valor_guia }];
   }
   const meta={ temComp:!!(ex.composicao&&ex.composicao.length), gnre:ex.gnre||null, dare:ex.dare||null, viaOcr:!!ex.viaOcr, parcelamento:ex.parcelamento||null }; // o Processar Tributos precisa disso pra ler da aba
   return itens.filter(i=>i.valor!==0||itens.length===1).map((i,k)=>({ ...base, tipo:nomeTrib+(pagina?' (pág. '+pagina+')':''), seq:k+1, codigo:i.codigo, denominacao:i.denominacao, valor:i.valor, encargo:i.encargo||null, meta }));
@@ -46870,7 +46870,7 @@ let _lancctbTribLinhas=[];
 async function renderLancctbTributos(){
   const el=document.getElementById('lancctbConteudoAba'); const eid=_lancctbEidAtual; if(!el||!eid||!_supaClient) return;
   _lancctbCarregando(el);
-  const { data: rows, error } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('id,doc_chave,seq,tipo,codigo,denominacao,valor,valor_guia,competencia,vencimento,unidade,setor,uf,arquivo,importado_em').eq('empresa_eid',eid).order('vencimento',{ascending:false}).order('doc_chave').order('seq'));
+  const { data: rows, error } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('id,doc_chave,seq,tipo,codigo,denominacao,valor,valor_guia,competencia,vencimento,unidade,setor,uf,arquivo,importado_em,meta').eq('empresa_eid',eid).order('vencimento',{ascending:false}).order('doc_chave').order('seq'));
   if(error){ el.innerHTML='<div style="padding:20px;color:var(--red)">Erro ao carregar os tributos: '+esc(error.message)+'</div>'; return; }
   // Conciliação: extrato JÁ conciliado, saída com o valor TOTAL da guia, entre o 1º dia do mês do vencimento e 15 dias depois dele (paga antes do vencimento ou com pouco atraso)
   const guias=new Map(); (rows||[]).forEach(r=>{ if(!guias.has(r.doc_chave)) guias.set(r.doc_chave,r); });
@@ -46892,8 +46892,10 @@ async function renderLancctbTributos(){
   _lancctbTribDesenhar();
 }
 // DAS: a denominação é sempre "Simples Nacional" (pedido do usuário 03/11/2026); aparece assim também nas linhas gravadas antes com "DAS".
+function _lancctbTribParcela(r){ const pc=r.meta&&r.meta.parcelamento; return (pc&&pc.parcela)?(pc.parcela+(pc.total?'/'+pc.total:'')):''; }
 function _lancctbTribDenom(r){
   const t=String(r.tipo||''), d=String(r.denominacao||'');
+  const pc=r.meta&&r.meta.parcelamento; if(/^DAS\b/i.test(t)&&pc&&pc.numero) return 'PARCSN Número do Parcelamento: '+pc.numero;
   if(/^DAS Parcelamento/i.test(t)) return 'Parcelamento do Simples Nacional';
   if(/^DAS\b/i.test(t)&&(!d||/^DAS\b/i.test(d))) return 'Simples Nacional';
   return d;
@@ -46940,10 +46942,10 @@ function _lancctbTribDesenhar(){
   }
   const th=(t,al)=>'<th style="padding:8px 8px;text-align:'+(al||'left')+'">'+t+'</th>';
   h+='<div style="overflow:auto;max-height:calc(100vh - 300px)"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead>'
-    +'<tr style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">'+th('Vencimento')+th('Competência')+th('Tributo')+th('Código')+th('Denominação')+th('Valor','right')+th('Faz parte da guia de','right')+(temUn?th('Unidade'):'')+th('Setor')+th('Conciliado','center')+th('Extrato que matou')+'</tr>'
+    +'<tr style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">'+th('Vencimento')+th('Competência')+th('Tributo')+th('Código')+th('Denominação')+th('Parcela','center')+th('Valor','right')+th('Faz parte da guia de','right')+(temUn?th('Unidade'):'')+th('Setor')+th('Conciliado','center')+th('Extrato que matou')+'</tr>'
     +'<tr style="background:var(--bg2);position:sticky;top:34px;z-index:5">'
     +'<th style="padding:4px 5px">'+inp('venc','🔎 dd/mm',60)+'</th><th style="padding:4px 5px">'+inp('comp','🔎 mm/aaaa',66)+'</th><th style="padding:4px 5px">'+inp('tipo','🔎 tributo',90)+'</th><th style="padding:4px 5px">'+inp('cod','🔎',44)+'</th><th style="padding:4px 5px">'+inp('den','🔎 denominação',130)+'</th>'
-    +'<th style="padding:4px 5px"><input class="si" placeholder="🔎 valor, >500…" value="'+esc(f.valor)+'" style="width:100%;min-width:84px;font-size:11px;text-align:right" oninput="_lancctbTribFiltroDeb(\'valor\',this.value)"></th>'
+    +'<th style="padding:4px 5px"></th><th style="padding:4px 5px"><input class="si" placeholder="🔎 valor, >500…" value="'+esc(f.valor)+'" style="width:100%;min-width:84px;font-size:11px;text-align:right" oninput="_lancctbTribFiltroDeb(\'valor\',this.value)"></th>'
     +'<th style="padding:4px 5px"><input class="si" placeholder="🔎 valor da guia" value="'+esc(f.guia)+'" style="width:100%;min-width:90px;font-size:11px;text-align:right" oninput="_lancctbTribFiltroDeb(\'guia\',this.value)"></th>'
     +(temUn?'<th style="padding:4px 5px">'+inp('unid','🔎',50)+'</th>':'')
     +'<th style="padding:4px 5px">'+inp('setor','🔎 setor',64)+'</th>'
@@ -46969,19 +46971,20 @@ function _lancctbTribPintar(){
       +'<td style="padding:6px 8px;font-weight:600">'+esc(r.tipo||'')+'</td>'
       +'<td style="padding:6px 8px;font-family:var(--mono)">'+esc(r.codigo||'—')+'</td>'
       +'<td style="padding:6px 8px;font-size:11.5px">'+esc(_lancctbTribDenom(r))+'</td>'
+      +'<td style="padding:6px 8px;text-align:center">'+esc(_lancctbTribParcela(r))+'</td>'
       +'<td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums">R$ '+_fmt(Number(r.valor))+'</td>'
       +'<td style="padding:6px 8px;text-align:right;font-variant-numeric:tabular-nums;color:var(--slate)" title="'+esc(r.arquivo||'')+'">'+(nSeq>1?'<b>R$ '+_fmt(Number(r.valor_guia))+'</b> <span style="font-size:10.5px">('+nSeq+' códigos)</span>':'<span style="font-size:10.5px">guia única</span>')+'</td>'
       +(temUn?'<td style="padding:6px 8px">'+esc(r.unidade||'')+'</td>':'')
       +'<td style="padding:6px 8px;font-size:11.5px;color:var(--slate)">'+esc(r.setor||'')+'</td>'
       +'<td style="padding:6px 8px;text-align:center">'+(r.conciliado?'<span style="color:var(--teal);font-weight:700">✔ sim</span>':'<span style="color:#d97706">pendente</span>')+'</td>'
       +'<td style="padding:6px 8px;font-size:11.5px">'+(r.extrato?esc((r.extrato.banco||'Banco')+' · '+_lancctbTribFmtD(r.extrato.data)+' · R$ '+_fmt(Number(r.extrato.valor))+' (extrato de '+r.extrato.data.slice(5,7)+'/'+r.extrato.data.slice(0,4)+')'):'—')+'</td></tr>';
-  }).join('')+(lista.length?'':'<tr><td colspan="11" style="padding:24px;text-align:center;color:var(--slate)">Nenhuma linha com esses filtros.</td></tr>');
+  }).join('')+(lista.length?'':'<tr><td colspan="12" style="padding:24px;text-align:center;color:var(--slate)">Nenhuma linha com esses filtros.</td></tr>');
   const rod=document.getElementById('tribRodape'); if(rod) rod.innerHTML=lista.length>2000?'<div style="padding:8px;color:var(--slate)">Mostrando 2.000 de '+lista.length+' — refine o filtro.</div>':'';
 }
 function _lancctbTribExcel(){
   const lista=_lancctbTribFiltrar(); if(!lista.length){ toast('Nada para exportar com os filtros atuais.','err'); return; }
-  const aoa=[['Vencimento','Competência','Tributo','Código','Denominação','Valor','Valor da guia','Unidade','Setor','Conciliado','Banco do extrato','Data do extrato','Valor do extrato','Arquivo'],
-    ...lista.map(r=>[_lancctbTribFmtD(r.vencimento),r.competencia?r.competencia.slice(5)+'/'+r.competencia.slice(0,4):'',r.tipo||'',r.codigo||'',_lancctbTribDenom(r),Number(r.valor),Number(r.valor_guia),r.unidade||'',r.setor||'',r.conciliado?'Sim':'Não',r.extrato?r.extrato.banco:'',r.extrato?_lancctbTribFmtD(r.extrato.data):'',r.extrato?Number(r.extrato.valor):'',r.arquivo||''])];
+  const aoa=[['Vencimento','Competência','Tributo','Código','Denominação','Parcela','Valor','Valor da guia','Unidade','Setor','Conciliado','Banco do extrato','Data do extrato','Valor do extrato','Arquivo'],
+    ...lista.map(r=>[_lancctbTribFmtD(r.vencimento),r.competencia?r.competencia.slice(5)+'/'+r.competencia.slice(0,4):'',r.tipo||'',r.codigo||'',_lancctbTribDenom(r),_lancctbTribParcela(r),Number(r.valor),Number(r.valor_guia),r.unidade||'',r.setor||'',r.conciliado?'Sim':'Não',r.extrato?r.extrato.banco:'',r.extrato?_lancctbTribFmtD(r.extrato.data):'',r.extrato?Number(r.extrato.valor):'',r.arquivo||''])];
   const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Tributos');
   const emp=S.emps().find(e=>String(e.eid)===String(_lancctbEidAtual));
   XLSX.writeFile(wb,'Tributos_'+String(emp?emp.nome:_lancctbEidAtual).replace(/[^a-zA-Z0-9]/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.xlsx');
