@@ -10015,7 +10015,30 @@ async function _democLerXlsxSemIA(tipo, file){
   }
   return resultados;
 }
+// Relatório de Faturamento (Domínio) lido SEM IA (pedido do usuário 04/11/2026, Clínica Elemental 193).
+// Linhas no formato: "Fevereiro 2026  0,00  4.775,00  0,00  4.775,00" = Mês Ano | Saídas | Serviços | Outros | Total.
+// Devolve o mesmo formato que a IA devolvia ({lancamentos:[{mes,ano,saidas,servicos,outros}]}), então o resto do fluxo não muda.
+// A linha só vale se Saídas+Serviços+Outros fechar com o Total impresso; se não fechar, o mês é recusado (nunca grava valor duvidoso).
+async function _democLerFaturamentoSemIA(file){
+  var texto=await _empExtrairTextoPDF(file,30);
+  var nomes=['janeiro','fevereiro','marco','abril','maio','junho','julho','agosto','setembro','outubro','novembro','dezembro'];
+  var num=function(s){ return parseFloat(String(s).replace(/\./g,'').replace(',','.')); };
+  var re=/^\s*([A-Za-zÀ-ú]+)\s+(\d{4})\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s+(-?[\d.]+,\d{2})\s*$/;
+  var lancamentos=[], recusados=[];
+  String(texto||'').split(/\r?\n/).forEach(function(linha){
+    var m=re.exec(linha); if(!m) return;
+    var nm=m[1].normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase();
+    var idx=nomes.indexOf(nm); if(idx<0) return;
+    var saidas=num(m[3]), servicos=num(m[4]), outros=num(m[5]), total=num(m[6]);
+    if(Math.abs((saidas+servicos+outros)-total)>0.011){ recusados.push(m[1]+'/'+m[2]); return; }
+    lancamentos.push({ mes:String(idx+1).padStart(2,'0'), ano:m[2], saidas:saidas, servicos:servicos, outros:outros });
+  });
+  if(recusados.length) throw new Error('Mês(es) cujo total não fecha com Saídas+Serviços+Outros: '+recusados.join(', ')+' — nada foi gravado.');
+  if(!lancamentos.length) throw new Error('Não reconheci linhas de faturamento (Mês Ano | Saídas | Serviços | Outros | Total) neste PDF.');
+  return { lancamentos:lancamentos };
+}
 async function _democExtrairTextoEChamarIA(edgeFnNome, file){
+  if(edgeFnNome==='luc-extrair-faturamento') return await _democLerFaturamentoSemIA(file);
   var texto=await _empExtrairTextoPDF(file,30);
   var resp=await fetch(SUPABASE_URL+'/functions/v1/'+edgeFnNome,{
     method:'POST',
@@ -10905,7 +10928,7 @@ function _democRenderFaturamentoSecao(eid){
       +'<th style="padding:6px 10px;text-align:left;background:var(--ink2);color:#fff">Arquivo</th>'
       +'<th style="padding:6px 10px;background:var(--ink2);color:#fff"></th>'
       +'</tr></thead><tbody>';
-    docs.slice().reverse().forEach(function(b,i){
+    docs.slice().sort(function(a,b){ return (String(a.ano)+String(a.mes).padStart(2,'0'))<(String(b.ano)+String(b.mes).padStart(2,'0'))?-1:1; }).forEach(function(b,i){
       var dados=democGetFaturamento(eid,b.ano,b.mes);
       h+='<tr style="background:'+(i%2===0?'var(--white)':'var(--bg)')+'">'
         +'<td style="padding:6px 10px">'+(LUC_MESES_FULL[parseInt(b.mes,10)-1]||b.mes)+'/'+b.ano+'</td>'
