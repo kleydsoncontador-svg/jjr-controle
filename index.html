@@ -34365,6 +34365,70 @@ function _lancctbPopcount(m){ let c=0; while(m){c+=m&1;m>>=1;} return c; }
 const _lancctbMatchingEmExecucao=new Set();
 let _lancctbProcAtual=null; // {chave, rotulo, msg} do processamento em andamento (pra faixa do topo e pro aviso de "já tem processamento")
 function _lancctbBarraProc(txt){ const el=document.getElementById('lancctbRegistroProcessarStatus'); if(el) el.textContent=txt; }
+// ── NF NO PRÓPRIO HISTÓRICO DO BANCO (pedido do usuário 04/11/2026, EDG #149): entrada do Itaú com histórico "SISPAG 0000000080" = pagamento da NF EMITIDA nº 80 (o cliente informa o nº da NF no Sispag).
+// Concilia a entrada com a(s) parcela(s) pendente(s) dessa NF (mais antiga primeiro). Se o valor recebido for MENOR que a parcela, a parcela passa a valer o recebido e o SALDO vira uma parcela nova, no mês seguinte,
+// automaticamente. Só age quando acha UMA NF de venda com esse número; valor maior que todas as parcelas pendentes, NF ambígua ou sem parcela pendente = não mexe (fica pendente p/ o usuário).
+async function _lancctbPassadaNfNoHistorico(eid,contaId,log,restringirPeriodo){
+  const out={ conciliadas:0, saldos:0, ignoradas:[] };
+  try{
+    const { data: ents } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,historico_bancario,conta_bancaria_id')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_entrada',0).order('data_pagamento',{ascending:true})));
+    const cand=(ents||[]).map(l=>{ const m=String(l.historico_bancario||'').match(/^\s*SISPAG\s+(\d{2,12})\s*$/i); return m?{ l, num:parseInt(m[1],10) }:null; }).filter(x=>x&&x.num>0);
+    if(!cand.length) return out;
+    if(log) log('NF citada no histórico do banco ('+cand.length+' entrada(s))…');
+    const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
+    if(!contaBancoInfo||!contaBancoInfo.conta_contabil_id) return out;
+    const { data: cf } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).eq('numero_conta','10000');
+    const contaEntradaNF=(cf||[])[0]; if(!contaEntradaNF) return out;
+    const r2=v=>Math.round(v*100)/100;
+    for(const { l, num } of cand){
+      const motivo=m=>{ out.ignoradas.push({ id:l.id, hist:l.historico_bancario, valor:l.valor_entrada, motivo:m }); };
+      const variantes=[String(num),String(num).padStart(6,'0'),String(num).padStart(9,'0')];
+      const { data: nfs } = await _supaClient.from('notas_fiscais').select('id,numero,cnpj_destinatario,nome_destinatario').eq('empresa_eid',eid).eq('direcao','venda').in('numero',variantes);
+      const ids=[...new Set((nfs||[]).map(n=>n.id))];
+      if(ids.length!==1){ motivo(ids.length?'NF '+num+' ambígua ('+ids.length+' notas com esse número)':'NF '+num+' de venda não encontrada'); continue; }
+      const nf=nfs[0];
+      const { data: parcsRaw } = await _supaClient.from('notas_fiscais_parcelas').select(LANCCTB_SEL_PARCELA_MOTOR+',status_conciliacao,tipo,direcao,data_emissao').eq('nf_id',nf.id).eq('status_conciliacao','pendente').order('data_vencimento',{ascending:true}).order('numero_parcela',{ascending:true});
+      const parcs=parcsRaw||[];
+      if(!parcs.length){ motivo('NF '+num+' sem parcela pendente'); continue; }
+      let resta=r2(Number(l.valor_entrada)); const aloc=[]; let parcial=null;
+      for(const p of parcs){
+        if(resta<=0.004) break;
+        const base=r2(Number(_lancctbNfValorParaMatching(p,resta)));
+        if(base<=0) continue;
+        if(resta>=base-0.01){ aloc.push({ p, valor:base }); resta=r2(resta-base); }
+        else { aloc.push({ p, valor:resta, saldo:r2(base-resta), base }); parcial=aloc[aloc.length-1]; resta=0; }
+      }
+      if(resta>0.01||!aloc.length){ motivo('valor R$ '+_fmt(Number(l.valor_entrada))+' maior que as parcelas pendentes da NF '+num); continue; }
+      const nomeT=nf.nome_destinatario||'', cnpjT=nf.cnpj_destinatario||null;
+      const { data: regraOv } = await _supaClient.from('regras_matching').select('conta_contabil_id,plano_contas(classificacao)').eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','cliente_fornecedor').eq('cnpj_cpf_gatilho',cnpjT||'__nenhum__').maybeSingle();
+      const contaId2=regraOv?regraOv.conta_contabil_id:contaEntradaNF.id, classif2=regraOv?regraOv.plano_contas.classificacao:contaEntradaNF.classificacao;
+      const hist=`Recebimento de ${nomeT||cnpjT||''} - NF ${nf.numero} - parcela ${aloc.map(a=>a.p.numero_parcela).join('/')}`.trim();
+      const base={ empresa_eid:eid, data:l.data_pagamento, historico:hist, cliente_fornecedor_nome:nomeT||null, cnpj_cpf:cnpjT, lancamento_extrato_id:l.id, origem_match:'regra' };
+      const linhas=[{ ...base, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'D', valor:r2(Number(l.valor_entrada)) },
+        ...aloc.map(a=>({ ...base, classificacao:classif2, conta_contabil_id:contaId2, tipo:'C', valor:a.valor, nf_parcela_id:a.p.id }))];
+      // 1) parcela do saldo (próximo mês) PRIMEIRO: se falhar, nada mais foi gravado
+      let novaId=null;
+      if(parcial){
+        const p=parcial.p; const { data: todas } = await _supaClient.from('notas_fiscais_parcelas').select('numero_parcela').eq('nf_id',nf.id);
+        const prox=Math.max(0,...(todas||[]).map(x=>x.numero_parcela||0))+1;
+        const dataSaldo=_lancctbParcelarSaldoDatas(p.data_vencimento,2)[1];
+        const { data: ins, error: eIns } = await _supaClient.from('notas_fiscais_parcelas').insert([{ nf_id:nf.id, empresa_eid:eid, numero_parcela:prox, data_vencimento:dataSaldo, valor_parcela:parcial.saldo, status_conciliacao:'pendente', data_emissao:p.data_emissao||null, tipo:p.tipo||null, direcao:p.direcao||null }]).select('id');
+        if(eIns){ motivo('erro ao criar a parcela do saldo: '+eIns.message); continue; }
+        novaId=(ins&&ins[0]&&ins[0].id)||null;
+      }
+      const { error: eRpc } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+      if(eRpc){ if(novaId) await _supaClient.from('notas_fiscais_parcelas').delete().eq('id',novaId).eq('status_conciliacao','pendente'); motivo('erro ao gravar o lançamento: '+eRpc.message); continue; }
+      for(const a of aloc){
+        const upd=a.saldo?{ valor_parcela:a.valor, status_conciliacao:'conciliado', lancamento_extrato_id:l.id }:{ status_conciliacao:'conciliado', lancamento_extrato_id:l.id };
+        await _supaClient.from('notas_fiscais_parcelas').update(upd).eq('id',a.p.id);
+      }
+      await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado' }).eq('id',l.id);
+      out.conciliadas++; if(parcial) out.saldos++;
+    }
+  }catch(e){ console.warn('NF no histórico do banco:',e); }
+  return out;
+}
 async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restringirPeriodo=false){
   const chaveExec=`${eid}|${contaId}`;
   if(_lancctbMatchingEmExecucao.has(chaveExec)){
@@ -34380,6 +34444,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
   _lancctbBarraProc(atual.msg);
   const cb=(m)=>{ const t=rotulo+': '+m; atual.msg=t; _lancctbBarraProc(t); if(statusCb) statusCb(t); };
   try{
+    if(modo==='completo'||modo==='comprovantes_recebimento'||modo==='notas_fiscais'){ try{ const ag0=(await _supaClient.from('agencias_bancarias').select('banco_codigo,banco_nome,descricao').eq('id',contaId).single()).data; if(!_lancctbContaSemNfVinculo(ag0)){ const rN=await _lancctbPassadaNfNoHistorico(eid,contaId,cb,restringirPeriodo); if(rN.conciliadas){ cb('NF citada no histórico: '+rN.conciliadas+' entrada(s) conciliada(s)'+(rN.saldos?', '+rN.saldos+' saldo(s) em parcela do mês seguinte':'')); toast(rN.conciliadas+' entrada(s) amarrada(s) pela NF citada no histórico'+(rN.saldos?' ('+rN.saldos+' saldo(s) viraram parcela do mês seguinte)':'')+'.','ok'); } } }catch(eN){ console.warn('Passada NF no histórico:',eN); } }
     return await _lancctbRodarMatchingInterno(eid,contaId,cb,modo,restringirPeriodo);
   } finally {
     _lancctbMatchingEmExecucao.delete(chaveExec);
