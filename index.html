@@ -26733,7 +26733,7 @@ async function _lancctbBuscarPdfsTributosDoMes(eid,anoMes){
     const encontrados=[];
     const idsUnidades=_lancctbTributosUnidadesDaEmpresa(eid); // a empresa + as FILIAIS que pagam pela mesma conta (ex.: Fast Lube 163 + unidade 164)
     for await (const [nome,fh] of dirMes.entries()){
-      if(fh.kind==='file'&&nome.toLowerCase().endsWith('.pdf')&&idsUnidades.some(i=>nome.includes(`(${i})`))){
+      if(fh.kind==='file'&&nome.toLowerCase().endsWith('.pdf')&&!_lancctbTribNomeNuncaLer(nome)&&idsUnidades.some(i=>nome.includes(`(${i})`))){
         encontrados.push({ nome, fileHandle:fh });
       }
     }
@@ -27276,6 +27276,20 @@ async function _lancctbExtrairViaOcrTributo(pdf,statusCb){
   // (_lancctbExtrairValorTotalGenerico), juntando o texto OCR de TODAS as
   // páginas já lidas acima (não roda o Tesseract de novo).
   const textoOcr=porPagina.map(p=>p.texto).join(' ');
+  // DAMSP (ISS da Prefeitura de São Paulo, só imagem): o valor está na coluna "Valor (R$)" logo depois de "AGO / 2026" (o "Total" sai com dígito errado no OCR) — achado 04/11/2026 (Adelpe 89, Auto Técnica 34, Super Troca 166).
+  if(/DAMSP|Documento de Arrecada\S*\s+do Munic\S*pio de S\S*o Paulo/i.test(textoOcr)){
+    const MES={JAN:'01',FEV:'02',MAR:'03',ABR:'04',MAI:'05',JUN:'06',JUL:'07',AGO:'08',SET:'09',OUT:'10',NOV:'11',DEZ:'12'};
+    const mv=textoOcr.match(/\b([A-Z]{3})\s*\/\s*(20\d{2})\s+(\d{1,3}(?:\.\d{3})*[,.]\d{2})\b/);
+    if(mv){ let x=mv[3]; if(/^\d+\.\d{2}$/.test(x)) x=x.replace('.',','); const v=_lancctbParseValorBR2(x); if(v>0) return { valor:v, composicao:null, competencia:MES[mv[1]]?(MES[mv[1]]+'/'+mv[2]):null, viaOcr:true }; }
+  }
+  // DARE-SP em imagem: o valor da guia é o mais repetido entre os "R$ x" (o "Valor Total" às vezes sai com espaços: "R$ 3 226 41").
+  if(/DARE-?SP|Documento de Arrecada\S*\s+de Receitas Estaduais/i.test(textoOcr)){
+    const cont={}; (textoOcr.match(/R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})/g)||[]).forEach(x=>{ const k=x.replace(/R\$\s*/,''); if(_lancctbParseValorBR2(k)>0) cont[k]=(cont[k]||0)+1; });
+    const ks=Object.keys(cont).sort((a,b)=>cont[b]-cont[a]);
+    const sp=textoOcr.match(/Valor Total\s*R\$\s*(\d{1,3})\s+(\d{3})\s+(\d{2})\b/i); const vsp=sp?parseFloat(sp[1]+sp[2]+'.'+sp[3]):null;
+    const v=ks.length&&(ks.length===1||cont[ks[0]]>=2||(vsp&&Math.abs(_lancctbParseValorBR2(ks[0])-vsp)<0.005))?_lancctbParseValorBR2(ks[0]):(vsp>0?vsp:0);
+    if(v>0) return { valor:v, composicao:null, competencia:null, viaOcr:true };
+  }
   const mTotal=textoOcr.match(/(?:total a recolher|valor total(?: do documento)?|total geral|valor a pagar|total\s*\(r\$\))[^,]{0,30}?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
   // FGTS Digital escaneado: o que é pago é o "Total da Guia" (FGTS + consignado), não o 1º "Total…"
   const mGuia=textoOcr.match(/total\s*da\s*guia:?\s*(?:R\$\s*)?([\d]{1,3}(?:\.\d{3})*,\d{2})/i);
@@ -46666,11 +46680,13 @@ async function _lancctbTribDadosDoPdf(pdf){
     const its=await _lancctbExtrairItensPagina(await pdf.getPage(1)); const t=its.map(i=>i.str).join(' ').replace(/\s+/g,' ');
     const nd=t.match(/N[úu]mero do Documento\s*:?\s*(\d{2}\.\d{2}\.\d{5}\.\d{7}-\d)/i)||t.match(/N[úu]mero do Documento\s*:?\s*([\d.\-\/]{12,})/i);
     const vc=t.match(/Pagar este documento at[ée]\s*(\d{2})\/(\d{2})\/(\d{4})/i);
-    return { documento:nd?nd[1]:null, vencimento:vc?(vc[3]+'-'+vc[2]+'-'+vc[1]):null, relatorioTrabalhadores:/Detalhe da Guia a Ser Emitida/i.test(t) };
-  }catch(e){ return {documento:null,vencimento:null,relatorioTrabalhadores:false}; }
+    return { documento:nd?nd[1]:null, vencimento:vc?(vc[3]+'-'+vc[2]+'-'+vc[1]):null, relatorioTrabalhadores:/Detalhe da Guia a Ser Emitida/i.test(t), apuracao:/DEMONSTRATIVO DA APURA..O/i.test(t.slice(0,600)) };
+  }catch(e){ return {documento:null,vencimento:null,relatorioTrabalhadores:false,apuracao:false}; }
 }
 // "Relatório RE FGTS …": detalhe dos TRABALHADORES da guia a ser emitida — não é uma guia (pedido do usuário 03/11/2026: ignorar). Pelo nome do arquivo ou pelo título dentro do PDF.
 const _lancctbTribNomeRelatorioRe=n=>/Relat[óo]rio\s+RE\b/i.test(String(n||''));
+// "Documentos Admissionais" (e afins) não são guia de tributo: NUNCA lidos (pedido do usuário 04/11/2026)
+const _lancctbTribNomeNuncaLer=n=>/Documentos?\s+Admission/i.test(String(n||''));
 // Mesma guia gravada mais de uma vez (chaves antigas ou nomes de arquivo com vencimentos diferentes): fica UMA — a de chave por número do documento, senão a de maior vencimento. Só age nas empresas informadas.
 async function _lancctbTributosDeduplicar(eids){
   let apagadas=0;
@@ -46697,6 +46713,13 @@ async function _lancctbTribItensDas(pdf,totalGuia){
     const soma=Math.round(itens.reduce((a,x)=>a+Math.round(x.valor*100),0))/100;
     return Math.abs(soma-totalGuia)<=0.02?itens:null;
   }catch(e){ return null; }
+}
+// O "(código)" do nome do arquivo pode ser o de uma FILIAL (Fast Lube 164 e 185 são filiais da 163): a guia entra na empresa-matriz, com a filial na coluna Unidade.
+function _lancctbTribResolverEmpresa(eidArq){
+  const emps=S.g('emps')||[]; const e=emps.find(x=>String(x.eid)===String(eidArq));
+  if(e) return { eid:String(e.eid), unidade:getFiliais(e.eid).length?String(e.eid):null };
+  const m=emps.find(x=>getFiliais(x.eid).some(f=>String(f.id)===String(eidArq)));
+  return m?{ eid:String(m.eid), unidade:String(eidArq) }:null;
 }
 function _lancctbTributosAbrirImportar(){
   let inp=document.getElementById('lancctbTributosArqInput');
@@ -46726,15 +46749,18 @@ async function _lancctbTributosImportar(arquivos){
       const f=arquivos[i];
       _lancctbFolhaPainel('🧾 Importando tributos…','Lendo <b>'+esc(f.name)+'</b> ('+(i+1)+' de '+arquivos.length+')…',false);
       const info=_lancctbParsearNomeArquivoTributo(f.name);
-      if(!info.eid||!emps.has(String(info.eid))){ rep.semEmpresa.push(f.name); mark(f.name,'Não importado','O nome do arquivo não tem o "(código da empresa)" de uma empresa cadastrada — esperado algo como "NOME DA EMPRESA (123) - Guia … - vencimento dd-mm-aaaa"'); continue; }
+      const resEmp=info.eid?_lancctbTribResolverEmpresa(info.eid):null;
+      if(!resEmp){ rep.semEmpresa.push(f.name); mark(f.name,'Não importado','O nome do arquivo não tem o "(código da empresa)" de uma empresa cadastrada — esperado algo como "NOME DA EMPRESA (123) - Guia … - vencimento dd-mm-aaaa"'); continue; }
+      if(_lancctbTribNomeNuncaLer(f.name)){ mark(f.name,'Lido (ignorado)','"Documentos Admissionais" não é guia de tributo — nunca é lido, de propósito'); continue; }
       if(_lancctbTribNomeRelatorioRe(f.name)){ mark(f.name,'Lido (ignorado)','Relatório RE (detalhe dos trabalhadores da guia a ser emitida) — não é uma guia; ignorado de propósito'); continue; }
       let ex=null, dp={documento:null,vencimento:null,relatorioTrabalhadores:false}, errLeitura='';
       try{
         const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise; pdf._ocrChave='trib|'+f.name+'|'+f.size;
         dp=await _lancctbTribDadosDoPdf(pdf);
-        if(dp.relatorioTrabalhadores) ex=null; else
+        if(dp.relatorioTrabalhadores||dp.apuracao) ex=null; else
         ex=await _lancctbExtrairValorPdfTributo(pdf,false,s=>_lancctbFolhaPainel('🧾 Importando tributos…','<b>'+esc(f.name)+'</b><br>'+esc(s),false));
       }catch(e){ console.warn('Tributos: falha ao ler',f.name,e); errLeitura=String((e&&e.message)||e); }
+      if(dp.apuracao){ mark(f.name,'Lido (ignorado)','É um "Demonstrativo da Apuração" (relatório de cálculo do imposto) — não é guia de pagamento; ignorado de propósito'); continue; }
       if(dp.relatorioTrabalhadores){ mark(f.name,'Lido (ignorado)','O PDF é o "Detalhe da Guia a Ser Emitida" (relação de trabalhadores) — não é uma guia; ignorado de propósito'); continue; }
       if(!ex||(!(ex.valor>0)&&!ex.multiGnre)){ rep.naoLidos.push(f.name); mark(f.name,errLeitura?'Erro ao ler':'Não lido',errLeitura?('Erro ao abrir/ler o PDF: '+errLeitura):'Não consegui achar o valor da guia (PDF sem texto reconhecível, imagem ilegível ou modelo de guia que o site ainda não conhece)'); continue; }
       const nomeTrib=_lancctbTribRotulo(info.descricao,ex.multiGnre?null:ex);
@@ -46754,7 +46780,7 @@ async function _lancctbTributosImportar(arquivos){
         const docChave=(dp.documento&&!ex.multiGnre)?['DOC',info.eid,dp.documento].join('|'):[info.eid,ls[0].competencia||venc||'sem-data',ls[0].valor_guia.toFixed(2),g.pag||0,codigos].join('|');
         if(guiasVistas.has(info.eid+'|'+docChave)){ rep.duplicadas+=ls.length; nDupArq++; continue; }
         guiasVistas.add(info.eid+'|'+docChave); rep.guias++; nGuiasArq++; nLinhasArq+=ls.length;
-        ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:String(info.eid), doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:venc, unidade:(getFiliais(info.eid).length?String(info.eid):null), setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
+        ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:resEmp.eid, doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:venc, unidade:resEmp.unidade, setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
       }
       mark(f.name,alertaArq?'Lido com alerta':(nGuiasArq?'Lido':'Lido (repetido)'),alertaArq||(nGuiasArq?(nGuiasArq+' guia(s), '+nLinhasArq+' código(s)'):'Esta guia já veio em outro arquivo desta seleção (mesmo número de documento ou mesmos valores) — ignorada'));
     }
