@@ -36,6 +36,7 @@
     { g: 'Resultado', k: 'despesasOperacionais', l: 'Despesas operacionais (comerciais, administrativas e outras — SEM as financeiras)', nat: 'D', padrao: ['4.2.1', '4.2.2', '4.2.4'], uso: 'EBIT' },
     { g: 'Resultado', k: 'despesasFinanceiras', l: 'Despesas financeiras', nat: 'D', padrao: ['4.2.3'], uso: 'Lucro líquido, cobertura de juros' },
     { g: 'Resultado', k: 'irCsll', l: 'IRPJ e CSLL (tributos sobre o lucro)', nat: 'D', padrao: ['4.3'], uso: 'Lucro líquido' },
+    { g: 'Resultado', k: 'despVariaveis', l: 'Despesas VARIÁVEIS com as vendas (comissões, fretes, taxas de cartão…) — opcional; devem estar também dentro das despesas operacionais acima', nat: 'D', padrao: [], uso: 'Ponto de equilíbrio e margem de contribuição (sem isso, todas as despesas operacionais contam como fixas)', opc: true },
     { g: 'Resultado', k: 'depreciacao', l: 'Depreciação e amortização (contas de despesa) — opcional', nat: 'D', padrao: [], uso: 'EBITDA', opc: true },
     { g: 'Resultado', k: 'compras', l: 'Compras do período (opcional)', nat: 'D', padrao: [], uso: 'Prazo médio de pagamento (sem isso usa o CMV)', opc: true },
     { g: 'Dívida e caixa', k: 'dividaOnerosa', l: 'Dívida onerosa: empréstimos e financiamentos (curto + longo prazo) — opcional', nat: 'C', padrao: [], uso: 'WACC, EVA, dívida líquida', opc: true },
@@ -45,6 +46,7 @@
   const SUGESTOES = {
     despAntecipadas: { raiz: '1.1', re: /ANTECIPAD/i }, intangivel: { raiz: '1.2', re: /INTANG/i }, investimentos: { raiz: '1.2', re: /^INVESTIMENTOS?$/i },
     depreciacao: { raiz: '4', re: /DEPRECIA|AMORTIZA/i, analitica: true },
+    despVariaveis: { raiz: '4.2', re: /COMISS|FRETE|CARTAO|CART[ÃA]O|EMBALAGEM|ENTREGA|PERDAS? COM|ROYALT/i, analitica: true },
     dividaOnerosa: { raiz: '2', re: /EMPR[ÉE]STIMO|FINANCIAMENTO/i, analitica: true }
   };
 
@@ -142,6 +144,34 @@
     linhas.push({ grupo: 'Capital de giro (versão simplificada de Fleuriet)', nome: 'Necessidade de capital de giro (NCG)', valor: ncg, unidade: 'R$', formula: 'Clientes + Estoques − Fornecedores', nota: 'versão simplificada: só considera clientes, estoques e fornecedores como contas cíclicas.' });
     linhas.push({ grupo: 'Capital de giro (versão simplificada de Fleuriet)', nome: 'Capital de giro (CDG)', valor: cdg, unidade: 'R$', formula: 'Patrimônio líquido + Passivo não circulante − Ativo não circulante', nota: '' });
     linhas.push({ grupo: 'Capital de giro (versão simplificada de Fleuriet)', nome: 'Saldo de tesouraria (T)', valor: st, unidade: 'R$', formula: 'CDG − NCG', nota: st >= 0 ? 'positivo: o capital de giro cobre a necessidade.' : 'negativo: a empresa depende de dívida de curto prazo para financiar o giro.' });
+    // ── Ponto de equilíbrio e alavancagem operacional (pedido do usuário 04/11/2026) ──
+    // Margem de contribuição = Receita líquida − CMV − despesas variáveis. Custos fixos = despesas operacionais − variáveis + despesas financeiras.
+    // Tudo no período acumulado do balancete (não anualizado). Se as despesas variáveis não foram informadas, todas as despesas operacionais contam como fixas.
+    {
+      const G = 'Ponto de equilíbrio e alavancagem operacional';
+      const dv = Math.min(val.despVariaveis || 0, val.despesasOperacionais || 0);
+      if ((val.despVariaveis || 0) > val.despesasOperacionais) avisos.push('Ponto de equilíbrio: as despesas variáveis informadas são maiores que as despesas operacionais; usei no máximo o total das operacionais. Confira as contas.');
+      const mc = rl - val.cmv - dv, mcPct = rl > 0 ? mc / rl : null;
+      const cf = val.despesasOperacionais - dv + val.despesasFinanceiras, dep = val.depreciacao || 0;
+      const pe = f => (mcPct && mcPct > 0 && f >= 0) ? Math.round(f / mcPct) : null;
+      const peC = pe(cf), peF = pe(Math.max(cf - dep, 0));
+      const lucroDes = (cfg.ke && plAj > 0) ? Math.round(plAj * (Number(String(cfg.ke).replace(',', '.')) / 100) * (mes / 12)) : null;
+      const peE = lucroDes !== null ? pe(cf + lucroDes) : null;
+      const naoAplica = mcPct === null || mcPct <= 0 ? 'não se aplica: a margem de contribuição é zero ou negativa (as vendas não cobrem nem os custos e despesas variáveis).' : '';
+      linhas.push({ grupo: G, nome: 'Margem de contribuição', valor: mc, unidade: 'R$', formula: 'Receita líquida − CMV − despesas variáveis', nota: dv ? '' : 'despesas variáveis não informadas: considerei só o CMV como custo variável.' });
+      linhas.push({ grupo: G, nome: 'Índice da margem de contribuição', valor: mcPct === null ? null : Math.round(mcPct * 10000) / 100, unidade: '%', formula: 'Margem de contribuição ÷ Receita líquida', nota: 'quanto de cada R$ 1,00 vendido sobra para pagar os custos fixos e dar lucro.' });
+      linhas.push({ grupo: G, nome: 'Custos e despesas fixos', valor: cf, unidade: 'R$', formula: 'Despesas operacionais − despesas variáveis + despesas financeiras', nota: '' });
+      linhas.push({ grupo: G, nome: 'Ponto de equilíbrio contábil (em receita)', valor: peC, unidade: 'R$', formula: 'Custos fixos ÷ Índice da margem de contribuição', nota: peC === null ? naoAplica : 'faturamento líquido do período em que o resultado é zero.' });
+      linhas.push({ grupo: G, nome: 'Ponto de equilíbrio financeiro (em receita)', valor: peF, unidade: 'R$', formula: '(Custos fixos − depreciação e amortização) ÷ Índice da margem de contribuição', nota: dep ? 'tira do custo fixo o que não sai do caixa.' : 'depreciação não informada: igual ao contábil.' });
+      linhas.push({ grupo: G, nome: 'Ponto de equilíbrio econômico (em receita)', valor: peE, unidade: 'R$', formula: '(Custos fixos + lucro mínimo desejado) ÷ Índice da margem de contribuição', nota: lucroDes === null ? 'informe o custo do capital próprio (Ke) em “Editar contas” para calcular: o lucro mínimo desejado é Ke × PL, proporcional ao período.' : 'lucro mínimo desejado = Ke × PL ajustado × ' + mes + '/12 = ' + brl(lucroDes) + '.' });
+      linhas.push({ grupo: G, nome: 'Receita líquida do período', valor: rl, unidade: 'R$', formula: 'Receita bruta − deduções', nota: '' });
+      const ms = (peC !== null && rl > 0) ? Math.round((rl - peC) / rl * 10000) / 100 : null;
+      linhas.push({ grupo: G, nome: 'Margem de segurança', valor: ms, unidade: '%', formula: '(Receita líquida − Ponto de equilíbrio contábil) ÷ Receita líquida', nota: ms === null ? '' : (ms >= 0 ? 'quanto as vendas podem cair antes de dar prejuízo.' : 'negativa: a empresa está vendendo abaixo do ponto de equilíbrio (prejuízo).') });
+      linhas.push({ grupo: G, nome: 'Ponto de equilíbrio mensal médio', valor: peC === null ? null : Math.round(peC / mes), unidade: 'R$', formula: 'Ponto de equilíbrio contábil ÷ meses do período', nota: '' });
+      linhas.push({ grupo: G, nome: 'Dias de vendas para atingir o equilíbrio', valor: (peC !== null && rl > 0) ? Math.round(peC / rl * dias * 10) / 10 : null, unidade: 'dias', formula: 'Ponto de equilíbrio ÷ Receita líquida × dias do período', nota: 'a partir do início do exercício, em quantos dias a empresa já cobriu todos os custos.' });
+      const gao = (ebit > 0 && mc > 0) ? Math.round(mc / ebit * 10000) / 10000 : null;
+      linhas.push({ grupo: G, nome: 'Grau de alavancagem operacional (GAO)', valor: gao, unidade: 'x', formula: 'Margem de contribuição ÷ Resultado operacional (EBIT)', nota: gao === null ? 'não se aplica: resultado operacional zero ou negativo.' : 'uma variação de 1% nas vendas muda o resultado operacional em ' + f2(gao, 2) + '%.' });
+    }
     rb.resultado.indices.filter(i => !/^ROE|^ROA/.test(i.nome)).forEach(i => linhas.push(Object.assign({}, i, { grupo: 'EBITDA, retornos e EVA — ' + i.grupo })));
     linhas.push({ grupo: 'Conferências do balancete', nome: 'Ativo total', valor: at, unidade: 'R$', formula: 'Ativo circulante + Ativo não circulante', nota: '' });
     linhas.push({ grupo: 'Conferências do balancete', nome: 'Passivo + PL (com o resultado ainda não apurado)', valor: val.passivoCirculante + val.elp + plAj, unidade: 'R$', formula: 'Passivo circulante + Passivo não circulante + (PL + resultado do exercício)', nota: 'deve ser igual ao ativo total.' });
