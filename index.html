@@ -46388,6 +46388,37 @@ function _lancctbFolhaAbrirImportar(){
   if(!inp){ inp=document.createElement('input'); inp.type='file'; inp.accept='.pdf'; inp.multiple=true; inp.id='lancctbFolhaArqInput'; inp.style.display='none'; inp.onchange=()=>{ const fs=[...inp.files]; inp.value=''; if(fs.length) _lancctbFolhaImportar(fs); }; document.body.appendChild(inp); }
   inp.click();
 }
+// Relatório do que foi lido e do que NÃO foi (pedido do usuário 03/11/2026): quantos arquivos vieram, quantos foram lidos, e os que não — com o nome inteiro do arquivo e o motivo —, com botão de Excel.
+function _lancctbImportRelatorioHtml(tituloExcel,arqMap,resumoHtml){
+  const todos=[...arqMap.entries()].map(([arquivo,v])=>({arquivo,situacao:v.situacao,motivo:v.motivo||''}));
+  const lido=x=>/^Lido/i.test(x.situacao), prob=todos.filter(x=>!lido(x)||/alerta/i.test(x.situacao));
+  const naoLidos=todos.filter(x=>!lido(x));
+  window.__relImport={ tituloExcel, todos, prob };
+  let h='<div style="display:flex;gap:18px;flex-wrap:wrap;margin-bottom:10px;padding:10px 12px;border:1px solid var(--border);border-radius:8px">'
+    +'<div><div style="font-size:22px;font-weight:700">'+todos.length+'</div><div style="color:var(--slate)">arquivo(s) na seleção</div></div>'
+    +'<div><div style="font-size:22px;font-weight:700;color:var(--teal)">'+(todos.length-naoLidos.length)+'</div><div style="color:var(--slate)">lido(s)</div></div>'
+    +'<div><div style="font-size:22px;font-weight:700;color:'+(naoLidos.length?'var(--red)':'var(--slate)')+'">'+naoLidos.length+'</div><div style="color:var(--slate)">NÃO lido(s)</div></div>'
+    +'<div><div style="font-size:22px;font-weight:700;color:'+(prob.length-naoLidos.length?'#d97706':'var(--slate)')+'">'+(prob.length-naoLidos.length)+'</div><div style="color:var(--slate)">lido(s) com alerta</div></div></div>';
+  h+=resumoHtml||'';
+  if(prob.length){
+    h+='<div style="margin-top:10px"><b>Arquivos com problema ('+prob.length+') — nome completo, como está na pasta:</b></div>'
+      +'<div style="max-height:260px;overflow:auto;border:1px solid var(--border);border-radius:6px;margin-top:4px"><table style="width:100%;border-collapse:collapse;font-size:12px">'
+      +'<thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0"><th style="padding:5px 8px;text-align:left">Arquivo</th><th style="padding:5px 8px;text-align:left">Situação</th><th style="padding:5px 8px;text-align:left">Motivo</th></tr></thead><tbody>'
+      +prob.map(x=>'<tr style="border-top:1px solid var(--border)"><td style="padding:5px 8px;word-break:break-all">'+esc(x.arquivo)+'</td><td style="padding:5px 8px;white-space:nowrap;color:'+(lido(x)?'#d97706':'var(--red)')+';font-weight:600">'+esc(x.situacao)+'</td><td style="padding:5px 8px">'+esc(x.motivo)+'</td></tr>').join('')
+      +'</tbody></table></div>';
+  } else h+='<div style="margin-top:10px;color:var(--teal)"><b>✔ Todos os arquivos foram lidos, sem nenhum problema.</b></div>';
+  h+='<div style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">'
+    +(prob.length?'<button class="action-btn action-btn-excel" onclick="_lancctbImportRelatorioExcel(true)">📊 Excel do que deu problema</button>':'')
+    +'<button class="btn bo bsm" onclick="_lancctbImportRelatorioExcel(false)">📊 Excel de todos os arquivos</button></div>';
+  return h;
+}
+function _lancctbImportRelatorioExcel(soProblemas){
+  const r=window.__relImport; if(!r){ toast('Nenhum relatório para exportar.','err'); return; }
+  const lista=soProblemas?r.prob:r.todos; if(!lista.length){ toast('Nada para exportar.','err'); return; }
+  const wb=XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet([['Arquivo','Situação','Motivo / detalhe'],...lista.map(x=>[x.arquivo,x.situacao,x.motivo])]),soProblemas?'Problemas':'Todos os arquivos');
+  XLSX.writeFile(wb,'Relatorio_importacao_'+r.tituloExcel+(soProblemas?'_problemas_':'_')+new Date().toISOString().slice(0,10)+'.xlsx');
+}
 function _lancctbFolhaPainel(titulo,html,fechavel){
   let p=document.getElementById('lancctbFolhaPainel');
   if(!p){ p=document.createElement('div'); p.id='lancctbFolhaPainel'; p.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9998;display:flex;align-items:center;justify-content:center;padding:20px'; document.body.appendChild(p); }
@@ -46398,20 +46429,23 @@ function _lancctbFolhaPainel(titulo,html,fechavel){
 async function _lancctbFolhaImportar(arquivos){
   const mapa=_lancctbFolhaMapaCnpjEid();
   _lancctbFolhaDbCache.clear();
-  const rep={ arquivos:arquivos.length, naoLidos:[], blocos:0, tipoDesconhecido:0, semEmpresa:new Map(), novas:0, duplicadas:0, valorDiferente:[], erros:0, divergeTotal:[], porEmp:new Map() };
+  const rep={ arquivos:arquivos.length, arq:new Map(), naoLidos:[], blocos:0, tipoDesconhecido:0, semEmpresa:new Map(), novas:0, duplicadas:0, valorDiferente:[], erros:0, divergeTotal:[], porEmp:new Map() };
   const linhas=new Map(); // chave completa -> linha (já tira duplicidade dentro do próprio envio)
+  const mark=(n,sit,mot)=>rep.arq.set(n,{situacao:sit,motivo:mot||''});
+  arquivos.forEach(f=>mark(f.name,'Não lido','Não chegou a ser processado (importação interrompida)'));
   try{
     for(let i=0;i<arquivos.length;i++){
       const f=arquivos[i];
       _lancctbFolhaPainel('👥 Importando folha…','Lendo <b>'+esc(f.name)+'</b> ('+(i+1)+' de '+arquivos.length+')…',false);
-      let r=null;
-      try{ const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise; r=await _lancctbParsearLiquidosDominio(pdf); }catch(e){ console.warn('Folha: falha ao ler',f.name,e); }
-      if(!r){ rep.naoLidos.push(f.name); continue; }
+      let r=null, errLeitura='';
+      try{ const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise; r=await _lancctbParsearLiquidosDominio(pdf); }catch(e){ console.warn('Folha: falha ao ler',f.name,e); errLeitura=String((e&&e.message)||e); }
+      if(!r){ rep.naoLidos.push(f.name); mark(f.name,errLeitura?'Erro ao ler':'Não lido',errLeitura?('Erro ao abrir/ler o PDF: '+errLeitura):'Não é uma "Relação Geral dos Líquidos" do Domínio (ou o PDF não tem texto reconhecível)'); continue; }
+      let nBlArq=0, semEmpArq=[], tipoDescArq=0;
       for(const b of r.blocks){
-        rep.blocos++;
-        const tipo=LIQ_TIPO_PARA_FOPAG[b.calculationType]; if(!tipo){ rep.tipoDesconhecido++; continue; }
+        rep.blocos++; nBlArq++;
+        const tipo=LIQ_TIPO_PARA_FOPAG[b.calculationType]; if(!tipo){ rep.tipoDesconhecido++; tipoDescArq++; continue; }
         const eid=mapa.get(String(b.entityDocument||'').replace(/\D/g,''));
-        if(!eid){ rep.semEmpresa.set(b.entityDocument,b.entityName||''); continue; }
+        if(!eid){ rep.semEmpresa.set(b.entityDocument,b.entityName||''); semEmpArq.push((b.entityName||'')+' '+_fmtCnpjCpf(b.entityDocument)); continue; }
         if(b.flags&&b.flags.includes('PAYROLL_TOTAL_MISMATCH')) rep.divergeTotal.push((b.entityName||b.entityDocument)+' — '+(_LANCCTB_FOLHA_ROTULO_TIPO[tipo]||tipo)+' '+String(b.competenceMonth).padStart(2,'0')+'/'+b.competenceYear);
         const comp=b.competence;
         for(const p of b.people){
@@ -46422,6 +46456,8 @@ async function _lancctbFolhaImportar(arquivos){
           linhas.set(k,{ empresa_eid:eid, tipo, competencia:comp, chave_pessoa:chavePessoa, codigo:p.code||null, nome:p.name, cpf:p.cpf||null, categoria:p.category||null, valor, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null });
         }
       }
+      { const alerta=[]; if(semEmpArq.length) alerta.push('CNPJ/CPF sem empresa cadastrada (não importado): '+semEmpArq.join('; ')); if(tipoDescArq) alerta.push(tipoDescArq+' relatório(s) de tipo de cálculo desconhecido (ignorados)');
+        mark(f.name,!nBlArq?'Não lido':(alerta.length?'Lido com alerta':'Lido'),!nBlArq?'Nenhum relatório de empresa reconhecido no PDF':(alerta.join(' | ')||(nBlArq+' relatório(s) de empresa'))); }
     }
     // confere com o que já está gravado (mesma empresa e competência)
     _lancctbFolhaPainel('👥 Importando folha…','Conferindo duplicidades…',false);
@@ -46445,18 +46481,14 @@ async function _lancctbFolhaImportar(arquivos){
       if(error){ console.error('Folha: erro ao gravar',error); rep.erros+=lote.length; } else { rep.novas+=lote.length; lote.forEach(l=>rep.porEmp.set(l.empresa_eid,(rep.porEmp.get(l.empresa_eid)||0)+1)); }
     }
   }catch(e){ console.error('Folha: importação',e); rep.erros++; }
-  const nomeEmp=eid=>{ const e=(S.g('emps')||[]).find(x=>String(x.eid)===String(eid)); return e?e.nome:eid; };
   const lista=(arr,max)=>arr.slice(0,max).map(x=>'<li>'+esc(x)+'</li>').join('')+(arr.length>max?'<li>… e mais '+(arr.length-max)+'</li>':'');
-  let h='<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin-bottom:8px">'
-    +'<b style="color:var(--teal)">'+rep.novas+'</b><span>linha(s) nova(s) gravada(s) em '+rep.porEmp.size+' empresa(s)</span>'
-    +'<b>'+rep.duplicadas+'</b><span>repetida(s) — já estavam gravadas ou apareceram 2x nos arquivos (ignoradas)</span>'
-    +'<b>'+rep.arquivos+'</b><span>arquivo(s) · '+rep.blocos+' relatório(s) de empresa lidos</span></div>';
-  if(rep.valorDiferente.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ '+rep.valorDiferente.length+' com valor diferente do já gravado (mantive o que estava; se o novo está certo, exclua o antigo e importe de novo):</b><ul style="margin:4px 0 0 18px">'+lista(rep.valorDiferente,12)+'</ul></div>';
-  if(rep.semEmpresa.size) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ '+rep.semEmpresa.size+' CNPJ/CPF sem empresa cadastrada (não importados):</b><ul style="margin:4px 0 0 18px">'+[...rep.semEmpresa].slice(0,12).map(([d,n])=>'<li>'+esc(n||'')+' — '+esc(_fmtCnpjCpf(d))+'</li>').join('')+'</ul></div>';
-  if(rep.divergeTotal.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ A soma das pessoas não bate com o "Total da Empresa" do relatório:</b><ul style="margin:4px 0 0 18px">'+lista(rep.divergeTotal,8)+'</ul></div>';
-  if(rep.naoLidos.length) h+='<div style="margin-top:8px;color:var(--red)"><b>Não reconheci como Relação Geral dos Líquidos:</b><ul style="margin:4px 0 0 18px">'+lista(rep.naoLidos,8)+'</ul></div>';
-  if(rep.tipoDesconhecido) h+='<div style="margin-top:8px;color:#d97706">'+rep.tipoDesconhecido+' relatório(s) de tipo de cálculo que não conheço (ignorados).</div>';
-  if(rep.erros) h+='<div style="margin-top:8px;color:var(--red)"><b>'+rep.erros+' linha(s) deram erro ao gravar</b> — veja o console.</div>';
+  let resumo='<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px">'
+    +'<b style="color:var(--teal)">'+rep.novas+'</b><span>linha(s) nova(s) gravada(s) em '+rep.porEmp.size+' empresa(s) ('+rep.blocos+' relatório(s) de empresa lidos)</span>'
+    +'<b>'+rep.duplicadas+'</b><span>repetida(s) ignorada(s) — já estavam gravadas ou apareceram 2x nos arquivos</span>'
+    +(rep.erros?'<b style="color:var(--red)">'+rep.erros+'</b><span style="color:var(--red)">linha(s) deram erro ao gravar — veja o console</span>':'')+'</div>';
+  if(rep.valorDiferente.length) resumo+='<div style="margin-top:8px;color:#d97706"><b>⚠ '+rep.valorDiferente.length+' com valor diferente do já gravado (mantive o que estava; se o novo está certo, exclua o antigo e importe de novo):</b><ul style="margin:4px 0 0 18px">'+lista(rep.valorDiferente,10)+'</ul></div>';
+  if(rep.divergeTotal.length) resumo+='<div style="margin-top:8px;color:#d97706"><b>⚠ A soma das pessoas não bate com o "Total da Empresa" do relatório:</b><ul style="margin:4px 0 0 18px">'+lista(rep.divergeTotal,10)+'</ul></div>';
+  const h=_lancctbImportRelatorioHtml('folha',rep.arq,resumo);
   _lancctbFolhaDbCache.clear();
   _lancctbFolhaPainel('👥 Folha importada',h,true);
   if(_lancctbAbaAtiva==='folha') renderLancctbFolha();
@@ -46651,39 +46683,43 @@ function _lancctbTributosLinhasDaGuia(ex,nomeTrib,pagina){
 }
 async function _lancctbTributosImportar(arquivos){
   const emps=new Set((S.g('emps')||[]).map(e=>String(e.eid)));
-  const rep={ arquivos:arquivos.length, guias:0, naoLidos:[], semEmpresa:[], novas:0, duplicadas:0, valorDiferente:[], erros:0, divergeSoma:[], porEmp:new Map() };
+  const rep={ arquivos:arquivos.length, arq:new Map(), guias:0, naoLidos:[], semEmpresa:[], novas:0, duplicadas:0, valorDiferente:[], erros:0, divergeSoma:[], porEmp:new Map() };
   const linhas=new Map(); const guiasVistas=new Set();
+  const mark=(n,sit,mot)=>rep.arq.set(n,{situacao:sit,motivo:mot||''});
+  arquivos.forEach(f=>mark(f.name,'Não lido','Não chegou a ser processado (importação interrompida)'));
   try{
     for(let i=0;i<arquivos.length;i++){
       const f=arquivos[i];
       _lancctbFolhaPainel('🧾 Importando tributos…','Lendo <b>'+esc(f.name)+'</b> ('+(i+1)+' de '+arquivos.length+')…',false);
       const info=_lancctbParsearNomeArquivoTributo(f.name);
-      if(!info.eid||!emps.has(String(info.eid))){ rep.semEmpresa.push(f.name); continue; }
-      let ex=null, dp={documento:null,vencimento:null};
+      if(!info.eid||!emps.has(String(info.eid))){ rep.semEmpresa.push(f.name); mark(f.name,'Não importado','O nome do arquivo não tem o "(código da empresa)" de uma empresa cadastrada — esperado algo como "NOME DA EMPRESA (123) - Guia … - vencimento dd-mm-aaaa"'); continue; }
+      let ex=null, dp={documento:null,vencimento:null}, errLeitura='';
       try{
         const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise; pdf._ocrChave='trib|'+f.name+'|'+f.size;
         dp=await _lancctbTribDadosDoPdf(pdf);
         ex=await _lancctbExtrairValorPdfTributo(pdf,false,s=>_lancctbFolhaPainel('🧾 Importando tributos…','<b>'+esc(f.name)+'</b><br>'+esc(s),false));
-      }catch(e){ console.warn('Tributos: falha ao ler',f.name,e); }
-      if(!ex||(!(ex.valor>0)&&!ex.multiGnre)){ rep.naoLidos.push(f.name); continue; }
+      }catch(e){ console.warn('Tributos: falha ao ler',f.name,e); errLeitura=String((e&&e.message)||e); }
+      if(!ex||(!(ex.valor>0)&&!ex.multiGnre)){ rep.naoLidos.push(f.name); mark(f.name,errLeitura?'Erro ao ler':'Não lido',errLeitura?('Erro ao abrir/ler o PDF: '+errLeitura):'Não consegui achar o valor da guia (PDF sem texto reconhecível, imagem ilegível ou modelo de guia que o site ainda não conhece)'); continue; }
       const nomeTrib=_lancctbTribRotulo(info.descricao,ex.multiGnre?null:ex);
       const compNome=_lancctbExtrairCompetenciaDoNome(info.descricao);
       const guias=ex.multiGnre?ex.multiGnre.map(g=>({ex:g.extraido,pag:g.pagina})):[{ex,pag:null}];
+      let nGuiasArq=0, nLinhasArq=0, nDupArq=0, alertaArq='';
       for(const g of guias){
         if(!g.ex.competencia&&compNome) g.ex.competencia=compNome.replace('.','/');
         const nomeG=ex.multiGnre?_lancctbTribRotulo(info.descricao,g.ex):nomeTrib;
         const ls=_lancctbTributosLinhasDaGuia(g.ex,nomeG,g.pag);
         if(!ls.length) continue;
         const soma=Math.round(ls.reduce((s,l)=>s+Math.round(l.valor*100),0))/100;
-        if(Math.abs(soma-ls[0].valor_guia)>0.02) rep.divergeSoma.push(f.name+' (itens R$ '+_fmt(soma)+' × guia R$ '+_fmt(ls[0].valor_guia)+')');
+        if(Math.abs(soma-ls[0].valor_guia)>0.02){ rep.divergeSoma.push(f.name+' (itens R$ '+_fmt(soma)+' × guia R$ '+_fmt(ls[0].valor_guia)+')'); alertaArq='A soma dos códigos (R$ '+_fmt(soma)+') não fecha com o valor da guia (R$ '+_fmt(ls[0].valor_guia)+') — confira o PDF'; }
         const codigos=ls.map(l=>l.codigo||'-').sort().join(',');
         const venc=dp.vencimento||info.vencimento||null; // o vencimento IMPRESSO na guia vale mais que o do nome do arquivo
         // chave: número do documento (a mesma guia em 2 pastas/nomes = uma só); sem número (imagem), competência + valor + códigos — nunca o nome nem o vencimento do arquivo
         const docChave=(dp.documento&&!ex.multiGnre)?['DOC',info.eid,dp.documento].join('|'):[info.eid,ls[0].competencia||venc||'sem-data',ls[0].valor_guia.toFixed(2),g.pag||0,codigos].join('|');
-        if(guiasVistas.has(info.eid+'|'+docChave)){ rep.duplicadas+=ls.length; continue; }
-        guiasVistas.add(info.eid+'|'+docChave); rep.guias++;
+        if(guiasVistas.has(info.eid+'|'+docChave)){ rep.duplicadas+=ls.length; nDupArq++; continue; }
+        guiasVistas.add(info.eid+'|'+docChave); rep.guias++; nGuiasArq++; nLinhasArq+=ls.length;
         ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:String(info.eid), doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:venc, unidade:(getFiliais(info.eid).length?String(info.eid):null), setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
       }
+      mark(f.name,alertaArq?'Lido com alerta':(nGuiasArq?'Lido':'Lido (repetido)'),alertaArq||(nGuiasArq?(nGuiasArq+' guia(s), '+nLinhasArq+' código(s)'):'Esta guia já veio em outro arquivo desta seleção (mesmo número de documento ou mesmos valores) — ignorada'));
     }
     _lancctbFolhaPainel('🧾 Importando tributos…','Conferindo duplicidades…',false);
     const porEid=new Map(); linhas.forEach(l=>{ if(!porEid.has(l.empresa_eid)) porEid.set(l.empresa_eid,[]); porEid.get(l.empresa_eid).push(l); });
@@ -46691,7 +46727,7 @@ async function _lancctbTributosImportar(arquivos){
     for(const [eid,lista] of porEid){
       const chaves=[...new Set(lista.map(l=>l.doc_chave))]; const jaTem=new Map();
       for(let i=0;i<chaves.length;i+=50){ const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('doc_chave,seq,valor').eq('empresa_eid',eid).in('doc_chave',chaves.slice(i,i+50)).order('id')); (ex||[]).forEach(x=>jaTem.set(x.doc_chave+'|'+x.seq,x)); }
-      lista.forEach(l=>{ const x=jaTem.get(l.doc_chave+'|'+l.seq); if(!x) novas.push(l); else if(Math.abs(Number(x.valor)-l.valor)>0.004) rep.valorDiferente.push(l.arquivo+' (R$ '+_fmt(Number(x.valor))+' gravado × R$ '+_fmt(l.valor)+')'); else rep.duplicadas++; });
+      lista.forEach(l=>{ const x=jaTem.get(l.doc_chave+'|'+l.seq); if(!x) novas.push(l); else if(Math.abs(Number(x.valor)-l.valor)>0.004){ rep.valorDiferente.push(l.arquivo+' (R$ '+_fmt(Number(x.valor))+' gravado × R$ '+_fmt(l.valor)+')'); mark(l.arquivo,'Lido com alerta','Valor diferente do que já estava gravado (R$ '+_fmt(Number(x.valor))+' gravado × R$ '+_fmt(l.valor)+') — mantive o gravado'); } else rep.duplicadas++; });
     }
     for(let i=0;i<novas.length;i+=200){
       const lote=novas.slice(i,i+200);
@@ -46701,16 +46737,12 @@ async function _lancctbTributosImportar(arquivos){
     }
     try{ const n=await _lancctbTributosDeduplicar([...new Set([...rep.porEmp.keys(),...[...linhas.values()].map(l=>l.empresa_eid)])]); rep.limpas=n; }catch(e){ console.warn('Tributos: limpeza de duplicatas',e); }
   }catch(e){ console.error('Tributos: importação',e); rep.erros++; }
-  const lista=(arr,max)=>arr.slice(0,max).map(x=>'<li>'+esc(x)+'</li>').join('')+(arr.length>max?'<li>… e mais '+(arr.length-max)+'</li>':'');
-  let h='<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin-bottom:8px">'
-    +'<b style="color:var(--teal)">'+rep.novas+'</b><span>linha(s) de código gravada(s) em '+rep.porEmp.size+' empresa(s)</span>'
-    +'<b>'+rep.duplicadas+'</b><span>repetida(s) — a mesma guia já estava gravada ou veio em 2 pastas (ignoradas)</span>'
-    +'<b>'+rep.arquivos+'</b><span>arquivo(s) · '+rep.guias+' guia(s) distintas</span>'+(rep.limpas?'<b>'+rep.limpas+'</b><span>linha(s) duplicada(s) que já estavam gravadas foram removidas</span>':'')+'</div>';
-  if(rep.valorDiferente.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ '+rep.valorDiferente.length+' com valor diferente do já gravado (mantive o que estava):</b><ul style="margin:4px 0 0 18px">'+lista(rep.valorDiferente,8)+'</ul></div>';
-  if(rep.divergeSoma.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ A soma dos códigos não fecha com o valor da guia (confira o PDF):</b><ul style="margin:4px 0 0 18px">'+lista(rep.divergeSoma,8)+'</ul></div>';
-  if(rep.semEmpresa.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ Nome do arquivo sem "(código da empresa)" cadastrada — não importados:</b><ul style="margin:4px 0 0 18px">'+lista(rep.semEmpresa,8)+'</ul></div>';
-  if(rep.naoLidos.length) h+='<div style="margin-top:8px;color:var(--red)"><b>Não consegui ler o valor:</b><ul style="margin:4px 0 0 18px">'+lista(rep.naoLidos,8)+'</ul></div>';
-  if(rep.erros) h+='<div style="margin-top:8px;color:var(--red)"><b>'+rep.erros+' linha(s) deram erro ao gravar</b> — veja o console.</div>';
+  const resumo='<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px">'
+    +'<b style="color:var(--teal)">'+rep.novas+'</b><span>linha(s) de código gravada(s) em '+rep.porEmp.size+' empresa(s) ('+rep.guias+' guia(s) distintas)</span>'
+    +'<b>'+rep.duplicadas+'</b><span>repetida(s) ignorada(s) — a mesma guia já estava gravada ou veio em 2 pastas</span>'
+    +(rep.limpas?'<b>'+rep.limpas+'</b><span>linha(s) duplicada(s) que já estavam gravadas foram removidas</span>':'')
+    +(rep.erros?'<b style="color:var(--red)">'+rep.erros+'</b><span style="color:var(--red)">linha(s) deram erro ao gravar — veja o console</span>':'')+'</div>';
+  const h=_lancctbImportRelatorioHtml('tributos',rep.arq,resumo);
   _lancctbFolhaPainel('🧾 Tributos importados',h,true);
   if(_lancctbAbaAtiva==='tributos') renderLancctbTributos();
 }
