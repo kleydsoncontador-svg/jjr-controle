@@ -24421,6 +24421,11 @@ function _lancctbContaSemNfVinculo(ag){
 }
 // FLUXO DE CAIXA nas contas Mercado Pago/Shopee/Maree: nunca, em nenhuma empresa — EXCETO a #250 NASA TRUCK, que tem Fluxo de Caixa bom e pode associar com o Mercado Pago (pedido do usuário 04/11/2026).
 // A exceção é só do Fluxo: a regra de NÃO vincular NF nessas contas (_lancctbContaSemNfVinculo) continua valendo na #250 também.
+// Linha do Fluxo só pode ser amarrada ao extrato da MESMA conta bancária em que o Fluxo foi importado. Linha sem conta definida casa com qualquer conta — exceto na #250 NASA TRUCK (um Fluxo por banco): lá exige a conta.
+function _lancctbFluxoDaConta(f,conta){
+  if(f&&f.conta_bancaria_id) return String(f.conta_bancaria_id)===String(conta);
+  return String(_lancctbEidAtual)!=='250';
+}
 function _lancctbContaSemFluxo(ag){
   return _lancctbContaSemNfVinculo(ag)&&String(_lancctbEidAtual)!=='250';
 }
@@ -32571,7 +32576,7 @@ async function _lancctbAssociarComprovantesTodos(){
     const params=_lancctbFluxoParamGet(eid), alias=_lancctbFluxoAliasGet(eid), usadoF=new Set(), parF=[];
     for(const r of exts){
       const ehS=(r.valor_saida||0)>0, v=ehS?r.valor_saida:r.valor_entrada; if(!(v>0)||!ehS) continue;
-      const cand=fxl.filter(f=>!usadoF.has(f.id)&&Math.abs((f.valor_saida||0)-v)<0.005&&_lancctbDiffDias(f.data,r.data_pagamento)<=1&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))&&!_lancctbFluxoEhIcms(f)&&_lancctbFluxoParamOk(r.historico_bancario,f,params)&&(_lancctbFluxoIdentidade(r.historico_bancario,f,alias)==='ok'||(_lancctbHistoricoEhFolha(r.historico_bancario)&&/^A\d/.test(String(f.descricao_conta_origem||''))&&f.data===r.data_pagamento)||(['163','165','166'].includes(String(eid))&&_lancctbHistoricoEhFolha(r.historico_bancario)&&/^A\d/.test(String(f.descricao_conta_origem||''))&&_lancctbNomeNaDescricao(nomeCompPorExt.get(r.id),f.descricao)))); // Fast Lube/RodaCentro/Super Troca: Sispag Salários com NOME no comprovante casa com a linha do Fluxo que traz o nome na DESCRIÇÃO ('VR DA SEMANA ANA CAROLA JESUS') — pedido do usuário 01/11/2026// Sispag Salários: não traz nome — vale a linha do Fluxo de conta de FOLHA (A01…A26) de MESMO valor e MESMO dia, se for a única
+      const cand=fxl.filter(f=>!usadoF.has(f.id)&&Math.abs((f.valor_saida||0)-v)<0.005&&_lancctbDiffDias(f.data,r.data_pagamento)<=1&&_lancctbFluxoDaConta(f,r.conta_bancaria_id)&&!_lancctbFluxoEhIcms(f)&&_lancctbFluxoParamOk(r.historico_bancario,f,params)&&(_lancctbFluxoIdentidade(r.historico_bancario,f,alias)==='ok'||(_lancctbHistoricoEhFolha(r.historico_bancario)&&/^A\d/.test(String(f.descricao_conta_origem||''))&&f.data===r.data_pagamento)||(['163','165','166'].includes(String(eid))&&_lancctbHistoricoEhFolha(r.historico_bancario)&&/^A\d/.test(String(f.descricao_conta_origem||''))&&_lancctbNomeNaDescricao(nomeCompPorExt.get(r.id),f.descricao)))); // Fast Lube/RodaCentro/Super Troca: Sispag Salários com NOME no comprovante casa com a linha do Fluxo que traz o nome na DESCRIÇÃO ('VR DA SEMANA ANA CAROLA JESUS') — pedido do usuário 01/11/2026// Sispag Salários: não traz nome — vale a linha do Fluxo de conta de FOLHA (A01…A26) de MESMO valor e MESMO dia, se for a única
       if(cand.length===1){ usadoF.add(cand[0].id); parF.push({id:cand[0].id,ext:r.id}); }
     }
     for(let i=0;i<parF.length;i+=8){ await Promise.all(parF.slice(i,i+8).map(x=>_supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:x.ext}).eq('id',x.id).eq('status_associado','nao_associado'))); }
@@ -32653,7 +32658,7 @@ async function _lancctbBuscarFluxoProLancamento(){
     .eq('empresa_eid',_lancctbEidAtual).eq('status_associado','nao_associado');
     if(dtDe) q=q.gte('data',dtDe); if(dtAte) q=q.lte('data',dtAte);
     return q; });
-  let candidatas=(linhas||[]).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id));
+  let candidatas=(linhas||[]).filter(f=>_lancctbFluxoDaConta(f,r.conta_bancaria_id));
   if(termo) candidatas=candidatas.filter(f=>(f.descricao||'').toLowerCase().includes(termo));
   if(forn) candidatas=candidatas.filter(f=>(f.cliente_fornecedor_nome||'').toLowerCase().includes(forn));
   if(dtDe||dtAte) candidatas=candidatas.filter(f=>(!dtDe||(f.data||'')>=dtDe)&&(!dtAte||(f.data||'')<=dtAte));
@@ -33666,7 +33671,7 @@ async function _lancctbPassadaIntermediadoras(c){
   const dias=(a,b)=>Math.round((new Date(a+'T12:00:00')-new Date(b+'T12:00:00'))/864e5);
   const tierDe=(f,p)=>{ const d=dias(f.data,p.data_pagamento); if(Math.abs(d)<=3) return Math.abs(d); if(d<0&&d>=-LANCCTB_FLUXO_ATRASO_DIAS) return 4; return null; };
   const ehFolha=f=>pessoasFolha.length&&pessoasFolha.some(pp=>_lancctbPessoaNoTexto(pp,f.cliente_fornecedor_nome||''));
-  const pool=fluxoPend.filter(f=>!usados.has(f.id)&&f.valor_saida>0&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&!ehFolha(f));
+  const pool=fluxoPend.filter(f=>!usados.has(f.id)&&f.valor_saida>0&&_lancctbFluxoDaConta(f,contaId)&&!ehFolha(f));
   const aceita=(p,f)=>{
     if(!_lancctbFluxoParamOk(p.historico_bancario,f,fpLista)) return false;
     const par=indicadaDe(f); if(par&&par.status_conciliacao==='conciliado'&&par.lancamento_extrato_id!==p.id) return false;
@@ -33766,7 +33771,7 @@ async function _lancctbPassadaRecebimentosKarater(c){
   const fmt=v=>Number(v).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
   const brd=d=>String(d||'').split('-').reverse().join('/').slice(0,5);
   const dias=(a,b)=>Math.round((new Date(a+'T12:00:00')-new Date(b+'T12:00:00'))/864e5);
-  const pool=fluxoPend.filter(f=>!usados.has(f.id)&&f.valor_entrada>0&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId)));
+  const pool=fluxoPend.filter(f=>!usados.has(f.id)&&f.valor_entrada>0&&_lancctbFluxoDaConta(f,contaId));
   const cents=v=>Math.round(Number(v)*100);
   const pags=[...entradas].sort((a,b)=>(a.data_pagamento<b.data_pagamento?-1:a.data_pagamento>b.data_pagamento?1:a.id-b.id));
   // faixas: 0 = Data Pagto/Canc. igual à do banco | 1 = Data Venc. igual à do banco (Data Pagto incoerente: mais de 3 dias de diferença) | 2..4 = ±1/±2/±3 dias na Data Pagto
@@ -34097,7 +34102,7 @@ async function _lancctbProcessarFluxo(){
         const ehSaida=l.valor_saida>0;
         const valor=l.valor_saida||l.valor_entrada;
         const candBase=fluxoPend.filter(f=>!usados.has(f.id))
-          .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
+          .filter(f=>_lancctbFluxoDaConta(f,contaId))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFluxo))
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&(Math.abs(vF-valor)<=(ehSaida?LANCCTB_FLUXO_TOL_CENTAVO:0.005)||_lancctbFluxoDifAprendida(f,valor,ehSaida))&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; })
@@ -34111,7 +34116,7 @@ async function _lancctbProcessarFluxo(){
         if(!cand.length&&candBase.length) _lancctbFluxoSugParamAdd(l.historico_bancario,`candidato de outro fornecedor apareceu (${candBase[0].cliente_fornecedor_nome||'sem nome'})`);
         if(!cand.length){
           // sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco, até R$ 0,02 de diferença; combinação única)
-          const comp=_lancctbFluxoComposicao(l.historico_bancario,valor,l.data_pagamento,fluxoPend.filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId)),{lista:_fpListaFluxo,aliases:_aliasFluxo,usados,ehSaida,comprovante:ehSaida?_lancctbMelhorComprovante(_compsPF,valor,l.data_pagamento,0.0201,c=>_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS):null});
+          const comp=_lancctbFluxoComposicao(l.historico_bancario,valor,l.data_pagamento,fluxoPend.filter(f=>_lancctbFluxoDaConta(f,contaId)),{lista:_fpListaFluxo,aliases:_aliasFluxo,usados,ehSaida,comprovante:ehSaida?_lancctbMelhorComprovante(_compsPF,valor,l.data_pagamento,0.0201,c=>_lancctbDiffDias(c.data_pagamento,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS):null});
           if(comp&&comp.itens&&Math.abs(comp.delta)<=LANCCTB_FLUXO_TOL_CENTAVO){ comp.itens.forEach(f=>{ usados.add(f.id); pares.push({fId:f.id,lId:l.id}); }); compostos++; if(Math.abs(comp.delta)>0.001) centavosAceitos++; }
           else if(comp&&comp.ambiguo) ambiguosComp++;
           continue;
@@ -34142,7 +34147,7 @@ async function _lancctbProcessarFluxo(){
         const idsG=new Set(G.map(l=>l.id)), temPar=new Set(pares.filter(x=>idsG.has(x.lId)).map(x=>x.lId));
         const sem=G.filter(l=>!temPar.has(l.id)); if(!sem.length) continue;
         const usadasFora=new Set(pares.filter(x=>!idsG.has(x.lId)).map(x=>x.fId));
-        const poolG=fluxoPend.filter(f=>!usadasFora.has(f.id)&&f.valor_saida>0&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))).map(f=>({f,v:Math.round(f.valor_saida*100)}));
+        const poolG=fluxoPend.filter(f=>!usadasFora.has(f.id)&&f.valor_saida>0&&_lancctbFluxoDaConta(f,contaId)).map(f=>({f,v:Math.round(f.valor_saida*100)}));
         const mk=l=>({ id:l.id, alvo:Math.round((l.valor_saida||0)*100), data:l.data_pagamento, marca:f=>_lancctbFluxoMarcaPref(l.historico_bancario,f,_fpListaFluxo),
           aceita:f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaFluxo)&&_lancctbFluxoIdentConfirmada(l.historico_bancario,f,_aliasFluxo,_fpListaFluxo)&&!_lancctbFluxoOutraPessoaFisica(l,f,_agNubFx,_lancctbHistEhTransfNome(l.historico_bancario)) });
         let r=_lancctbFluxoParticao(G.map(mk),poolG,0,300000);
@@ -34272,7 +34277,7 @@ async function _lancctbProcessarFluxoRegras(silencioso){
       const valor=l.valor_saida||l.valor_entrada;
       const jaLigado=_lancctbEscolherFluxoLigado((fluxoPend||[]).filter(f=>f.lancamento_extrato_id!=null&&String(f.lancamento_extrato_id)===String(l.id)),l); // ligação já confirmada pelo usuário (se houver várias, a que mais combina)
       const candidatos=jaLigado?[jaLigado]:(fluxoPend||[]).filter(f=>f.status_associado==='nao_associado')
-        .filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))
+        .filter(f=>_lancctbFluxoDaConta(f,contaId))
         .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; return vF&&(Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO||_lancctbFluxoDifAprendida(f,valor,ehSaida))&&_lancctbDiffDias(f.data,l.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS; });
       if(!candidatos.length) continue;
       candidatos.sort((a,b)=>(_lancctbNomeCompativel([l.historico_bancario],b.cliente_fornecedor_nome)?1:0)-(_lancctbNomeCompativel([l.historico_bancario],a.cliente_fornecedor_nome)?1:0)
@@ -34865,7 +34870,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
   _lancctbFluxoAliasLista=_lancctbFluxoAliasGet(eid);
   async function tentarNfViaFluxo(l,ehSaida,valor,comprovanteMatch,usarComprovantes){
     const base=(fluxoCaixaPonteBase||[]).filter(f=>_lancctbFluxoParamOk(l.historico_bancario,f,_fpListaEng)&&_lancctbFluxoIdentOk(l.historico_bancario,f)&&!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
-      &&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&(f.numero||f.documento_numero));
+      &&_lancctbFluxoDaConta(f,contaId)&&(f.numero||f.documento_numero));
     const ehPonteL=_lancctbEhIntermediadora(l.historico_bancario)||(String(eid)==='15'&&l.valor_entrada>0);
     const temNome=_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
     const vFluxo=f=>ehSaida?f.valor_saida:f.valor_entrada;
@@ -34937,7 +34942,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // subset-sum só nele — assim pagamentos aglutinados de várias NFs do mesmo fornecedor ainda abrem pelo Fluxo.
     const _temNomeHist=_lancctbHistoricoTemNomeEmpresa(l.historico_bancario)&&!ehPonteL;
     const flTudoSemFiltro=(fluxoCaixaPonteBase||[]).filter(f=>!fluxoPonteUsados.has(f.id)&&(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)
-      &&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(contaId))&&vFluxo(f)>0&&(f.lancamento_extrato_id===l.id||_lancctbFluxoNaJanela(f,l.data_pagamento))
+      &&_lancctbFluxoDaConta(f,contaId)&&vFluxo(f)>0&&(f.lancamento_extrato_id===l.id||_lancctbFluxoNaJanela(f,l.data_pagamento))
       &&!_lancctbFluxoBloqueioSemantico(l.historico_bancario,f)); // semântica (UF/família/beneficiário/natureza) antes de qualquer soma — Pix do Mateus não abre em SEFAZ ES
     const flTudo=_temNomeHist
       ? flTudoSemFiltro.filter(f=>_lancctbFluxoIdentOk(l.historico_bancario,f)&&(f.lancamento_extrato_id===l.id||_lancctbNomeCompativel([l.historico_bancario],f.cliente_fornecedor_nome||f.descricao||'')))
@@ -39600,7 +39605,7 @@ async function renderLancctbRegistroContabil(){
       if(fluxoPorExtrato[r.id]){ item.fluxoConciliado=fluxoPorExtrato[r.id]; item.fluxoConciliadoLigado=true; return; }
       if(_lancctbContaSemFluxo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)) return; // Mercado Pago/Shopee/Maree: sem palpite de Fluxo
       const ehSaida=r.valor_saida>0, valor=r.valor_saida||r.valor_entrada;
-      const cand=livres.filter(f=>!usados.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id))).filter(f=>{
+      const cand=livres.filter(f=>!usados.has(f.id)&&_lancctbFluxoDaConta(f,r.conta_bancaria_id)).filter(f=>{
         const vF=ehSaida?f.valor_saida:f.valor_entrada;
         if(_lancctbHistoricoEhTributo(r.historico_bancario)&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||''))) return false;
         return vF&&Math.abs(vF-valor)<=LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO&&_lancctbDiffDias(f.data,r.data_pagamento)<=LANCCTB_MATCH_TOLERANCIA_DIAS;
@@ -39817,7 +39822,7 @@ async function renderLancctbRegistroContabil(){
       else if(!item.fluxoConfirmado&&!_lancctbContaSemFluxo(_agPorId.get(Number(r.conta_bancaria_id))||contaAtual)){
         const _filtroFluxoSug=(semTextoTributo)=>_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS)
           .filter(f=>{ const vF=ehSaida?f.valor_saida:f.valor_entrada; if(!semTextoTributo&&ehTribHist&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')+' '+(f.descricao_conta_origem||''))) return false; if(semTextoTributo&&(!vF||Math.abs(vF-valor)>0.005||_lancctbDiffDias(f.data,r.data_pagamento)>1)) return false; return vF&&(Math.abs(vF-valor)<=(ehTribHist?0.005:LANCCTB_MATCH_TOLERANCIA_VALOR_FLUXO)||_lancctbFluxoDifAprendida(f,valor,ehSaida)); })
-          .filter(f=>!fluxoUsadoSugestao.has(f.id)&&(!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id)))
+          .filter(f=>!fluxoUsadoSugestao.has(f.id)&&_lancctbFluxoDaConta(f,r.conta_bancaria_id))
           .filter(f=>!_lancctbFluxoOutraPessoaFisica(r,f,_agPorId.get(Number(r.conta_bancaria_id))||contaAtual,_lancctbHistEhTransfNome(r.historico_bancario)))
           .filter(f=>_lancctbFluxoParamOk(r.historico_bancario,f,_lancctbFluxoParamLista))
           .filter(f=>semTextoTributo||_lancctbFluxoIdentOk(r.historico_bancario,f)); // na sugestão marcada o bloqueio "tributo × linha que não é órgão arrecadador" não vale (só valor+data exatos, 1 candidato)
@@ -39844,7 +39849,7 @@ async function renderLancctbRegistroContabil(){
           fluxoUsadoSugestao.add(candidatosFluxo[0].id);
         } else {
           // Sem linha única: tenta COMPOSIÇÃO (vários títulos do mesmo fornecedor somando o valor líquido do banco); depois, "possível alias/intermediário" (só mostra, nunca associa sozinho)
-          const poolC=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS).filter(f=>!f.conta_bancaria_id||String(f.conta_bancaria_id)===String(r.conta_bancaria_id));
+          const poolC=_idxRng(_idxFL,r.data_pagamento,LANCCTB_MATCH_TOLERANCIA_DIAS).filter(f=>_lancctbFluxoDaConta(f,r.conta_bancaria_id));
           let comp=_lancctbFluxoComposicao(r.historico_bancario,valor,r.data_pagamento,poolC,{lista:_lancctbFluxoParamLista,aliases:_lancctbFluxoAliasLista,usados:fluxoUsadoSugestao,ehSaida,comprovante:item.comprovanteSugerido||null});
           // Tributo (pedido do usuário 30/10/2026): só sugere valor EXATO ou COMPOSIÇÃO cuja soma do Fluxo seja IGUAL ao valor do extrato (sem folga de centavos); ao aceitar, a composição abre em linhas no Registro Contábil.
           if(ehTribHist&&ehSaida){
