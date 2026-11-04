@@ -46608,6 +46608,30 @@ function _lancctbTribRotulo(descricao,ex,itens){
   if(/DARE/i.test(d)) return 'DARE';
   return (_lancctbNomeTributoLegivel(d).nomeCompleto)||d;
 }
+// Número do documento e vencimento IMPRESSOS na guia (texto nativo): o nome do arquivo às vezes traz outro vencimento (achado 03/11/2026, Accurare 22: a MESMA guia 07.16.26258.6307923-1 salva como
+// "vencimento 15-09" e "vencimento 25-09"). Guia só-imagem (OCR) fica sem isso e cai no nome do arquivo.
+async function _lancctbTribDadosDoPdf(pdf){
+  try{
+    const its=await _lancctbExtrairItensPagina(await pdf.getPage(1)); const t=its.map(i=>i.str).join(' ').replace(/\s+/g,' ');
+    const nd=t.match(/N[úu]mero do Documento\s*:?\s*(\d{2}\.\d{2}\.\d{5}\.\d{7}-\d)/i)||t.match(/N[úu]mero do Documento\s*:?\s*([\d.\-\/]{12,})/i);
+    const vc=t.match(/Pagar este documento at[ée]\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+    return { documento:nd?nd[1]:null, vencimento:vc?(vc[3]+'-'+vc[2]+'-'+vc[1]):null };
+  }catch(e){ return {documento:null,vencimento:null}; }
+}
+// Mesma guia gravada mais de uma vez (chaves antigas ou nomes de arquivo com vencimentos diferentes): fica UMA — a de chave por número do documento, senão a de maior vencimento. Só age nas empresas informadas.
+async function _lancctbTributosDeduplicar(eids){
+  let apagadas=0;
+  for(const eid of eids){
+    const { data: rows } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('id,doc_chave,seq,codigo,valor,valor_guia,competencia,vencimento').eq('empresa_eid',String(eid)).order('id'));
+    const guias=new Map(); (rows||[]).forEach(r=>{ if(!guias.has(r.doc_chave)) guias.set(r.doc_chave,[]); guias.get(r.doc_chave).push(r); });
+    const grupos=new Map();
+    guias.forEach((ls,dc)=>{ const r0=ls[0]; if(!r0.competencia) return; const sig=[r0.competencia,Number(r0.valor_guia).toFixed(2),ls.map(x=>(x.codigo||'-')+':'+Number(x.valor).toFixed(2)).sort().join(',')].join('|'); if(!grupos.has(sig)) grupos.set(sig,[]); grupos.get(sig).push({dc,ls}); });
+    const apagar=[];
+    grupos.forEach(g=>{ if(g.length<2) return; g.sort((a,b)=>((b.dc.startsWith('DOC|')?1:0)-(a.dc.startsWith('DOC|')?1:0))||String(b.ls[0].vencimento||'').localeCompare(String(a.ls[0].vencimento||''))); g.slice(1).forEach(x=>x.ls.forEach(r=>apagar.push(r.id))); });
+    for(let i=0;i<apagar.length;i+=200){ const { error } = await _supaClient.from('tributos_guias').delete().in('id',apagar.slice(i,i+200)).eq('empresa_eid',String(eid)); if(!error) apagadas+=Math.min(200,apagar.length-i); }
+  }
+  return apagadas;
+}
 function _lancctbTributosAbrirImportar(){
   let inp=document.getElementById('lancctbTributosArqInput');
   if(!inp){ inp=document.createElement('input'); inp.type='file'; inp.accept='.pdf'; inp.multiple=true; inp.id='lancctbTributosArqInput'; inp.style.display='none'; inp.onchange=()=>{ const fs=[...inp.files]; inp.value=''; if(fs.length) _lancctbTributosImportar(fs); }; document.body.appendChild(inp); }
@@ -46635,9 +46659,10 @@ async function _lancctbTributosImportar(arquivos){
       _lancctbFolhaPainel('🧾 Importando tributos…','Lendo <b>'+esc(f.name)+'</b> ('+(i+1)+' de '+arquivos.length+')…',false);
       const info=_lancctbParsearNomeArquivoTributo(f.name);
       if(!info.eid||!emps.has(String(info.eid))){ rep.semEmpresa.push(f.name); continue; }
-      let ex=null;
+      let ex=null, dp={documento:null,vencimento:null};
       try{
         const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise; pdf._ocrChave='trib|'+f.name+'|'+f.size;
+        dp=await _lancctbTribDadosDoPdf(pdf);
         ex=await _lancctbExtrairValorPdfTributo(pdf,false,s=>_lancctbFolhaPainel('🧾 Importando tributos…','<b>'+esc(f.name)+'</b><br>'+esc(s),false));
       }catch(e){ console.warn('Tributos: falha ao ler',f.name,e); }
       if(!ex||(!(ex.valor>0)&&!ex.multiGnre)){ rep.naoLidos.push(f.name); continue; }
@@ -46652,10 +46677,12 @@ async function _lancctbTributosImportar(arquivos){
         const soma=Math.round(ls.reduce((s,l)=>s+Math.round(l.valor*100),0))/100;
         if(Math.abs(soma-ls[0].valor_guia)>0.02) rep.divergeSoma.push(f.name+' (itens R$ '+_fmt(soma)+' × guia R$ '+_fmt(ls[0].valor_guia)+')');
         const codigos=ls.map(l=>l.codigo||'-').sort().join(',');
-        const docChave=[info.eid,info.vencimento||'sem-venc',ls[0].valor_guia.toFixed(2),g.pag||0,codigos].join('|'); // sem o NOME na chave: o rótulo pode melhorar sem duplicar o que já foi importado
+        const venc=dp.vencimento||info.vencimento||null; // o vencimento IMPRESSO na guia vale mais que o do nome do arquivo
+        // chave: número do documento (a mesma guia em 2 pastas/nomes = uma só); sem número (imagem), competência + valor + códigos — nunca o nome nem o vencimento do arquivo
+        const docChave=(dp.documento&&!ex.multiGnre)?['DOC',info.eid,dp.documento].join('|'):[info.eid,ls[0].competencia||venc||'sem-data',ls[0].valor_guia.toFixed(2),g.pag||0,codigos].join('|');
         if(guiasVistas.has(info.eid+'|'+docChave)){ rep.duplicadas+=ls.length; continue; }
         guiasVistas.add(info.eid+'|'+docChave); rep.guias++;
-        ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:String(info.eid), doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:info.vencimento||null, unidade:(getFiliais(info.eid).length?String(info.eid):null), setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
+        ls.forEach(l=>{ linhas.set(info.eid+'|'+docChave+'|'+l.seq,{ empresa_eid:String(info.eid), doc_chave:docChave, seq:l.seq, tipo:l.tipo, codigo:l.codigo, denominacao:l.denominacao, valor:l.valor, valor_guia:l.valor_guia, competencia:l.competencia, vencimento:venc, unidade:(getFiliais(info.eid).length?String(info.eid):null), setor:_lancctbTributosSetorDoNome(f.name), uf:l.uf, arquivo:f.name, importado_por:(currentUser&&currentUser.nome)||null }); });
       }
     }
     _lancctbFolhaPainel('🧾 Importando tributos…','Conferindo duplicidades…',false);
@@ -46672,12 +46699,13 @@ async function _lancctbTributosImportar(arquivos){
       const { error } = await _supaClient.from('tributos_guias').upsert(lote,{onConflict:'empresa_eid,doc_chave,seq',ignoreDuplicates:true});
       if(error){ console.error('Tributos: erro ao gravar',error); rep.erros+=lote.length; } else { rep.novas+=lote.length; lote.forEach(l=>rep.porEmp.set(l.empresa_eid,(rep.porEmp.get(l.empresa_eid)||0)+1)); }
     }
+    try{ const n=await _lancctbTributosDeduplicar([...new Set([...rep.porEmp.keys(),...[...linhas.values()].map(l=>l.empresa_eid)])]); rep.limpas=n; }catch(e){ console.warn('Tributos: limpeza de duplicatas',e); }
   }catch(e){ console.error('Tributos: importação',e); rep.erros++; }
   const lista=(arr,max)=>arr.slice(0,max).map(x=>'<li>'+esc(x)+'</li>').join('')+(arr.length>max?'<li>… e mais '+(arr.length-max)+'</li>':'');
   let h='<div style="display:grid;grid-template-columns:auto 1fr;gap:4px 14px;margin-bottom:8px">'
     +'<b style="color:var(--teal)">'+rep.novas+'</b><span>linha(s) de código gravada(s) em '+rep.porEmp.size+' empresa(s)</span>'
     +'<b>'+rep.duplicadas+'</b><span>repetida(s) — a mesma guia já estava gravada ou veio em 2 pastas (ignoradas)</span>'
-    +'<b>'+rep.arquivos+'</b><span>arquivo(s) · '+rep.guias+' guia(s) distintas</span></div>';
+    +'<b>'+rep.arquivos+'</b><span>arquivo(s) · '+rep.guias+' guia(s) distintas</span>'+(rep.limpas?'<b>'+rep.limpas+'</b><span>linha(s) duplicada(s) que já estavam gravadas foram removidas</span>':'')+'</div>';
   if(rep.valorDiferente.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ '+rep.valorDiferente.length+' com valor diferente do já gravado (mantive o que estava):</b><ul style="margin:4px 0 0 18px">'+lista(rep.valorDiferente,8)+'</ul></div>';
   if(rep.divergeSoma.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ A soma dos códigos não fecha com o valor da guia (confira o PDF):</b><ul style="margin:4px 0 0 18px">'+lista(rep.divergeSoma,8)+'</ul></div>';
   if(rep.semEmpresa.length) h+='<div style="margin-top:8px;color:#d97706"><b>⚠ Nome do arquivo sem "(código da empresa)" cadastrada — não importados:</b><ul style="margin:4px 0 0 18px">'+lista(rep.semEmpresa,8)+'</ul></div>';
