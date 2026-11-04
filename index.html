@@ -46624,6 +46624,7 @@ function _lancctbTribRotulo(descricao,ex,itens){
   const d=String(descricao||'');
   if(ex&&ex.gnre) return 'GNRE'+(ex.gnre.uf?' '+ex.gnre.uf:'');
   if(/\bDAE\b|\bDARE\b/i.test(d)){ if(/DIFAL/i.test(d)) return 'ICMS DIFAL'; if(/ICMS\s*ST/i.test(d)) return 'ICMS ST'; if(/ICMS/i.test(d)) return 'ICMS'; return /DARE/i.test(d)?'DARE':'DAE'; } // DAE/DARE (Minas, São Paulo…) tem código próprio, não é DARF
+  if(/\bDAS\b/i.test(d)) return /parcel/i.test(d)?'DAS Parcelamento':'DAS';
   if(ex&&ex.composicao&&ex.composicao.length){
     const cls=[]; ex.composicao.forEach(c=>{ const k=_LANCCTB_TRIB_CODIGOS[String(c.codigo||'').replace(/\D/g,'').padStart(4,'0')]; if(k&&!cls.includes(k)) cls.push(k); });
     return 'DARF'+(cls.length?' ('+cls.join('/')+')':'');
@@ -46667,6 +46668,18 @@ async function _lancctbTributosDeduplicar(eids){
   }
   return apagadas;
 }
+// DAS do Simples Nacional (Documento de Arrecadação do Simples Nacional): tabela "1001 IRPJ - SIMPLES NACIONAL … 1002 CSLL … 1004 COFINS … 1005 PIS … 1006 INSS … 1010 ISS/ICMS …". Só vale se a soma fecha com o total do documento.
+async function _lancctbTribItensDas(pdf,totalGuia){
+  try{
+    const its=await _lancctbExtrairItensPagina(await pdf.getPage(1)); const t=its.map(i=>i.str).join(' ').replace(/\s+/g,' ');
+    if(!/Documento de Arrecada[çc][ãa]o do Simples Nacional/i.test(t)) return null;
+    const re=/\b(10\d{2})\s+([A-ZÀ-Ú][A-ZÀ-Ú0-9 .\/-]*?SIMPLES NACIONAL)\s+(\d{1,3}(?:\.\d{3})*,\d{2})/g; const itens=[]; let m;
+    while((m=re.exec(t))){ const nome=m[2].replace(/\s*-\s*SIMPLES NACIONAL\s*$/i,'').trim(); itens.push({ codigo:m[1], denominacao:nome+' — Simples Nacional', valor:_lancctbParseValorBR2(m[3]) }); }
+    if(itens.length<2) return null;
+    const soma=Math.round(itens.reduce((a,x)=>a+Math.round(x.valor*100),0))/100;
+    return Math.abs(soma-totalGuia)<=0.02?itens:null;
+  }catch(e){ return null; }
+}
 function _lancctbTributosAbrirImportar(){
   let inp=document.getElementById('lancctbTributosArqInput');
   if(!inp){ inp=document.createElement('input'); inp.type='file'; inp.accept='.pdf'; inp.multiple=true; inp.id='lancctbTributosArqInput'; inp.style.display='none'; inp.onchange=()=>{ const fs=[...inp.files]; inp.value=''; if(fs.length) _lancctbTributosImportar(fs); }; document.body.appendChild(inp); }
@@ -46680,7 +46693,7 @@ function _lancctbTributosLinhasDaGuia(ex,nomeTrib,pagina){
   if(!itens){
     const cod=(ex.dare&&ex.dare.codigo)||(ex.gnre&&ex.gnre.codigo)||null;
     const den=(ex.dare&&ex.dare.descricao)?('Dívida ativa/'+ex.dare.descricao):((ex.gnre&&ex.gnre.tipoNome)?(ex.gnre.tipoNome+(ex.gnre.uf?' — '+ex.gnre.uf:'')):nomeTrib);
-    itens=[{ codigo:cod, denominacao:den, valor:base.valor_guia }];
+    itens=[{ codigo:cod, denominacao:/^DAS Parcelamento/i.test(nomeTrib)?'Parcelamento do Simples Nacional':(/^DAS/i.test(nomeTrib)?'Simples Nacional':den), valor:base.valor_guia }];
   }
   return itens.filter(i=>i.valor!==0||itens.length===1).map((i,k)=>({ ...base, tipo:nomeTrib+(pagina?' (pág. '+pagina+')':''), seq:k+1, codigo:i.codigo, denominacao:i.denominacao, valor:i.valor }));
 }
@@ -46703,6 +46716,7 @@ async function _lancctbTributosImportar(arquivos){
         dp=await _lancctbTribDadosDoPdf(pdf);
         if(dp.relatorioTrabalhadores) ex=null; else
         ex=await _lancctbExtrairValorPdfTributo(pdf,false,s=>_lancctbFolhaPainel('🧾 Importando tributos…','<b>'+esc(f.name)+'</b><br>'+esc(s),false));
+        if(ex&&!ex.multiGnre&&!(ex.composicao&&ex.composicao.length)&&/\bDAS\b/i.test(info.descricao)&&!/parcel/i.test(info.descricao)){ const itDas=await _lancctbTribItensDas(pdf,ex.valor); if(itDas) ex.composicao=itDas; }
       }catch(e){ console.warn('Tributos: falha ao ler',f.name,e); errLeitura=String((e&&e.message)||e); }
       if(dp.relatorioTrabalhadores){ mark(f.name,'Lido (ignorado)','O PDF é o "Detalhe da Guia a Ser Emitida" (relação de trabalhadores) — não é uma guia; ignorado de propósito'); continue; }
       if(!ex||(!(ex.valor>0)&&!ex.multiGnre)){ rep.naoLidos.push(f.name); mark(f.name,errLeitura?'Erro ao ler':'Não lido',errLeitura?('Erro ao abrir/ler o PDF: '+errLeitura):'Não consegui achar o valor da guia (PDF sem texto reconhecível, imagem ilegível ou modelo de guia que o site ainda não conhece)'); continue; }
@@ -46732,8 +46746,20 @@ async function _lancctbTributosImportar(arquivos){
     const novas=[];
     for(const [eid,lista] of porEid){
       const chaves=[...new Set(lista.map(l=>l.doc_chave))]; const jaTem=new Map();
-      for(let i=0;i<chaves.length;i+=50){ const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('doc_chave,seq,valor').eq('empresa_eid',eid).in('doc_chave',chaves.slice(i,i+50)).order('id')); (ex||[]).forEach(x=>jaTem.set(x.doc_chave+'|'+x.seq,x)); }
-      lista.forEach(l=>{ const x=jaTem.get(l.doc_chave+'|'+l.seq); if(!x) novas.push(l); else if(Math.abs(Number(x.valor)-l.valor)>0.004){ rep.valorDiferente.push(l.arquivo+' (R$ '+_fmt(Number(x.valor))+' gravado × R$ '+_fmt(l.valor)+')'); mark(l.arquivo,'Lido com alerta','Valor diferente do que já estava gravado (R$ '+_fmt(Number(x.valor))+' gravado × R$ '+_fmt(l.valor)+') — mantive o gravado'); } else rep.duplicadas++; });
+      for(let i=0;i<chaves.length;i+=50){ const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('tributos_guias').select('id,doc_chave,seq,codigo,valor').eq('empresa_eid',eid).in('doc_chave',chaves.slice(i,i+50)).order('id')); (ex||[]).forEach(x=>{ if(!jaTem.has(x.doc_chave)) jaTem.set(x.doc_chave,[]); jaTem.get(x.doc_chave).push(x); }); }
+      const porDoc=new Map(); lista.forEach(l=>{ if(!porDoc.has(l.doc_chave)) porDoc.set(l.doc_chave,[]); porDoc.get(l.doc_chave).push(l); });
+      for(const [dc,novos] of porDoc){
+        const velhos=jaTem.get(dc);
+        if(!velhos){ novos.forEach(l=>novas.push(l)); continue; }
+        const sig=a=>a.map(x=>(x.codigo||'-')+':'+Number(x.valor).toFixed(2)).sort().join(',');
+        const somaN=Math.round(novos.reduce((a,x)=>a+Math.round(x.valor*100),0))/100, somaV=Math.round(velhos.reduce((a,x)=>a+Math.round(Number(x.valor)*100),0))/100;
+        if(sig(novos)===sig(velhos)){ rep.duplicadas+=novos.length; continue; }
+        if(novos.length>velhos.length&&Math.abs(somaN-somaV)<=0.02){ // mesma guia, agora lida com mais detalhe (ex.: DAS aberto em IRPJ, CSLL, COFINS, PIS, INSS, ISS)
+          const ids=velhos.map(v=>v.id); for(let i=0;i<ids.length;i+=200) await _supaClient.from('tributos_guias').delete().in('id',ids.slice(i,i+200)).eq('empresa_eid',eid);
+          novos.forEach(l=>novas.push(l)); mark(novos[0].arquivo,'Lido','Guia já existia como 1 linha — atualizada com o detalhe por código ('+novos.length+' códigos)'); continue;
+        }
+        rep.valorDiferente.push(novos[0].arquivo+' (R$ '+_fmt(somaV)+' gravado × R$ '+_fmt(somaN)+')'); mark(novos[0].arquivo,'Lido com alerta','Valor diferente do que já estava gravado (R$ '+_fmt(somaV)+' gravado × R$ '+_fmt(somaN)+') — mantive o gravado');
+      }
     }
     for(let i=0;i<novas.length;i+=200){
       const lote=novas.slice(i,i+200);
