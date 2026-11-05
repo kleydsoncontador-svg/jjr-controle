@@ -34678,6 +34678,64 @@ async function _lancctbPassadaNfNoHistorico(eid,contaId,log,restringirPeriodo){
   }catch(e){ console.warn('NF no histórico do banco:',e); }
   return out;
 }
+// ── TAYLU (#203) × MERCADO PAGO: nome do fornecedor + valor + data (pedido do usuário 05/11/2026) ──────────────────────────────────────────────────────
+// Saída do Mercado Pago cujo histórico traz o NOME do fornecedor ("Pagamento com QR Pix PTD COMERCIO DE PECAS LTDA - …") e que bate, ao mesmo tempo, com UMA parcela pendente de NF de ENTRADA ou
+// SERVIÇO TOMADO (direção compra) desse mesmo fornecedor: valor EXATO e vencimento da parcela NO MESMO DIA do pagamento → amarra sozinho. Só a Taylu e só contas Mercado Pago.
+// Conservador: se houver 2+ parcelas candidatas, 2+ lançamentos disputando a mesma parcela, nome com palavra distintiva faltando ou qualquer diferença de valor, NÃO mexe (fica pendente).
+async function _lancctbPassadaMpNfTaylu(eid,contaId,log,restringirPeriodo){
+  const out={ conciliadas:0, ignoradas:[] };
+  if(String(eid)!=='203') return out;
+  try{
+    const { data: ag } = await _supaClient.from('agencias_bancarias').select('banco_nome,descricao,conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
+    if(!ag||!ag.conta_contabil_id||!/mercado\s*pago/i.test(String(ag.banco_nome||'')+' '+String(ag.descricao||''))) return out;
+    const { data: ents } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodoSe(restringirPeriodo,_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,conta_bancaria_id')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0).order('data_pagamento',{ascending:true})));
+    if(!(ents||[]).length) return out;
+    const { data: parcsTodas } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_parcelas').select(LANCCTB_SEL_PARCELA_MOTOR).eq('empresa_eid',eid).eq('status_conciliacao','pendente'));
+    const parcs=(parcsTodas||[]).filter(p=>p.notas_fiscais&&p.notas_fiscais.direcao==='compra'&&p.data_vencimento);
+    if(!parcs.length) return out;
+    if(log) log('Mercado Pago × NF de entrada/serviço tomado (nome + valor + data)…');
+    const r2=v=>Math.round(v*100)/100;
+    // 1) candidatas por lançamento
+    const pares=[]; const usoParcela=new Map();
+    for(const l of ents){
+      const valor=r2(Number(l.valor_saida)); const toksHist=_lancctbIdentTokens(l.historico_bancario||'');
+      const cands=parcs.filter(p=>{
+        if(String(p.data_vencimento).slice(0,10)!==String(l.data_pagamento).slice(0,10)) return false;
+        if(Math.abs(r2(Number(_lancctbNfValorParaMatching(p,valor)))-valor)>=0.005) return false;
+        const tn=_lancctbIdentTokens(p.notas_fiscais.nome_emitente||'');
+        if(!tn.length) return false;
+        return tn.every(t=>toksHist.some(h=>_lancctbIdentCasa(t,h)));   // TODAS as palavras distintivas do nome da NF aparecem no histórico
+      });
+      if(cands.length!==1) continue;
+      pares.push({ l, p:cands[0] }); usoParcela.set(cands[0].id,(usoParcela.get(cands[0].id)||0)+1);
+    }
+    const ok=pares.filter(x=>usoParcela.get(x.p.id)===1);
+    if(!ok.length) return out;
+    const { data: contaBancoInfo } = { data:{ conta_contabil_id:ag.conta_contabil_id, plano_contas:ag.plano_contas } };
+    const { data: contasFixas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['10000','10001']);
+    const contaSaidaNF=(contasFixas||[]).find(c=>c.numero_conta==='10001');
+    if(!contaSaidaNF){ out.ignoradas.push({ motivo:'conta 10001 não cadastrada no Plano de Contas' }); return out; }
+    for(const { l, p } of ok){
+      const nf=p.notas_fiscais; const valor=r2(Number(l.valor_saida));
+      const cnpjT=nf.cnpj_emitente||null, nomeT=nf.nome_emitente||'';
+      const { data: regraOv } = await _supaClient.from('regras_matching').select('conta_contabil_id,plano_contas(classificacao)').eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','cliente_fornecedor').eq('cnpj_cpf_gatilho',cnpjT||'__nenhum__').maybeSingle();
+      const contaId2=regraOv?regraOv.conta_contabil_id:contaSaidaNF.id, classif2=regraOv?regraOv.plano_contas.classificacao:contaSaidaNF.classificacao;
+      const hist=`Pagamento a ${nomeT||cnpjT||''} - NF ${nf.numero||''} - parcela ${p.numero_parcela}`.trim();
+      const base={ empresa_eid:eid, data:l.data_pagamento, historico:hist, cliente_fornecedor_nome:nomeT||null, cnpj_cpf:cnpjT, lancamento_extrato_id:l.id, origem_match:'regra' };
+      const linhas=[
+        { ...base, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor },
+        { ...base, classificacao:classif2, conta_contabil_id:contaId2, tipo:'D', valor, nf_parcela_id:p.id }
+      ];
+      const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
+      if(error){ out.ignoradas.push({ id:l.id, motivo:'erro ao gravar: '+error.message }); continue; }
+      await _supaClient.from('notas_fiscais_parcelas').update({ status_conciliacao:'conciliado', lancamento_extrato_id:l.id }).eq('id',p.id);
+      await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado' }).eq('id',l.id);
+      out.conciliadas++;
+    }
+  }catch(e){ console.warn('Mercado Pago × NF Taylu:',e); }
+  return out;
+}
 async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restringirPeriodo=false){
   const chaveExec=`${eid}|${contaId}`;
   if(_lancctbMatchingEmExecucao.has(chaveExec)){
@@ -34694,6 +34752,7 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
   const cb=(m)=>{ const t=rotulo+': '+m; atual.msg=t; _lancctbBarraProc(t); if(statusCb) statusCb(t); };
   try{
     if(modo==='completo'||modo==='comprovantes_recebimento'||modo==='notas_fiscais'){ try{ const ag0=(await _supaClient.from('agencias_bancarias').select('banco_codigo,banco_nome,descricao').eq('id',contaId).single()).data; if(!_lancctbContaSemNfVinculo(ag0)||String(eid)==='250'){ const rN=await _lancctbPassadaNfNoHistorico(eid,contaId,cb,restringirPeriodo); if(rN.conciliadas){ cb('NF citada no histórico: '+rN.conciliadas+' entrada(s) conciliada(s)'+(rN.saldos?', '+rN.saldos+' saldo(s) em parcela do mês seguinte':'')); toast(rN.conciliadas+' entrada(s) amarrada(s) pela NF citada no histórico'+(rN.saldos?' ('+rN.saldos+' saldo(s) viraram parcela do mês seguinte)':'')+'.','ok'); } } }catch(eN){ console.warn('Passada NF no histórico:',eN); } }
+    if(String(eid)==='203'&&(modo==='completo'||modo==='comprovantes_pagamento'||modo==='notas_fiscais')){ try{ const rT=await _lancctbPassadaMpNfTaylu(eid,contaId,cb,restringirPeriodo); if(rT.conciliadas){ cb('Mercado Pago × NF: '+rT.conciliadas+' pagamento(s) amarrado(s) por nome + valor + data'); toast(rT.conciliadas+' pagamento(s) do Mercado Pago amarrado(s) à NF (nome do fornecedor + valor + data).','ok'); } }catch(eT){ console.warn('Passada MP × NF Taylu:',eT); } }
     return await _lancctbRodarMatchingInterno(eid,contaId,cb,modo,restringirPeriodo);
   } finally {
     _lancctbMatchingEmExecucao.delete(chaveExec);
