@@ -2755,11 +2755,12 @@ function renderDetalheMes(m){
         var totDeb=0, totCre=0;
         (r.lancamentos||[]).forEach(function(l){totDeb+=l.debito||0;totCre+=l.credito||0;});
         var sa=r.saldoAnterior||0;
-        var sf=sa+totDeb-totCre;
+        var impl=implNet(m,cod);
+        var sf=sa+impl+totDeb-totCre;
         if(existing){
           existing.debitos=totDeb; existing.creditos=totCre;
           if(!existing.saldoAnteriorManual) existing.saldoAnterior=existing.saldoAnterior||sa;
-          existing.saldoFinal=existing.saldoAnterior+totDeb-totCre;
+          existing.saldoFinal=existing.saldoAnterior+impl+totDeb-totCre;
           return existing;
         }
         return {
@@ -2784,7 +2785,7 @@ function renderDetalheMes(m){
     if(existing){
       existing.debitos=(existing.debitos||0)+totDebAj;
       existing.creditos=(existing.creditos||0)+totCreAj;
-      existing.saldoFinal=existing.saldoAnterior+existing.debitos-existing.creditos;
+      existing.saldoFinal=existing.saldoAnterior+implNet(m,cod)+existing.debitos-existing.creditos;
     } else if(isPatrimonialOuPermitida(cod,(razao[cod]&&razao[cod].nome)||cod)){
       // Account reached only via reclassification (not in Razão for this period)
       var sa2=0;
@@ -2802,6 +2803,7 @@ function renderDetalheMes(m){
   tableDiv.id='compTable_'+m;
   tableDiv.appendChild(renderContasTable(contasToShow,m,d.locked));
   wrap.appendChild(tableDiv);
+  compPublicarSaldosMes(m,contasToShow);
 
   return wrap;
 }
@@ -6584,7 +6586,8 @@ function renderContaDetHeader(){
   data.ajustes.forEach(function(a){totDeb+=a.debito||0;totCre+=a.credito||0;});
 
   var sa=contaObj?contaObj.saldoAnterior:(razaoConta?razaoConta.saldoAnterior:0);
-  var sf=sa+totDeb-totCre;
+  var saImpl=implNet(contaDetMes,contaDetCodigo); // lançamentos implantados em meses anteriores (Implantar Saldo Anterior)
+  var sf=sa+saImpl+totDeb-totCre;
 
   // Saldo Anterior pode ser marcado como conciliado pelo usuário
   var saAberto = d ? !(d.saldoAntConciliado && d.saldoAntConciliado[contaDetCodigo]) : true;
@@ -6608,6 +6611,16 @@ function renderContaDetHeader(){
   } else if(saAberto){
     totalAbertoCount=lancs.length;
   }
+  // Lançamentos implantados em meses anteriores que ainda estão em aberto também contam
+  if(data.conciliacao){
+    implLinhas(contaDetMes,contaDetCodigo).forEach(function(r){
+      if(r.status==='aberto'){
+        totalAbertoCount++;
+        if(tipo==='Passivo')saldoAberto+=((r.l.credito||0)-(r.l.debito||0));
+        else saldoAberto+=((r.l.debito||0)-(r.l.credito||0));
+      }
+    });
+  }
   // Ajustes não conciliados também contam como "aberto"
   var ajustesAbertos=data.ajustes.filter(function(a){return !a.conciliado;});
   ajustesAbertos.forEach(function(a){
@@ -6623,7 +6636,7 @@ function renderContaDetHeader(){
     (sa?' <button class="btn bo bsm" style="margin-top:4px;font-size:10px;padding:2px 6px" onclick="abrirDetalharSaldoAnteriorModal()" title="Substituir este valor único pela composição detalhada, lançamento a lançamento">📤 Detalhar</button>':'');
 
   cards.innerHTML=
-    '<div class="card"><div class="cl">Saldo Anterior</div><div class="cv sm'+(saAberto?'':' g')+'">'+fmt(sa)+'</div>'+saBtn+'</div>'+
+    '<div class="card"><div class="cl">Saldo Anterior</div><div class="cv sm'+(saAberto?'':' g')+'">'+fmt(sa)+'</div>'+(saImpl?'<div style="font-size:10.5px;color:var(--slate);margin-top:2px">+ implantado em meses anteriores: '+fmt(saImpl)+'</div>':'')+saBtn+'</div>'+
     '<div class="card"><div class="cl">Total Débito</div><div class="cv sm">'+fmt(totDeb)+'</div></div>'+
     '<div class="card"><div class="cl">Total Crédito</div><div class="cv sm">'+fmt(totCre)+'</div></div>'+
     '<div class="card"><div class="cl">Saldo Final</div><div class="cv sm g">'+fmt(sf)+'</div></div>'+
@@ -6693,6 +6706,46 @@ function editarSaldoAnterior(){
   renderContaDetHeader();
   renderContaDetTabela();
   toast('Saldo anterior atualizado ✓');
+}
+// Lançamentos implantados por "Implantar Saldo Anterior" em meses ANTERIORES ao mês aberto (compõem o saldo anterior).
+function implLinhas(mes,cod){
+  var out=[]; var comp=S.comp(curEmpId);
+  Object.keys(comp).sort().filter(function(x){return x<mes;}).forEach(function(pm){
+    var c=S.razao(curEmpId,pm)[cod]; if(!c||!c.lancamentos)return;
+    var pConcil=comp[pm]&&comp[pm].conciliacao&&comp[pm].conciliacao[cod];
+    c.lancamentos.forEach(function(l,i){
+      if(!l.implantacao)return;
+      var st=pConcil&&pConcil.lancamentos&&pConcil.lancamentos[i]?pConcil.lancamentos[i].status:'aberto';
+      out.push({l:l,status:st,mes:pm,idx:i});
+    });
+  });
+  return out;
+}
+function implNet(mes,cod){
+  var t=0; implLinhas(mes,cod).forEach(function(r){t+=(r.l.debito||0)-(r.l.credito||0);});
+  return Math.round(t*100)/100;
+}
+// Publica o Saldo Final de cada conta do mês (o mesmo número do cartão "Saldo Final" da conta) para o Balancete
+// (Demonstrativos Contábeis) conferir. Chave por número da empresa (eid); só grava se mudou.
+function compPublicarSaldosMes(m,contas){
+  try{
+    var emp=S.emps().find(function(e){return e.id===curEmpId;});
+    var eid=emp&&emp.eid; if(eid==null||eid==='')return;
+    var razao=S.razao(curEmpId,m); var d=S.comp(curEmpId)[m]; var aj=(d&&d.ajustes)||{};
+    var out={};
+    (contas||[]).forEach(function(c){
+      var rc=razao[c.codigo], sf;
+      if(rc){
+        var td=0,tc=0;
+        (rc.lancamentos||[]).forEach(function(l){td+=l.debito||0;tc+=l.credito||0;});
+        (aj[c.codigo]||[]).forEach(function(a){td+=a.debito||0;tc+=a.credito||0;});
+        sf=(c.saldoAnterior!=null?c.saldoAnterior:(rc.saldoAnterior||0))+implNet(m,c.codigo)+td-tc;
+      } else sf=c.saldoFinal;
+      out[c.codigo]=Math.round((sf||0)*100)/100;
+    });
+    var k='comp_saldos_eid_'+eid+'_'+m;
+    if(JSON.stringify(S.g(k))!==JSON.stringify(out)) S.s(k,out);
+  }catch(e){ console.warn('compPublicarSaldosMes',e); }
 }
 // Zera o "saldo" gravado em cada lançamento do mês desta conta → a tela recalcula o corrido a partir do Saldo Anterior atual.
 function _zerarSaldosCorridosConta(){
@@ -7228,7 +7281,7 @@ function renderContaDetTabela(){
   // acumulado de ajustes/reclassificações — assim um ajuste passa a impactar
   // visivelmente o saldo de todas as linhas seguintes, como no Razão real.
   (function(){
-    var saldoBase=contaObj?contaObj.saldoAnterior:(razaoConta?razaoConta.saldoAnterior:0);
+    var saldoBase=(contaObj?contaObj.saldoAnterior:(razaoConta?razaoConta.saldoAnterior:0))+implNet(contaDetMes,contaDetCodigo);
     var ultimoSaldoRazao=saldoBase;
     var offsetAjustes=0;
     rows.forEach(function(r){

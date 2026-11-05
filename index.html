@@ -10856,6 +10856,24 @@ function _democContasAcumuladas(tipo,eid,ano,mesLimite){
   });
   return acumulado;
 }
+// Saldos finais da Composição de Saldos por conta no mês (gravados pela própria Composição: comp_saldos_eid_<eid>_<aaaa-mm>).
+// Usa o que já está em memória e confere na nuvem (no máximo 1x a cada 20s por mês); se mudou, redesenha.
+var _democSaldosCompChecado={};
+function _democSaldosComposicao(eid,ano,mes){
+  var k='comp_saldos_eid_'+eid+'_'+ano+'-'+String(mes).padStart(2,'0');
+  var v=S.g(k);
+  var agora=Date.now();
+  if(!_democSaldosCompChecado[k]||agora-_democSaldosCompChecado[k]>20000){
+    _democSaldosCompChecado[k]=agora;
+    try{
+      _supaClient.from('dados_app').select('value').eq('key',k).maybeSingle().then(function(r){
+        var nv=r&&r.data?r.data.value:null;
+        if(nv&&typeof nv==='object'&&JSON.stringify(nv)!==JSON.stringify(S.g(k))){ cccCache[k]=nv; try{ renderDemoc(); }catch(e){} }
+      });
+    }catch(e){}
+  }
+  return (v&&typeof v==='object')?v:null;
+}
 function _democRenderPagerEContas(tipo,eid,docs){
   docs=docs||democGetDocsLista(tipo,eid);
   if(!docs.length) return '<div style="color:var(--slate);font-size:12.5px;margin-top:10px">Nenhum documento anexado ainda.</div>';
@@ -10866,6 +10884,8 @@ function _democRenderPagerEContas(tipo,eid,docs){
   var dados=democGetDoc(tipo,eid,atual.ano,atual.mes);
   var mostraAcumulado=(tipo==='dre');
   var acumulado=mostraAcumulado?_democContasAcumuladas(tipo,eid,atual.ano,atual.mes):null;
+  // Conferência com a Composição de Saldos (pedido do usuário 05/11/2026): saldo final da conta na composição do mês × Saldo Atual do Balancete.
+  var saldosComp=(tipo==='balancete')?_democSaldosComposicao(eid,atual.ano,atual.mes):null;
   var h='<div style="display:flex;align-items:center;gap:10px;margin-top:12px;margin-bottom:8px;flex-wrap:wrap">'
     +'<button class="btn bo bsm" '+(idx<=0?'disabled':'')+' onclick="democMesVisNavegar(\''+tipo+'\',\''+eid+'\',-1)">◄</button>'
     +'<div style="font-weight:700;min-width:130px;text-align:center;color:#1E3558">'+(LUC_MESES_FULL[parseInt(atual.mes,10)-1]||atual.mes)+'/'+atual.ano+'</div>'
@@ -10893,13 +10913,17 @@ function _democRenderPagerEContas(tipo,eid,docs){
         +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Débito</th>'
         +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Crédito</th>'
         +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saldo Atual</th>'
+        +'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff" title="Saldo final da conta na Composição de Saldos (último dia do mês)">Saldo na Composição</th>'
+        +'<th style="padding:6px 10px;text-align:center;background:var(--ink2);color:#fff">Conferência</th>'
       ):'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Saldo do mês</th>')
     +(mostraAcumulado?'<th style="padding:6px 10px;text-align:right;background:var(--ink2);color:#fff">Acumulado no ano</th>':'')
     +'</tr></thead><tbody>';
   dados.contas.forEach(function(c,i){
     var chaveConta=c.codigo_analitico||('nome:'+c.nome_conta);
     var saldoAtual=c.saldo_atual!=null?c.saldo_atual:c.saldo; // fallback pra documento importado no formato antigo
-    h+='<tr style="background:'+(i%2===0?'var(--white)':'var(--bg)')+'">'
+    var _vComp=(saldosComp&&c.codigo_analitico&&Object.prototype.hasOwnProperty.call(saldosComp,c.codigo_analitico))?saldosComp[c.codigo_analitico]:null;
+    var _incompat=(ehBalanceteDetalhado&&_vComp!==null&&Math.abs((parseFloat(saldoAtual)||0)-_vComp)>0.01);
+    h+='<tr style="background:'+(_incompat?'rgba(239,68,68,.16)':(i%2===0?'var(--white)':'var(--bg)'))+'">'
       +'<td style="padding:5px 10px;font-family:var(--mono)">'+esc(c.codigo_analitico||'')+'</td>'
       +'<td style="padding:5px 10px">'+esc(c.nome_conta||'')+'</td>'
       +(ehBalanceteDetalhado?(
@@ -10907,6 +10931,8 @@ function _democRenderPagerEContas(tipo,eid,docs){
           +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(c.debito!=null?_fmt(c.debito):'—')+'</td>'
           +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(c.credito!=null?_fmt(c.credito):'—')+'</td>'
           +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(saldoAtual!=null?_fmt(saldoAtual):'—')+'</td>'
+          +'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(_vComp!==null?_fmt(_vComp):'')+'</td>'
+          +'<td style="padding:5px 10px;text-align:center;font-size:11.5px;font-weight:700;color:'+(_incompat?'#DC2626':'#16A34A')+'">'+(_vComp===null?'':(_incompat?'Incompatível':'Compatível'))+'</td>'
         ):'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+(saldoAtual!=null?_fmt(saldoAtual):'—')+'</td>')
       +(mostraAcumulado?'<td style="padding:5px 10px;text-align:right;font-family:var(--mono)">'+_fmt(acumulado[chaveConta]||0)+'</td>':'')
       +'</tr>';
