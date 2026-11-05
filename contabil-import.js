@@ -528,9 +528,18 @@
     // Conferência com a Composição de Saldos (05/11/2026): saldo final da conta na composição do mês × saldo atual do Balancete
     var ym=String(sm.competence||pe||'').slice(0,7), saldosComp=null;
     try{ if(typeof _democSaldosComposicao==='function') saldosComp=_democSaldosComposicao(eid,ym.slice(0,4),ym.slice(5,7)); }catch(e){ saldosComp=null; }
+    // Totais para conferência (pedido do usuário 05/11/2026): conta-raiz de cada grupo (1 Ativo, 2 Passivo, 3 Receitas, 4 Despesas); sem a raiz, soma das analíticas do grupo
+    var totGrupo=function(g){
+      var raiz=contas.filter(function(c){ return String(c.classification)===g; })[0];
+      if(raiz) return {v:Number(raiz.balance||0), l:raiz.balance_side};
+      var sg=0, achou=false; contas.forEach(function(c){ if(c.is_analytic&&String(c.classification).split('.')[0]===g){ achou=true; sg+=(c.balance_side==='C'?-1:1)*Number(c.balance||0); } });
+      return achou?{v:Math.abs(sg), l:sg<0?'C':'D'}:null;
+    };
+    var cxTot=function(rot,g){ var t=totGrupo(g); return '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 14px;min-width:170px;background:var(--white)"><div style="font-size:11px;color:var(--slate)">'+rot+'</div><div style="font-size:15px;font-weight:700;'+MONO+'">'+(t?('R$ '+nf(t.v)+(t.l?' '+t.l:'')):'—')+'</div></div>'; };
+    var caixasTot='<div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">'+cxTot('Total do Ativo','1')+cxTot('Total do Passivo (inclui PL)','2')+cxTot('Total das Receitas','3')+cxTot('Total das Despesas','4')+'</div>';
     var busca=String(s.busca||'').toLowerCase();
     var vis=contas.filter(function(c){ if(s.so==='analiticas'&&!c.is_analytic) return false; if(s.so==='sinteticas'&&c.is_analytic) return false; return !busca||(String(c.description||'').toLowerCase().indexOf(busca)>=0||String(c.code).indexOf(busca)>=0||String(c.classification).indexOf(busca)>=0); });
-    var h='<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:10px">'
+    var h=caixasTot+'<div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end;margin-bottom:10px">'
       +'<div><div style="font-size:11px;color:var(--slate)">Balancete</div><select class="si" onchange="'+vzCall(eid,T,'{periodo:this.value}')+'">'+sums.map(function(x){ return optHtml(chave(x),(x.competence?x.competence.slice(5)+'/'+x.competence.slice(0,4)+' · ':'')+brDeIso(x.period_start)+' a '+brDeIso(x.period_end),chave(x)===s.periodo); }).join('')+'</select></div>'
       +'<div><div style="font-size:11px;color:var(--slate)">Contas</div><select class="si" onchange="'+vzCall(eid,T,'{so:this.value}')+'">'+optHtml('todas','Todas (sintéticas e analíticas)',s.so==='todas')+optHtml('analiticas','Só analíticas',s.so==='analiticas')+optHtml('sinteticas','Só sintéticas',s.so==='sinteticas')+'</select></div>'
       +'<div><div style="font-size:11px;color:var(--slate)">Buscar conta</div><input class="fi" style="width:220px" value="'+esc2(s.busca||'')+'" placeholder="nome, código ou classificação + Enter" onchange="'+vzCall(eid,T,'{busca:this.value}')+'"></div></div>'
