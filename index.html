@@ -48013,17 +48013,23 @@ async function _lancctbParsearExtratoBTGPactualCC(pdf){
   const pagina1=await pdf.getPage(1);
   const itens1=await _lancctbExtrairItensPagina(pagina1);
   const texto1=itens1.map(i=>i.str).join(' ').replace(/\s+/g,' ');
-  if(!/Conta corrente\s*-\s*PJ/i.test(texto1)) return null;
+  // 2 modelos do mesmo banco: (A) "Conta corrente - PJ" / "Período do extrato: dd/mm/aaaa - dd/mm/aaaa" (22/09/2026) e (B) "Extrato conta corrente" / "Período de dd/mm/aaaa a dd/mm/aaaa"
+  // com "Resumo do saldo" e a tabela "Lançamentos" (Valentina Boconi 204, set/2026 — o leitor genérico misturava as linhas de histórico). A tabela e as colunas são as mesmas.
+  const _btgModeloA=/Conta corrente\s*-\s*PJ/i.test(texto1);
+  const _btgModeloB=/Extrato conta corrente/i.test(texto1)&&/Descri[çc][ãa]o do lan[çc]amento/i.test(texto1)&&/Entradas\/Sa[íi]das/i.test(texto1);
+  if(!_btgModeloA&&!_btgModeloB) return null;
   if(!/BTG\s*Pactual/i.test(texto1)) return null;
 
-  const mPeriodo=texto1.match(/Per[íi]odo do extrato:\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/i);
+  const mPeriodo=texto1.match(/Per[íi]odo do extrato:\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})/i)||texto1.match(/Per[íi]odo de\s*(\d{2})\/(\d{2})\/(\d{4})\s*a\s*(\d{2})\/(\d{2})\/(\d{4})/i);
   // Competência = mês/ano do FIM do período (não a data de geração do PDF, que pode ser do mês seguinte).
   const competencia=mPeriodo?mPeriodo[6]+'-'+mPeriodo[5]:null;
 
   // Faixas de coluna (coordenadas nativas do PDF — mesmas usadas por _lancctbAgruparLinhasPorY em toda
   // a tela): Data < 100 · Descrição 100–490 · Entradas/Saídas 490–660 · Saldo ≥ 660.
   const ehData=s=>/^\d{2}\/\d{2}\/\d{4}$/.test(String(s).trim());
-  const ehValor=s=>/^-?\d[\d.]*,\d{2}$/.test(String(s).trim());
+  // modelo A traz só o número ("1.234,56"); modelo B traz "R$ 2.032,75" e "- R$ 11.834,58" num item só
+  const ehValor=s=>/^-?\s*(R\$\s*)?\d[\d.]*,\d{2}$/.test(String(s).trim());
+  const _numBR=s=>_lancctbParseValorBR(String(s).replace(/[^\d.,]/g,''));
   const linhaData=L=>L.itens.find(i=>i.x<100&&ehData(i.str));
   const linhaValor=L=>L.itens.find(i=>i.x>=490&&i.x<660&&ehValor(i.str));
   const linhaSaldo=L=>L.itens.filter(i=>i.x>=660).map(i=>i.str).join('').trim();
@@ -48037,6 +48043,16 @@ async function _lancctbParsearExtratoBTGPactualCC(pdf){
   for(let p=1;p<=pdf.numPages;p++){
     const itens=p===1?itens1:await _lancctbExtrairItensPagina(await pdf.getPage(p));
     const linhas=_lancctbAgruparLinhasPorY(itens);
+    // Descrição de um lançamento pode ocupar até 3 linhas: parte ANTES da linha da data, parte NA linha (ex.: o código E2E "16A7535A…") e parte DEPOIS — o banco centraliza o bloco verticalmente.
+    // Cada linha só-de-descrição pertence à linha-âncora (a da data) MAIS PRÓXIMA no eixo y (valor máximo: 22 pt); assim nenhum lançamento "rouba" a descrição do vizinho (Valentina Boconi 204, set/2026).
+    const _ancoras=[]; linhas.forEach((L,ix)=>{ if(linhaData(L)) _ancoras.push(ix); });
+    const _descDaAncora=new Map();
+    linhas.forEach((L,ix)=>{
+      if(linhaData(L)||!ehDescPura(L)) return;
+      let melhor=-1, dmin=1e9; _ancoras.forEach(a=>{ const d=Math.abs(linhas[a].y-L.y); if(d<dmin){ dmin=d; melhor=a; } });
+      if(melhor>=0&&dmin<=22){ if(!_descDaAncora.has(melhor)) _descDaAncora.set(melhor,[]); _descDaAncora.get(melhor).push({y:L.y,txt:linhaDesc(L)}); }
+      else if(_ancoras.length&&L.y<=linhas[_ancoras[0]].y+22&&L.y>=linhas[_ancoras[_ancoras.length-1]].y-22) avisos.push('Linha de descrição sem lançamento próximo — ignorada: '+linhaDesc(L)); // fora da faixa da tabela (resumo/gráfico da pág. 1, rodapé) é só ruído
+    });
     for(let i=0;i<linhas.length;i++){
       const L=linhas[i];
       const itData=linhaData(L);
@@ -48047,7 +48063,7 @@ async function _lancctbParsearExtratoBTGPactualCC(pdf){
       const descPropria=linhaDesc(L);
       if(!itValor){
         // Sem valor de Entradas/Saídas → marcador de saldo (abertura/fechamento), nunca movimentação.
-        const saldoNum=saldoStr?_lancctbParseValorBR(saldoStr):null;
+        const saldoNum=saldoStr?(/^\s*-/.test(saldoStr)?-1:1)*_numBR(saldoStr):null;
         if(/abertura/i.test(descPropria)) saldoAnteriorDoc=saldoNum;
         else if(/fechamento/i.test(descPropria)) saldoFinalDoc=saldoNum;
         else if(descPropria) avisos.push('Linha com data e saldo mas sem "Entradas/Saídas", e sem ser abertura/fechamento — ignorada: '+descPropria);
@@ -48059,24 +48075,20 @@ async function _lancctbParsearExtratoBTGPactualCC(pdf){
       // inteira); sem essa checagem, um lançamento de 1 linha só "roubava" a descrição do PRÓXIMO
       // lançamento (ex: "Pix enviado para Andreia Peixoto Cruz" grudava com "Pix recebido de Bytedance...").
       let historico;
-      if(descPropria){
-        historico=descPropria;
-      } else {
-        let partes=[];
-        const anterior=linhas[i-1];
-        if(anterior&&!anterior._usada&&ehDescPura(anterior)){ partes.push(linhaDesc(anterior)); anterior._usada=true; }
-        const seguinte=linhas[i+1];
-        if(seguinte&&!seguinte._usada&&ehDescPura(seguinte)){ partes.push(linhaDesc(seguinte)); seguinte._usada=true; }
-        historico=partes.join(' ').replace(/\s+/g,' ').trim();
+      {
+        const viz=(_descDaAncora.get(i)||[]);
+        const antes=viz.filter(v=>v.y>L.y).sort((a,b)=>b.y-a.y).map(v=>v.txt);
+        const depois=viz.filter(v=>v.y<=L.y).sort((a,b)=>b.y-a.y).map(v=>v.txt);
+        historico=[...antes,descPropria,...depois].filter(Boolean).join(' ').replace(/\s+/g,' ').trim();
       }
       if(!historico){ avisos.push('Lançamento de '+itData.str+' sem descrição reconstruída — mantido, revise.'); }
-      const valor=_lancctbParseValorBR(itValor.str.replace(/^-/,''));
+      const valor=_numBR(itValor.str);
       const negativo=itValor.str.trim().startsWith('-');
       seqOrigem++;
       registros.push({
         data:dataIso, historico: historico||'(sem descrição)',
         valor_entrada: negativo?0:valor, valor_saida: negativo?valor:0,
-        documento:null, _seq:seqOrigem, _pagina:p, _saldoLinha:saldoStr?_lancctbParseValorBR(saldoStr):null,
+        documento:null, _seq:seqOrigem, _pagina:p, _saldoLinha:saldoStr?(/^\s*-/.test(saldoStr)?-1:1)*_numBR(saldoStr):null,
       });
     }
   }
