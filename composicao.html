@@ -349,6 +349,9 @@ html.dark-mode .ledger-acct-row:hover{background:transparent!important}
 html.dark-mode .ledger-acct-row:not(.conta-fechada-verde):hover td{background:rgba(255,255,255,.07)!important}
 /* selinhos (Tipo, Conciliação, Status) dentro de conta fechada: fundo claro translúcido e letras pretas */
 html body .conta-fechada-verde td .badge,html body .conta-fechada-verde td .concil-badge,html.dark-mode body .conta-fechada-verde td .badge,html.dark-mode body .conta-fechada-verde td .concil-badge{background:rgba(255,255,255,.65)!important;color:#000!important;border:1px solid rgba(0,0,0,.28)!important;font-weight:700!important}
+/* filtros sob o título de cada coluna (conta aberta) */
+html body .ledger-table thead tr.cdf-row th{background:#161616!important;padding:3px 4px;position:sticky;z-index:39}
+.cdf-i{width:100%;min-width:56px;font-size:11px;padding:3px 5px;border:1px solid var(--border);border-radius:4px;background:var(--white);color:var(--ink)}
 </style>
 </head>
 <body>
@@ -475,10 +478,8 @@ html body .conta-fechada-verde td .badge,html body .conta-fechada-verde td .conc
     <div class="cards" id="contaDetCards" style="margin-bottom:14px"></div>
 
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:12px">
-      <input class="si" id="contaDetFiltroData" placeholder="Data (yyyy-mm)..." oninput="renderContaDetTabela()" style="width:130px">
-      <input class="si" id="contaDetFiltroHist" placeholder="🔍 Histórico contém..." oninput="renderContaDetTabela()" style="width:240px">
-      <input class="si" id="contaDetFiltroValor" placeholder="Valor..." oninput="renderContaDetTabela()" style="width:110px">
-      <select class="si" id="contaDetFiltroStatus" onchange="renderContaDetTabela()" style="width:150px">
+      <input type="hidden" id="contaDetFiltroData"><input type="hidden" id="contaDetFiltroHist"><input type="hidden" id="contaDetFiltroValor">
+      <select class="si" id="contaDetFiltroStatus" onchange="renderContaDetTabela()" style="display:none">
         <option value="">Todos os status</option>
         <option value="aberto">Em aberto</option>
         <option value="baixado_exato">Conciliado (exato)</option>
@@ -5896,7 +5897,7 @@ function exportarLedgerFiltrado(){
   var saIncluded=(fStatus===''||fStatus==='flagged')||
     (fStatus==='aberto'&&!saConciliado)||
     ((fStatus==='baixado_exato'||fStatus==='manual')&&saConciliado);
-  if(fHist||fVal||fData)saIncluded=false;
+  if(fHist||fVal||fData||cdfAtivo())saIncluded=false;
 
   if(!rows.length&&!saIncluded){toast('Nenhum lançamento para exportar com os filtros atuais','err');return}
 
@@ -6643,6 +6644,7 @@ function abrirContaDetalhe(mes, codigo){
     var el=document.getElementById(id); if(el)el.value='';
   });
   var st=document.getElementById('contaDetFiltroStatus'); if(st)st.value='';
+  contaDetF={}; _cdfFechaCal();
   goPage('conta');
 }
 
@@ -6784,7 +6786,104 @@ function toggleSaldoAntConciliado(){
 }
 
 
+// ── Filtros sob o título de cada coluna (pedido do usuário 05/11/2026) ──
+var contaDetF={}, _cdfTimer=null, _cdfFoco=null, _cdfCal={ini:null,fim:null};
+function cdfAtivo(){ return Object.keys(contaDetF).some(function(k){return !!contaDetF[k];}); }
+function cdfTxt(el){
+  contaDetF[el.dataset.k]=el.value;
+  _cdfFoco={id:el.id,pos:el.selectionStart};
+  clearTimeout(_cdfTimer); _cdfTimer=setTimeout(function(){renderContaDetTabela();},280);
+}
+function cdfStatus(v){ var st=document.getElementById('contaDetFiltroStatus'); if(st) st.value=v; renderContaDetTabela(); }
+function _cdfVal(filtro,valor){
+  var f=String(filtro||'').trim(); if(!f) return true;
+  var limpo=f.split('.').join('').split(',').join('.').split(' ').join('');
+  var n=parseFloat(limpo);
+  var soNum=true; for(var i=0;i<f.length;i++){ if('-0123456789., '.indexOf(f.charAt(i))<0){ soNum=false; break; } }
+  if(soNum&&!isNaN(n)) return Math.abs(Math.abs(valor||0)-Math.abs(n))<0.015;
+  return fmt(valor||0).toLowerCase().indexOf(f.toLowerCase())>=0;
+}
+function cdfPassa(r,docsNf){
+  var f=contaDetF, l=r.l;
+  function inc(a,b){ return String(a||'').toLowerCase().indexOf(String(b).toLowerCase().trim())>=0; }
+  if(f.num&&!inc(l.numero,f.num)) return false;
+  if(f.hist&&!inc(l.historico,f.hist)) return false;
+  if(f.doc){ var doc=(r.kind==='lanc'&&!r.isGrupo)?(docsNf[r.idx]!==undefined?docsNf[r.idx]:_extrairNumeroNF(l.historico)):''; if(!inc(doc,f.doc)) return false; }
+  if(f.cp&&!inc(l.ctapart,f.cp)) return false;
+  if(f.deb&&!_cdfVal(f.deb,l.debito)) return false;
+  if(f.cre&&!_cdfVal(f.cre,l.credito)) return false;
+  if(f.sal&&!_cdfVal(f.sal,r.saldoCalc)) return false;
+  if(f.crit&&!inc(r.matchDetalhe,f.crit)) return false;
+  if(f.de&&(l.data||'')<f.de) return false;
+  if(f.ate&&(l.data||'')>f.ate) return false;
+  return true;
+}
+function _cdfLinhaFiltros(){
+  function esc(v){ return String(v||'').split('"').join('&quot;'); }
+  function inp(k,ph){ return '<th><input class="cdf-i" id="cdf_'+k+'" data-k="'+k+'" value="'+esc(contaDetF[k])+'" placeholder="'+ph+'" oninput="cdfTxt(this)"></th>'; }
+  var stV=(document.getElementById('contaDetFiltroStatus')||{}).value||'';
+  function opt(v,t){ return '<option value="'+v+'"'+(stV===v?' selected':'')+'>'+t+'</option>'; }
+  var lbl='📅 Período';
+  function dm(d){ return d?d.split('-').reverse().join('/'):'…'; }
+  if(contaDetF.de||contaDetF.ate) lbl='📅 '+dm(contaDetF.de)+' – '+dm(contaDetF.ate);
+  return '<tr class="cdf-row"><th></th>'+
+    '<th><button class="cdf-i" id="cdfDataBtn" onclick="cdfAbrirCal(this)" style="cursor:pointer;text-align:left;white-space:nowrap">'+lbl+'</button></th>'+
+    inp('num','nº')+inp('hist','filtrar…')+inp('doc','doc')+'<th></th>'+inp('cp','conta')+inp('deb','débito')+inp('cre','crédito')+inp('sal','saldo')+
+    '<th><select class="cdf-i" onchange="cdfStatus(this.value)">'+opt('','Todos')+opt('aberto','Em aberto')+opt('baixado_exato','Conciliado (exato)')+opt('baixado_aprox','Conciliado (aprox.)')+opt('manual','Manual')+opt('flagged','Flagados')+'</select></th>'+
+    inp('crit','critério')+'<th></th><th></th><th></th></tr>';
+}
+// Dois calendários lado a lado: o da esquerda escolhe a data inicial, o da direita a final (podem ser do mesmo mês)
+function cdfAbrirCal(btn){
+  var pop=document.getElementById('cdfCalPop');
+  if(pop){ _cdfFechaCal(); return; }
+  var base=String(contaDetMes||'').split('-'), y=parseInt(base[0],10)||new Date().getFullYear(), m=(parseInt(base[1],10)||1)-1;
+  _cdfCal={ini:{y:y,m:m},fim:{y:y,m:m}};
+  if(contaDetF.de){ var p=contaDetF.de.split('-'); _cdfCal.ini={y:parseInt(p[0],10),m:parseInt(p[1],10)-1}; }
+  if(contaDetF.ate){ var p2=contaDetF.ate.split('-'); _cdfCal.fim={y:parseInt(p2[0],10),m:parseInt(p2[1],10)-1}; }
+  pop=document.createElement('div'); pop.id='cdfCalPop';
+  var rc=btn.getBoundingClientRect();
+  pop.style.cssText='position:fixed;z-index:9999;top:'+(rc.bottom+4)+'px;left:'+Math.max(8,Math.min(rc.left,window.innerWidth-560))+'px;background:var(--white);color:var(--ink);border:1px solid var(--border);border-radius:10px;padding:12px;box-shadow:0 10px 30px rgba(0,0,0,.45);display:flex;gap:18px;flex-wrap:wrap;max-width:540px';
+  pop.onclick=function(e){
+    var b=e.target.closest('button'); if(!b) return;
+    var a=b.dataset.a;
+    if(a==='mes'){ var c=_cdfCal[b.dataset.w]; c.m+=parseInt(b.dataset.d,10); if(c.m<0){c.m=11;c.y--;} if(c.m>11){c.m=0;c.y++;} _cdfRenderCal(); }
+    else if(a==='dia'){
+      if(b.dataset.w==='ini'){ contaDetF.de=b.dataset.v; if(contaDetF.ate&&contaDetF.ate<contaDetF.de) contaDetF.ate=contaDetF.de; }
+      else { contaDetF.ate=b.dataset.v; if(contaDetF.de&&contaDetF.de>contaDetF.ate) contaDetF.de=contaDetF.ate; }
+      renderContaDetTabela(); _cdfRenderCal();
+    }
+    else if(a==='limpar'){ contaDetF.de=''; contaDetF.ate=''; renderContaDetTabela(); _cdfRenderCal(); }
+    else if(a==='fechar'){ _cdfFechaCal(); }
+  };
+  document.body.appendChild(pop); _cdfRenderCal();
+  setTimeout(function(){ document.addEventListener('mousedown',_cdfFechaFora); },0);
+}
+function _cdfFechaCal(){ var pop=document.getElementById('cdfCalPop'); if(pop) pop.remove(); document.removeEventListener('mousedown',_cdfFechaFora); }
+function _cdfFechaFora(e){ var pop=document.getElementById('cdfCalPop'); if(pop&&!pop.contains(e.target)&&!(e.target.closest&&e.target.closest('#cdfDataBtn'))) _cdfFechaCal(); }
+function _cdfCalHtml(w){
+  var c=_cdfCal[w], sel=w==='ini'?contaDetF.de:contaDetF.ate;
+  var nomes=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  var primeiro=new Date(c.y,c.m,1).getDay(), dias=new Date(c.y,c.m+1,0).getDate();
+  var bs='border:none;background:none;color:var(--ink);cursor:pointer;';
+  var h='<div style="width:230px"><div style="font-size:11px;color:var(--slate);margin-bottom:4px">'+(w==='ini'?'Data inicial':'Data final')+'</div>'+
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px"><button data-a="mes" data-w="'+w+'" data-d="-1" style="'+bs+'font-size:15px">◄</button><b style="font-size:13px">'+nomes[c.m]+' '+c.y+'</b><button data-a="mes" data-w="'+w+'" data-d="1" style="'+bs+'font-size:15px">►</button></div>'+
+    '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center;font-size:11px">';
+  ['D','S','T','Q','Q','S','S'].forEach(function(x){ h+='<div style="color:var(--slate);padding:2px 0">'+x+'</div>'; });
+  for(var i=0;i<primeiro;i++) h+='<div></div>';
+  for(var d=1;d<=dias;d++){
+    var iso=c.y+'-'+String(c.m+1).padStart(2,'0')+'-'+String(d).padStart(2,'0');
+    var on=(iso===sel);
+    h+='<button data-a="dia" data-w="'+w+'" data-v="'+iso+'" style="'+bs+'padding:4px 0;border-radius:5px;font-size:12px;'+(on?'background:var(--teal);color:#fff;font-weight:700':'')+'">'+d+'</button>';
+  }
+  return h+'</div></div>';
+}
+function _cdfRenderCal(){
+  var pop=document.getElementById('cdfCalPop'); if(!pop) return;
+  pop.innerHTML=_cdfCalHtml('ini')+_cdfCalHtml('fim')+
+    '<div style="width:100%;display:flex;gap:8px;justify-content:flex-end"><button class="btn bo bsm" data-a="limpar">Limpar período</button><button class="btn bp bsm" data-a="fechar">Fechar</button></div>';
+}
 function limparFiltrosContaDet(){
+  contaDetF={}; _cdfFechaCal();
   ['contaDetFiltroData','contaDetFiltroHist','contaDetFiltroValor'].forEach(function(id){
     var el=document.getElementById(id); if(el)el.value='';
   });
@@ -7452,6 +7551,7 @@ function renderContaDetTabela(){
   })();
 
   var rowsFiltered=rows.filter(function(r){
+    if(!cdfPassa(r,docsNf))return false;
     if(fData&&!(r.l.data||'').startsWith(fData))return false;
     if(fHist&&!(r.l.historico||'').toLowerCase().includes(fHist.toLowerCase()))return false;
     if(fVal){
@@ -7502,7 +7602,7 @@ function renderContaDetTabela(){
   var saIncluded = (sa!==0||saManual) && (fStatus==='flagged' ||
     ((fStatus===''||fStatus==='aberto')&&!saConciliado) ||
     ((fStatus==='baixado_exato'||fStatus==='manual')&&saConciliado));
-  if(fHist||fVal||fData) saIncluded=false; // SALDO ANTERIOR doesn't match text/value/date filters
+  if(fHist||fVal||fData||cdfAtivo()) saIncluded=false; // SALDO ANTERIOR doesn't match text/value/date filters
 
   var html='<table class="ledger-table"><thead><tr>'+
     '<th><input type="checkbox" id="contaDetSelAll" onchange="toggleSelAllLanc(this)"></th>'+
@@ -7512,7 +7612,7 @@ function renderContaDetTabela(){
     '<th style="text-align:center">Baixa em<br>Andamento <input type="checkbox" id="baixaAndamentoSelAll" onchange="toggleSelAllBaixaAndamento(this)" title="Marcar/desmarcar todos os itens filtrados" style="vertical-align:middle;margin-left:4px"></th>'+
     '<th style="text-align:center">Saldo<br>Anterior <input type="checkbox" id="saldoAnteriorSelAll" onchange="toggleSelAllSaldoAnteriorSel(this)" title="Marcar/desmarcar todos os itens filtrados" style="vertical-align:middle;margin-left:4px"></th>'+
     '<th></th>'+
-    '</tr></thead><tbody>';
+    '</tr>'+_cdfLinhaFiltros()+'</thead><tbody>';
 
   if(saIncluded){
     var saCls=saConciliado?'ledger-row-exato':'';
@@ -7592,10 +7692,16 @@ function renderContaDetTabela(){
     '</tr>';
   });
 
+  if(!rowsFiltered.length&&!saIncluded) html+='<tr><td colspan="15" style="text-align:center;padding:18px;color:var(--slate)">Nenhum lançamento com esses filtros</td></tr>';
   html+='</tbody></table>';
-  if(!rowsFiltered.length&&!saIncluded)html='<div class="empty"><div class="et">Nenhum lançamento com esses filtros</div></div>';
 
   body.innerHTML=html;
+  // linha de filtros gruda logo abaixo da linha de títulos; devolve o foco ao campo que estava sendo digitado
+  (function(){
+    var th1=body.querySelector('thead tr'); var hh=th1?th1.offsetHeight:34;
+    [].forEach.call(body.querySelectorAll('thead tr.cdf-row th'),function(th){ th.style.top=hh+'px'; });
+    if(_cdfFoco&&_cdfFoco.id){ var el=document.getElementById(_cdfFoco.id); if(el){ el.focus(); try{ el.setSelectionRange(_cdfFoco.pos,_cdfFoco.pos); }catch(e){} } _cdfFoco=null; }
+  })();
 
   // Wire up action cells
   var trs=body.querySelectorAll('tbody tr');
