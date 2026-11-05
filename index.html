@@ -989,7 +989,7 @@ html.dark-mode span.af-sem-txt-badge, :root[data-theme="dark"] span.af-sem-txt-b
 </script>
 <script src="pride-fluxo-parser.js?v=1"></script>
 <script src="contabil-parsers.js?v=1"></script>
-<script src="contabil-import.js?v=2"></script>
+<script src="contabil-import.js?v=4"></script>
 <script src="itau-extrato-parsers.js?v=1"></script>
 <script src="extrato-generico.js?v=1"></script>
 <script src="supabase-config.js"></script>
@@ -9800,6 +9800,8 @@ function _democFmtDataHora(iso){
   return d.toLocaleDateString('pt-BR')+' '+d.toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'});
 }
 function _democRenderLogSubstituicoes(){
+  return ''; // histórico de atualizações automáticas retirado da tela a pedido do usuário (05/11/2026); os registros continuam guardados
+
   var log=democGetLogSubstituicoes();
   if(!log.length) return '';
   var admin=isAdmin(currentUser);
@@ -10170,6 +10172,23 @@ async function democVerificarPasta(){
   if(btn){ btn.disabled=true; btn.textContent='Verificando pasta…'; }
 
   try{
+    // Balancete e DRE em PDF: mesmo leitor da importação por dentro da empresa (sem IA, identifica a empresa pelo CNPJ do PDF)
+    let relNovo=null;
+    try{
+      if(window.CtbImport&&CtbImport.verificarPastaGlobal){
+        if(btn) btn.textContent='Lendo Balancetes e DREs…';
+        relNovo=await CtbImport.verificarPastaGlobal(handleRaiz);
+      }
+    }catch(e){ console.error('verificarPastaGlobal',e); toast('Erro ao ler Balancetes/DREs da pasta: '+(e.message||e),'err'); }
+    if(relNovo){
+      const msgs=[];
+      if(relNovo.novos) msgs.push(relNovo.novos+' Balancete(s)/DRE(s) importado(s)');
+      if(relNovo.bloqueados.length) msgs.push(relNovo.bloqueados.length+' não importado(s): '+relNovo.bloqueados.slice(0,3).join(' | '));
+      if(relNovo.erros.length) msgs.push(relNovo.erros.length+' erro(s): '+relNovo.erros.slice(0,2).join(' | '));
+      if(msgs.length) toast(msgs.join(' — '),(relNovo.bloqueados.length||relNovo.erros.length)?'err':'ok');
+      else if(relNovo.vistos) toast(relNovo.vistos+' PDF(s) de Balancete/DRE na pasta, todos já importados.','ok');
+      renderDemoc();
+    }
     // 1ª passada: só nomes de arquivo + data de modificação (instantâneo,
     // não abre conteúdo nenhum) — decide o que precisa ser reaberto de verdade.
     const pendentes=[]; // {tipo,eid,ano,mes,fh,nome,lastModified}
@@ -10187,6 +10206,7 @@ async function democVerificarPasta(){
           // leitor sem IA) — faturamento continua só em .pdf.
           const ehExtensaoValida=nomeMin.endsWith('.pdf')||((tipo==='balancete'||tipo==='dre')&&(nomeMin.endsWith('.xlsx')||nomeMin.endsWith('.xls')));
           if(!ehExtensaoValida) continue;
+          if((tipo==='balancete'||tipo==='dre')&&nomeMin.endsWith('.pdf')) continue; // PDF de Balancete/DRE: lido pelo leitor novo (sem IA), logo abaixo
           totalArquivos++;
           const info=_democParsearNomeArquivoPasta(nomeArq);
           if(!info){ semPadrao++; continue; }
@@ -10790,6 +10810,7 @@ function _democRenderContasSecao(tipo, eid){
   var docsAntigos=democGetDocsLista(tipo,eid), tipoCtb=tipo==='balancete'?'TRIAL_BALANCE':'INCOME_STATEMENT';
   var novo=_democRenderCtbAba(eid,tipoCtb,DEMOC_TIPOS_CONTAS[tipo].label,tipo==='balancete'?'Balancete':'DRE',tipo==='balancete'?'Importa todas as contas (sintéticas e analíticas), o resumo e os resultados do mês e do exercício.':'Importa todas as linhas da DRE (contas, grupos, subtotais e resultado).');
   var pend=democGetNovasContasPendentes(tipo,eid).length;
+  if(tipo==='balancete') return novo; // seção "modo antigo" retirada a pedido do usuário em 05/11/2026 (dados antigos continuam guardados)
   return novo+'<details style="margin-top:18px;border-top:1px solid var(--border);padding-top:10px"'+((docsAntigos.length||pend)?' open':'')+'><summary style="cursor:pointer;font-size:12.5px;font-weight:700;color:var(--slate)">Registros anteriores e importação por Excel/IA (modo antigo)'+(docsAntigos.length?' — '+docsAntigos.length+' mês(es)':'')+'</summary><div style="margin-top:10px">'+_democRenderContasSecaoAntigo(tipo,eid)+'</div></details>';
 }
 function _democRenderContasSecaoAntigo(tipo, eid){
@@ -10891,13 +10912,14 @@ window.addEventListener('message',function(ev){
   try{
     var eid=String(m.eid), partes=String(m.mes||'').split('-');
     _democEidAtual=eid; _democTipoAtivo='balancete';
-    var doc=democGetDocsLista('balancete',eid).find(function(d){ return String(d.ano)===partes[0]&&parseInt(d.mes,10)===parseInt(partes[1],10); });
-    if(doc) _democMesVisualizando['balancete|'+eid]=doc;
+    try{ if(window.CtbImport&&CtbImport.irParaCompetencia) CtbImport.irParaCompetencia(eid,String(m.mes)); }catch(e){}
     goPage('democ');
     var cod=String(m.codigo||'').replace(/[^0-9A-Za-z._-]/g,'');
-    setTimeout(function(){
+    var tent=0, timer=setInterval(function(){
+      tent++;
       var tr=document.querySelector('#democContainer tr[data-cod="'+cod+'"]');
-      if(tr){ tr.scrollIntoView({block:'center'}); tr.style.outline='2px solid var(--teal)'; setTimeout(function(){ tr.style.outline=''; },4000); }
+      if(tr){ clearInterval(timer); tr.scrollIntoView({block:'center'}); tr.style.outline='2px solid var(--teal)'; setTimeout(function(){ tr.style.outline=''; },4000); }
+      else if(tent>16) clearInterval(timer);
     },250);
   }catch(e){ console.error('abrirBalancete',e); }
 });
