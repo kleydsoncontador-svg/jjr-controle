@@ -2757,7 +2757,7 @@ function renderDetalheMes(m){
         var sf=sa+totDeb-totCre;
         if(existing){
           existing.debitos=totDeb; existing.creditos=totCre;
-          existing.saldoAnterior=existing.saldoAnterior||sa;
+          if(!existing.saldoAnteriorManual) existing.saldoAnterior=existing.saldoAnterior||sa;
           existing.saldoFinal=existing.saldoAnterior+totDeb-totCre;
           return existing;
         }
@@ -4966,7 +4966,7 @@ function processRazao(data, filename){
   if(comp[razaoMesAtual]){
     comp[razaoMesAtual].contas.forEach(function(c){
       var r=contas[c.codigo];
-      if(r&&r.saldoAnterior&&!c.saldoAnterior)c.saldoAnterior=r.saldoAnterior;
+      if(r&&r.saldoAnterior&&!c.saldoAnterior&&!c.saldoAnteriorManual)c.saldoAnterior=r.saldoAnterior;
     });
     S.saveComp(curEmpId,comp);
   }
@@ -6615,6 +6615,37 @@ function limparFiltrosContaDet(){
 // ajuste/reclassificação espelhado vindo de OUTRA conta, ou de qualquer mudança que não
 // tenha disparado um re-render nesta tela específica (a conta pode ter ficado aberta
 // numa aba enquanto a mudança aconteceu em outro lugar).
+// Saldo anterior editável à mão (sem justificativa): o operador às vezes concilia no sistema dele
+// e não quer trazer a composição anterior. Fica marcado como "editado" e o Razão não sobrescreve.
+function editarSaldoAnterior(){
+  var comp=S.comp(curEmpId); var d=comp[contaDetMes]; if(!d)return;
+  if(d.locked){toast('Mês fechado — reabra para alterar o saldo anterior','err');return}
+  var c=(d.contas||[]).find(function(x){return x.codigo===contaDetCodigo});
+  if(!c){toast('Conta não encontrada','err');return}
+  var atual=c.saldoAnterior||0;
+  var t=prompt('Novo saldo anterior desta conta.\nComo aparece na coluna Saldo: credor = negativo (ex.: -220,00).\nOu escreva com C/D no fim: "220 C" = credor, "220 D" = devedor.\nDeixe vazio para voltar ao saldo do Razão.',
+    String(atual).replace('.',','));
+  if(t===null)return;
+  t=t.trim();
+  if(t===''){
+    var rz=S.razao(curEmpId,contaDetMes)[contaDetCodigo];
+    c.saldoAnterior=(rz&&rz.saldoAnterior)||0; delete c.saldoAnteriorManual;
+  }else{
+    var m=t.match(/^(-)?\s*(?:R\$)?\s*([\d.]*\d(?:,\d+)?|\d+(?:\.\d+)?)\s*([cCdD])?$/);
+    if(!m){toast('Valor inválido','err');return}
+    var n=parseFloat(m[2].indexOf(',')>=0?m[2].replace(/\./g,'').replace(',','.'):m[2]);
+    if(isNaN(n)){toast('Valor inválido','err');return}
+    if(m[1])n=-n;
+    if(m[3]&&/c/i.test(m[3]))n=-Math.abs(n);
+    if(m[3]&&/d/i.test(m[3]))n=Math.abs(n);
+    c.saldoAnterior=Math.round(n*100)/100; c.saldoAnteriorManual=true;
+  }
+  c.saldoFinal=(c.saldoAnterior||0)+(c.debitos||0)-(c.creditos||0);
+  S.saveComp(curEmpId,comp);
+  renderContaDetHeader();
+  renderContaDetTabela();
+  toast('Saldo anterior atualizado ✓');
+}
 function atualizarSaldoCorridoConta(){
   renderContaDetHeader();
   renderContaDetTabela();
@@ -7202,7 +7233,8 @@ function renderContaDetTabela(){
   // Saldo Anterior
   var sa=contaObj?contaObj.saldoAnterior:(razaoConta?razaoConta.saldoAnterior:0);
   var saConciliado=!!(d&&d.saldoAntConciliado&&d.saldoAntConciliado[contaDetCodigo]);
-  var saIncluded = sa!==0 && (fStatus==='flagged' ||
+  var saManual=!!(contaObj&&contaObj.saldoAnteriorManual);
+  var saIncluded = (sa!==0||saManual) && (fStatus==='flagged' ||
     ((fStatus===''||fStatus==='aberto')&&!saConciliado) ||
     ((fStatus==='baixado_exato'||fStatus==='manual')&&saConciliado));
   if(fHist||fVal||fData) saIncluded=false; // SALDO ANTERIOR doesn't match text/value/date filters
@@ -7226,10 +7258,10 @@ function renderContaDetTabela(){
       '<td colspan="8">SALDO ANTERIOR</td>'+
       '<td class="tr">'+fmt(sa)+'</td>'+
       '<td><span class="concil-badge '+(saConciliado?'cb-exato':'cb-aberto')+'">'+(saConciliado?'Conciliado':'Em aberto')+'</span></td>'+
-      '<td></td>'+
+      '<td>'+(saManual?'<span style="font-size:10px;color:#b45309;font-weight:600">editado</span>':'')+'</td>'+
       '<td style="text-align:center"><input type="checkbox" class="baixaAndChk" data-idx="SA"'+saBaixaAndCk+'></td>'+
       '<td style="text-align:center"><input type="checkbox" class="saldoAntSelChk" data-idx="SA"'+saSaldoAntSelCk+'></td>'+
-      '<td></td></tr>';
+      '<td><button class="btn bo bsm" style="font-size:11px;padding:2px 7px" title="Alterar o saldo anterior desta conta (sem justificativa)" onclick="editarSaldoAnterior()">✏ Editar</button></td></tr>';
   }
 
   // Lançamentos de meses anteriores em aberto
