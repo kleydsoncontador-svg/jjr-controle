@@ -54,22 +54,36 @@
   }
 
   // ───────────── ícone 🔔 na tela da empresa: quantos lembretes PENDENTES (não concluídos) ela tem; some quando zera ─────────────
-  function contaPend(eid) {
+  function listaPend(eid) {
     const h = hojeIso(), lim = (() => { const d = new Date(); d.setFullYear(d.getFullYear() + 2); return iso(d); })();
-    let n = 0;
+    const out = [];
     getL().filter(l => (l.eids || []).map(String).includes(String(eid))).forEach(l => {
-      const oc = ocorrencias(l, l.data || h, lim);
-      let achou = false;
-      for (const di of oc) { if (!feito(l, di)) { achou = true; break; } if (di > h) break; }
-      if (achou) n++;
+      for (const di of ocorrencias(l, l.data || h, lim)) { if (!feito(l, di)) { out.push({ l, di }); break; } if (di > h) break; }
     });
-    return n;
+    return out.sort((a, b) => a.di < b.di ? -1 : 1);
   }
+  const contaPend = eid => listaPend(eid).length;
   root.lemAtualizarBadge = function (eid) {
     const b = document.getElementById('empLembBtn'), n = document.getElementById('empLembNum'); if (!b) return;
     const c = contaPend(eid); b.style.display = c ? '' : 'none'; if (n) n.textContent = c;
   };
-  root.lemAbrirDaEmpresa = function (eid) { LEM.filtroEmp = String(eid); goPage('lembretes'); };
+  // atalho para a tela de Lembretes (todos, sem filtro)
+  root.lemAbrirDaEmpresa = function () { LEM.filtroEmp = ''; goPage('lembretes'); };
+  // prévia ao passar o mouse: uma linha por lembrete (título + resumo do texto)
+  root.lemPreviaMostrar = function (btn, eid) {
+    lemPreviaEsconder();
+    const ls = listaPend(eid); if (!ls.length) return;
+    const h = hojeIso(), r = btn.getBoundingClientRect();
+    const d = document.createElement('div'); d.id = 'lemPrevia';
+    d.style.cssText = 'position:fixed;z-index:99999;max-width:460px;min-width:280px;padding:10px 12px;border-radius:8px;background:var(--white,#fff);color:var(--ink,#111);border:1px solid var(--border,#ccc);box-shadow:0 8px 24px rgba(0,0,0,.35);font-size:12.5px;line-height:1.35;pointer-events:none;top:' + (r.bottom + 6) + 'px;left:' + Math.max(8, Math.min(r.left, window.innerWidth - 480)) + 'px';
+    d.innerHTML = '<div style="font-weight:700;margin-bottom:6px">🔔 Lembretes pendentes desta empresa</div>' + ls.map((x, k) => {
+      const t = String(x.l.texto || '').replace(/\s+/g, ' ').trim(), rs = t.length > 110 ? t.slice(0, 110) + '…' : t;
+      return '<div style="padding:4px 0;border-top:1px solid var(--border,#ddd)"><b>Lembrete ' + (k + 1) + ':</b> ' + E(x.l.titulo) + ' <span style="color:' + (x.di < h ? '#d33' : 'var(--slate,#667)') + '">(' + br(x.di) + (x.di < h ? ' · atrasado' : '') + ')</span>' + (rs ? '<div style="color:var(--slate,#667)">' + E(rs) + '</div>' : '') + '</div>';
+    }).join('');
+    document.body.appendChild(d);
+  };
+  root.lemPreviaEsconder = function () { const d = document.getElementById('lemPrevia'); if (d) d.remove(); };
+
   // ───────────── tela principal ─────────────
   root.renderLembretes = function () {
     const pg = document.getElementById('page-lembretes'); if (!pg) return;
