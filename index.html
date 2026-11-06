@@ -48518,6 +48518,47 @@ function _lancctbParsearExtratoCaixinhaXlsx(wb){
   return { lancamentos:lancs, saldoAnteriorDoc:saldoInicial, saldoFinalDoc:saldoFinal==null?null:Math.round(saldoFinal*100)/100,
     layout:'Caixinha — movimento de caixa em Excel (RECEBIMENTO/PAGAMENTO)'+(avisos.length?' ⚠ '+avisos.join('; '):(totR!=null?' ✓ totais conferem':'')) };
 }
+// ── Planilha "Caixa" (exportação financeira) — Data | Categoria | Histórico | Tipo (C/D) | Valor | Id | Contato | CNPJ | Marcadores | Conta ──
+// Achado real 05/11/2026 (Taylu, Mercado Pago "maquininha de cartão", .xls): Tipo C = entrada, Tipo D = saída; o valor vem sempre positivo. Colunas achadas pelo NOME.
+function _lancctbParsearExtratoCaixaTipoCdXlsx(wb){
+  const ws=wb.Sheets[wb.SheetNames[0]]; if(!ws) return null;
+  const aoa=XLSX.utils.sheet_to_json(ws,{header:1,raw:true,defval:''});
+  if(!aoa.length) return null;
+  const n=x=>String(x==null?'':x).normalize('NFD').replace(/[̀-ͯ]/g,'').toLowerCase().replace(/\s+/g,' ').trim();
+  let hIdx=-1, c={};
+  for(let i=0;i<Math.min(aoa.length,10);i++){
+    const r=aoa[i].map(n);
+    const d=r.indexOf('data'), h=r.indexOf('historico'), t=r.indexOf('tipo'), v=r.indexOf('valor');
+    if(d>=0&&h>=0&&t>=0&&v>=0){ hIdx=i; c={d,h,t,v,cat:r.indexOf('categoria'),id:r.indexOf('id'),ct:r.indexOf('contato'),doc:r.indexOf('cnpj')}; break; }
+  }
+  if(hIdx<0) return null;
+  const pad=x=>String(x).padStart(2,'0');
+  const diaIso=v=>{
+    if(v instanceof Date&&!isNaN(v)) return v.getFullYear()+'-'+pad(v.getMonth()+1)+'-'+pad(v.getDate());
+    if(typeof v==='number'&&v>20000&&v<80000){ const t=new Date(Math.round((v-25569)*86400000)); return t.getUTCFullYear()+'-'+pad(t.getUTCMonth()+1)+'-'+pad(t.getUTCDate()); }
+    const m=String(v||'').trim().match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/); if(m) return m[3]+'-'+pad(m[2])+'-'+pad(m[1]);
+    const m2=String(v||'').trim().match(/^(\d{4})-(\d{2})-(\d{2})/); return m2?m2[0]:null;
+  };
+  const num=v=>{ if(typeof v==='number') return v; const t=String(v==null?'':v).trim(); if(!t) return 0; const x=t.indexOf(',')>=0?parseFloat(t.split('.').join('').split(',').join('.')):parseFloat(t); return isNaN(x)?0:x; };
+  const lancs=[];
+  for(let i=hIdx+1;i<aoa.length;i++){
+    const r=aoa[i];
+    const data=diaIso(r[c.d]); if(!data) continue;
+    const tipo=String(r[c.t]==null?'':r[c.t]).trim().toUpperCase().charAt(0);
+    if(tipo!=='C'&&tipo!=='D') continue;
+    const valor=Math.abs(num(r[c.v])); if(!(valor>0)) continue;
+    let hist=String(r[c.h]==null?'':r[c.h]).trim();
+    const contato=c.ct>=0?String(r[c.ct]==null?'':r[c.ct]).trim():'';
+    if(contato&&!n(hist).includes(n(contato).slice(0,12))) hist=(hist?hist+' - ':'')+contato;
+    const doc=c.doc>=0?String(r[c.doc]==null?'':r[c.doc]).trim():'', idm=c.id>=0?String(r[c.id]==null?'':r[c.id]).trim():'';
+    lancs.push({ data, historico:hist||'(sem histórico)', valor_entrada:tipo==='C'?Math.round(valor*100)/100:0, valor_saida:tipo==='D'?Math.round(valor*100)/100:0,
+      documento:idm||null, informacao:doc?('Documento contraparte: '+doc.replace(/\D/g,'')):undefined });
+  }
+  if(!lancs.length) return null;
+  const somaE=lancs.reduce((a,l)=>a+l.valor_entrada,0), somaS=lancs.reduce((a,l)=>a+l.valor_saida,0);
+  return { lancamentos:lancs, saldoAnteriorDoc:null, saldoFinalDoc:null,
+    layout:'Planilha Caixa em Excel (Data/Histórico/Tipo C-D/Valor) — '+lancs.length+' lançamento(s), entradas R$ '+somaE.toFixed(2)+' / saídas R$ '+somaS.toFixed(2) };
+}
 // ── Mercado Pago — "account_statement…xlsx" ──
 function _lancctbParsearExtratoMercadoPagoXlsx(wb){
   const ws=wb.Sheets[wb.SheetNames[0]];
@@ -50289,7 +50330,7 @@ async function processarLancctbUploadExtrato(forcarIA){
       const wb=XLSX.read(buf,{type:'array',cellDates:true});
       // Formatos de C/C de marketplace/fintech (Mercado Pago, ShopeePay) —
       // leitura direta, sem IA, antes do mapeador genérico de colunas.
-      const recExcel=_lancctbParsearExtratoContaAzulXlsx(wb)||_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb)||_lancctbParsearExtratoBBContaCorrenteXlsx(wb)||_lancctbParsearExtratoHotmartXlsx(wb)||_lancctbParsearExtratoJjrCcXlsx(wb)||_lancctbParsearExtratoCaixinhaXlsx(wb);
+      const recExcel=_lancctbParsearExtratoContaAzulXlsx(wb)||_lancctbParsearExtratoMercadoPagoXlsx(wb)||_lancctbParsearExtratoShopeePayXlsx(wb)||_lancctbParsearExtratoBBContaCorrenteXlsx(wb)||_lancctbParsearExtratoHotmartXlsx(wb)||_lancctbParsearExtratoJjrCcXlsx(wb)||_lancctbParsearExtratoCaixaTipoCdXlsx(wb)||_lancctbParsearExtratoCaixinhaXlsx(wb);
       if(recExcel){
         // 'excel' — precisa ser um dos valores aceitos por
         // lancamentos_extrato_origem_importacao_check (achado real
