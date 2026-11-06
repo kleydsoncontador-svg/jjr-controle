@@ -109,7 +109,8 @@
       const tag = rep !== 'nenhum' ? `<div style="font-size:10.5px;color:var(--slate)">${REP_TXT[rep]}${l.fim ? ' · encerra em ' + br(l.fim) : ''}</div>` : '';
       return `<tr style="border-top:1px solid var(--border);${ok ? 'opacity:.6' : ''}">
         <td style="padding:7px 8px;font-size:12px;max-width:220px">${E(empsTxt(l))}</td>
-        <td style="padding:7px 8px;font-size:12.5px;font-weight:600">${ok ? '<s>' + E(l.titulo) + '</s>' : E(l.titulo)}${tag}</td>
+        <td style="padding:7px 8px;font-size:12.5px;font-weight:600">${ok ? '<s>' + E(l.titulo) + '</s>' : E(l.titulo)}${tag}
+          ${rep === 'nenhum' ? `<div style="margin-top:4px;font-weight:400;font-size:11px;color:var(--slate)">Mudar a data: <input type="date" value="${E(l.data)}" data-id="${E(l.id)}" onchange="lemMoverData(this.dataset.id,this.value)" style="font-size:11px;padding:1px 4px;border:1px solid var(--border);border-radius:4px;background:var(--white);color:var(--ink)"></div>` : ''}</td>
         <td style="padding:7px 8px;font-size:12px;white-space:pre-wrap;max-width:300px">${E(l.texto || '')}</td>
         <td style="padding:7px 8px;white-space:nowrap;text-align:right"><button class="btn ${ok ? 'bo' : 'bp'} bsm" data-id="${E(l.id)}" onclick="lemConcluir(this.dataset.id)">${ok ? '↩ Reabrir' : '✓ Concluir'}</button>
           ${rep !== 'nenhum' && !(l.fim && l.fim <= di) ? `<button class="btn bo bsm" data-id="${E(l.id)}" onclick="lemEncerrar(this.dataset.id)" title="Conclui este e encerra a repetição: as datas seguintes deixam de lembrar">⏹ Encerrar daqui p/ frente</button>` : ''}
@@ -119,6 +120,14 @@
       <div style="overflow-x:auto;max-height:60vh;overflow-y:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;font-size:11px;color:var(--slate)"><th style="padding:5px 8px">Empresa</th><th style="padding:5px 8px">Lembrete</th><th style="padding:5px 8px">Texto</th><th></th></tr></thead><tbody>${linhas}</tbody></table></div>
       <div class="ma"><button class="btn bp" onclick="lemAbrirNovo('${di}')">＋ Adicionar lembrete neste dia</button><button class="btn bo" onclick="closeModal('mLembDia')">Fechar</button></div>`;
     openModal('mLembDia');
+  };
+  // muda a data de um lembrete (não repetido) direto na lista do dia; nos que repetem, a série inteira se muda pelo ✎ (Editar)
+  root.lemMoverData = function (id, novo) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(novo || '')) { toast('Data inválida.', 'err'); return; }
+    const arr = getL(), l = arr.find(x => x.id === id); if (!l) return; const antes = l.data;
+    if (novo === antes) return;
+    l.data = novo; l.concluido = false; if (l.feitos) delete l.feitos[antes]; // mudou a data = volta a ficar pendente
+    setL(arr); renderLembretes(); lemAbrirDia(LEM.dataDia || antes); toast('Lembrete movido para ' + br(novo) + ' ✓', 'ok');
   };
   root.lemConcluir = function (id) {
     const arr = getL(), l = arr.find(x => x.id === id); if (!l) return; const di = LEM.dataDia || l.data;
