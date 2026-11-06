@@ -15514,6 +15514,7 @@ function _convMpSetStatus(alvo,msg,tipo){
   el.style.color=cor;
   el.textContent=msg;
 }
+const CONV_MP_NF_EMPRESAS=['203']; // empresas cujo relatório de Vendas BR recebe o nº da NF de venda no fim do histórico
 async function processarConvMp(alvo){
   const btn=document.getElementById('convMpBtnProcessar_'+alvo);
   _convMpSetStatus(alvo,'','');
@@ -15576,6 +15577,34 @@ async function processarConvMp(alvo){
       return;
     }
 
+    // ── NF no histórico (pedido do usuário 05/11/2026, só Taylu #203): cada venda do relatório é amarrada a UMA NF de venda do site por CPF/CNPJ (ou nome) + valor bruto + data
+    // da venda = data de emissão; o nº da NF vai no FIM do histórico ("… - NF 8750"). Duas NFs possíveis, ou a mesma NF para duas vendas = não coloca (fica sem NF). ──
+    let nfsVenda=null, nfAviso='';
+    const _eidMp=String(_convMpResolveAlvo(alvo).eidMatriz||'');
+    if(CONV_MP_NF_EMPRESAS.includes(_eidMp)){ // por enquanto só a Taylu; para outra empresa usar o mesmo recurso, acrescente o nº dela aqui
+      try{
+        const _p2=n=>String(n).padStart(2,'0');
+        const iniNf=deAno+'-'+_p2(deMes)+'-01', fimNf=ateAno+'-'+_p2(ateMes)+'-'+_p2(new Date(ateAno,ateMes,0).getDate());
+        const { data: nfsRaw, error: eNf } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('numero,cnpj_destinatario,nome_destinatario,valor_total,data_emissao')
+          .eq('empresa_eid',_eidMp).eq('direcao','venda').gte('data_emissao',iniNf).lte('data_emissao',fimNf+'T23:59:59'));
+        if(eNf) throw eNf;
+        nfsVenda=(nfsRaw||[]).map(n=>({ numero:String(n.numero||'').replace(/^0+(?=\d)/,''), doc:String(n.cnpj_destinatario||'').replace(/\D/g,''), nome:n.nome_destinatario||'', valor:Number(n.valor_total), data:String(n.data_emissao||'').slice(0,10) }));
+      }catch(eN){ console.warn('NFs de venda (Vendas BR):',eN); nfAviso=' (não consegui ler as NFs de venda — histórico sem número de NF)'; }
+    }
+    const _nfDaVenda=(docRaw,compradorTxt,valorBruto,dataIso)=>{
+      if(!nfsVenda||!(valorBruto>0)) return null;
+      const doc=String(docRaw||'').replace(/\D/g,'');
+      const toksC=(typeof _lancctbIdentTokens==='function')?_lancctbIdentTokens(compradorTxt||''):[];
+      const cands=nfsVenda.filter(n=>{
+        if(n.data!==dataIso) return false;
+        if(Math.abs(n.valor-valorBruto)>=0.005) return false;
+        if(doc.length>=11&&n.doc&&n.doc===doc) return true;
+        const tn=(typeof _lancctbIdentTokens==='function')?_lancctbIdentTokens(n.nome):[];
+        return tn.length>0&&toksC.length>0&&tn.every(t=>toksC.some(h=>_lancctbIdentCasa(t,h)));
+      });
+      const nums=[...new Set(cands.map(c=>c.numero))];
+      return nums.length===1?nums[0]:null;
+    };
     const linhas=[];
     for(let r=headerRowIdx+1;r<aoa.length;r++){
       const row=aoa[r];
@@ -15595,6 +15624,9 @@ async function processarConvMp(alvo){
       const cpfFormatado=cpfCnpj?('CPF '+_convMpFormatarCpfCnpj(cpfCnpj)):'';
       const numVenda=idxVenda>=0?(row[idxVenda]||''):'';
       const dataBr=_convMpFmtDataBr(dataObj);
+      const _rb=typeof receitaProdutos==='number'?receitaProdutos:parseFloat(String(receitaProdutos).replace(/\./g,'').replace(',','.'));
+      const _dIso=dataObj.getFullYear()+'-'+String(dataObj.getMonth()+1).padStart(2,'0')+'-'+String(dataObj.getDate()).padStart(2,'0');
+      const nfNum=_nfDaVenda(cpfCnpj,comprador,_rb,_dIso);
 
       idxOps.forEach(({op,idx})=>{
         if(idx<0)return;
@@ -15603,8 +15635,19 @@ async function processarConvMp(alvo){
         const numVal=typeof val==='number'?val:parseFloat(String(val).replace(/\./g,'').replace(',','.'));
         if(!isFinite(numVal))return;
         linhas.push({dataEditada:dataBr,operacao:op,valor:numVal,
-          historico:`${op} - ${comprador} (${cpfFormatado}) - nº da venda ${numVenda}`});
+          historico:`${op} - ${comprador} (${cpfFormatado}) - nº da venda ${numVenda}`,nfNum:nfNum||'',saleKey:r});
       });
+    }
+    // fecha a amarração: NF usada por mais de uma venda = ambígua, não entra
+    let vendasComNf=0, vendasSemNf=0;
+    if(nfsVenda){
+      const usoNf=new Map(); linhas.forEach(l=>{ if(l.nfNum){ if(!usoNf.has(l.nfNum)) usoNf.set(l.nfNum,new Set()); usoNf.get(l.nfNum).add(l.saleKey); } });
+      const vistas=new Set(), vistasSem=new Set();
+      linhas.forEach(l=>{
+        if(l.nfNum&&usoNf.get(l.nfNum).size===1){ l.historico+=' NF '+l.nfNum; vistas.add(l.saleKey); }
+        else { l.nfNum=''; vistasSem.add(l.saleKey); }
+      });
+      vendasComNf=vistas.size; vendasSemNf=[...vistasSem].filter(k=>!vistas.has(k)).length;
     }
 
     if(!linhas.length){
@@ -15620,7 +15663,7 @@ async function processarConvMp(alvo){
     const semDebitoCredito=linhas.filter(l=>{const c=(cfg.contas||{})[l.operacao]||{};return !c.debito||!c.credito;});
 
     _convMpResultados[alvo]={linhas,resumo,cfg:JSON.parse(JSON.stringify(cfg)),periodo:{deVal,ateVal},arquivo:file.name,
-      validacoes:{totalLinhas:linhas.length,semDebitoCredito:semDebitoCredito.length}};
+      validacoes:{totalLinhas:linhas.length,semDebitoCredito:semDebitoCredito.length,nfAtiva:!!nfsVenda,vendasComNf,vendasSemNf,nfAviso}};
 
     renderConvMpLista();
     toast('Arquivo processado com sucesso!','ok');
@@ -15644,6 +15687,7 @@ function renderConvMpResultado(alvo,resultado){
   });
   html+=`<div style="margin-top:10px;font-size:11px;color:var(--slate)">
     <div>✓ ${validacoes.totalLinhas} linhas geradas</div>
+    ${validacoes.nfAtiva?`<div style="color:${validacoes.vendasComNf?'#16a34a':'var(--slate)'}">✓ ${validacoes.vendasComNf} venda(s) amarrada(s) à NF (nº no fim do histórico) · ${validacoes.vendasSemNf} sem NF encontrada</div>`:''}${validacoes.nfAviso?`<div style="color:#d97706">⚠${esc(validacoes.nfAviso)}</div>`:''}
     ${validacoes.semDebitoCredito>0?`<div style="color:#dc2626">⚠ ${validacoes.semDebitoCredito} linha(s) sem conta débito/crédito configurada</div>`:'<div style="color:#16a34a">✓ Todas as linhas têm conta débito e crédito</div>'}
   </div>
   <div style="margin-top:10px;display:flex;gap:6px">
