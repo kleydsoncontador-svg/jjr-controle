@@ -59,7 +59,7 @@
     const porDia = porDiaDoAno(LEM.ano), hoje = hojeIso();
     const anos = []; for (let a = new Date().getFullYear() - 1; a <= new Date().getFullYear() + 3; a++) anos.push(a);
     let h = `<style>.lem-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:14px}@media (max-width:1100px){.lem-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}@media (max-width:640px){.lem-grid{grid-template-columns:1fr}}
-      .lem-mes{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:10px 12px}.lem-mes h4{margin:0 0 6px;font-size:13px;color:var(--ink);text-align:center}
+      .lem-mes{background:var(--white);border:1px solid var(--border);border-radius:10px;padding:10px 12px}.lem-mes{overflow:hidden}.lem-mes h4{margin:-10px -12px 8px;padding:7px 0;font-size:13px;color:#fff;background:var(--ink2);text-align:center;letter-spacing:.02em}html.dark-mode .lem-mes h4{background:#000}
       .lem-dias{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;text-align:center;font-size:11.5px}.lem-sem{color:var(--slate);font-size:10.5px;padding:2px 0}
       .lem-d{border:none;background:none;color:var(--ink);padding:5px 0;border-radius:6px;cursor:pointer;font-size:12px;position:relative}.lem-d:hover{background:var(--bg)}
       .lem-d.hoje{outline:2px solid var(--teal)}.lem-d.tem{background:#1E3A8A;color:#fff;font-weight:700}.lem-d.tem.atras{background:#B91C1C}.lem-d.tem.feito{background:#16A34A}
