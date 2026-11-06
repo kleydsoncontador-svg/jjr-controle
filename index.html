@@ -15597,21 +15597,34 @@ async function processarConvMp(alvo){
       try{
         const _p2=n=>String(n).padStart(2,'0');
         const iniNf=deAno+'-'+_p2(deMes)+'-01', fimNf=ateAno+'-'+_p2(ateMes)+'-'+_p2(new Date(ateAno,ateMes,0).getDate());
-        const { data: nfsRaw, error: eNf } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('numero,cnpj_destinatario,nome_destinatario,valor_total,data_emissao')
+        const { data: nfsRaw, error: eNf } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('numero,cnpj_destinatario,nome_destinatario,valor_total,data_emissao,natureza_operacao')
           .eq('empresa_eid',_eidMp).eq('direcao','venda').gte('data_emissao',iniNf).lte('data_emissao',fimNf+'T23:59:59'));
         if(eNf) throw eNf;
-        nfsVenda=(nfsRaw||[]).map(n=>({ numero:String(n.numero||'').replace(/^0+(?=\d)/,''), doc:String(n.cnpj_destinatario||'').replace(/\D/g,''), nome:n.nome_destinatario||'', valor:Number(n.valor_total), data:String(n.data_emissao||'').slice(0,10) }));
+        nfsVenda=(nfsRaw||[]).map(n=>({ numero:String(n.numero||'').replace(/^0+(?=\d)/,''), doc:String(n.cnpj_destinatario||'').replace(/\D/g,''), nome:n.nome_destinatario||'', valor:Number(n.valor_total), data:String(n.data_emissao||'').slice(0,10),
+          ret:/RETORNO|DEVOLU/.test(_convMpRemoverAcentos(String(n.natureza_operacao||'')).toUpperCase()), cancelada:false }));
+        // Venda cancelada por devolução/retorno: NF de "Retorno/Devolução" do mesmo cliente e mesmo valor anula a NF de venda anterior mais recente ainda não anulada;
+        // a que vale é a PRÓXIMA venda (ex.: 8775 anulada pelo retorno 8835, vale a 8838). Retornos nunca são candidatos.
+        const _chaveCli=n=>n.doc||_convMpRemoverAcentos(n.nome).toUpperCase().replace(/[^A-Z]+/g,' ').trim();
+        const _ordenadas=[...nfsVenda].sort((a,b)=>(a.data<b.data?-1:a.data>b.data?1:(parseInt(a.numero,10)||0)-(parseInt(b.numero,10)||0)));
+        _ordenadas.filter(n=>n.ret).forEach(rt=>{
+          const alvoNf=[..._ordenadas].reverse().find(v=>!v.ret&&!v.cancelada&&_chaveCli(v)===_chaveCli(rt)&&Math.abs(v.valor-rt.valor)<0.005&&(v.data<rt.data||(v.data===rt.data&&(parseInt(v.numero,10)||0)<(parseInt(rt.numero,10)||0))));
+          if(alvoNf) alvoNf.cancelada=true;
+        });
       }catch(eN){ console.warn('NFs de venda (Vendas BR):',eN); nfAviso=' (não consegui ler as NFs de venda — histórico sem número de NF)'; }
     }
     const _nfDaVenda=(docRaw,compradorTxt,valorBruto,dataIso)=>{
       if(!nfsVenda||!(valorBruto>0)) return null;
       const doc=String(docRaw||'').replace(/\D/g,'');
-      const cands=nfsVenda.filter(n=>{
-        if(n.data!==dataIso) return false;
-        if(Math.abs(n.valor-valorBruto)>=0.005) return false;
-        if(doc.length>=11&&n.doc&&n.doc===doc) return true;
-        return _convMpNomesCompativeis(n.nome,compradorTxt);
-      });
+      const casa=n=>!n.ret&&!n.cancelada&&Math.abs(n.valor-valorBruto)<0.005&&((doc.length>=11&&n.doc&&n.doc===doc)||_convMpNomesCompativeis(n.nome,compradorTxt));
+      let cands=nfsVenda.filter(n=>n.data===dataIso&&casa(n));
+      if(!cands.length){
+        // a NF do dia da venda foi anulada por um retorno? então vale a próxima venda do mesmo cliente/valor, até 3 dias depois
+        const anuladaNoDia=nfsVenda.some(n=>n.data===dataIso&&n.cancelada&&Math.abs(n.valor-valorBruto)<0.005&&((doc.length>=11&&n.doc&&n.doc===doc)||_convMpNomesCompativeis(n.nome,compradorTxt)));
+        if(anuladaNoDia){
+          const lim=new Date(dataIso+'T00:00:00'); lim.setDate(lim.getDate()+3); const limIso=lim.getFullYear()+'-'+String(lim.getMonth()+1).padStart(2,'0')+'-'+String(lim.getDate()).padStart(2,'0');
+          cands=nfsVenda.filter(n=>n.data>dataIso&&n.data<=limIso&&casa(n));
+        }
+      }
       const nums=[...new Set(cands.map(c=>c.numero))];
       return nums.length===1?nums[0]:null;
     };
