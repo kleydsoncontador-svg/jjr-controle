@@ -17,7 +17,7 @@
   const uid = () => { try { return (typeof _homeUid === 'function') ? _homeUid() : 'padrao'; } catch (e) { return 'padrao'; } };
   const chave = () => 'lembretes_' + uid();
   const getL = () => { try { const v = S.g(chave()); return Array.isArray(v) ? v : []; } catch (e) { return []; } };
-  const setL = arr => { try { S.s(chave(), arr); } catch (e) { console.warn('lembretes: não salvou', e); } };
+  const setL = arr => { try { S.s(chave(), arr); } catch (e) { console.warn('lembretes: não salvou', e); } try { typeof currentEid !== "undefined" && currentEid && root.lemAtualizarBadge(currentEid); } catch (e) {} };
   const empsAtivas = () => { try { return (S.emps() || []).filter(e => { const t = (e.fechamentoStatus && e.fechamentoStatus.tipo) || 'ativo'; return e.status !== 'ex' && t !== 'saida' && t !== 'extincao'; }).sort((a, b) => Number(a.eid || 0) - Number(b.eid || 0)); } catch (e) { return []; } };
   const nomeEmp = eid => { try { const e = (S.emps() || []).find(x => String(x.eid) === String(eid)); return e ? ('#' + e.eid + ' ' + (e.nome || '')) : ('#' + eid); } catch (x) { return '#' + eid; } };
   const empsTxt = l => (l.eids && l.eids.length) ? l.eids.map(nomeEmp).join(' · ') : 'Sem relação com empresa';
@@ -53,6 +53,23 @@
     return m;
   }
 
+  // ───────────── ícone 🔔 na tela da empresa: quantos lembretes PENDENTES (não concluídos) ela tem; some quando zera ─────────────
+  function contaPend(eid) {
+    const h = hojeIso(), lim = (() => { const d = new Date(); d.setFullYear(d.getFullYear() + 2); return iso(d); })();
+    let n = 0;
+    getL().filter(l => (l.eids || []).map(String).includes(String(eid))).forEach(l => {
+      const oc = ocorrencias(l, l.data || h, lim);
+      let achou = false;
+      for (const di of oc) { if (!feito(l, di)) { achou = true; break; } if (di > h) break; }
+      if (achou) n++;
+    });
+    return n;
+  }
+  root.lemAtualizarBadge = function (eid) {
+    const b = document.getElementById('empLembBtn'), n = document.getElementById('empLembNum'); if (!b) return;
+    const c = contaPend(eid); b.style.display = c ? '' : 'none'; if (n) n.textContent = c;
+  };
+  root.lemAbrirDaEmpresa = function (eid) { LEM.filtroEmp = String(eid); goPage('lembretes'); };
   // ───────────── tela principal ─────────────
   root.renderLembretes = function () {
     const pg = document.getElementById('page-lembretes'); if (!pg) return;
