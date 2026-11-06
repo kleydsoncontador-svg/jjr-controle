@@ -102,22 +102,22 @@
   }
   root.lemAbrirDia = function (di) {
     LEM.dataDia = di;
-    const el = garantirModal('mLembDia', 900);
+    const el = garantirModal('mLembDia', 1200);
     const ls = getL().filter(doFiltro).filter(l => ocorrencias(l, di, di).length);
     const linhas = ls.length ? ls.map(l => {
       const ok = feito(l, di), rep = l.repete || 'nenhum';
       const tag = rep !== 'nenhum' ? `<div style="font-size:10.5px;color:var(--slate)">${REP_TXT[rep]}${l.fim ? ' · encerra em ' + br(l.fim) : ''}</div>` : '';
       return `<tr style="border-top:1px solid var(--border);${ok ? 'opacity:.6' : ''}">
-        <td style="padding:7px 8px;font-size:12px;max-width:220px">${E(empsTxt(l))}</td>
-        <td style="padding:7px 8px;font-size:12.5px;font-weight:600">${ok ? '<s>' + E(l.titulo) + '</s>' : E(l.titulo)}${tag}
+        <td style="padding:10px 10px;font-size:13px;min-width:200px;max-width:280px">${E(empsTxt(l))}</td>
+        <td style="padding:10px 10px;font-size:14px;font-weight:600;min-width:220px">${ok ? '<s>' + E(l.titulo) + '</s>' : E(l.titulo)}${tag}
           ${rep === 'nenhum' ? `<div style="margin-top:4px;font-weight:400;font-size:11px;color:var(--slate)">Mudar a data: <input type="date" value="${E(l.data)}" data-id="${E(l.id)}" onchange="lemMoverData(this.dataset.id,this.value)" style="font-size:11px;padding:1px 4px;border:1px solid var(--border);border-radius:4px;background:var(--white);color:var(--ink)"></div>` : ''}</td>
-        <td style="padding:7px 8px;font-size:12px;white-space:pre-wrap;max-width:300px">${E(l.texto || '')}</td>
+        <td style="padding:10px 10px;font-size:13px;white-space:pre-wrap;min-width:260px;max-width:480px">${E(l.texto || '')}</td>
         <td style="padding:7px 8px;white-space:nowrap;text-align:right"><button class="btn ${ok ? 'bo' : 'bp'} bsm" data-id="${E(l.id)}" onclick="lemConcluir(this.dataset.id)">${ok ? '↩ Reabrir' : '✓ Concluir'}</button>
           ${rep !== 'nenhum' && !(l.fim && l.fim <= di) ? `<button class="btn bo bsm" data-id="${E(l.id)}" onclick="lemEncerrar(this.dataset.id)" title="Conclui este e encerra a repetição: as datas seguintes deixam de lembrar">⏹ Encerrar daqui p/ frente</button>` : ''}
           <button class="btn bo bsm" data-id="${E(l.id)}" onclick="lemAbrirNovo(null,this.dataset.id)">✎</button> <button class="btn bd bsm" data-id="${E(l.id)}" onclick="lemExcluir(this.dataset.id)">🗑</button></td></tr>`;
     }).join('') : `<tr><td colspan="4" style="padding:18px;text-align:center;color:var(--slate)">Nenhum lembrete nesta data.</td></tr>`;
     el.firstChild.innerHTML = `<div class="mt" style="display:flex;justify-content:space-between;align-items:center"><span>🔔 Lembretes de ${br(di)}</span><button onclick="closeModal('mLembDia')" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button></div>
-      <div style="overflow-x:auto;max-height:60vh;overflow-y:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;font-size:11px;color:var(--slate)"><th style="padding:5px 8px">Empresa</th><th style="padding:5px 8px">Lembrete</th><th style="padding:5px 8px">Texto</th><th></th></tr></thead><tbody>${linhas}</tbody></table></div>
+      <div style="overflow-x:auto;min-height:38vh;max-height:68vh;overflow-y:auto"><table style="width:100%;border-collapse:collapse"><thead><tr style="text-align:left;font-size:12px;color:var(--slate)"><th style="padding:7px 10px">Empresa</th><th style="padding:7px 10px">Lembrete</th><th style="padding:7px 10px">Texto</th><th></th></tr></thead><tbody>${linhas}</tbody></table></div>
       <div class="ma"><button class="btn bp" onclick="lemAbrirNovo('${di}')">＋ Adicionar lembrete neste dia</button><button class="btn bo" onclick="closeModal('mLembDia')">Fechar</button></div>`;
     openModal('mLembDia');
   };
