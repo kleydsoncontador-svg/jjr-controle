@@ -889,7 +889,8 @@
       const eIgn = rid && ign.has(String(rid));
       td.innerHTML = (v != null ? 'R$ ' + fmt(v) : (eIgn ? '<i style="font-size:11px">ignorada</i>' : ''))
         + (rid && fontePorId.get(String(rid)) === 'ajuste_manual' ? ' <button class="icon-btn" style="padding:0 3px" title="Excluir este ajuste" onclick="event.stopPropagation();_flExcluirAjuste(' + rid + ')">🗑</button>' : '')
-        + (rid ? ' <button class="icon-btn" style="padding:0 4px" title="' + (eIgn ? 'Voltar a considerar esta linha (volta como pendente)' : 'Ignorar esta linha: fica apagada, fora do saldo e do TXT') + '" onclick="event.stopPropagation();_flIgnorarLinha(' + rid + ',' + (eIgn ? 'false' : 'true') + ')">' + (eIgn ? '↩' : '🚫') + '</button>' : '');
+        + (rid ? ' <button class="icon-btn" style="padding:0 4px" title="' + (eIgn ? 'Voltar a considerar esta linha (volta como pendente)' : 'Ignorar esta linha: fica apagada, fora do saldo e do TXT') + '" onclick="event.stopPropagation();_flIgnorarLinha(' + rid + ',' + (eIgn ? 'false' : 'true') + ')">' + (eIgn ? '↩' : '🚫') + '</button>' : '')
+        + (rid && fontePorId.get(String(rid)) !== 'ajuste_manual' ? '<div style="line-height:1;margin-top:1px"><button class="icon-btn" style="padding:0 4px;font-size:11px" title="Excluir esta linha do Registro (pede confirmação)" onclick="event.stopPropagation();_flExcluirLinha(' + rid + ')">🗑</button></div>' : '');
       { const dc = tr.children[1]; if (rid && dc && !dc.querySelector('.fl-ed')) dc.insertAdjacentHTML('beforeend', ' <button class="icon-btn fl-ed" style="padding:0 3px;float:right" title="Editar a data desta linha' + (fontePorId.get(String(rid)) === 'ajuste_manual' ? ' (e valor/histórico do ajuste)' : '') + '" onclick="event.stopPropagation();_flEditarLinha(' + rid + ')">✏️</button>'); } // lápis ao lado da data
       if (rid && fontePorId.get(String(rid)) === 'ajuste_manual') { tr.style.setProperty('background', 'rgba(250,204,21,.30)', 'important'); [...tr.children].forEach(c => { c.style.background = 'transparent'; }); tr.title = 'Ajuste manual (incluído para acerto do saldo diário)'; }
       if (eIgn) { tr.style.opacity = '.42'; tr.style.textDecoration = 'line-through'; tr.title = 'Linha ignorada: fora do saldo e do TXT'; }
@@ -981,6 +982,22 @@
   };
 
   // ── 5) excluir tudo que está filtrado ──
+  root._flExcluirLinha = async function (id) {
+    if (!ativo()) return;
+    if (_lancctbExclusaoBloqueada(eidAtual(), _lancctbRegistroMes, 'a linha do Registro')) return;
+    const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle(); if (!x) { toast('Linha não encontrada.', 'err'); return; }
+    const v = Number(x.valor_entrada) > 0 ? '+ R$ ' + fmt(x.valor_entrada) : '− R$ ' + fmt(x.valor_saida);
+    if (!confirm('Excluir esta linha do Registro?\n\n' + brData(x.data_pagamento) + ' · ' + v + '\n' + String(x.historico_bancario || '').slice(0, 140) + '\n\n' + (x.fonte === 'fluxo' ? 'Ela veio do Fluxo: o lançamento do Fluxo é mantido, mas não volta para o Registro.' : 'Se rodar "Trazer … do extrato" de novo, ela pode ser trazida outra vez (para impedir, use Ignorar).') + (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial' ? '\nEla está classificada: a classificação também é desfeita.' : ''))) return;
+    for (const t of ['notas_fiscais_parcelas', 'comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).eq('lancamento_extrato_id', id);
+    await _supaClient.from('aplicacoes_financeiras_movimentos').update({ lancamento_extrato_id: null }).eq('lancamento_extrato_id', id);
+    const lig = await _supaClient.from('fluxo_caixa_lancamentos').select('id').eq('lancamento_extrato_id', id);
+    await _supaClient.from('fluxo_caixa_lancamentos').update({ lancamento_extrato_id: null, status_associado: 'nao_associado', conta_bancaria_id: null }).eq('lancamento_extrato_id', id);
+    await _supaClient.from('lancamentos_contabeis').delete().eq('lancamento_extrato_id', id);
+    const r = await _supaClient.from('lancamentos_extrato').delete().eq('id', id);
+    if (r.error) { toast('Erro ao excluir: ' + r.error.message, 'err'); return; }
+    const fl = (lig.data || []).map(f => f.id); if (fl.length) { const ex = getExcl(); fl.forEach(i => ex.add(String(i))); setExcl(ex); desmarcarManuais(fl); }
+    toast('Linha excluída do Registro ✓', 'ok'); renderLancctbRegistroContabil();
+  };
   root._flExcluirFiltradas = async function () {
     if (!ativo()) return;
     const ids = (root.__regIdsFiltrados || []).slice(); const n = ids.length;
