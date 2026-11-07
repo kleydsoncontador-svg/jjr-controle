@@ -1006,9 +1006,9 @@
       if (h0) { const idx = [...h0.children].findIndex(t => /^fluxo de caixa/i.test((t.textContent || '').trim()));
         if (idx >= 0) { const n = h0.children.length; h0.children[idx].remove(); if (h1 && h1.children.length === n) h1.children[idx].remove(); if (cg0 && cg0.children.length === n) cg0.children[idx].remove();
           tbl.querySelectorAll('tbody tr').forEach(tr => { if (tr.children.length === n) tr.children[idx].remove(); }); } } }
-    const cg = tbl.querySelector('colgroup'); if (cg && cg.children[7]) { const c = document.createElement('col'); c.style.width = '15ch'; cg.insertBefore(c, cg.children[8]); }
+    const cg = tbl.querySelector('colgroup'); if (cg && cg.children[7]) { const c = document.createElement('col'); c.style.width = '19ch'; cg.insertBefore(c, cg.children[8]); }
     const heads = tbl.querySelectorAll('thead tr');
-    if (heads[0] && heads[0].children[7]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 10px;min-width:130px;text-align:right;white-space:nowrap'; th.textContent = 'Saldo'; th.title = 'Saldo da conta após este lançamento (saldo inicial da conta + movimentos em ordem de data)'; heads[0].insertBefore(th, heads[0].children[8]); }
+    if (heads[0] && heads[0].children[7]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 10px;min-width:150px;text-align:right;white-space:nowrap'; th.textContent = 'Saldo'; th.title = 'Saldo da conta após este lançamento (saldo inicial da conta + movimentos em ordem de data)'; heads[0].insertBefore(th, heads[0].children[8]); }
     if (heads[1] && heads[1].children[7]) { const th = document.createElement('th'); th.style.cssText = 'padding:4px 6px'; heads[1].insertBefore(th, heads[1].children[8]); }
     tbl.querySelectorAll('tbody tr').forEach(tr => {
       const cel = tr.children[7]; if (!cel) return;
@@ -1016,10 +1016,12 @@
       const v = rid ? mapa.get(String(rid)) : undefined;
       td.style.cssText = 'padding:7px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:' + (v != null && v < 0 ? '#dc2626' : 'var(--slate)');
       const eIgn = rid && ign.has(String(rid));
-      td.innerHTML = (v != null ? 'R$ ' + fmt(v) : (eIgn ? '<i style="font-size:11px">ignorada</i>' : ''))
-        + (rid && fontePorId.get(String(rid)) === 'ajuste_manual' ? ' <button class="icon-btn" style="padding:0 3px" title="Excluir este ajuste" onclick="event.stopPropagation();_flExcluirAjuste(' + rid + ')">🗑</button>' : '')
-        + (rid ? ' <button class="icon-btn" style="padding:0 4px" title="' + (eIgn ? 'Voltar a considerar esta linha (volta como pendente)' : 'Ignorar esta linha: fica apagada, fora do saldo e do TXT') + '" onclick="event.stopPropagation();_flIgnorarLinha(' + rid + ',' + (eIgn ? 'false' : 'true') + ')">' + (eIgn ? '↩' : '🚫') + '</button>' : '')
-        + (rid && fontePorId.get(String(rid)) !== 'ajuste_manual' ? '<div style="line-height:1;margin-top:1px"><button class="icon-btn" style="padding:0 4px;font-size:11px" title="Excluir esta linha do Registro (pede confirmação)" onclick="event.stopPropagation();_flExcluirLinha(' + rid + ')">🗑</button></div>' : '');
+      const bt = 'padding:1px 7px;font-size:10.5px;line-height:1.5;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer;white-space:nowrap';
+      const ehAj = rid && fontePorId.get(String(rid)) === 'ajuste_manual';
+      td.innerHTML = '<div>' + (v != null ? 'R$ ' + fmt(v) : (eIgn ? '<i style="font-size:11px">ignorada</i>' : '')) + '</div>'
+        + (rid ? '<div style="display:flex;gap:4px;justify-content:flex-end;margin-top:3px">'
+          + '<button style="' + bt + ';color:var(--slate)" title="' + (eIgn ? 'Voltar a considerar esta linha (volta como pendente)' : 'Ignorar esta linha: fica apagada, fora do saldo e do TXT') + '" onclick="event.stopPropagation();_flIgnorarLinha(' + rid + ',' + (eIgn ? 'false' : 'true') + ')">' + (eIgn ? 'Voltar' : 'Ignorar') + '</button>'
+          + '<button style="' + bt + ';color:#dc2626;border-color:#dc2626" title="' + (ehAj ? 'Excluir este ajuste' : 'Excluir esta linha do Registro (pede confirmação)') + '" onclick="event.stopPropagation();' + (ehAj ? '_flExcluirAjuste(' : '_flExcluirLinha(') + rid + ')">Excluir</button></div>' : '');
       { const dc = tr.children[1]; if (rid && dc && !dc.querySelector('.fl-ed')) dc.insertAdjacentHTML('beforeend', ' <button class="icon-btn fl-ed" style="padding:0 3px;float:right" title="Editar a data desta linha' + (fontePorId.get(String(rid)) === 'ajuste_manual' ? ' (e valor/histórico do ajuste)' : '') + '" onclick="event.stopPropagation();_flEditarLinha(' + rid + ')">✏️</button>'); } // lápis ao lado da data
       if (rid && fontePorId.get(String(rid)) === 'ajuste_manual') { tr.style.setProperty('background', 'rgba(250,204,21,.30)', 'important'); [...tr.children].forEach(c => { c.style.background = 'transparent'; }); tr.title = 'Ajuste manual (incluído para acerto do saldo diário)'; }
       if (eIgn) { tr.style.opacity = '.42'; tr.style.textDecoration = 'line-through'; tr.title = 'Linha ignorada: fora do saldo e do TXT'; }
@@ -1059,7 +1061,7 @@
         else if (va !== undefined) { td.innerHTML = '💲 ' + (va > 0 ? '+' : '') + fmt(va) + '<div style="font-size:9px;font-weight:400;opacity:.8;line-height:1">Ajustado</div>'; td.style.color = '#0ea5e9'; td.title = 'Valor corrigido: diferença em relação ao valor original do Fluxo'; }
         tr.insertBefore(td, tr.children[8]);
       }); }
-    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130 + 110) + 'px';
+    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 150 + 110) + 'px';
   }
   // ── saldo do DIA filtrado: Registro × extrato (banco) e a diferença, logo abaixo da barra de saldo ──
   let diaBusy = false, diaCache = { k: '', ts: 0, h: '' };
