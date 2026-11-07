@@ -455,6 +455,7 @@
     });
     return h;
   }
+  root._flTeste = { exatoSubset, htmlRel };
   root._flAbrirRelatorios = function () {
     const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
     const lista = lerRel(), dt = d => { try { return new Date(d).toLocaleString('pt-BR'); } catch (e) { return ''; } };
