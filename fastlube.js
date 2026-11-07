@@ -341,15 +341,27 @@
       if (pend.length && !R.length) pend.forEach(adiciona);       // sobra do extrato e nada sobrando no Fluxo: só está no extrato
       else if (pend.length && R.length) {
         const dif = Lp - Rs;
-        if (dif === 0) { pend.forEach(l => { l.explicada = true; l.via = 'grupo'; }); }          // o que sobrou dos dois lados fecha exatamente
-        else if (dif > 0) {
-          const hist = nomeCat(pend) + ' (extrato: ' + listaValores(pend.map(l => l.c), 8) + '; soma do Fluxo de Caixa: ' + listaValores(R.map(x => x.c), 10) + '; diferença ' + fmt(dif / 100) + ')';
-          if (rejeitadas.has('flkk' + d + '|' + dif)) ent.ignoradas = (ent.ignoradas || 0) + 1;
+        const grupoOk = () => { pend.forEach(l => { l.explicada = true; l.via = 'grupo'; }); };
+        if (dif === 0) { grupoOk(); R.forEach(x => { x.usado = true; }); }          // o que sobrou dos dois lados fecha exatamente
+        else if (dif < 0) {
+          const selR = exatoSubset(R, Lp);                                           // existe um subconjunto do Fluxo que fecha com TODO o extrato pendente?
+          if (selR) {
+            grupoOk(); const us = new Set(selR); R.forEach((x, i) => { if (us.has(i)) x.usado = true; });
+            const R2 = R.filter((x, i) => !us.has(i));
+            if (R2.length) { rel.excessos.push({ dia: d, dif: -R2.reduce((a, x) => a + x.c, 0), ls: 0, rs: R2.reduce((a, x) => a + x.c, 0), fluxo: R2.length }); ent.excesso = R2.map(x => ({ v: x.c, n: x.nome })); }
+          } else { rel.excessos.push({ dia: d, dif, ls: Lp, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); ent.sobraSispag = Lp; }
+        } else {
+          const selP = exatoSubset(pend, Rs);                                        // existe um subconjunto do extrato pendente que fecha com TODO o Fluxo sem par?
+          if (selP) { R.forEach(x => { x.usado = true; }); const us = new Set(selP); pend.forEach((l, i) => { if (us.has(i)) { l.explicada = true; l.via = 'grupo'; } else adiciona(l); }); }
           else {
-            novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif / 100, valor_entrada: 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
-            rel.conciliacoes.push({ dia: d, dif, ls: Lp, rs: Rs, hist }); ent.conc = { dif, ls: Lp, rs: Rs, hist, sisp: pend.map(l => ({ v: l.c, h: String(l.r.historico_bancario || '') })), fluxo: R.map(x => ({ v: x.c, n: x.nome })) };
+            const hist = nomeCat(pend) + ' (extrato: ' + listaValores(pend.map(l => l.c), 8) + '; soma do Fluxo de Caixa: ' + listaValores(R.map(x => x.c), 10) + '; diferença ' + fmt(dif / 100) + ')';
+            if (rejeitadas.has('flkk' + d + '|' + dif)) ent.ignoradas = (ent.ignoradas || 0) + 1;
+            else {
+              novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif / 100, valor_entrada: 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
+              rel.conciliacoes.push({ dia: d, dif, ls: Lp, rs: Rs, hist }); ent.conc = { dif, ls: Lp, rs: Rs, hist, sisp: pend.map(l => ({ v: l.c, h: String(l.r.historico_bancario || '') })), fluxo: R.map(x => ({ v: x.c, n: x.nome })) };
+            }
           }
-        } else { rel.excessos.push({ dia: d, dif, ls: Lp, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); ent.sobraSispag = Lp; }
+        }
       } else if (!pend.length && R.length) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); }
       ent.cobertas = ls.filter(l => l.explicada).length; rel.explicadas += ent.cobertas;
       ent.outroDia = ls.filter(l => /^(dia|soma dia)/.test(l.via || '')).map(l => ({ v: l.c, h: String(l.r.historico_bancario || ''), via: l.via }));
