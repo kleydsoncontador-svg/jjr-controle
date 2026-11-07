@@ -450,8 +450,27 @@
       ent.excesso = [];
       sobras.forEach(x => { rel.marcasDif = rel.marcasDif || {}; rel.marcasDif[x.id] = d; });   // linhas do Fluxo sem par que entraram na explicação da Conciliação: ficam marcadas na coluna DIF.
     });
-    // dias que só têm Fluxo sem par e nenhum extrato
-    Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
+    // dias SEM nenhuma saída no extrato mas com Fluxo sem par (inclui datas antigas, de meses sem extrato): o saldo não bate com Fluxo a mais, então entra uma Conciliação (ENTRADA) do total, explicada
+    {
+      const outros = {};
+      if (p.de) {
+        const ant = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)').lt('data_pagamento', sh(p.de, -3)))).data || [];
+        ant.forEach(f => { (outros[f.data_pagamento] = outros[f.data_pagamento] || []).push({ id: f.id, c: cents(f.valor_saida), nome: String(f.historico_bancario || '').split(' | ')[0].slice(0, 60) }); });
+        Object.keys(fluxoDia).filter(d => d < p.de).forEach(d => { const L = livres(d); if (L.length) outros[d] = (outros[d] || []).concat(L); });
+      }
+      Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).forEach(d => { const L = livres(d); if (L.length) outros[d] = L; });
+      const cand = Object.keys(outros).filter(d => !extDia[d] && !diasFechados.has(d)).sort(), comExt = new Set();
+      for (let k = 0; k < cand.length; k += 100) { const r = await _supaClient.from('lancamentos_extrato').select('data_pagamento').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'referencia').gt('valor_saida', 0).in('data_pagamento', cand.slice(k, k + 100)); (r.data || []).forEach(x => comExt.add(x.data_pagamento)); }
+      cand.forEach(d => {
+        const R = outros[d], Rs = R.reduce((a, x) => a + x.c, 0); if (!Rs) return;
+        if (comExt.has(d)) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); return; }
+        if (rejeitadas.has('flkk' + d + '|' + (-Rs))) return;
+        const hist = 'Conciliação do dia ' + brData(d) + ': não há pagamento no extrato neste dia, mas o Fluxo lançou R$ ' + fmt(Rs / 100) + ': ' + R.slice(0, 6).map(x => x.nome + ' ' + fmt(x.c / 100)).join(' + ') + (R.length > 6 ? ' + …(' + R.length + ' lançamentos)' : '') + '.';
+        novas.push({ r: { id: 'k' + d + '|' + (-Rs), data_pagamento: d, valor_saida: 0, valor_entrada: Rs / 100, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
+        rel.conciliacoes.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, hist }); rel.marcasDif = rel.marcasDif || {}; R.forEach(x => { rel.marcasDif[x.id] = d; }); dias.push(d);
+        rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: { dif: -Rs, ls: 0, rs: Rs, hist, sisp: [], fluxo: R.map(x => ({ v: x.c, n: x.nome })) }, excesso: [] });
+      });
+    }
     if (!simular) {
       try { const dset = new Set(dias), antM = S.g('fl_dif_marcas_163') || {}, novoM = {}; Object.keys(antM).forEach(k => { if (!dset.has(antM[k])) novoM[k] = antM[k]; }); Object.assign(novoM, rel.marcasDif || {}); S.s('fl_dif_marcas_163', novoM); } catch (e) {}
     }
