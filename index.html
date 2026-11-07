@@ -9478,6 +9478,7 @@ function renderObsPontosAtencao(eid, obs){
   var html = '<div style="display:grid;gap:8px">';
   obs.forEach(function(o,idx){
     html += '<div style="display:flex;gap:8px;align-items:flex-start">'
+      +'<label style="display:flex;flex-direction:column;align-items:center;font-size:10.5px;color:var(--slate);cursor:pointer;padding-top:4px;width:46px" title="Marque para esta observação ir no e-mail de observações"><input type="checkbox" class="pa-obs-env" '+(o.enviar===false?'':'checked')+' onchange="_paObsAutoSalvar(this,\''+eid+'\','+idx+',true)">Enviar</label>'
       +'<textarea class="fi pa-autogrow" data-eid="'+eid+'" rows="1" style="flex:1;min-height:38px;font-size:12.5px;resize:none;overflow:hidden;font-family:inherit" oninput="_paAutoGrow(this);_paObsAutoSalvar(this,\''+eid+'\','+idx+')" onchange="salvarObsPontosAtencao(\''+eid+'\','+idx+',this.value)" placeholder="Escreva a observação...">'+esc(o.texto||'')+'</textarea>'
       +'<button onclick="excluirObsPontosAtencao(\''+eid+'\','+idx+')" style="background:none;border:none;cursor:pointer;font-size:16px;padding:2px 6px" title="Excluir">❌</button>'
       +'</div>';
@@ -9487,9 +9488,9 @@ function renderObsPontosAtencao(eid, obs){
 }
 // grava sozinho 0,7s depois de parar de digitar (sem precisar clicar fora) — não redesenha a tela, só salva
 var _paObsTimer={};
-function _paObsAutoSalvar(el,eid,idx){
+function _paObsAutoSalvar(el,eid,idx,imediato){
   var k=eid+'|'+idx; clearTimeout(_paObsTimer[k]);
-  _paObsTimer[k]=setTimeout(function(){ var obs=getPontosAtencaoObs(eid); if(idx<obs.length){ obs[idx].texto=el.value; setPontosAtencaoObs(eid,obs); } },700);
+  _paObsTimer[k]=setTimeout(function(){ paFlushObs(eid); },imediato?0:700);
 }
 // Faz a textarea crescer conforme o texto digitado, pra ficar sempre
 // totalmente visível sem precisar de scroll interno ou resize manual.
@@ -9498,6 +9499,7 @@ function _paAutoGrow(el){
   el.style.height=el.scrollHeight+'px';
 }
 function adicionarObsPontosAtencao(eid){
+  paFlushObs(eid);
   var obs=getPontosAtencaoObs(eid);
   obs.push({texto:''});
   setPontosAtencaoObs(eid,obs);
@@ -9511,10 +9513,24 @@ function paAbrirObs(eid,focarUltima){
   if(!el){ el=document.createElement('div'); el.className='mb'; el.id='mPaObs'; el.innerHTML='<div class="modal" style="max-width:760px;width:96%"></div>'; document.body.appendChild(el); }
   el.firstChild.innerHTML='<div class="mt" style="display:flex;justify-content:space-between;align-items:center"><span>📝 Observações — '+esc(emp.nome||('#'+eid))+'</span><button onclick="closeModal(\'mPaObs\')" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button></div>'
     +'<div style="max-height:62vh;overflow-y:auto;padding:4px 2px">'+renderObsPontosAtencao(eid,getPontosAtencaoObs(eid))+'</div>'
-    +'<div class="ma"><button class="btn bo" onclick="closeModal(\'mPaObs\')">Fechar</button></div>';
+    +'<div class="ma"><button class="btn bp" onclick="paSalvarObs(\''+eid+'\')">💾 Salvar observações</button><button class="btn bo" onclick="paSalvarObs(\''+eid+'\',true);enviarEmailObsPontosAtencao(\''+eid+'\')" title="E-mail separado, só com as observações marcadas para enviar">📧 Enviar marcadas por Outlook</button><button class="btn bo" onclick="closeModal(\'mPaObs\')">Fechar</button></div>';
   openModal('mPaObs');
   var tas=el.querySelectorAll('textarea.pa-autogrow'); tas.forEach(_paAutoGrow);
   if(focarUltima&&tas.length) tas[tas.length-1].focus();
+}
+// grava tudo o que está digitado no quadro (usado pelo botão Salvar e antes de criar/excluir linha, pra nunca perder texto)
+function paFlushObs(eid){
+  var tas=document.querySelectorAll('#mPaObs textarea.pa-autogrow[data-eid="'+eid+'"]'); if(!tas.length) return;
+  var obs=getPontosAtencaoObs(eid);
+  var cks=document.querySelectorAll('#mPaObs input.pa-obs-env');
+  tas.forEach(function(t,i){ if(i<obs.length){ obs[i].texto=t.value; if(cks[i]) obs[i].enviar=cks[i].checked; } });
+  setPontosAtencaoObs(eid,obs);
+}
+function paSalvarObs(eid,quieto){
+  paFlushObs(eid);
+  var n=getPontosAtencaoObs(eid).filter(function(o){return (o.texto||'').trim();}).length;
+  renderContasAlerta();
+  if(!quieto) toast('Observações salvas ('+n+')','ok');
 }
 function salvarObsPontosAtencao(eid, idx, valor){
   var obs=getPontosAtencaoObs(eid);
@@ -9525,6 +9541,7 @@ function salvarObsPontosAtencao(eid, idx, valor){
 }
 function excluirObsPontosAtencao(eid, idx){
   if(!confirm('Deseja excluir esta observação?'))return;
+  paFlushObs(eid);
   var obs=getPontosAtencaoObs(eid);
   obs.splice(idx,1);
   setPontosAtencaoObs(eid,obs);
@@ -9545,17 +9562,22 @@ function enviarEmailPontosAtencao(eid){
   const alertas=JSON.parse(S.g('alertas_'+eid)||'[]');
   const obs=getPontosAtencaoObs(eid).filter(o=>(o.texto||'').trim());
   if(!alertas.length && !obs.length){toast('Nenhuma conta em alerta ou observação cadastrada para esta empresa.','err');return;}
+  if(!alertas.some(a=>_paEhLancctb(a)?!!paTextoEmail(a):((a.alerta||'').trim()||a.nome_conta)) && !obs.length){toast('Marque, em cada lançamento, o que perguntar ao cliente (Fornecedor / Tipo de gasto / Nota fiscal).','err');return;}
 
   let blocos='';
-  if(alertas.length){
-    blocos+='Contas em Alerta:\n'+alertas.map(a=>{
+  const perguntas=[], livres=[];
+  alertas.forEach(a=>{
+    if(_paEhLancctb(a)){ const t=paTextoEmail(a); if(t) perguntas.push(t); }
+    else if((a.alerta||'').trim()||a.nome_conta){
       const partes=[];
       if(a.codigo_analitico) partes.push('Cód. Analítico '+a.codigo_analitico);
       if(a.codigo_reduzido) partes.push('Cód. Reduzido '+a.codigo_reduzido);
       const codTxt=partes.length?' ('+partes.join(' / ')+')':'';
-      return '- '+(a.nome_conta||'(sem nome de conta)')+codTxt+(a.alerta?': '+a.alerta:'');
-    }).join('\n')+'\n\n';
-  }
+      livres.push('- '+(a.nome_conta||'(sem nome de conta)')+codTxt+(a.alerta?': '+a.alerta:''));
+    }
+  });
+  if(perguntas.length) blocos+='Lançamentos que precisamos esclarecer:\n'+perguntas.map(t=>'- '+t).join('\n')+'\n\n';
+  if(livres.length) blocos+='Contas em Alerta:\n'+livres.join('\n')+'\n\n';
   if(obs.length){
     blocos+='Observações:\n'+obs.map(o=>'- '+o.texto).join('\n')+'\n\n';
   }
@@ -9587,57 +9609,70 @@ function paAplicarFiltros(){
     }
   });
 }
+// Linhas antigas (antes de 06/11/2026) vieram dos Lançamentos Contábeis só com o texto "Lançamento bancário automático — data — R$ valor — histórico"
+function _paParseAuto(a){
+  var m=String((a&&a.alerta)||'').match(/^Lançamento bancário automático — (\d{2}\/\d{2}\/\d{4}) — R\$ ([\d.,]+) — ([\s\S]*)$/);
+  return m?{data:m[1],valor:m[2],hist:m[3]}:null;
+}
+function _paEhLancctb(a){ return !!a&&(a.origem==='lancctb'||!!_paParseAuto(a)); }
+// Texto que vai pro cliente no e-mail: só o que o contador marcou pra perguntar (flags por linha). Usa o histórico ORIGINAL do banco quando existe.
+function paTextoEmail(a){
+  var d,v,h,t='lançamento';
+  if(a.origem==='lancctb'){ d=a.data_br; v=a.valor_br; h=a.historico_bancario||a.historico_usado||''; t=a.tipo||'lançamento'; }
+  else { var p=_paParseAuto(a)||{}; d=p.data; v=p.valor; h=p.hist; }
+  var perg=[];
+  if(a.perg_fornecedor) perg.push('o nome do fornecedor');
+  if(a.perg_tipo) perg.push('o tipo de gasto (a que se refere)');
+  if(a.perg_nf) perg.push('se há nota fiscal relacionada e, se houver, o número da nota e a parcela');
+  if(!perg.length) return '';
+  return 'Referente ao '+t+' do dia '+(d||'?')+', no valor de R$ '+(v||'?')+(h?' ('+(a.origem==='lancctb'&&a.historico_bancario?'histórico do banco: ':'histórico: ')+h+')':'')+', gostaríamos de saber: '+perg.join('; ')+'.';
+}
 function renderAlertasTable(eid, alertas){
   if(!alertas || !alertas.length){
-    return `<div style="padding:20px;text-align:center;color:var(--slate)">Nenhuma conta em alerta</div>`;
+    return `<div style="padding:14px;text-align:center;color:var(--slate)">Nenhuma conta em alerta</div>`;
   }
-
+  const th='padding:6px 8px;text-align:left;font-weight:600;border-right:1px solid var(--border);font-size:11.5px';
+  const inp='width:100%;padding:2px 5px;font-size:12px';
   let html = `
-    <table style="width:100%;border-collapse:collapse;font-size:13px">
+    <table style="width:100%;border-collapse:collapse;font-size:12.5px">
       <thead style="background:var(--bg);border-bottom:2px solid var(--border)">
         <tr>
-          <th style="padding:10px;text-align:left;font-weight:600;border-right:1px solid var(--border)">Código Analítico</th>
-          <th style="padding:10px;text-align:left;font-weight:600;border-right:1px solid var(--border)">Código Reduzido</th>
-          <th style="padding:10px;text-align:left;font-weight:600;border-right:1px solid var(--border)">Nome da Conta</th>
-          <th style="padding:10px;text-align:left;font-weight:600;border-right:1px solid var(--border);width:38%">Observação</th>
-          <th style="padding:10px;text-align:center;font-weight:600;width:40px"></th>
+          <th style="${th};width:120px">Origem</th>
+          <th style="${th};width:130px">Código Analítico</th>
+          <th style="${th};width:80px">Cód. Reduzido</th>
+          <th style="${th};width:20%">Nome da Conta</th>
+          <th style="${th};width:150px">Perguntar no e-mail</th>
+          <th style="${th}">Texto do e-mail / Observação</th>
+          <th style="padding:6px;width:34px"></th>
         </tr>
       </thead>
       <tbody>
   `;
-
   alertas.forEach((alerta, idx) => {
+    const lanc=_paEhLancctb(alerta);
+    const chk=(f,rot)=>`<label style="display:flex;align-items:center;gap:4px;font-size:11.5px;cursor:pointer;white-space:nowrap"><input type="checkbox" data-f="${f}" ${alerta[f]?'checked':''} onchange="salvarAlerta('${eid}',${idx},true)"> ${rot}</label>`;
+    const origem=lanc?'<span title="Veio automaticamente do módulo Lançamentos Contábeis" style="font-size:11px;font-weight:600;color:#1d4ed8;background:#dbeafe;padding:2px 7px;border-radius:10px;white-space:nowrap">🏦 Lançamentos Contábeis</span>'
+                     :'<span style="font-size:11px;color:var(--slate)">✍️ Manual</span>';
+    const flags=lanc?(chk('perg_fornecedor','Fornecedor')+chk('perg_tipo','Tipo de gasto')+chk('perg_nf','Nota fiscal / parcela')):'<span style="font-size:11px;color:var(--slate)">—</span>';
+    const texto=lanc
+      ?`<div class="pa-prev" style="font-size:12px;line-height:1.3;color:var(--ink)">${esc(paTextoEmail(alerta)||'— marque o que perguntar ao cliente —')}</div>`
+      :`<textarea class="fi pa-autogrow" data-f="alerta" rows="1" style="width:100%;padding:3px 5px;font-size:12px;resize:none;overflow:hidden;font-family:inherit" placeholder="Escreva a observação desta conta..." oninput="_paAutoGrow(this)" onchange="salvarAlerta('${eid}',${idx})">${esc(alerta.alerta||'')}</textarea>`;
     html += `
-      <tr style="border-bottom:1px solid var(--border);background:${idx%2===0?'var(--white)':'var(--bg)'}">
-        <td style="padding:10px;border-right:1px solid var(--border)">
-          <input type="text" value="${esc(alerta.codigo_analitico||'')}" class="fi" style="width:100%;padding:4px;font-size:12px"
-            onchange="this.value=this.value.toUpperCase(); salvarAlerta('${eid}',${idx})" />
-        </td>
-        <td style="padding:10px;border-right:1px solid var(--border)">
-          <input type="text" value="${esc(alerta.codigo_reduzido||'')}" class="fi" style="width:100%;padding:4px;font-size:12px"
-            onchange="salvarAlerta('${eid}',${idx})" />
-        </td>
-        <td style="padding:10px;border-right:1px solid var(--border)">
-          <input type="text" value="${esc(alerta.nome_conta||'')}" class="fi" style="width:100%;padding:4px;font-size:12px"
-            onchange="salvarAlerta('${eid}',${idx})" />
-        </td>
-        <td style="padding:10px;border-right:1px solid var(--border)">
-          <textarea class="fi pa-autogrow" rows="1" style="width:100%;padding:4px;font-size:12px;resize:none;overflow:hidden;font-family:inherit"
-            placeholder="Escreva a observação desta conta..."
-            oninput="_paAutoGrow(this)" onchange="salvarAlerta('${eid}',${idx})">${esc(alerta.alerta||'')}</textarea>
-        </td>
-        <td style="padding:10px;text-align:center">
-          <button onclick="excluirAlerta('${eid}',${idx})" style="background:none;border:none;cursor:pointer;font-size:16px;padding:2px 6px" title="Excluir">❌</button>
-        </td>
+      <tr data-idx="${idx}" style="border-bottom:1px solid var(--border);background:${idx%2===0?'var(--white)':'var(--bg)'}">
+        <td style="padding:4px 8px;border-right:1px solid var(--border);vertical-align:middle">${origem}</td>
+        <td style="padding:4px 8px;border-right:1px solid var(--border)"><input type="text" data-f="codigo_analitico" value="${esc(alerta.codigo_analitico||'')}" class="fi" style="${inp}" onchange="this.value=this.value.toUpperCase(); salvarAlerta('${eid}',${idx})" /></td>
+        <td style="padding:4px 8px;border-right:1px solid var(--border)"><input type="text" data-f="codigo_reduzido" value="${esc(alerta.codigo_reduzido||'')}" class="fi" style="${inp}" onchange="salvarAlerta('${eid}',${idx})" /></td>
+        <td style="padding:4px 8px;border-right:1px solid var(--border)"><input type="text" data-f="nome_conta" value="${esc(alerta.nome_conta||'')}" class="fi" style="${inp}" onchange="salvarAlerta('${eid}',${idx})" /></td>
+        <td style="padding:4px 8px;border-right:1px solid var(--border);vertical-align:middle">${flags}</td>
+        <td style="padding:4px 8px;border-right:1px solid var(--border);vertical-align:middle">${texto}</td>
+        <td style="padding:2px;text-align:center"><button onclick="excluirAlerta('${eid}',${idx})" style="background:none;border:none;cursor:pointer;font-size:15px;padding:2px 5px" title="Excluir">❌</button></td>
       </tr>
     `;
   });
-
   html += `
       </tbody>
     </table>
   `;
-
   return html;
 }
 
@@ -9669,30 +9704,21 @@ function excluirAlerta(eid, index){
   toast('Alerta excluído','ok');
 }
 
-function salvarAlerta(eid, index){
+function salvarAlerta(eid, index, quieto){
   const alertas = JSON.parse(S.g('alertas_'+eid)||'[]');
-
-  // Coleta os valores dos inputs dessa linha
-  const container = document.getElementById('alerta-container-'+eid);
-  if(!container) return;
-
-  const trs = container.querySelectorAll('tbody tr');
-  if(index >= trs.length) return;
-
-  const tr = trs[index];
-  const inputs = tr.querySelectorAll('input, textarea');
-
-  if(inputs.length >= 4){
-    alertas[index] = {
-      codigo_analitico: inputs[0].value.toUpperCase(),
-      codigo_reduzido: inputs[1].value,
-      nome_conta: inputs[2].value,
-      alerta: inputs[3].value
-    };
-  }
-
+  if(index >= alertas.length) return;
+  const tr = document.querySelector('#alerta-container-'+eid+' tr[data-idx="'+index+'"]');
+  if(!tr) return;
+  const a = alertas[index];
+  // só atualiza os campos da linha; o que veio dos Lançamentos Contábeis (data, valor, histórico do banco...) fica intacto
+  tr.querySelectorAll('[data-f]').forEach(el=>{
+    const f=el.dataset.f;
+    if(el.type==='checkbox') a[f]=el.checked;
+    else a[f]=(f==='codigo_analitico')?el.value.toUpperCase():el.value;
+  });
   S.s('alertas_'+eid, JSON.stringify(alertas));
-  toast('Alerta salvo','ok');
+  const prev=tr.querySelector('.pa-prev'); if(prev) prev.textContent=paTextoEmail(a)||'— marque o que perguntar ao cliente —';
+  if(!quieto) toast('Alerta salvo','ok');
 }
 
 // ─── Demonstrativos Contábeis ────────────────────────────────────────────────
@@ -33287,10 +33313,10 @@ async function salvarLancctbRegra(){
       try{ const eidM=_lancctbEidAtual, at=new Set(S.g('lancctb_fluxo_manual_'+eidM)||[]); at.add(_lancctbFluxoAssociandoFluxoId); S.s('lancctb_fluxo_manual_'+eidM,[...at]); }catch(e){} } // associação feita à mão não é desfeita pela revalidação de identidade
 
     // Pontos de Atenção — checa o banco e cada linha de contrapartida.
-    if(contaBancoInfo.plano_contas.enviar_pontos_atencao) _lancctbEnviarAoPontosAtencao(_lancctbEidAtual,{numero_conta:contaBancoInfo.plano_contas.numero_conta,classificacao:contaBancoInfo.plano_contas.classificacao,descricao:contaBancoInfo.plano_contas.descricao},{ data:extrato.data_pagamento, valor:valorTotal, historico:historicoBanco });
+    if(contaBancoInfo.plano_contas.enviar_pontos_atencao) _lancctbEnviarAoPontosAtencao(_lancctbEidAtual,{numero_conta:contaBancoInfo.plano_contas.numero_conta,classificacao:contaBancoInfo.plano_contas.classificacao,descricao:contaBancoInfo.plano_contas.descricao},{ data:extrato.data_pagamento, valor:valorTotal, historico:historicoBanco, historicoBancario:extrato.historico_bancario, tipo:Number(extrato.valor_saida)>0?'pagamento':'recebimento' });
     linhasContrapartida.forEach((l,i)=>{
       const conta=contasPorId.get(String(l.conta_contabil_id));
-      if(conta?.enviar_pontos_atencao) _lancctbEnviarAoPontosAtencao(_lancctbEidAtual,conta,{ data:extrato.data_pagamento, valor:l.valor!=null?l.valor:valorTotal, historico:historicosResolvidos[i] });
+      if(conta?.enviar_pontos_atencao) _lancctbEnviarAoPontosAtencao(_lancctbEidAtual,conta,{ data:extrato.data_pagamento, valor:l.valor!=null?l.valor:valorTotal, historico:historicosResolvidos[i], historicoBancario:extrato.historico_bancario, tipo:Number(extrato.valor_saida)>0?'pagamento':'recebimento' });
     });
 
     closeModal('mLancctbRegra');
@@ -33569,6 +33595,9 @@ function _lancctbEnviarAoPontosAtencao(eid,contaInfo,detalhe){
     codigo_reduzido: contaInfo.numero_conta||'',
     nome_conta: contaInfo.descricao||'',
     alerta: obsTexto,
+    origem: 'lancctb', data_br: dataFmt, valor_br: _fmt(detalhe.valor||0), tipo: detalhe.tipo||'lançamento',
+    historico_bancario: detalhe.historicoBancario||'', historico_usado: detalhe.historico||'', nomeTerceiro: detalhe.nomeTerceiro||'',
+    perg_fornecedor:false, perg_tipo:false, perg_nf:false,
   });
   S.s('alertas_'+eid, JSON.stringify(alertas));
 }
@@ -35042,7 +35071,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       const conta=contasAlertaMap.get(String(linha.conta_contabil_id));
       if(!conta||jaEnviadas.has(conta.id)) continue;
       jaEnviadas.add(conta.id);
-      _lancctbEnviarAoPontosAtencao(eid,conta,{ data:l.data_pagamento, valor, historico:historicoUtilizado, nomeTerceiro });
+      _lancctbEnviarAoPontosAtencao(eid,conta,{ data:l.data_pagamento, valor, historico:historicoUtilizado, nomeTerceiro, historicoBancario:l.historico_bancario, tipo:Number(l.valor_saida)>0?'pagamento':'recebimento' });
     }
   }
 
