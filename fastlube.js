@@ -358,17 +358,21 @@
     });
     const fx = fxr.data || [];
     const fluxoDia = {}; fx.forEach(f => { (fluxoDia[f.data_pagamento] = fluxoDia[f.data_pagamento] || []).push({ id: f.id, c: cents(f.valor_saida), usado: false, h: String(f.historico_bancario || ''), cls: f.status_conciliacao === 'conciliado' || f.status_conciliacao === 'parcial', nome: String(f.historico_bancario || '').split(' | ')[0].slice(0, 60) }); });
-    // ICMS PARTILHADO: o valor certo é o da aba ICMS (guia). Se a NF do histórico está lá e o valor do Registro difere por centavos (até R$ 1,00), o Registro passa a ter o valor da aba ICMS; a diferença para o extrato é tratada pela Conciliação do dia.
+    // ICMS PARTILHADO: o valor certo é o da aba ICMS (guia). A mesma NF pode ter MAIS DE UMA linha na aba (ex.: Partilhado + ST, comum em Alagoas) e pode ser paga em duas guias:
+    // cada linha do Fluxo casa com UMA linha da aba (a de valor mais próximo, até R$ 1,00) e cada linha da aba é usada uma só vez. Sem par claro, o valor não é mexido.
     const ajustesIcms = [], icmsOk = new Set();
     if (typeof _lancctbIcmsLer === 'function') {
       const cacheIcms = {}, lerIcms = m => { if (!(m in cacheIcms)) { try { cacheIcms[m] = _lancctbIcmsLer(EID, m) || []; } catch (e) { cacheIcms[m] = []; } } return cacheIcms[m]; };
+      const porNf = {}, itens = [];
       Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).forEach(d => fluxoDia[d].forEach(x => {
         if (x.cls || !/PARTILHAD/i.test(x.h)) return; const m = x.h.match(/N[úu]mero\s+(\d+)/); if (!m) return;
         const mes = d.slice(0, 7), ant = new Date(d.slice(0, 4), +d.slice(5, 7) - 2, 1), mesAnt = ant.getFullYear() + '-' + String(ant.getMonth() + 1).padStart(2, '0');
-        const linha = [mes, mesAnt].reduce((r, k) => r || lerIcms(k).find(z => String(z.doc).replace(/\D/g, '') === m[1]), null); if (!linha) return;
-        const V = cents(linha.valor); if (!V || Math.abs(V - x.c) > 100) return; icmsOk.add(x.id); if (V === x.c) return;
-        ajustesIcms.push({ id: x.id, dia: d, de: x.c, para: V, nome: x.nome, nf: m[1] }); x.c = V;
+        if (!porNf[m[1]]) { porNf[m[1]] = []; [mes, mesAnt].forEach(k => lerIcms(k).forEach(z => { if (String(z.doc).replace(/\D/g, '') === m[1] && !porNf[m[1]].some(y => y.id === z.id)) porNf[m[1]].push({ id: z.id, tipo: z.tipo, v: cents(z.valor), usada: false }); })); }
+        itens.push({ x, d, nf: m[1] });
       }));
+      const casa = (it, exato) => { const L = (porNf[it.nf] || []).filter(r => !r.usada && r.v); let best = null; L.forEach(r => { const dif = Math.abs(r.v - it.x.c); if (exato ? dif === 0 : dif <= 100) if (!best || dif < best.dif) best = { r, dif }; }); return best; };
+      itens.forEach(it => { const b = casa(it, true); if (b) { b.r.usada = true; it.fim = b.r; icmsOk.add(it.x.id); } });                // 1º: quem já tem o valor exato de uma linha da aba
+      itens.forEach(it => { if (it.fim) return; const b = casa(it, false); if (!b) return; b.r.usada = true; it.fim = b.r; icmsOk.add(it.x.id); if (b.r.v !== it.x.c) { ajustesIcms.push({ id: it.x.id, dia: it.d, de: it.x.c, para: b.r.v, nome: it.x.nome, nf: it.nf, tipo: b.r.tipo, linhas: (porNf[it.nf] || []).length }); it.x.c = b.r.v; } });
     }
     const extDia = {};
     ref.filter(r => Number(r.valor_saida) > 0 && !diasFechados.has(r.data_pagamento)).forEach(r => { (extDia[r.data_pagamento] = extDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), cat: catExtrato(r.historico_bancario), explicada: false, via: '' }); });
@@ -489,7 +493,7 @@
     rel.ajustesIcms = ajustesIcms;
     if (!simular && ajustesIcms.length) {
       const logI = [];
-      for (const a of ajustesIcms) { const r = await _supaClient.from('lancamentos_extrato').update({ valor_saida: a.para / 100 }).eq('id', a.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente'); if (!r.error) logI.push({ id: a.id, em: new Date().toISOString(), por: quemFez(), dia: a.dia, nome: a.nome, de: a.de / 100, para: a.para / 100, via: 'ICMS Partilhado: valor confirmado na aba ICMS (NF ' + a.nf + ')' }); }
+      for (const a of ajustesIcms) { const r = await _supaClient.from('lancamentos_extrato').update({ valor_saida: a.para / 100 }).eq('id', a.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente'); if (!r.error) logI.push({ id: a.id, em: new Date().toISOString(), por: quemFez(), dia: a.dia, nome: a.nome, de: a.de / 100, para: a.para / 100, via: 'ICMS Partilhado: valor confirmado na aba ICMS (NF ' + a.nf + (a.linhas > 1 ? ', ' + a.linhas + ' linhas na aba: ' + a.tipo : '') + ')' }); }
       gravarLogValor(logI);
     }
     rel.ajustesCent = ajustesCent;
