@@ -27,6 +27,19 @@
     if (n.indexOf('BANCO DO BRASIL') >= 0 || /^BB\b/.test(n)) return 4;
     return null; // CARTEIRA e outros: não são banco → não vão pro Registro
   }
+  // Histórico bancário das linhas vindas do Fluxo (pedido 07/11/2026): Razão social | Número X (Parcela N) | CNPJ/CPF n | Descrição da conta | Histórico | MATRIZ/FILIAL 003
+  function unidadeCurta(u) { const m = String(u || '').match(/(MATRIZ|FILIAL\s*\d+)/i); return m ? m[1].toUpperCase().replace(/FILIAL\s*/, 'FILIAL ') : ''; }
+  function histFluxo(f) {
+    const p = [];
+    const nome = String(f.cliente_fornecedor_nome || '').trim(); if (nome) p.push(nome);
+    const num = String(f.numero || f.documento_numero || '').trim();
+    if (num) { const pc = (f.parcela != null && String(f.parcela).trim() !== '') ? ' (Parcela ' + String(f.parcela).replace(/\.0+$/, '') + ')' : ''; p.push('Número ' + num + pc); }
+    const doc = String(f.cnpj_cpf || '').trim(); if (doc) p.push('CNPJ/CPF ' + doc);
+    const dc = String(f.descricao_conta_origem || '').trim(); if (dc) p.push(dc);
+    const h = String(f.descricao || '').trim(); if (h) p.push(h);
+    const u = unidadeCurta(f.unidade); if (u) p.push(u);
+    return p.join(' | ') || null;
+  }
   // regras "não trazer do fluxo" (o usuário vai definir): [{campo:'descricao_conta_origem'|'descricao'|'cliente_fornecedor_nome'|'unidade'|'forma_pagamento', contem:'texto'}]
   function excluidoPorRegra(f) {
     let regras = []; try { regras = S.g('fl_fluxo_regras_excluir_' + EID) || []; } catch (e) {}
@@ -57,6 +70,9 @@
       + '<button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="_flExcluirFiltradas()" title="Exclui do Registro TODAS as linhas que estão filtradas na tela (não só a página atual).">🗑 Excluir filtradas (' + n + ')</button>';
   };
 
+  // chips da regra: a Fast Lube ganha CNPJ/CPF e junta com " | " (outras empresas não mudam)
+  root._flHistChipsExtra = () => (String(_lancctbEidAtual) === EID ? [{ tok: '{FLUXO_CNPJ}', rot: 'CNPJ/CPF (Fluxo)' }] : []);
+  root._flHistJuntador = () => (String(_lancctbEidAtual) === EID ? ' | ' : ' ');
   // ── 1) subir o Fluxo ──
   root._flSubirFluxo = async function () {
     await abrirLancctbFluxoImportModal();
@@ -69,7 +85,7 @@
   };
   async function converterFluxo() {
     const { data: fx, error } = await _lancctbFetchTudo(() => _supaClient.from('fluxo_caixa_lancamentos')
-      .select('id,empresa_eid,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,documento_numero,port_nom,descricao_conta_origem,unidade,forma_pagamento')
+      .select('id,empresa_eid,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,port_nom,descricao_conta_origem,unidade,forma_pagamento')
       .eq('empresa_eid', EID).is('lancamento_extrato_id', null));
     if (error) { toast('Fast Lube: não consegui ler o Fluxo: ' + error.message, 'err'); return null; }
     const excl = getExcl(), itens = []; let semBanco = 0, porRegra = 0, jaExc = 0, semValor = 0;
@@ -83,7 +99,7 @@
     let criadas = 0;
     for (let i = 0; i < itens.length; i += 300) {
       const lote = itens.slice(i, i + 300);
-      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: f.descricao || null, documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo' }));
+      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: histFluxo(f), documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo' }));
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows, { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
       if (up.error) { toast('Fast Lube: erro ao criar linhas do Registro: ' + up.error.message, 'err'); return null; }
       const hs = rows.map(r => r.hash_dedup);
@@ -101,6 +117,13 @@
     return { criadas, semBanco, porRegra };
   }
 
+  // reescreve o histórico bancário das linhas do Registro que vieram do Fluxo (as já convertidas antes da regra de concatenação)
+  root._flRefazerHistoricos = async function () {
+    const { data: fx } = await _lancctbFetchTudo(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,descricao_conta_origem,unidade,port_nom,lancamento_extrato_id').eq('empresa_eid', EID).not('lancamento_extrato_id', 'is', null));
+    const rows = []; (fx || []).forEach(f => { const c = contaDoPortador(f.port_nom); if (!c) return; rows.push({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, hash_dedup: 'flx' + f.id, origem_importacao: 'excel', historico_bancario: histFluxo(f) }); });
+    for (let i = 0; i < rows.length; i += 300) { const u = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup' }); if (u.error) { toast('Erro ao refazer históricos: ' + u.error.message, 'err'); return 0; } }
+    return rows.length;
+  };
   // ── 2) trazer do extrato (referência) ──
   function periodo() {
     let de = _lancctbRegistroDataDe || '', ate = _lancctbRegistroDataAte || '';
@@ -220,6 +243,11 @@
     let s = cents((ag && ag.saldo_inicial) || 0); const mapa = new Map();
     reg.forEach(l => { s += cents(l.valor_entrada) - cents(l.valor_saida); mapa.set(String(l.id), s / 100); });
     if (!document.body.contains(tbl)) return;
+    // Fast Lube não tem mais Fluxo de Caixa como item: tira a coluna "Fluxo de Caixa" do Registro
+    { const h0 = tbl.querySelector('thead tr'), h1 = tbl.querySelector('thead tr:nth-child(2)'), cg0 = tbl.querySelector('colgroup');
+      if (h0) { const idx = [...h0.children].findIndex(t => /^fluxo de caixa/i.test((t.textContent || '').trim()));
+        if (idx >= 0) { const n = h0.children.length; h0.children[idx].remove(); if (h1 && h1.children.length === n) h1.children[idx].remove(); if (cg0 && cg0.children.length === n) cg0.children[idx].remove();
+          tbl.querySelectorAll('tbody tr').forEach(tr => { if (tr.children.length === n) tr.children[idx].remove(); }); } } }
     const cg = tbl.querySelector('colgroup'); if (cg && cg.children[7]) { const c = document.createElement('col'); c.style.width = '15ch'; cg.insertBefore(c, cg.children[8]); }
     const heads = tbl.querySelectorAll('thead tr');
     if (heads[0] && heads[0].children[7]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 10px;min-width:130px;text-align:right;white-space:nowrap'; th.textContent = 'Saldo'; th.title = 'Saldo da conta após este lançamento (saldo inicial da conta + movimentos em ordem de data)'; heads[0].insertBefore(th, heads[0].children[8]); }
