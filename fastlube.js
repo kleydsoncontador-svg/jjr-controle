@@ -401,12 +401,14 @@
       const it = livres(d); if (!it.length) return; const sel = exatoSubset(it, l.c); if (sel) { sel.forEach(k => { it[k].usado = true; }); l.explicada = true; l.via = 'soma de ' + sel.length; }
     }));
     // passada B2 (inverso): UMA linha do Fluxo = SOMA exata de várias saídas Sispag do extrato do mesmo dia (ex.: folha pagos um a um no extrato e lançados juntos no Fluxo)
-    const gruposDia = {};
+    const gruposDia = {}, composicoes = [];
     dias.forEach(d => livres(d).sort((a, b) => b.c - a.c).forEach(f => {
       const cand = extDia[d].filter(l => !l.explicada && l.cat === 'sispag'); if (cand.length < 2) return;
       const sel = exatoSubset(cand, f.c); if (!sel || sel.length < 2) return;
       sel.forEach(k => { cand[k].explicada = true; cand[k].via = 'soma p/ 1 do Fluxo'; }); f.usado = true;
       (gruposDia[d] = gruposDia[d] || []).push({ v: f.c, n: f.nome, qtd: sel.length });
+      // folha/adiantamento (A01-SALARIOS) = soma EXATA de vários Sispag Salários: vira pagamento composto (1 crédito do banco com o valor cheio + 1 débito por Sispag)
+      if (/A01-SALARIO|FOLHA|ADIANTAMENTO/i.test(f.h || '')) composicoes.push({ id: f.id, dia: d, total: f.c, nome: f.nome, partes: sel.map(k => ({ c: cand[k].c, h: String(cand[k].r.historico_bancario || 'Sispag Salários') })) });
     }));
     // passada C: dia próximo (±3): valor igual, depois soma de linhas de UM mesmo dia
     let outroDia = 0;
@@ -493,6 +495,21 @@
     }
     if (!simular) {
       try { const dset = new Set(dias), antM = S.g('fl_dif_marcas_163') || {}, novoM = {}; Object.keys(antM).forEach(k => { if (!dset.has(antM[k])) novoM[k] = antM[k]; }); Object.assign(novoM, rel.marcasDif || {}); S.s('fl_dif_marcas_163', novoM); } catch (e) {}
+    }
+    rel.composicoes = composicoes;
+    if (!simular && composicoes.length) {
+      let nOk = 0;
+      for (const cp of composicoes) {
+        try {
+          const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,historico_bancario,composicao_tributo,status_conciliacao').eq('id', cp.id).maybeSingle();
+          if (!x || x.status_conciliacao !== 'pendente' || (x.composicao_tributo || []).length) continue;
+          const itens = cp.partes.map(pt => ({ codigo: null, denominacao: 'Sispag Salários', valor: pt.c / 100, resumo: pt.h, competencia: null, gatilho: 'Sispag Salários', historico: pt.h }));
+          const marca = '[PAGAMENTO COMPOSTO: ' + cp.nome + ' = ' + cp.partes.length + ' Sispag Salários] ';
+          const u = await _supaClient.from('lancamentos_extrato').update({ historico_bancario: marca + String(x.historico_bancario || ''), origem_importacao: 'tributo_composicao', composicao_tributo: itens }).eq('id', cp.id).eq('status_conciliacao', 'pendente');
+          if (!u.error) nOk++;
+        } catch (e) { console.warn('Composição da folha:', e); }
+      }
+      rel.composicoesAplicadas = nOk;
     }
     rel.ajustesIcms = ajustesIcms;
     if (!simular && ajustesIcms.length) {
