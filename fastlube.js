@@ -58,6 +58,17 @@
     let regras = []; try { regras = S.g('fl_fluxo_regras_excluir_' + EID) || []; } catch (e) {}
     return regras.some(r => r && r.campo && r.contem && norm(f[r.campo]).indexOf(norm(r.contem)) >= 0);
   }
+  // Os vínculos Fluxo ↔ linha do Registro da Fast Lube são intencionais: entram na lista de associações MANUAIS (as rotinas que revalidam/soltam preservam essa lista)
+  function marcarManuais(ids) {
+    try {
+      const k = 'lancctb_fluxo_manual_' + EID, at = new Set((S.g(k) || []).map(Number)); let mudou = false;
+      ids.forEach(i => { if (!at.has(Number(i))) { at.add(Number(i)); mudou = true; } });
+      if (mudou) S.s(k, [...at]);
+    } catch (e) {}
+  }
+  function desmarcarManuais(ids) {
+    try { const k = 'lancctb_fluxo_manual_' + EID, rm = new Set(ids.map(Number)); S.s(k, (S.g(k) || []).filter(x => !rm.has(Number(x)))); } catch (e) {}
+  }
   const getExcl = () => { try { return new Set((S.g('fl_fluxo_excluidos_' + EID) || []).map(String)); } catch (e) { return new Set(); } };
   const setExcl = set => { try { S.s('fl_fluxo_excluidos_' + EID, [...set]); } catch (e) {} };
 
@@ -91,6 +102,7 @@
     await abrirLancctbFluxoImportModal();
     const chk = document.getElementById('lancctbFluxoImportSoMesAtual'); if (chk) chk.checked = false; // o mês é o do arquivo, não o do Fechamento Atual
   };
+  root._flReligarFluxo = async function () { const r = await converterFluxo(); const { data: lig } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos').select('id').eq('empresa_eid', EID).not('lancamento_extrato_id', 'is', null)); marcarManuais((lig || []).map(x => x.id)); return r; };
   root._flAposImportarFluxo = async function () {
     if (eidAtual() !== EID) return;
     await converterFluxo();
@@ -124,7 +136,7 @@
         const u = await _supaClient.from('fluxo_caixa_lancamentos').upsert(lig.slice(k, k + 200), { onConflict: 'id' });
         if (u.error) { toast('Fast Lube: erro ao marcar o Fluxo como associado: ' + u.error.message, 'err'); return null; }
       }
-      criadas += lig.length;
+      criadas += lig.length; marcarManuais(lig.map(x => x.id));
     }
     toast('Fast Lube: ' + criadas + ' linha(s) do Fluxo levadas ao Registro' + (semBanco ? ' · ' + semBanco + ' sem banco (ex.: CARTEIRA) ficaram de fora' : '') + (porRegra ? ' · ' + porRegra + ' barradas pela regra' : '') + (jaExc ? ' · ' + jaExc + ' já excluídas por você' : '') + '.', 'ok');
     return { criadas, semBanco, porRegra };
@@ -336,13 +348,13 @@
     const ids = (root.__regIdsFiltrados || []).slice(); const n = ids.length;
     if (!n) { toast('Nenhuma linha filtrada para excluir.', 'err'); return; }
     if (_lancctbExclusaoBloqueada(eidAtual(), _lancctbRegistroMes, 'as linhas do Registro')) return;
-    if (!confirm('Excluir do Registro as ' + n + ' linha(s) que estão filtradas (todas as páginas)?\n\nVale para linhas que vieram do Fluxo ou do extrato. Se alguma já estava classificada, a classificação também é desfeita.\nAs linhas do Fluxo excluídas NÃO voltam num próximo upload do mesmo fluxo.')) return;
+    if (!confirm('Excluir do Registro as ' + n + ' linha(s) que estão filtradas (todas as páginas)?\n\nVale para linhas que vieram do Fluxo ou do extrato. Se alguma já estava classificada, a classificação também é desfeita.\nAs linhas do Fluxo ligadas a elas também são apagadas do sistema (o arquivo do Fluxo continua com você, para subir de novo).')) return;
     const dig = prompt('Para confirmar, digite a quantidade de linhas que serão excluídas (' + n + '):'); if (String(dig || '').trim() !== String(n)) { toast('Número não confere — nada foi excluído.', 'err'); return; }
     toast('Excluindo ' + n + ' linha(s)…', 'info');
     const lotes = (fn) => _lancctbEmLotesDb(ids, 200, fn);
     // linhas do Fluxo ligadas: guarda que foram excluídas (não voltam) e desliga
     const lig = await _lancctbFetchPorIds(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id').eq('empresa_eid', EID), 'lancamento_extrato_id', ids, () => false);
-    const exc = getExcl(); (lig.data || []).forEach(f => exc.add(String(f.id))); setExcl(exc);
+    const fluxoIds = (lig.data || []).map(f => f.id);
     await lotes(l => _supaClient.from('notas_fiscais_parcelas').update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', l));
     await lotes(l => _supaClient.from('comprovantes_bancarios').update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', l));
     await lotes(l => _supaClient.from('comprovantes_recebimento').update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', l));
@@ -352,7 +364,11 @@
     await lotes(l => _supaClient.from('lancamentos_contabeis').delete().in('lancamento_extrato_id', l));
     const r = await lotes(l => _supaClient.from('lancamentos_extrato').delete().in('id', l));
     if (r && r.error) { toast('Erro ao excluir: ' + r.error.message, 'err'); return; }
-    toast(n + ' linha(s) excluída(s) do Registro ✓', 'ok');
+    if (fluxoIds.length) {
+      for (let i = 0; i < fluxoIds.length; i += 200) { const d = await _supaClient.from('fluxo_caixa_lancamentos').delete().in('id', fluxoIds.slice(i, i + 200)); if (d.error) { toast('Registro limpo, mas não consegui apagar as linhas do Fluxo: ' + d.error.message, 'err'); break; } }
+      desmarcarManuais(fluxoIds);
+    }
+    toast(n + ' linha(s) excluída(s) do Registro' + (fluxoIds.length ? ' (e ' + fluxoIds.length + ' do Fluxo)' : '') + ' ✓', 'ok');
     renderLancctbRegistroContabil();
   };
 })(window);
