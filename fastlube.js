@@ -19,6 +19,19 @@
   root._flContaRef = (eid, conta) => String(eid) === EID && CONTAS[String(conta)] !== undefined;
   const ativo = () => root._flContaRef(eidAtual(), contaAtual());
   const dormir = ms => new Promise(r => setTimeout(r, ms));
+  // lê TODAS as linhas de uma consulta paginando pelo id (estável; o paginador geral estava cortando ~1.000 linhas)
+  async function todosPorId(build) {
+    const out = []; let ultimo = 0;
+    for (;;) {
+      const r = await build().gt('id', ultimo).order('id', { ascending: true }).limit(1000);
+      if (r.error) return { data: out, error: r.error };
+      const d = r.data || []; out.push(...d);
+      if (d.length < 1000) break;
+      ultimo = d[d.length - 1].id;
+    }
+    return { data: out, error: null };
+  }
+  const porDataId = (a, b) => (a.data_pagamento < b.data_pagamento ? -1 : a.data_pagamento > b.data_pagamento ? 1 : a.id - b.id);
 
   // ── portador do Fluxo → conta bancária ──
   function contaDoPortador(p) {
@@ -84,9 +97,9 @@
     try { renderLancctbRegistroContabil(); } catch (e) {}
   };
   async function converterFluxo() {
-    const { data: fx, error } = await _lancctbFetchTudo(() => _supaClient.from('fluxo_caixa_lancamentos')
+    const { data: fx, error } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos')
       .select('id,empresa_eid,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,port_nom,descricao_conta_origem,unidade,forma_pagamento')
-      .eq('empresa_eid', EID).is('lancamento_extrato_id', null).order('id', { ascending: true }));
+      .eq('empresa_eid', EID).is('lancamento_extrato_id', null));
     if (error) { toast('Fast Lube: não consegui ler o Fluxo: ' + error.message, 'err'); return null; }
     const excl = getExcl(), itens = []; let semBanco = 0, porRegra = 0, jaExc = 0, semValor = 0;
     (fx || []).forEach(f => {
@@ -119,7 +132,7 @@
 
   // reescreve o histórico bancário das linhas do Registro que vieram do Fluxo (as já convertidas antes da regra de concatenação)
   root._flRefazerHistoricos = async function () {
-    const { data: fx } = await _lancctbFetchTudo(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,descricao_conta_origem,unidade,port_nom,lancamento_extrato_id').eq('empresa_eid', EID).not('lancamento_extrato_id', 'is', null).order('id', { ascending: true }));
+    const { data: fx } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,descricao_conta_origem,unidade,port_nom,lancamento_extrato_id').eq('empresa_eid', EID).not('lancamento_extrato_id', 'is', null));
     const rows = []; (fx || []).forEach(f => { const c = contaDoPortador(f.port_nom); if (!c) return; rows.push({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, hash_dedup: 'flx' + f.id, origem_importacao: 'excel', historico_bancario: histFluxo(f) }); });
     for (let i = 0; i < rows.length; i += 300) { const u = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup' }); if (u.error) { toast('Erro ao refazer históricos: ' + u.error.message, 'err'); return 0; } }
     return rows.length;
@@ -132,21 +145,21 @@
     return { de, ate };
   }
   async function carregarRef(conta, p) {
-    const r = await _lancctbFetchTudo(() => {
+    const r = await todosPorId(() => {
       let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,documento,informacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'referencia');
       if (p.de) q = q.gte('data_pagamento', p.de); if (p.ate) q = q.lte('data_pagamento', p.ate);
-      return q.order('data_pagamento', { ascending: true }).order('id', { ascending: true });
+      return q;
     });
-    return r.data || [];
+    return (r.data || []).sort(porDataId);
   }
   async function carregarRegistro(conta, de, ate, extra) {
-    const r = await _lancctbFetchTudo(() => {
+    const r = await todosPorId(() => {
       let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,fonte,status_conciliacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
       if (de) q = q.gte('data_pagamento', de); if (ate) q = q.lte('data_pagamento', ate);
       if (extra) q = extra(q);
-      return q.order('data_pagamento', { ascending: true }).order('id', { ascending: true });
+      return q;
     });
-    return r.data || [];
+    return (r.data || []).sort(porDataId);
   }
   // subconjunto cuja soma (em centavos) é exatamente o alvo
   function subsetSum(itens, alvo) {
@@ -236,7 +249,7 @@
     const conta = contaAtual();
     const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
     const reg = await carregarRegistro(conta, '', '');
-    const igR = await _lancctbFetchTudo(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
+    const igR = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
     const ign = new Set((igR.data || []).map(x => String(x.id)));
     const fontePorId = new Map(); reg.forEach(l => fontePorId.set(String(l.id), l.fonte)); (igR.data || []).forEach(l => fontePorId.set(String(l.id), l.fonte));
     const ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento' };
@@ -277,7 +290,9 @@
     const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130) + 'px';
   }
   let obs = null, tmr = null;
+  (function () { const st = document.createElement('style'); st.textContent = 'body[data-fl="1"] #lancctbRegraBuscaFluxoWrap{display:none !important}'; document.head.appendChild(st); })();
   root._flPosRender = function () {
+    try { document.body.dataset.fl = (eidAtual() === EID) ? '1' : ''; } catch (e) {}
     if (!ativo()) { if (obs) obs.disconnect(); return; }
     const alvo = document.getElementById('lancctbConteudoAba'); if (!alvo) return;
     const rodar = () => { clearTimeout(tmr); tmr = setTimeout(() => { injetarSaldo().catch(e => console.warn('Saldo (Fast Lube):', e)); }, 250); };
