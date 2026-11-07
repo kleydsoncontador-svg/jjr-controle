@@ -87,11 +87,13 @@
     if (!ativo()) return '';
     const n = (root.__regIdsFiltrados || []).length;
     return '<button class="btn bp" onclick="_flSubirFluxo()" title="Sobe o Fluxo de Caixa do mês (Excel). O banco de cada linha vem da coluna Portador: ITAU → Itaú, BANCO DO BRASIL → Banco do Brasil.">⬆ Subir Fluxo de Caixa</button>'
-      + '<button class="btn bo" onclick="_flTrazerExtrato(\'receb\')" title="Traz do extrato bancário desta conta (aba Extrato Bancário) todos os RECEBIMENTOS (entradas) do período para o Registro.">⬇ Trazer recebimentos do extrato</button>'
-      + '<button class="btn bo" onclick="_flTrazerExtrato(\'pag\')" title="Traz do extrato os PAGAMENTOS (saídas) que o Fluxo não explica (aplicações, tarifas, impostos...), para o saldo diário bater. Nada do Fluxo é tirado.">⬇ Trazer pagamentos do extrato</button>'
+      + '<button class="btn bo" style="color:#39ff14;border-color:#39ff14;font-weight:700;text-shadow:0 0 6px #39ff14,0 0 12px rgba(57,255,20,.7);box-shadow:0 0 8px rgba(57,255,20,.45)" onclick="_flTrazerExtrato(\'receb\')" title="Traz do extrato bancário desta conta (aba Extrato Bancário) todos os RECEBIMENTOS (entradas) do período para o Registro.">⬇ Trazer recebimentos do extrato</button>'
+      + '<button class="btn bo" style="color:#ff2a2a;border-color:#ff2a2a;font-weight:700;text-shadow:0 0 6px #ff2a2a,0 0 12px rgba(255,42,42,.7);box-shadow:0 0 8px rgba(255,42,42,.45)" onclick="_flTrazerExtrato(\'pag\')" title="Traz do extrato os PAGAMENTOS (saídas) que o Fluxo não explica (aplicações, tarifas, impostos...), para o saldo diário bater. Nada do Fluxo é tirado.">⬇ Trazer pagamentos do extrato</button>'
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
+      + '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
+      + '<button class="btn bo" onclick="_flExcelRelatorio(\'todos\')" title="Gera um Excel para o cliente com 5 abas: Ajustes e conciliações, Datas alteradas, Valores alterados, Ignorados e Fluxo × extrato por dia. Mostra o que foi preciso fazer para chegar ao saldo do extrato.">📊 Excel p/ cliente</button>'
       + '<button class="btn bo" onclick="_flAbrirDatas()" title="Lançamentos cuja data foi alterada em relação à data de origem (Fluxo ou extrato): quando, quem, data original e nova. Dá para voltar à data original.">📆 Datas alteradas</button>'
       + '<button class="btn bo" onclick="_flAbrirRelatorios()" title="Relatórios gerados pelos botões de recebimentos e pagamentos do extrato (o que foi trazido, diferenças, avisos).">📑 Relatórios</button>'
       + '<button class="btn bo" onclick="_flConciliarSaldo()" title="Compara, dia a dia, o saldo do extrato bancário com o saldo do Registro Contábil.">⚖ Conciliar saldo</button>'
@@ -555,6 +557,9 @@
   root._flAbrirDatas = async function () {
     const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
     el.innerHTML = '<div style="padding:20px;color:var(--slate)">Procurando as datas alteradas…</div>';
+    root.__flDat.rows = await carregarDatasAlteradas(); desenharDatas();
+  };
+  async function carregarDatasAlteradas() {
     const regs = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,hash_dedup,status_conciliacao,updated_at').eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).in('fonte', ['fluxo', 'extrato_receb', 'extrato_compl', 'ajuste_manual']))).data || [];
     const idsFx = [], idsRef = [];
     regs.forEach(r => { const h = r.hash_dedup || ''; if (h.indexOf('flx') === 0) idsFx.push(+h.slice(3)); else if (h.indexOf('flr') === 0 || h.indexOf('flc') === 0) idsRef.push(+h.slice(3)); });
@@ -571,8 +576,8 @@
       if (!orig || orig === r.data_pagamento) return;
       lista.push({ id: r.id, em: (l && l.em) || r.updated_at, por: (l && l.por) || '', via: (l && l.via) || 'detectada (data diferente da origem)', de: orig, para: r.data_pagamento, conta: r.conta_bancaria_id, fonte: r.fonte, v: Number(r.valor_entrada) > 0 ? Number(r.valor_entrada) : -Number(r.valor_saida || 0), h: String(r.historico_bancario || ''), status: r.status_conciliacao });
     });
-    root.__flDat.rows = lista.sort((a, b) => String(b.em || '').localeCompare(String(a.em || ''))); desenharDatas();
-  };
+    return lista.sort((a, b) => String(b.em || '').localeCompare(String(a.em || '')));
+  }
   function datasFiltradas() {
     const f = root.__flDat.f, t = norm(f.texto);
     return root.__flDat.rows.filter(x => (!f.banco || String(x.conta) === f.banco) && (!f.via || (f.via === 'det' ? /^detectada/.test(x.via) : !/^detectada/.test(x.via))) && (!t || norm(x.h).indexOf(t) >= 0));
@@ -667,6 +672,53 @@
     }
     toast(feitas + ' linha(s) resgatada(s)' + rot + ' ✓', 'ok');
     root.__flIgn.rows = root.__flIgn.rows.filter(x => ids.indexOf(x.id) < 0); root.__flIgn.sel = new Set(); desenharIgnorados();
+  };
+
+  // ───────── página "Valores alterados" + Excel para o cliente ─────────
+  const dtBr = d => { try { return d ? new Date(d).toLocaleString('pt-BR') : ''; } catch (e) { return ''; } };
+  root._flAbrirValores = function () {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    const lista = (S.g('fl_valores_alterados_163') || []), c = 'padding:5px 8px';
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">💲 Valores alterados — Fast Lube</div><button class="btn bo bsm" onclick="_flExcelRelatorio(\'valores\')">📊 Gerar Excel</button></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:980px">Linhas do Fluxo cujo valor foi corrigido para bater com o extrato (✏️ ao lado do valor, ou ajuste automático de centavos em tributos). O valor original fica guardado aqui.</div>'
+      + '<div style="overflow:auto;max-height:calc(100vh - 260px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="' + c + ';text-align:left">Quando</th><th style="' + c + ';text-align:left">Quem</th><th style="' + c + ';text-align:left">Dia</th><th style="' + c + ';text-align:left">Lançamento</th><th style="' + c + ';text-align:right">Valor no Fluxo</th><th style="' + c + ';text-align:right">Valor correto</th><th style="' + c + ';text-align:right">Diferença</th><th style="' + c + ';text-align:left">Como</th></tr></thead><tbody>'
+      + (lista.length ? lista.map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="' + c + ';white-space:nowrap">' + E(dtBr(x.em)) + '</td><td style="' + c + '">' + E(x.por || '') + '</td><td style="' + c + ';white-space:nowrap">' + brData(x.dia) + '</td><td style="' + c + '">' + E(x.nome || '') + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.de) + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.para) + '</td><td style="' + c + ';text-align:right;color:' + (x.para - x.de < 0 ? '#dc2626' : 'var(--teal)') + '">' + fmt(x.para - x.de) + '</td><td style="' + c + ';font-size:11.5px">' + E(x.via || '') + '</td></tr>').join('') : '<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--slate)">Nenhum valor foi alterado até agora.</td></tr>')
+      + '</tbody></table></div>';
+  };
+  root._flExcelRelatorio = async function (qual) {
+    if (typeof XLSX === 'undefined') { toast('Biblioteca de Excel não carregada.', 'err'); return; }
+    toast('Montando o Excel…', 'info');
+    const B = { '1': 'Itaú', '4': 'Banco do Brasil' }, ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
+    const dBr = d => d ? brData(d) : '';
+    const wb = XLSX.utils.book_new(), add = (nome, cab, linhas, larg) => { const ws = XLSX.utils.aoa_to_sheet([cab].concat(linhas.length ? linhas : [['(nada a informar)']])); ws['!cols'] = (larg || cab.map(() => 18)).map(w => ({ wch: w })); XLSX.utils.book_append_sheet(wb, ws, nome); };
+    const sel = 'id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao';
+    if (qual === 'todos' || qual === 'ajustes') {
+      const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).in('fonte', ['ajuste_manual', 'conciliacao']).neq('status_conciliacao', 'ignorado'))).data || [];
+      add('Ajustes e conciliações', ['Banco', 'Data', 'Tipo', 'Entrada', 'Saída', 'Histórico'], r.sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 16, 14, 14, 110]);
+    }
+    if (qual === 'todos' || qual === 'datas') {
+      const d = await carregarDatasAlteradas();
+      add('Datas alteradas', ['Banco', 'Data original', 'Data nova', 'Valor', 'Lançamento', 'Quando', 'Quem', 'Como'], d.map(x => [B[String(x.conta)] || x.conta, dBr(x.de), dBr(x.para), x.v, String(x.h || ''), dtBr(x.em), x.por || '', x.via || '']), [16, 14, 12, 14, 80, 18, 18, 30]);
+    }
+    if (qual === 'todos' || qual === 'valores') {
+      const v = S.g('fl_valores_alterados_163') || [];
+      add('Valores alterados', ['Dia', 'Lançamento', 'Valor no Fluxo', 'Valor correto', 'Diferença', 'Quando', 'Quem', 'Como'], v.map(x => [dBr(x.dia), x.nome || '', x.de, x.para, Math.round((x.para - x.de) * 100) / 100, dtBr(x.em), x.por || '', x.via || '']), [12, 60, 16, 16, 12, 18, 18, 40]);
+    }
+    if (qual === 'todos' || qual === 'ignorados') {
+      const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).eq('status_conciliacao', 'ignorado'))).data || [];
+      add('Ignorados', ['Banco', 'Data', 'Origem', 'Entrada', 'Saída', 'Histórico'], r.sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 22, 14, 14, 110]);
+    }
+    if (qual === 'todos') {
+      // Fluxo × extrato por dia, no mês filtrado na tela: onde o Fluxo do cliente não bate com o extrato
+      const conta = contaAtual(), p = { de: _lancctbRegistroDataDe || '', ate: _lancctbRegistroDataAte || '' };
+      const ref = await carregarRef(conta, p), reg = await carregarRegistro(conta, p.de, p.ate);
+      const dias = {}; const ac = (d, k, v) => { (dias[d] = dias[d] || { re: 0, rs: 0, ge: 0, gs: 0 })[k] += v; };
+      ref.forEach(x => { ac(x.data_pagamento, 're', cents(x.valor_entrada)); ac(x.data_pagamento, 'rs', cents(x.valor_saida)); });
+      reg.filter(x => x.fonte === 'fluxo').forEach(x => { ac(x.data_pagamento, 'ge', cents(x.valor_entrada)); ac(x.data_pagamento, 'gs', cents(x.valor_saida)); });
+      add('Fluxo x extrato por dia', ['Banco', 'Dia', 'Entradas extrato', 'Entradas Fluxo', 'Diferença entradas', 'Saídas extrato', 'Saídas Fluxo', 'Diferença saídas'], Object.keys(dias).sort().map(d => { const x = dias[d]; return [nomeBanco(conta), dBr(d), x.re / 100, x.ge / 100, (x.re - x.ge) / 100, x.rs / 100, x.gs / 100, (x.rs - x.gs) / 100]; }), [16, 12, 18, 18, 18, 18, 18, 18]);
+    }
+    XLSX.writeFile(wb, 'Fast Lube - ' + (qual === 'todos' ? 'ajustes para o cliente' : qual) + ' - ' + new Date().toISOString().slice(0, 10) + '.xlsx');
+    toast('Excel gerado ✓', 'ok');
   };
 
   // ───────── ajuste manual, editar data, excluir ajuste ─────────
