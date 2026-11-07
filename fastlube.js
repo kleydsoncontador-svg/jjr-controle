@@ -92,6 +92,7 @@
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
+      + '<button class="btn bo" onclick="_flAbrirDatas()" title="Lançamentos cuja data foi alterada em relação à data de origem (Fluxo ou extrato): quando, quem, data original e nova. Dá para voltar à data original.">📆 Datas alteradas</button>'
       + '<button class="btn bo" onclick="_flAbrirRelatorios()" title="Relatórios gerados pelos botões de recebimentos e pagamentos do extrato (o que foi trazido, diferenças, avisos).">📑 Relatórios</button>'
       + '<button class="btn bo" onclick="_flConciliarSaldo()" title="Compara, dia a dia, o saldo do extrato bancário com o saldo do Registro Contábil.">⚖ Conciliar saldo</button>'
       + '<button class="btn bo" onclick="_flIgnorarFiltradas()" title="Ignora todas as linhas filtradas: ficam apagadas, fora do saldo e do TXT, e o extrato pode trazer o pagamento delas de novo.">🚫 Ignorar filtradas (' + n + ')</button>'
@@ -520,6 +521,69 @@
   };
   root._flApagarRel = function (id) { if (!confirm('Apagar este relatório?')) return; try { S.s(RELKEY, lerRel().filter(x => x.id !== id)); } catch (e) {} root._flAbrirRelatorios(); };
 
+  // ───────── datas alteradas: registro das mudanças + detecção pela data de origem ─────────
+  const LOGDATA = 'fl_datas_alteradas_' + EID;
+  const lerLogData = () => { try { return S.g(LOGDATA) || []; } catch (e) { return []; } };
+  const gravarLogData = es => { if (!es.length) return; try { S.s(LOGDATA, es.concat(lerLogData()).slice(0, 3000)); } catch (e) {} };
+  const quemFez = () => { try { return (currentUser && (currentUser.nome || currentUser.name || currentUser.email)) || ''; } catch (e) { return ''; } };
+  const entLog = (x, para, via) => ({ id: x.id, em: new Date().toISOString(), por: quemFez(), conta: x.conta_bancaria_id, fonte: x.fonte || '', v: Number(x.valor_entrada) > 0 ? Number(x.valor_entrada) : -Number(x.valor_saida || 0), h: String(x.historico_bancario || '').slice(0, 200), de: x.data_pagamento, para, via });
+  root.__flDat = root.__flDat || { rows: [], f: { banco: '', via: '', texto: '' } };
+  root._flAbrirDatas = async function () {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    el.innerHTML = '<div style="padding:20px;color:var(--slate)">Procurando as datas alteradas…</div>';
+    const regs = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,hash_dedup,status_conciliacao,updated_at').eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).in('fonte', ['fluxo', 'extrato_receb', 'extrato_compl', 'ajuste_manual']))).data || [];
+    const idsFx = [], idsRef = [];
+    regs.forEach(r => { const h = r.hash_dedup || ''; if (h.indexOf('flx') === 0) idsFx.push(+h.slice(3)); else if (h.indexOf('flr') === 0 || h.indexOf('flc') === 0) idsRef.push(+h.slice(3)); });
+    const dataFx = new Map(), dataRef = new Map();
+    for (let i = 0; i < idsFx.length; i += 200) { const r = await _supaClient.from('fluxo_caixa_lancamentos').select('id,data').in('id', idsFx.slice(i, i + 200)); (r.data || []).forEach(x => dataFx.set(x.id, x.data)); }
+    for (let i = 0; i < idsRef.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento').in('id', idsRef.slice(i, i + 200)); (r.data || []).forEach(x => dataRef.set(x.id, x.data_pagamento)); }
+    const logPorLinha = new Map(); lerLogData().forEach(e => { if (!logPorLinha.has(e.id)) logPorLinha.set(e.id, e); });
+    const lista = [];
+    regs.forEach(r => {
+      const h = r.hash_dedup || ''; let orig = null;
+      if (h.indexOf('flx') === 0) orig = dataFx.get(+h.slice(3)); else if (h.indexOf('flr') === 0 || h.indexOf('flc') === 0) orig = dataRef.get(+h.slice(3));
+      const l = logPorLinha.get(r.id);
+      if (!orig && l) orig = l.de;                                  // ajuste manual: só pelo registro de alterações
+      if (!orig || orig === r.data_pagamento) return;
+      lista.push({ id: r.id, em: (l && l.em) || r.updated_at, por: (l && l.por) || '', via: (l && l.via) || 'detectada (data diferente da origem)', de: orig, para: r.data_pagamento, conta: r.conta_bancaria_id, fonte: r.fonte, v: Number(r.valor_entrada) > 0 ? Number(r.valor_entrada) : -Number(r.valor_saida || 0), h: String(r.historico_bancario || ''), status: r.status_conciliacao });
+    });
+    root.__flDat.rows = lista.sort((a, b) => String(b.em || '').localeCompare(String(a.em || ''))); desenharDatas();
+  };
+  function datasFiltradas() {
+    const f = root.__flDat.f, t = norm(f.texto);
+    return root.__flDat.rows.filter(x => (!f.banco || String(x.conta) === f.banco) && (!f.via || (f.via === 'det' ? /^detectada/.test(x.via) : !/^detectada/.test(x.via))) && (!t || norm(x.h).indexOf(t) >= 0));
+  }
+  function desenharDatas() {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    const g = root.__flDat, lista = datasFiltradas(), mostra = lista.slice(0, 400), f = g.f, dt = d => { try { return new Date(d).toLocaleString('pt-BR'); } catch (e) { return ''; } };
+    const est = 'padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)';
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">📆 Lançamentos com data alterada — Fast Lube</div></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:1000px">Mostra as linhas do Registro cuja data é diferente da data de origem (a do Fluxo de Caixa ou a do extrato). Quando a alteração foi feita pelo site, aparece quem fez e como. Dá para <b>voltar à data original</b> (só linhas ainda não classificadas).</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><select style="' + est + '" onchange="__flDat.f.banco=this.value;_flDatasRedesenhar()"><option value="">Todos os bancos</option><option value="1"' + (f.banco === '1' ? ' selected' : '') + '>Itaú</option><option value="4"' + (f.banco === '4' ? ' selected' : '') + '>Banco do Brasil</option></select>'
+      + '<select style="' + est + '" onchange="__flDat.f.via=this.value;_flDatasRedesenhar()"><option value="">Todas</option><option value="reg"' + (f.via === 'reg' ? ' selected' : '') + '>Feitas pelo site (com quem/quando)</option><option value="det"' + (f.via === 'det' ? ' selected' : '') + '>Detectadas pela data de origem</option></select>'
+      + '<input style="' + est + ';width:240px" placeholder="🔎 texto do histórico" value="' + E(f.texto) + '" oninput="__flDat.f.texto=this.value;_flDatasRedesenhar(true)">'
+      + '<button class="btn bo bsm" onclick="_flReverterDatas()" ' + (lista.some(x => x.status === 'pendente' || x.status === 'ignorado') ? '' : 'disabled') + ' title="Volta TODAS as linhas filtradas (ainda não classificadas) para a data original">↩ Voltar à data original (' + lista.filter(x => x.status === 'pendente' || x.status === 'ignorado').length + ')</button></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:4px">' + lista.length + ' linha(s) com data alterada' + (lista.length > mostra.length ? ' — mostrando as primeiras ' + mostra.length : '') + '</div>'
+      + '<div style="overflow:auto;max-height:calc(100vh - 360px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="padding:6px 8px;text-align:left">Alterada em</th><th style="padding:6px 8px;text-align:left">Por</th><th style="padding:6px 8px;text-align:left">Banco</th><th style="padding:6px 8px;text-align:left">Origem</th><th style="padding:6px 8px;text-align:right">Valor</th><th style="padding:6px 8px;text-align:left">Histórico bancário</th><th style="padding:6px 8px;text-align:left;white-space:nowrap">Data original → Data atual</th><th style="padding:6px 8px;text-align:left">Como</th><th style="padding:6px 8px"></th></tr></thead><tbody>'
+      + (mostra.length ? mostra.map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 8px;white-space:nowrap;font-size:11.5px">' + dt(x.em) + '</td><td style="padding:5px 8px;font-size:11.5px">' + E(x.por || '—') + '</td><td style="padding:5px 8px;white-space:nowrap">' + E(BANCOS[String(x.conta)] || x.conta) + '</td><td style="padding:5px 8px;white-space:nowrap;font-size:11.5px">' + E(ORIGENS[x.fonte] || '—') + '</td><td style="padding:5px 8px;text-align:right;white-space:nowrap;color:' + (x.v >= 0 ? 'var(--teal)' : '#dc2626') + '">' + (x.v >= 0 ? '+' : '−') + ' R$ ' + fmt(Math.abs(x.v)) + '</td><td style="padding:5px 8px;font-size:11.5px;line-height:1.3;max-width:640px">' + E(x.h) + '</td><td style="padding:5px 8px;white-space:nowrap"><b>' + brData(x.de) + '</b> → <b>' + brData(x.para) + '</b></td><td style="padding:5px 8px;font-size:11.5px">' + E(x.via) + '</td><td style="padding:5px 8px">' + ((x.status === 'pendente' || x.status === 'ignorado') ? '<button class="btn bo bsm" title="Voltar esta linha à data original" onclick="_flReverterDatas(' + x.id + ')">↩</button>' : '<span title="Já classificada: desclassifique para mudar a data" style="font-size:11px;color:var(--slate)">classificada</span>') + '</td></tr>').join('') : '<tr><td colspan="9" style="padding:20px;text-align:center;color:var(--slate)">Nenhuma linha com data diferente da origem.</td></tr>')
+      + '</tbody></table></div>';
+  }
+  root._flDatasRedesenhar = function (mantemFoco) {
+    const a = document.activeElement, ph = a && a.getAttribute && a.getAttribute('placeholder'), pos = a && a.selectionStart; desenharDatas();
+    if (mantemFoco && ph) { const n = [...document.querySelectorAll('#lancctbConteudoAba input')].find(i => i.getAttribute('placeholder') === ph); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (e) {} } }
+  };
+  root._flReverterDatas = async function (idUnico) {
+    const alvo = (idUnico ? root.__flDat.rows.filter(x => x.id === idUnico) : datasFiltradas()).filter(x => x.status === 'pendente' || x.status === 'ignorado');
+    if (!alvo.length) { toast('Nenhuma linha para reverter.', 'err'); return; }
+    if (!confirm('Voltar ' + alvo.length + ' linha(s) para a data original?')) return;
+    let feitas = 0; const logs = [];
+    for (let i = 0; i < alvo.length; i += 20) {
+      await Promise.all(alvo.slice(i, i + 20).map(async x => { const r = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: x.de }).eq('id', x.id).in('status_conciliacao', ['pendente', 'ignorado']).select('id'); if (!r.error && (r.data || []).length) { feitas++; logs.push({ id: x.id, em: new Date().toISOString(), por: quemFez(), conta: x.conta, fonte: x.fonte, v: x.v, h: x.h.slice(0, 200), de: x.para, para: x.de, via: 'voltou à data original' }); } }));
+    }
+    gravarLogData(logs);
+    toast(feitas + ' linha(s) voltaram à data original ✓', 'ok'); root._flAbrirDatas();
+  };
+
   // ───────── página "Ignorados": resgatar linhas ignoradas (mesmo banco, outro banco, outra data) ─────────
   const BANCOS = { '1': 'Itaú', '4': 'Banco do Brasil' };
   const ORIGENS = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
@@ -574,6 +638,7 @@
       const r = await _supaClient.from('lancamentos_extrato').update(up).in('id', lote).eq('status_conciliacao', 'ignorado').select('id');
       if (r.error) { toast('Erro ao resgatar: ' + r.error.message, 'err'); return; }
       feitas += (r.data || []).length;
+      if (data) { const mapa = new Map(g.rows.map(x => [x.id, x])); gravarLogData((r.data || []).map(row => mapa.get(row.id)).filter(a => a && a.data_pagamento !== data).map(a => entLog(a, data, 'resgate (🚫 Ignorados)'))); }
       if (banco) await _supaClient.from('fluxo_caixa_lancamentos').update({ conta_bancaria_id: Number(banco) }).in('lancamento_extrato_id', lote);
     }
     toast(feitas + ' linha(s) resgatada(s)' + rot + ' ✓', 'ok');
@@ -621,7 +686,7 @@
       });
   };
   root._flEditarLinha = async function (id) {
-    const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle(); if (!x) return;
+    const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle(); if (!x) return;
     if (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial') { toast('Esta linha já está classificada. Desclassifique antes de editar.', 'err'); return; }
     const aj = x.fonte === 'ajuste_manual', ent = Number(x.valor_entrada) > 0;
     dialogoForm('✏️ Editar linha' + (aj ? ' (ajuste manual)' : ''),
@@ -632,6 +697,7 @@
         const up = { data_pagamento: d };
         if (aj) { const t = el.querySelector('#flEdTipo').value, v = num(el.querySelector('#flEdValor').value); if (!(v > 0)) { toast('Informe o valor.', 'err'); return false; } up.valor_saida = t === 'saida' ? v : 0; up.valor_entrada = t === 'entrada' ? v : 0; up.historico_bancario = el.querySelector('#flEdHist').value.trim() || HIST_AJUSTE; }
         const r = await _supaClient.from('lancamentos_extrato').update(up).eq('id', id); if (r.error) { toast('Erro ao salvar: ' + r.error.message, 'err'); return false; }
+        if (up.data_pagamento !== x.data_pagamento) gravarLogData([entLog(x, up.data_pagamento, 'edição da linha (✏️)')]);
         toast('Linha atualizada ✓', 'ok'); renderLancctbRegistroContabil();
       });
   };
@@ -648,8 +714,9 @@
     dialogoForm('📅 Alterar data das filtradas (' + ids.length + ')', '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">A nova data vale para as ' + ids.length + ' linha(s) filtradas (todas as páginas). Linhas já classificadas não são alteradas — desclassifique antes.</div><label style="font-size:12px">Nova data</label><input id="flBulkData" type="date" style="' + ESTI + '">',
       async el => {
         const d = el.querySelector('#flBulkData').value; if (!d) { toast('Escolha a nova data.', 'err'); return false; }
-        let feitas = 0;
-        for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: d }).in('id', ids.slice(i, i + 200)).in('status_conciliacao', ['pendente', 'ignorado']).select('id'); if (r.error) { toast('Erro: ' + r.error.message, 'err'); return false; } feitas += (r.data || []).length; }
+        let feitas = 0; const logs = [];
+        for (let i = 0; i < ids.length; i += 200) { const antes = new Map(((await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte').in('id', ids.slice(i, i + 200)).in('status_conciliacao', ['pendente', 'ignorado'])).data || []).map(x => [x.id, x])); const r = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: d }).in('id', ids.slice(i, i + 200)).in('status_conciliacao', ['pendente', 'ignorado']).select('id'); (r.data || []).forEach(row => { const a = antes.get(row.id); if (a && a.data_pagamento !== d) logs.push(entLog(a, d, 'alteração em lote (📅)')); }); if (r.error) { toast('Erro: ' + r.error.message, 'err'); return false; } feitas += (r.data || []).length; }
+        gravarLogData(logs);
         toast(feitas + ' linha(s) com a data alterada para ' + brData(d) + (feitas < ids.length ? ' · ' + (ids.length - feitas) + ' já classificada(s) não foram alteradas' : ''), 'ok'); renderLancctbRegistroContabil();
       });
   };
