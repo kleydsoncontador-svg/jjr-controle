@@ -205,7 +205,8 @@
       const u = await _supaClient.from('lancamentos_extrato').update({ valor_saida: total / 100, historico_bancario: hist }).eq('id', keep.id).eq('status_conciliacao', 'pendente'); if (u.error) throw new Error(u.error.message);
       const lig = await _supaClient.from('fluxo_caixa_lancamentos').select('id').in('lancamento_extrato_id', ids);
       const fids = (lig.data || []).map(f => f.id);
-      if (fids.length) { await _supaClient.from('fluxo_caixa_lancamentos').update({ lancamento_extrato_id: keep.id, status_associado: 'associado' }).in('id', fids); marcarManuais(fids); }
+      // as outras linhas do Fluxo ficam guardadas no sistema, mas soltas e marcadas como 'não trazer' (assim o Registro mostra UMA linha só, sem abrir em várias)
+      if (fids.length) { await _supaClient.from('fluxo_caixa_lancamentos').update({ lancamento_extrato_id: null, status_associado: 'nao_associado', conta_bancaria_id: null }).in('id', fids); const ex = getExcl(); fids.forEach(i => ex.add(String(i))); setExcl(ex); desmarcarManuais(fids); }
       for (const t of ['notas_fiscais_parcelas', 'comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', ids);
       await _supaClient.from('lancamentos_contabeis').delete().in('lancamento_extrato_id', ids);
       const d = await _supaClient.from('lancamentos_extrato').delete().in('id', ids); if (d.error) throw new Error(d.error.message);
