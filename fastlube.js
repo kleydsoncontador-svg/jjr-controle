@@ -344,6 +344,7 @@
         } else { rel.excessos.push({ dia: d, dif, ls: Lp, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); ent.sobraSispag = Lp; }
       } else if (!pend.length && R.length) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); }
       ent.cobertas = ls.filter(l => l.explicada).length; rel.explicadas += ent.cobertas;
+      ent.outroDia = ls.filter(l => /^(dia|soma dia)/.test(l.via || '')).map(l => ({ v: l.c, h: String(l.r.historico_bancario || ''), via: l.via }));
     });
     // dias que só têm Fluxo sem par e nenhum extrato
     Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate)).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
@@ -464,6 +465,7 @@
       h += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px"><div style="font-weight:700;margin-bottom:4px">Dia ' + brData(d.dia) + ' — ' + chip + '</div><div style="font-size:12.5px;line-height:1.45">';
       if (d.total) h += 'O extrato tem <b>' + d.total + '</b> saída(s) neste dia. <b>' + d.cobertas + '</b> já estavam no Fluxo de Caixa (por isso não trouxe de novo, para não contar duas vezes).<br>';
       if (d.add && d.add.length) h += 'Estas saídas estavam <b>só no extrato</b> (o Fluxo não tem), então trouxe para o Registro:' + d.add.map(a => li(v$(a.v) + ' — ' + E(a.h))).join('') ;
+      if (d.outroDia && d.outroDia.length) h += '<div style="margin-top:4px">Estas saídas do extrato só bateram com pagamentos do Fluxo de <b>outro dia</b> (até 3 dias de diferença):' + d.outroDia.map(o => li(v$(o.v) + ' — ' + E(o.h) + ' (' + E(o.via) + ')')).join('') + '</div>';
       if (d.ignoradas) h += '<div style="margin-top:4px;color:var(--slate)">Você tinha ignorado ' + d.ignoradas + ' linha(s) do extrato deste dia — não trouxe de novo.</div>';
       if (d.conc) h += '<div style="margin-top:4px">Os pagamentos <b>Sispag</b> do extrato (' + v$(d.conc.ls) + ') não fecharam exatamente com o que o Fluxo tem neste dia (' + v$(d.conc.rs) + '). Para o saldo do dia bater, incluí <b>uma linha de Conciliação de ' + v$(d.conc.dif) + '</b> (a diferença). O histórico dela mostra as somas.</div>';
       if (alerta) h += '<div style="margin-top:4px;color:#b45309"><b>O Fluxo tem pagamento(s) neste dia que NÃO aparece(m) no extrato do banco</b> (total ' + v$(d.excesso.reduce((a, e) => a + e.v, 0)) + '):' + d.excesso.slice(0, 12).map(e => li(v$(e.v) + (e.n ? ' — ' + E(e.n) : ''))).join('') + (d.excesso.length > 12 ? li('… e mais ' + (d.excesso.length - 12)) : '') + '<span style="color:var(--slate)">Pode ter sido pago em outro dia ou por outro banco. Se NÃO saiu deste banco, clique em 🚫 nessa linha (ela sai do saldo) — ou em ✏️ para mudar a data — e traga os pagamentos de novo.</span></div>';
