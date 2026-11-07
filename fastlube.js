@@ -301,13 +301,13 @@
     const rejeitadas = new Set((ant.data || []).filter(x => x.status_conciliacao === 'ignorado').map(x => x.hash_dedup));
     // 2) Fluxo (Registro) por dia, e saídas do extrato por dia
     const fxr = await todosPorId(() => {
-      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
+      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,status_conciliacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
       const de0 = p.de ? sh(p.de, -3) : '', ate0 = p.ate ? sh(p.ate, 3) : '';
       if (de0) q = q.gte('data_pagamento', de0); if (ate0) q = q.lte('data_pagamento', ate0);
       return q;
     });
     const fx = fxr.data || [];
-    const fluxoDia = {}; fx.forEach(f => { (fluxoDia[f.data_pagamento] = fluxoDia[f.data_pagamento] || []).push({ id: f.id, c: cents(f.valor_saida), usado: false, nome: String(f.historico_bancario || '').split(' | ')[0].slice(0, 60) }); });
+    const fluxoDia = {}; fx.forEach(f => { (fluxoDia[f.data_pagamento] = fluxoDia[f.data_pagamento] || []).push({ id: f.id, c: cents(f.valor_saida), usado: false, h: String(f.historico_bancario || ''), cls: f.status_conciliacao === 'conciliado' || f.status_conciliacao === 'parcial', nome: String(f.historico_bancario || '').split(' | ')[0].slice(0, 60) }); });
     const extDia = {};
     ref.filter(r => Number(r.valor_saida) > 0 && !diasFechados.has(r.data_pagamento)).forEach(r => { (extDia[r.data_pagamento] = extDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), cat: catExtrato(r.historico_bancario), explicada: false, via: '' }); });
     const dias = Object.keys(extDia).sort();
@@ -315,6 +315,17 @@
     const casavel = l => l.cat === 'sispag' || l.cat === 'outros';
     // passada A: mesmo dia, mesmo valor
     dias.forEach(d => extDia[d].slice().sort((a, b) => b.c - a.c).forEach(l => { if (!casavel(l)) return; const f = livres(d).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'mesmo valor'; } }));
+    // passada A2 (tributos): o cliente erra centavos (até R$ 1,00) em IPTU/ICMS/IRPJ/CSLL/PIS/COFINS/FGTS...: a saída do extrato casa com a linha do Fluxo de imposto de valor MUITO próximo.
+    // O pagador que já teve esse ajuste fica na memória (fl_tol_pagadores_163) e passa a valer mesmo sem a palavra do imposto no nome.
+    const TRIB = /IPTU|PREFEITURA|ICMS|IRPJ|CSLL|\bPIS\b|COFINS|FGTS|\bGPS\b|DARF|GNRE|\bINSS\b|\bISS\b|IMPOSTO|TRIBUT|\bDAS\b|\bGP\d/i;
+    const chavePag = h => String(h || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim();
+    let tolMem = {}; try { tolMem = S.g('fl_tol_pagadores_163') || {}; } catch (e) {}
+    const ajustesCent = [];
+    dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
+      let melhor = null;
+      livres(d).forEach(x => { if (x.cls) return; const dif = Math.abs(x.c - l.c); if (dif === 0 || dif > 100) return; if (!(TRIB.test(x.h) || tolMem[chavePag(x.h)])) return; if (!melhor || dif < melhor.dif) melhor = { x, dif }; });
+      if (melhor) { melhor.x.usado = true; l.explicada = true; l.via = 'tributo (centavos)'; ajustesCent.push({ id: melhor.x.id, dia: d, de: melhor.x.c, para: l.c, nome: melhor.x.nome, chave: chavePag(melhor.x.h), h: melhor.x.h }); }
+    }));
     // passada B: mesmo dia, a saída do extrato = SOMA exata de linhas do Fluxo (qualquer tipo, menos aplicação/tarifa)
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       const it = livres(d); if (!it.length) return; const sel = exatoSubset(it, l.c); if (sel) { sel.forEach(k => { it[k].usado = true; }); l.explicada = true; l.via = 'soma de ' + sel.length; }
@@ -370,8 +381,20 @@
     });
     // dias que só têm Fluxo sem par e nenhum extrato
     Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
+    rel.ajustesCent = ajustesCent;
+    if (!simular && ajustesCent.length) {
+      const log = []; let ok = 0;
+      for (const a of ajustesCent) {
+        const r = await _supaClient.from('lancamentos_extrato').update({ valor_saida: a.para / 100 }).eq('id', a.id).eq('fonte', 'fluxo').in('status_conciliacao', ['pendente']);
+        if (!r.error) { ok++; log.push({ id: a.id, em: new Date().toISOString(), por: quemFez(), dia: a.dia, nome: a.nome, de: a.de / 100, para: a.para / 100, via: 'tributo: ajuste de centavos pelo extrato' }); tolMem[a.chave] = (tolMem[a.chave] || 0) + 1; }
+      }
+      try { S.s('fl_tol_pagadores_163', tolMem); } catch (e) {}
+      gravarLogValor(log); rel.ajustesAplicados = ok;
+    }
     return rel;
   }
+  const LOGVALOR = 'fl_valores_alterados_163';
+  const gravarLogValor = es => { if (!es.length) return; try { S.s(LOGVALOR, es.concat(S.g(LOGVALOR) || []).slice(0, 3000)); } catch (e) {} };
   // dias cujo saldo de fechamento (Registro × extrato) já bate E que já receberam linhas do extrato (conciliados: não se reprocessa)
   async function todosDiasConciliados(conta) {
     const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
@@ -495,6 +518,7 @@
     if (!r) return '<div style="font-size:13px">Trouxe <b>' + x.trouxe + '</b> recebimento(s) do extrato para o Registro' + (x.valor ? ', somando <b>R$ ' + fmt(x.valor) + '</b>' : '') + '.</div>';
     const det = r.detalhe || [];
     let h = '<div style="font-size:13px;margin-bottom:8px">' + (r.linhasAdicionadas ? 'Trouxe <b>' + r.linhasAdicionadas + '</b> linha(s) do extrato para o Registro' : 'Não precisei trazer nada do extrato') + '. Nenhuma linha do Fluxo de Caixa foi tirada ou alterada.</div>';
+    if (r.ajustesCent && r.ajustesCent.length) h += '<div style="font-size:12.5px;margin:6px 0;padding:6px 8px;border:1px solid var(--border);border-radius:6px"><b>Tributos com diferença de centavos</b> (' + (r.ajustesAplicados != null ? 'valor corrigido pelo extrato' : 'simulação') + '):' + r.ajustesCent.map(a => li(brData(a.dia) + ' · ' + E(a.nome) + ': Fluxo ' + v$(a.de) + ' → extrato ' + v$(a.para))).join('') + '</div>';
     if (!det.length) return h + '<div style="font-size:12.5px;color:var(--slate)">Não havia saída no extrato neste período.</div>';
     det.forEach(d => {
       const alerta = d.excesso && d.excesso.length, temAdd = d.add && d.add.length || d.conc;
@@ -701,6 +725,23 @@
         toast('Linha atualizada ✓', 'ok'); renderLancctbRegistroContabil();
       });
   };
+  root._flEditarValor = async function (id) {
+    const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle(); if (!x) return;
+    if (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial') { toast('Esta linha já está classificada. Desclassifique antes de editar o valor.', 'err'); return; }
+    const ent = Number(x.valor_entrada) > 0, atual = ent ? Number(x.valor_entrada) : Number(x.valor_saida);
+    dialogoForm('✏️ Corrigir valor (linha do Fluxo)',
+      '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">' + E(String(x.historico_bancario || '').slice(0, 160)) + '<br>Dia ' + brData(x.data_pagamento) + ' · valor no Fluxo: <b>R$ ' + fmt(atual) + '</b><br>A correção fica registrada (valor original guardado) e o sistema lembra deste pagador para os próximos meses.</div>'
+      + '<label style="font-size:12px">Valor correto (R$)</label><input id="flEdVal" value="' + fmt(atual) + '" style="' + ESTI + '">',
+      async el => {
+        const v = num(el.querySelector('#flEdVal').value); if (!(v > 0)) { toast('Informe o valor.', 'err'); return false; }
+        if (Math.round(v * 100) === Math.round(atual * 100)) return;
+        const r = await _supaClient.from('lancamentos_extrato').update(ent ? { valor_entrada: v } : { valor_saida: v }).eq('id', id).in('status_conciliacao', ['pendente']);
+        if (r.error) { toast('Erro ao salvar: ' + r.error.message, 'err'); return false; }
+        gravarLogValor([{ id, em: new Date().toISOString(), por: quemFez(), dia: x.data_pagamento, nome: String(x.historico_bancario || '').split(' | ')[0].slice(0, 60), de: atual, para: v, via: 'edição manual (✏️ do valor)' }]);
+        try { const m = S.g('fl_tol_pagadores_163') || {}, k = String(x.historico_bancario || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim(); if (k && Math.abs(v - atual) <= 1) { m[k] = (m[k] || 0) + 1; S.s('fl_tol_pagadores_163', m); } } catch (e) {}
+        toast('Valor corrigido ✓ (original R$ ' + fmt(atual) + ' guardado no registro)', 'ok'); renderLancctbRegistroContabil();
+      });
+  };
   root._flExcluirAjuste = async function (id) {
     if (!confirm('Excluir este ajuste manual?')) return;
     for (const t of ['comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios', 'notas_fiscais_parcelas']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).eq('lancamento_extrato_id', id);
@@ -799,6 +840,8 @@
       td.style.cssText = 'padding:7px 8px;font-size:11.5px;white-space:nowrap;color:' + (f === 'fluxo' ? 'var(--teal)' : 'var(--slate)');
       td.textContent = f ? (ROT[f] || f) : '';
       tr.insertBefore(td, tr.children[7]);
+      const cv = tr.children[8]; // lapisinho minúsculo ao lado do VALOR, só nas linhas que vieram do Fluxo
+      if (rid && f === 'fluxo' && cv && !cv.querySelector('.fl-edv')) cv.insertAdjacentHTML('beforeend', ' <span class="fl-edv" style="cursor:pointer;font-size:9px;opacity:.65;margin-left:2px" title="Corrigir o valor desta linha do Fluxo (ex.: centavos de imposto)" onclick="event.stopPropagation();_flEditarValor(' + rid + ')">✏️</span>');
     });
     const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130) + 'px';
   }
