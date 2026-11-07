@@ -131,6 +131,18 @@
     campo.value = ''; // começa vazio: o usuário vai clicando nas partes que quer
     try { _lancctbRegraAvaliarDas(); } catch (e) {}
   };
+  // Fast Lube: avisa em que banco e período o botão de processar vai agir (só o que está na tela; sem filtro de data = a conta inteira)
+  root._flAvisoEscopo = function (nome) {
+    if (!ativo()) return;
+    const ag = (_lancctbRegistroAgenciasCache || []).find(a => String(a.id) === contaAtual());
+    const banco = ag ? (_lancctbNomeBancoExibicao(ag.banco_nome) + (ag.conta_corrente ? ' Cc ' + ag.conta_corrente : '')) : 'conta ' + contaAtual();
+    let per;
+    if (_lancctbRegistroDataExata) per = 'o dia ' + brData(_lancctbRegistroDataExata);
+    else if (_lancctbRegistroDataDe || _lancctbRegistroDataAte) per = 'de ' + (_lancctbRegistroDataDe ? brData(_lancctbRegistroDataDe) : 'o início') + ' até ' + (_lancctbRegistroDataAte ? brData(_lancctbRegistroDataAte) : 'o fim');
+    else per = 'TODO o período (sem filtro de data)';
+    const rot = String(nome || '').replace('_lancctbProcessar', '').replace(/FonteRegistro/, 'Pagamentos/Recebimentos');
+    toast('Processando ' + rot + ' — ' + banco + ' — ' + per, 'info');
+  };
   // ── 1) subir o Fluxo ──
   root._flSubirFluxo = async function () {
     await abrirLancctbFluxoImportModal();
@@ -464,11 +476,12 @@
   (function () { const st = document.createElement('style'); st.textContent = 'body[data-fl="1"] #lancctbRegraBuscaFluxoWrap{display:none !important}'; document.head.appendChild(st); })();
   root._flPosRender = function () {
     try { document.body.dataset.fl = (eidAtual() === EID) ? '1' : ''; } catch (e) {}
+    try { if (eidAtual() === EID) { const b = document.querySelector('.action-bar-sticky [data-etapa="fluxo"]'); if (b) b.style.display = 'none'; } } catch (e) {}
     if (!ativo()) { if (obs) obs.disconnect(); return; }
     const alvo = document.getElementById('lancctbConteudoAba'); if (!alvo) return;
     // a barra de saldo (saldo inicial / entradas / saídas / saldo final) às vezes era apagada por uma atualização da tela que chegava depois: se ficar vazia, preenche de novo
     const garantirBarraSaldo = () => { const slot = document.getElementById('lancctbSaldoRegSlot'); if (!slot || slot.innerHTML.trim() !== '') return; const agora = Date.now(); if (agora - (root.__flSaldoTs || 0) < 3000) return; root.__flSaldoTs = agora; _lancctbRegistroSaldoPreencher(0).catch(() => {}); };
-    const rodar = () => { clearTimeout(tmr); tmr = setTimeout(() => { injetarSaldo().catch(e => console.warn('Saldo (Fast Lube):', e)); garantirBarraSaldo(); }, 250); };
+    const rodar = () => { clearTimeout(tmr); tmr = setTimeout(() => { injetarSaldo().catch(e => console.warn('Saldo (Fast Lube):', e)); garantirBarraSaldo(); try { const bf = document.querySelector('.action-bar-sticky [data-etapa="fluxo"]'); if (bf) bf.style.display = 'none'; } catch (e) {} }, 250); };
     if (!obs) { obs = new MutationObserver(rodar); }
     obs.disconnect(); obs.observe(alvo, { childList: true, subtree: true });
     rodar();
