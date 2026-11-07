@@ -317,6 +317,14 @@
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       const it = livres(d); if (!it.length) return; const sel = exatoSubset(it, l.c); if (sel) { sel.forEach(k => { it[k].usado = true; }); l.explicada = true; l.via = 'soma de ' + sel.length; }
     }));
+    // passada B2 (inverso): UMA linha do Fluxo = SOMA exata de várias saídas Sispag do extrato do mesmo dia (ex.: folha pagos um a um no extrato e lançados juntos no Fluxo)
+    const gruposDia = {};
+    dias.forEach(d => livres(d).sort((a, b) => b.c - a.c).forEach(f => {
+      const cand = extDia[d].filter(l => !l.explicada && l.cat === 'sispag'); if (cand.length < 2) return;
+      const sel = exatoSubset(cand, f.c); if (!sel || sel.length < 2) return;
+      sel.forEach(k => { cand[k].explicada = true; cand[k].via = 'soma p/ 1 do Fluxo'; }); f.usado = true;
+      (gruposDia[d] = gruposDia[d] || []).push({ v: f.c, n: f.nome, qtd: sel.length });
+    }));
     // passada C: dia próximo (±3): valor igual, depois soma de linhas de UM mesmo dia
     let outroDia = 0;
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const f = livres(sh(d, dd)).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'dia ' + (dd > 0 ? '+' : '') + dd; outroDia++; return; } } }));
@@ -325,7 +333,7 @@
     const rel = { linhasAdicionadas: 0, conciliacoes: [], excessos: [], explicadas: 0, outroDia, dias: dias.length, fechados: [...diasFechados].length, detalhe: [] };
     dias.forEach(d => {
       const ls = extDia[d];
-      const ent = { dia: d, total: ls.length, cobertas: 0, add: [], conc: null, excesso: [] }; rel.detalhe.push(ent);
+      const ent = { dia: d, total: ls.length, cobertas: 0, add: [], conc: null, excesso: [], grupos: gruposDia[d] || [] }; rel.detalhe.push(ent);
       const sobra = ls.filter(l => !l.explicada), diretas = sobra.filter(l => !casavel(l)), pend = sobra.filter(l => casavel(l)), R = livres(d);
       const adiciona = l => { if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); };
       diretas.forEach(adiciona);                                  // aplicações, tarifas, IOF, impostos do banco: só existem no extrato
@@ -464,6 +472,7 @@
       const chip = alerta ? '<span style="color:#b45309;font-weight:700">⚠ precisa da sua atenção</span>' : (temAdd ? '<span style="color:var(--teal);font-weight:700">➕ trouxe linhas do extrato</span>' : '<span style="color:var(--teal);font-weight:700">✔ nada a trazer</span>');
       h += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px"><div style="font-weight:700;margin-bottom:4px">Dia ' + brData(d.dia) + ' — ' + chip + '</div><div style="font-size:12.5px;line-height:1.45">';
       if (d.total) h += 'O extrato tem <b>' + d.total + '</b> saída(s) neste dia. <b>' + d.cobertas + '</b> já estavam no Fluxo de Caixa (por isso não trouxe de novo, para não contar duas vezes).<br>';
+      if (d.grupos && d.grupos.length) h += 'Alguns pagamentos do Fluxo aparecem no extrato <b>divididos em várias saídas Sispag</b> (a soma fecha exatamente), por isso não trouxe de novo:' + d.grupos.map(g => li(v$(g.v) + (g.n ? ' — ' + E(g.n) : '') + ' = ' + g.qtd + ' saídas do extrato')).join('') + '<br>';
       if (d.add && d.add.length) h += 'Estas saídas estavam <b>só no extrato</b> (o Fluxo não tem), então trouxe para o Registro:' + d.add.map(a => li(v$(a.v) + ' — ' + E(a.h))).join('') ;
       if (d.outroDia && d.outroDia.length) h += '<div style="margin-top:4px">Estas saídas do extrato só bateram com pagamentos do Fluxo de <b>outro dia</b> (até 3 dias de diferença):' + d.outroDia.map(o => li(v$(o.v) + ' — ' + E(o.h) + ' (' + E(o.via) + ')')).join('') + '</div>';
       if (d.ignoradas) h += '<div style="margin-top:4px;color:var(--slate)">Você tinha ignorado ' + d.ignoradas + ' linha(s) do extrato deste dia — não trouxe de novo.</div>';
