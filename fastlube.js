@@ -162,7 +162,10 @@
     [...new Set([...Object.keys(mr), ...Object.keys(mg)])].sort().forEach(d => { sr += mr[d] || 0; sg += mg[d] || 0; if (sr === sg) conc.push(d); });
     root.__flDiasConc = conc;
   };
+  root.__flFiltroOrigem = root.__flFiltroOrigem || '';
+  root._flLimparFiltros = function () { root.__flFiltroOrigem = ''; };
   root._flAplicaFiltroDias = function (q) {
+    if (ativo() && root.__flFiltroOrigem) q = q.eq('fonte', root.__flFiltroOrigem);
     const v = root.__flFiltroDias, conc = root.__flDiasConc;
     if (!ativo() || !v || !conc) return q;
     if (v === 'conc') return conc.length ? q.in('data_pagamento', conc) : q.eq('id', -1);
@@ -487,7 +490,10 @@
     // coluna ORIGEM (logo depois do PF/PJ, antes do Valor): de onde veio a linha
     const cg2 = tbl.querySelector('colgroup'); if (cg2 && cg2.children[6]) { const c = document.createElement('col'); c.style.width = '17ch'; cg2.insertBefore(c, cg2.children[7]); }
     if (heads[0] && heads[0].children[6]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 8px;text-align:left;white-space:nowrap'; th.textContent = 'Origem'; th.title = 'De onde veio esta linha: Fluxo de Caixa, ou extrato bancário (recebimento / pagamento trazido pelos botões)'; heads[0].insertBefore(th, heads[0].children[7]); }
-    if (heads[1] && heads[1].children[6]) { const th = document.createElement('th'); th.style.cssText = 'padding:4px 6px'; heads[1].insertBefore(th, heads[1].children[7]); }
+    if (heads[1] && heads[1].children[6]) { const th = document.createElement('th'); th.style.cssText = 'padding:4px 6px';
+      const op = [['', 'Todas'], ['fluxo', 'Fluxo de Caixa'], ['extrato_receb', 'Extrato · recebimento'], ['extrato_compl', 'Extrato · pagamento'], ['conciliacao', 'Conciliação']];
+      th.innerHTML = '<select class="si" data-filtro="registro-origem" style="width:100%;font-size:11px" onchange="__flFiltroOrigem=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">' + op.map(o => '<option value="' + o[0] + '"' + (root.__flFiltroOrigem === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
+      heads[1].insertBefore(th, heads[1].children[7]); }
     tbl.querySelectorAll('tbody tr').forEach(tr => {
       const cel = tr.children[6]; if (!cel) return;
       const td = document.createElement('td'); const rid = tr.dataset.rid, f = rid ? fontePorId.get(String(rid)) : null;
