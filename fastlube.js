@@ -337,7 +337,7 @@
   async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
-    const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte,hash_dedup').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
+    const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte,hash_dedup,valor_saida,valor_entrada').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
     const noPer = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate) && (!diasSel || diasSel.has(x.data_pagamento));
     const apagar = (ant.data || []).filter(x => noPer(x) && x.status_conciliacao === 'pendente').map(x => x.id);
     for (let i = 0; !simular && i < apagar.length; i += 200) {
@@ -348,6 +348,10 @@
     }
     // dia FECHADO = já tem linha trazida e CLASSIFICADA (não se mexe). Linha que você IGNOROU não fecha o dia: ela só impede que o mesmo item seja trazido de novo.
     const diasFechados = new Set((ant.data || []).filter(x => noPer(x) && (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial')).map(x => x.data_pagamento));
+    // O que já está no Registro e NÃO será refeito (classificado, ou fora dos dias escolhidos): conta como presente e não é trazido de novo — mas o dia continua sendo processado (novas diferenças são tratadas).
+    const apagarSet = new Set(apagar), presentes = (ant.data || []).filter(x => !apagarSet.has(x.id) && x.status_conciliacao !== 'ignorado');
+    const trazidas = new Set(presentes.map(x => x.hash_dedup)), presenteDia = {};
+    presentes.forEach(x => { presenteDia[x.data_pagamento] = (presenteDia[x.data_pagamento] || 0) + cents(x.valor_saida) - cents(x.valor_entrada); });
     const rejeitadas = new Set((ant.data || []).filter(x => x.status_conciliacao === 'ignorado').map(x => x.hash_dedup));
     // 2) Fluxo (Registro) por dia, e saídas do extrato por dia
     const fxr = await todosPorId(() => {
@@ -375,7 +379,7 @@
       itens.forEach(it => { if (it.fim) return; const b = casa(it, false); if (!b) return; b.r.usada = true; it.fim = b.r; icmsOk.add(it.x.id); if (b.r.v !== it.x.c) { ajustesIcms.push({ id: it.x.id, dia: it.d, de: it.x.c, para: b.r.v, nome: it.x.nome, nf: it.nf, tipo: b.r.tipo, linhas: (porNf[it.nf] || []).length }); it.x.c = b.r.v; } });
     }
     const extDia = {};
-    ref.filter(r => Number(r.valor_saida) > 0 && !diasFechados.has(r.data_pagamento)).forEach(r => { (extDia[r.data_pagamento] = extDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), cat: catExtrato(r.historico_bancario), explicada: false, via: '' }); });
+    ref.filter(r => Number(r.valor_saida) > 0).forEach(r => { const ja = trazidas.has('flc' + r.id); (extDia[r.data_pagamento] = extDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), cat: catExtrato(r.historico_bancario), explicada: ja, via: ja ? 'já trazida' : '' }); });
     const dias = Object.keys(extDia).sort();
     const livres = d => (fluxoDia[d] || []).filter(x => !x.usado);
     const casavel = l => l.cat === 'sispag' || l.cat === 'outros';
@@ -450,10 +454,10 @@
       const ent = rel.detalhe.find(x => x.dia === d); if (!ent) return;
       const A = extDia[d].reduce((a, l) => a + l.c, 0), regF = (fluxoDia[d] || []).reduce((a, x) => a + x.c, 0);
       const regN = novas.filter(n => n.r.data_pagamento === d && (n.fonte === 'extrato_compl' || n.fonte === 'conciliacao')).reduce((a, n) => a + cents(n.r.valor_saida) - cents(n.r.valor_entrada), 0);
-      const dif = A - regF - regN - (ent.ignV || 0); if (!dif) return;
+      const dif = A - regF - regN - (presenteDia[d] || 0) - (ent.ignV || 0); if (!dif) return;
       // diferença = EXATAMENTE pagamentos do extrato que o Fluxo só tinha em OUTRO dia: traz esses pagamentos do extrato como eles são (histórico do próprio Sispag), sem 'Conciliação' nem explicação
       if (dif > 0) {
-        const cand = extDia[d].filter(l => /^(dia|soma dia)/.test(l.via || '')), selX = cand.length ? exatoSubset(cand, dif) : null;
+        const cand = extDia[d].filter(l => /^(dia|soma dia|soma de|soma p\/ 1|grupo)/.test(l.via || '')), selX = cand.length ? exatoSubset(cand, dif) : null;
         if (selX) { selX.forEach(k => { const l = cand[k]; if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); l.via = 'trazida (valor exato)'; }); return; }
       }
       if (rejeitadas.has('flkk' + d + '|' + dif)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; }
