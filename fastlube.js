@@ -283,11 +283,11 @@
   const catExtrato = h => { h = String(h || '').toUpperCase(); if (/SISPAG/.test(h)) return 'sispag'; if (/APLIC/.test(h)) return 'aplic'; if (/\bTAR\b|TAR\/|TARIFA|\bIOF\b|DA REC|CONTR IMP|FIN VENDA|JUROS|CUSTAS/.test(h)) return 'banco'; return 'outros'; };
   const nomeCat = ls => [...new Set(ls.map(l => String(l.r.historico_bancario || '').trim()).filter(Boolean))].slice(0, 3).join(' / ') || 'Extrato';
   const listaValores = (vs, max) => { const f = x => fmt(x / 100); return vs.length <= max ? vs.map(f).join(' + ') : vs.slice(0, max).map(f).join(' + ') + ' + … (+' + (vs.length - max) + ')'; };
-  async function conciliarPagamentos(conta, p, ref, novas, simular) {
+  async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
     const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte,hash_dedup').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
-    const noPer = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate);
+    const noPer = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate) && (!diasSel || diasSel.has(x.data_pagamento));
     const apagar = (ant.data || []).filter(x => noPer(x) && x.status_conciliacao === 'pendente').map(x => x.id);
     for (let i = 0; !simular && i < apagar.length; i += 200) {
       const lote = apagar.slice(i, i + 200);
@@ -368,7 +368,7 @@
       ent.outroDia = ls.filter(l => /^(dia|soma dia)/.test(l.via || '')).map(l => ({ v: l.c, h: String(l.r.historico_bancario || ''), via: l.via }));
     });
     // dias que só têm Fluxo sem par e nenhum extrato
-    Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate)).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
+    Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
     return rel;
   }
   // dias cujo saldo de fechamento (Registro × extrato) já bate E que já receberam linhas do extrato (conciliados: não se reprocessa)
@@ -379,6 +379,7 @@
     const mr = mv(ref), mg = mv(reg), proc = new Set(reg.filter(l => ['extrato_receb', 'extrato_compl', 'conciliacao'].includes(l.fonte)).map(l => l.data_pagamento));
     let sr = cents((ag && ag.saldo_inicial) || 0), sg = sr; const out = new Set();
     [...new Set([...Object.keys(mr), ...Object.keys(mg)])].sort().forEach(d => { sr += mr[d] || 0; sg += mg[d] || 0; if (sr === sg && proc.has(d)) out.add(d); });
+    out.mov = new Set(Object.keys(mr)); // dias que têm movimento no extrato
     return out;
   }
   async function diasJaConciliados(conta, p) {
@@ -394,37 +395,51 @@
       const pad = n => String(n).padStart(2, '0'), iso = (a, m, d) => a + '-' + pad(m + 1) + '-' + pad(d);
       let base = _lancctbRegistroDataDe || (/^\d{4}-\d{2}$/.test(_lancctbRegistroMes || '') ? _lancctbRegistroMes + '-01' : '');
       if (!base) { try { base = S.fechAtual() + '-01'; } catch (e) { base = new Date().toISOString().slice(0, 8) + '01'; } }
-      let ano = +base.slice(0, 4), mes = +base.slice(5, 7) - 1, ini = null, fim = null, bloq = new Set(), feito = false;
+      let ano = +base.slice(0, 4), mes = +base.slice(5, 7) - 1, bloq = new Set(), mov = null, feito = false;
+      const sel = new Set(); let ancora = null; // sel = dias escolhidos; ancora = 1º clique à espera do 2º (intervalo)
       const fechar = r => { if (feito) return; feito = true; closeModal('mFlCal'); resolve(r); };
-      const temBloq = (a, b) => [...bloq].some(d => d >= a && d <= b);
+      const diasEntre = (a, b) => { const o = []; for (let d = new Date(a + 'T12:00:00'); d.toISOString().slice(0, 10) <= b; d.setDate(d.getDate() + 1)) o.push(d.toISOString().slice(0, 10)); return o; };
+      const resumo = () => {
+        if (!sel.size) return 'Clique no dia inicial e depois no final (ctrl+clique escolhe dias soltos). Clique num dia escolhido para tirá-lo.';
+        const ds = [...sel].sort(), seguidos = diasEntre(ds[0], ds[ds.length - 1]).filter(x => !bloq.has(x)).length === ds.length;
+        return seguidos ? 'De <b>' + brData(ds[0]) + '</b> até <b>' + brData(ds[ds.length - 1]) + '</b> (' + ds.length + ' dia(s))' : '<b>' + ds.length + '</b> dia(s) escolhido(s): ' + ds.slice(0, 12).map(x => x.slice(8) + '/' + x.slice(5, 7)).join(', ') + (ds.length > 12 ? ' …' : '');
+      };
       const desenhar = () => {
         const ult = new Date(ano, mes + 1, 0).getDate(), ini1 = new Date(ano, mes, 1).getDay();
         let g = ''; ['D', 'S', 'T', 'Q', 'Q', 'S', 'S'].forEach(x => { g += '<div style="text-align:center;font-size:11px;color:var(--slate);padding:2px 0">' + x + '</div>'; });
         for (let i = 0; i < ini1; i++) g += '<div></div>';
         for (let d = 1; d <= ult; d++) {
-          const k = iso(ano, mes, d), b = bloq.has(k), sel = k === ini || k === fim, dentro = ini && fim && k > ini && k < fim;
-          const est = 'padding:9px 0;border-radius:6px;border:1px solid var(--border);font-size:13px;cursor:' + (b ? 'not-allowed' : 'pointer') + ';background:' + (sel ? 'var(--teal)' : dentro ? 'rgba(20,184,166,.25)' : b ? 'rgba(148,163,184,.25)' : 'var(--white)') + ';color:' + (sel ? '#fff' : b ? 'var(--slate)' : 'var(--ink)') + (b ? ';text-decoration:line-through' : '');
-          g += '<button type="button" data-d="' + k + '" title="' + (b ? 'Dia já conciliado (o saldo do Registro já bate com o extrato)' : '') + '" style="' + est + '">' + d + (b ? '🔒' : '') + '</button>';
+          const k = iso(ano, mes, d), b = bloq.has(k), on = sel.has(k);
+          const est = 'padding:9px 0;border-radius:6px;border:1px solid var(--border);font-size:13px;cursor:' + (b ? 'not-allowed' : 'pointer') + ';background:' + (on ? 'var(--teal)' : b ? 'rgba(148,163,184,.25)' : 'var(--white)') + ';color:' + (on ? '#fff' : b ? 'var(--slate)' : 'var(--ink)') + (b ? ';text-decoration:line-through' : '');
+          g += '<button type="button" data-d="' + k + '" title="' + (b ? 'Dia já conciliado (o saldo do Registro já bate com o extrato)' : (on ? 'Clique para tirar este dia' : '')) + '" style="' + est + '">' + d + (b ? '🔒' : '') + '</button>';
         }
-        el.firstChild.innerHTML = '<div class="mt" style="display:flex;justify-content:space-between;align-items:center"><span>📅 ' + E(rotulo) + ' do extrato — escolha o período</span><button id="flCalX" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button></div>'
+        el.firstChild.innerHTML = '<div class="mt" style="display:flex;justify-content:space-between;align-items:center"><span>📅 ' + E(rotulo) + ' do extrato — escolha os dias</span><button id="flCalX" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button></div>'
           + '<div style="display:flex;justify-content:space-between;align-items:center;margin:6px 0"><button class="btn bo bsm" id="flCalPrev">‹</button><b style="text-transform:capitalize">' + MESES[mes] + ' de ' + ano + '</b><button class="btn bo bsm" id="flCalNext">›</button></div>'
           + '<div style="display:grid;grid-template-columns:repeat(7,1fr);gap:4px">' + g + '</div>'
-          + '<div style="margin-top:10px;font-size:12.5px;color:var(--slate)" id="flCalTxt">' + (ini ? 'De <b>' + brData(ini) + '</b> até <b>' + brData(fim || ini) + '</b>' : 'Clique no dia inicial e depois no dia final (um clique só = um dia).') + ' <span style="opacity:.8">· 🔒 = dia já conciliado</span></div>'
-          + '<div class="ma"><button class="btn bo" id="flCalMes">Mês inteiro</button><button class="btn bp" id="flCalOk">Trazer</button><button class="btn bo" id="flCalCancel">Cancelar</button></div>';
+          + '<div style="margin-top:10px;font-size:12.5px;color:var(--slate)" id="flCalTxt">' + resumo() + ' <span style="opacity:.8">· 🔒 = dia já conciliado</span></div>'
+          + '<div class="ma"><button class="btn bo" id="flCalMes" title="Escolhe todos os dias do mês que ainda não estão conciliados (pula os 🔒). Depois você pode clicar em um dia para tirá-lo.">Mês inteiro</button><button class="btn bo" id="flCalLimpa">Limpar</button><button class="btn bp" id="flCalOk">Trazer</button><button class="btn bo" id="flCalCancel">Cancelar</button></div>';
         el.querySelector('#flCalX').onclick = el.querySelector('#flCalCancel').onclick = () => fechar(null);
         el.querySelector('#flCalPrev').onclick = () => { mes--; if (mes < 0) { mes = 11; ano--; } desenhar(); };
         el.querySelector('#flCalNext').onclick = () => { mes++; if (mes > 11) { mes = 0; ano++; } desenhar(); };
-        el.querySelector('#flCalMes').onclick = () => { ini = iso(ano, mes, 1); fim = iso(ano, mes, ult); if (temBloq(ini, fim)) { toast('Há dia(s) já conciliado(s) neste mês — escolha os dias ainda não conciliados.', 'err'); ini = fim = null; } desenhar(); };
-        el.querySelector('#flCalOk').onclick = () => { if (!ini) { toast('Clique no dia inicial (e no final).', 'err'); return; } fechar({ de: ini, ate: fim || ini }); };
-        el.querySelectorAll('button[data-d]').forEach(b => { b.onclick = () => {
+        el.querySelector('#flCalLimpa').onclick = () => { sel.clear(); ancora = null; desenhar(); };
+        el.querySelector('#flCalMes').onclick = () => {
+          sel.clear(); ancora = null;
+          for (let d = 1; d <= ult; d++) { const k = iso(ano, mes, d); if (!bloq.has(k) && (!mov || mov.has(k))) sel.add(k); }
+          if (!sel.size) toast('Neste mês todos os dias com movimento já estão conciliados.', 'info');
+          desenhar();
+        };
+        el.querySelector('#flCalOk').onclick = () => { if (!sel.size) { toast('Escolha ao menos um dia (ou "Mês inteiro").', 'err'); return; } const ds = [...sel].sort(); fechar({ de: ds[0], ate: ds[ds.length - 1], dias: ds }); };
+        el.querySelectorAll('button[data-d]').forEach(b => { b.onclick = ev => {
           const k = b.dataset.d; if (bloq.has(k)) { toast('Este dia já está conciliado (o saldo do Registro já bate com o extrato).', 'err'); return; }
-          if (!ini || (ini && fim)) { ini = k; fim = null; } else if (k < ini) { fim = ini; ini = k; } else fim = k;
-          if (fim && temBloq(ini, fim)) { toast('O período inclui dia(s) já conciliado(s).', 'err'); fim = null; }
+          if (ev.ctrlKey || ev.metaKey) { if (sel.has(k)) sel.delete(k); else sel.add(k); ancora = null; }
+          else if (ancora) { diasEntre(ancora < k ? ancora : k, ancora < k ? k : ancora).filter(x => !bloq.has(x)).forEach(x => sel.add(x)); ancora = null; }
+          else if (sel.has(k)) sel.delete(k);
+          else { sel.add(k); ancora = k; }
           desenhar();
         }; });
       };
       desenhar(); openModal('mFlCal');
-      todosDiasConciliados(conta).then(set => { bloq = set; if (!feito) desenhar(); }).catch(() => {});
+      todosDiasConciliados(conta).then(set => { bloq = set; mov = set.mov || null; if (!feito) desenhar(); }).catch(() => {});
     });
   }
   // simulação (não grava nada): devolve o que o botão de pagamentos faria no período — usada para conferir o motor
@@ -439,17 +454,17 @@
     const conta = contaAtual();
     const escolha = await escolherPeriodo(comPagamentos ? 'Pagamentos' : 'Recebimentos', conta);
     if (!escolha) return;
-    const p = { de: escolha.de, ate: escolha.ate };
+    const p = { de: escolha.de, ate: escolha.ate }, diasSel = new Set(escolha.dias || []);
     // trava de segurança (o calendário já marca os dias conciliados; isto cobre qualquer escape)
-    const bloq = await diasJaConciliados(conta, p);
+    const bloq = (await diasJaConciliados(conta, p)).filter(d => diasSel.has(d));
     if (bloq.length) { janela('🔒 Dia(s) já conciliado(s)', '<div style="font-size:13px">O saldo do Registro destes dias já bate com o extrato bancário, então não reprocesso:</div><div style="margin:8px 0;font-weight:700">' + bloq.slice(0, 40).map(brData).join(' · ') + '</div>', 640); return; }
-    const ref = await carregarRef(conta, p);
-    if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta no período. Suba o extrato lá primeiro.', 'err'); return; }
+    const ref = (await carregarRef(conta, p)).filter(r => diasSel.has(r.data_pagamento));
+    if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta nos dias escolhidos. Suba o extrato lá primeiro.', 'err'); return; }
     const novas = []; let nEnt = 0, nSai = 0, explicadas = 0, explicadasOutroDia = 0;
     if (comRecebimentos) ref.forEach(r => { if (Number(r.valor_entrada) > 0 && !(Number(r.valor_saida) > 0)) { novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; } });
     let relatorio = null;
     if (comPagamentos) {
-      relatorio = await conciliarPagamentos(conta, p, ref, novas);
+      relatorio = await conciliarPagamentos(conta, p, ref, novas, false, diasSel);
       if (!relatorio) return;
       nSai = relatorio.linhasAdicionadas;
     }
