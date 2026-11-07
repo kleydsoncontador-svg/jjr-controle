@@ -104,7 +104,7 @@
 
   // chips da regra: a Fast Lube ganha CNPJ/CPF e junta com " | " (outras empresas não mudam)
   root._flHistChipsExtra = () => (String(_lancctbEidAtual) === EID ? [{ tok: '{FLUXO_CNPJ}', rot: 'CNPJ/CPF (Fluxo)' }] : []);
-  root._flHistJuntador = () => (String(_lancctbEidAtual) === EID ? ' | ' : ' ');
+  root._flHistJuntador = () => ' '; // Histórico Utilizado personalizado: só espaço entre os campos (sem a barra vertical |)
   // ── regra em PARTES (Fast Lube): o histórico do Registro vem separado por " | "; a regra guarda as partes escolhidas (separadas por " | ")
   //    e vale para todo lançamento cujo histórico tenha TODAS as partes, em qualquer posição.
   root._flGatilhoBate = function (g, t) {
