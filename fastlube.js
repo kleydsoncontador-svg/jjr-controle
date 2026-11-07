@@ -786,13 +786,22 @@
   // ───────── página "Valores alterados" + Excel para o cliente ─────────
   const dtBr = d => { try { return d ? new Date(d).toLocaleString('pt-BR') : ''; } catch (e) { return ''; } };
   const tipoValor = x => /^(tributo|ICMS)/i.test(x.via || '') ? 'Automático' : /^consolid/i.test(x.via || '') ? 'Consolidação' : 'Manual';
-  root._flAbrirValores = function () {
+  // banco de cada linha alterada (o registro não guarda a conta: busca pelo id da linha)
+  async function bancosDosValores(lista) {
+    const ids = [...new Set(lista.map(x => x.id).filter(Boolean))], m = new Map();
+    for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id').in('id', ids.slice(i, i + 200)); (r.data || []).forEach(x => m.set(x.id, x.conta_bancaria_id)); }
+    return m;
+  }
+  const NOME_BANCO = { '1': 'Itaú', '4': 'Banco do Brasil' };
+  root._flAbrirValores = async function () {
     const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
     const lista = (S.g('fl_valores_alterados_163') || []), c = 'padding:5px 8px';
+    el.innerHTML = '<div style="padding:20px;color:var(--slate)">Carregando os valores alterados…</div>';
+    const bm = await bancosDosValores(lista), bco = x => NOME_BANCO[String(x.conta || bm.get(x.id))] || '';
     el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">💲 Valores alterados — Fast Lube</div><button class="btn bo bsm" onclick="_flExcelRelatorio(\'valores\')">📊 Gerar Excel</button></div>'
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:980px">Linhas do Fluxo cujo valor foi corrigido para bater com o extrato (✏️ ao lado do valor, ou ajuste automático de centavos em tributos). O valor original fica guardado aqui.</div>'
-      + '<div style="overflow:auto;max-height:calc(100vh - 260px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="' + c + ';text-align:left">Quando</th><th style="' + c + ';text-align:left">Quem</th><th style="' + c + ';text-align:left">Dia</th><th style="' + c + ';text-align:left">Lançamento</th><th style="' + c + ';text-align:right">Valor no Fluxo</th><th style="' + c + ';text-align:right">Valor correto</th><th style="' + c + ';text-align:right">Diferença</th><th style="' + c + ';text-align:left">Tipo</th><th style="' + c + ';text-align:left">Como</th></tr></thead><tbody>'
-      + (lista.length ? lista.map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="' + c + ';white-space:nowrap">' + E(dtBr(x.em)) + '</td><td style="' + c + '">' + E(x.por || '') + '</td><td style="' + c + ';white-space:nowrap">' + brData(x.dia) + '</td><td style="' + c + '">' + E(x.nome || '') + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.de) + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.para) + '</td><td style="' + c + ';text-align:right;color:' + (x.para - x.de < 0 ? '#dc2626' : 'var(--teal)') + '">' + fmt(x.para - x.de) + '</td><td style="' + c + ';font-weight:600;color:' + (tipoValor(x) === 'Automático' ? '#d97706' : 'var(--ink)') + '">' + tipoValor(x) + '</td><td style="' + c + ';font-size:11.5px">' + E(x.via || '') + '</td></tr>').join('') : '<tr><td colspan="9" style="padding:20px;text-align:center;color:var(--slate)">Nenhum valor foi alterado até agora.</td></tr>')
+      + '<div style="overflow:auto;max-height:calc(100vh - 260px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="' + c + ';text-align:left">Quando</th><th style="' + c + ';text-align:left">Quem</th><th style="' + c + ';text-align:left">Banco</th><th style="' + c + ';text-align:left">Dia</th><th style="' + c + ';text-align:left">Lançamento</th><th style="' + c + ';text-align:right">Valor no Fluxo</th><th style="' + c + ';text-align:right">Valor correto</th><th style="' + c + ';text-align:right">Diferença</th><th style="' + c + ';text-align:left">Tipo</th><th style="' + c + ';text-align:left">Como</th></tr></thead><tbody>'
+      + (lista.length ? lista.map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="' + c + ';white-space:nowrap">' + E(dtBr(x.em)) + '</td><td style="' + c + '">' + E(x.por || '') + '</td><td style="' + c + ';white-space:nowrap">' + E(bco(x)) + '</td><td style="' + c + ';white-space:nowrap">' + brData(x.dia) + '</td><td style="' + c + '">' + E(x.nome || '') + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.de) + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.para) + '</td><td style="' + c + ';text-align:right;color:' + (x.para - x.de < 0 ? '#dc2626' : 'var(--teal)') + '">' + fmt(x.para - x.de) + '</td><td style="' + c + ';font-weight:600;color:' + (tipoValor(x) === 'Automático' ? '#d97706' : 'var(--ink)') + '">' + tipoValor(x) + '</td><td style="' + c + ';font-size:11.5px">' + E(x.via || '') + '</td></tr>').join('') : '<tr><td colspan="10" style="padding:20px;text-align:center;color:var(--slate)">Nenhum valor foi alterado até agora.</td></tr>')
       + '</tbody></table></div>';
   };
   root._flExcelRelatorio = async function (qual) {
@@ -811,8 +820,8 @@
       add('Datas alteradas', ['Banco', 'Data original', 'Data nova', 'Valor', 'Lançamento', 'Quando', 'Quem', 'Como'], d.map(x => [B[String(x.conta)] || x.conta, dBr(x.de), dBr(x.para), x.v, String(x.h || ''), dtBr(x.em), x.por || '', x.via || '']), [16, 14, 12, 14, 80, 18, 18, 30]);
     }
     if (qual === 'todos' || qual === 'valores') {
-      const v = S.g('fl_valores_alterados_163') || [];
-      add('Valores alterados', ['Dia', 'Lançamento', 'Valor no Fluxo', 'Valor correto', 'Diferença', 'Tipo', 'Quando', 'Quem', 'Como'], v.map(x => [dBr(x.dia), x.nome || '', x.de, x.para, Math.round((x.para - x.de) * 100) / 100, tipoValor(x), dtBr(x.em), x.por || '', x.via || '']), [12, 60, 16, 16, 12, 14, 18, 18, 50]);
+      const v = S.g('fl_valores_alterados_163') || [], bm = await bancosDosValores(v);
+      add('Valores alterados', ['Banco', 'Dia', 'Lançamento', 'Valor no Fluxo', 'Valor correto', 'Diferença', 'Tipo', 'Quando', 'Quem', 'Como'], v.map(x => [NOME_BANCO[String(x.conta || bm.get(x.id))] || '', dBr(x.dia), x.nome || '', x.de, x.para, Math.round((x.para - x.de) * 100) / 100, tipoValor(x), dtBr(x.em), x.por || '', x.via || '']), [16, 12, 60, 16, 16, 12, 14, 18, 18, 50]);
     }
     if (qual === 'todos' || qual === 'ignorados') {
       const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).eq('status_conciliacao', 'ignorado'))).data || [];
