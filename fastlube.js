@@ -92,6 +92,7 @@
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
+      + '<button class="btn bo" onclick="_flConsolidarTributos()" title="Soma numa linha só as parcelas de IRPJ (F03-IRPJ) e CSLL (F04-CSLL) lançadas no mesmo dia. Isto também é feito sozinho ao subir o Fluxo.">∑ Consolidar IRPJ/CSLL</button>'
       + '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
       + '<button class="btn bo" onclick="_flExcelRelatorio(\'todos\')" title="Gera um Excel para o cliente com 5 abas: Ajustes e conciliações, Datas alteradas, Valores alterados, Ignorados e Fluxo × extrato por dia. Mostra o que foi preciso fazer para chegar ao saldo do extrato.">📊 Excel p/ cliente</button>'
       + '<button class="btn bo" onclick="_flAbrirDatas()" title="Lançamentos cuja data foi alterada em relação à data de origem (Fluxo ou extrato): quando, quem, data original e nova. Dá para voltar à data original.">📆 Datas alteradas</button>'
@@ -189,6 +190,40 @@
     await converterFluxo();
     try { renderLancctbRegistroContabil(); } catch (e) {}
   };
+  // ───────── CONSOLIDAR IRPJ / CSLL: o cliente manda "parcelas" do mesmo tributo no mesmo dia (mesmo código F03-IRPJ / F04-CSLL): vira UMA linha com a soma ─────────
+  const COD_TRIB = /\bF\d{2}-(IRPJ|CSLL|CSSL)\b/i;
+  async function consolidarTributos(simular) {
+    const regs = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_saida,historico_bancario,documento').eq('empresa_eid', EID).eq('fonte', 'fluxo').gt('valor_saida', 0).eq('status_conciliacao', 'pendente'))).data || [];
+    const grupos = {};
+    regs.forEach(r => { const m = String(r.historico_bancario || '').match(COD_TRIB); if (!m) return; const k = r.conta_bancaria_id + '|' + r.data_pagamento + '|' + m[1].toUpperCase().replace('CSSL', 'CSLL'); (grupos[k] = grupos[k] || []).push(r); });
+    const lista = Object.values(grupos).filter(g => g.length > 1).map(g => g.sort((a, b) => a.id - b.id));
+    if (simular || !lista.length) return lista;
+    const logV = [], logC = [];
+    for (const g of lista) {
+      const keep = g[0], outros = g.slice(1), ids = outros.map(x => x.id), total = g.reduce((a, x) => a + cents(x.valor_saida), 0);
+      const hist = String(keep.historico_bancario || '') + ' | CONSOLIDADO: ' + g.length + ' lançamentos do Fluxo somados (' + g.map(x => fmt(x.valor_saida)).join(' + ') + ')';
+      const u = await _supaClient.from('lancamentos_extrato').update({ valor_saida: total / 100, historico_bancario: hist }).eq('id', keep.id).eq('status_conciliacao', 'pendente'); if (u.error) throw new Error(u.error.message);
+      const lig = await _supaClient.from('fluxo_caixa_lancamentos').select('id').in('lancamento_extrato_id', ids);
+      const fids = (lig.data || []).map(f => f.id);
+      if (fids.length) { await _supaClient.from('fluxo_caixa_lancamentos').update({ lancamento_extrato_id: keep.id, status_associado: 'associado' }).in('id', fids); marcarManuais(fids); }
+      for (const t of ['notas_fiscais_parcelas', 'comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', ids);
+      await _supaClient.from('lancamentos_contabeis').delete().in('lancamento_extrato_id', ids);
+      const d = await _supaClient.from('lancamentos_extrato').delete().in('id', ids); if (d.error) throw new Error(d.error.message);
+      logV.push({ id: keep.id, em: new Date().toISOString(), por: quemFez(), dia: keep.data_pagamento, nome: String(keep.historico_bancario || '').split(' | ')[0].slice(0, 60) + ' (' + (String(keep.historico_bancario || '').match(COD_TRIB) || [''])[0] + ')', de: Number(keep.valor_saida), para: total / 100, via: 'consolidação: ' + g.length + ' parcelas do mesmo tributo somadas numa linha' });
+      logC.push({ em: new Date().toISOString(), dia: keep.data_pagamento, mantida: keep.id, linhas: g.map(x => ({ id: x.id, v: Number(x.valor_saida), h: x.historico_bancario, doc: x.documento })) });
+    }
+    gravarLogValor(logV);
+    try { S.s('fl_consolidados_163', logC.concat(S.g('fl_consolidados_163') || []).slice(0, 500)); } catch (e) {}
+    return lista;
+  }
+  root._flConsolidarTributos = async function () {
+    if (!ativo()) return;
+    const l = await consolidarTributos(true);
+    if (!l.length) { toast('Nada a consolidar: não há IRPJ/CSLL em parcelas no mesmo dia.', 'info'); return; }
+    if (!confirm('Somar em UMA linha as parcelas de IRPJ/CSLL do mesmo dia?\n\n' + l.length + ' grupo(s), ' + l.reduce((a, g) => a + g.length, 0) + ' linhas viram ' + l.length + '.\nOs valores originais ficam guardados (página Valores alterados).')) return;
+    try { const r = await consolidarTributos(false); toast(r.length + ' grupo(s) consolidado(s) ✓', 'ok'); } catch (e) { toast('Erro ao consolidar: ' + e.message, 'err'); }
+    renderLancctbRegistroContabil();
+  };
   async function converterFluxo() {
     const { data: fx, error } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos')
       .select('id,empresa_eid,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,port_nom,descricao_conta_origem,unidade,forma_pagamento')
@@ -219,6 +254,8 @@
       }
       criadas += lig.length; marcarManuais(lig.map(x => x.id));
     }
+    let consol = 0; try { consol = (await consolidarTributos(false)).length; } catch (e) { console.warn('Consolidar IRPJ/CSLL:', e); }
+    if (consol) toast('Fast Lube: ' + consol + ' grupo(s) de IRPJ/CSLL (parcelas do mesmo dia) somados em uma linha só.', 'ok');
     toast('Fast Lube: ' + criadas + ' linha(s) do Fluxo levadas ao Registro' + (semBanco ? ' · ' + semBanco + ' sem banco (ex.: CARTEIRA) ficaram de fora' : '') + (porRegra ? ' · ' + porRegra + ' barradas pela regra' : '') + (jaExc ? ' · ' + jaExc + ' já excluídas por você' : '') + '.', 'ok');
     return { criadas, semBanco, porRegra };
   }
