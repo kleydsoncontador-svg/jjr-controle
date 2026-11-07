@@ -419,7 +419,9 @@
     try { document.body.dataset.fl = (eidAtual() === EID) ? '1' : ''; } catch (e) {}
     if (!ativo()) { if (obs) obs.disconnect(); return; }
     const alvo = document.getElementById('lancctbConteudoAba'); if (!alvo) return;
-    const rodar = () => { clearTimeout(tmr); tmr = setTimeout(() => { injetarSaldo().catch(e => console.warn('Saldo (Fast Lube):', e)); }, 250); };
+    // a barra de saldo (saldo inicial / entradas / saídas / saldo final) às vezes era apagada por uma atualização da tela que chegava depois: se ficar vazia, preenche de novo
+    const garantirBarraSaldo = () => { const slot = document.getElementById('lancctbSaldoRegSlot'); if (!slot || slot.innerHTML.trim() !== '') return; const agora = Date.now(); if (agora - (root.__flSaldoTs || 0) < 3000) return; root.__flSaldoTs = agora; _lancctbRegistroSaldoPreencher(0).catch(() => {}); };
+    const rodar = () => { clearTimeout(tmr); tmr = setTimeout(() => { injetarSaldo().catch(e => console.warn('Saldo (Fast Lube):', e)); garantirBarraSaldo(); }, 250); };
     if (!obs) { obs = new MutationObserver(rodar); }
     obs.disconnect(); obs.observe(alvo, { childList: true, subtree: true });
     rodar();
