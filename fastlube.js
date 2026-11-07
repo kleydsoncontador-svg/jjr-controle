@@ -171,9 +171,18 @@
     root.__flDiasConc = conc;
   };
   root.__flFiltroOrigem = root.__flFiltroOrigem || '';
-  root._flLimparFiltros = function () { root.__flFiltroOrigem = ''; };
+  root.__flFiltroDif = root.__flFiltroDif || '';
+  root._flLimparFiltros = function () { root.__flFiltroOrigem = ''; root.__flFiltroDif = ''; };
+  const idsValorAlterado = () => { try { return [...new Set((S.g('fl_valores_alterados_163') || []).map(x => x.id).filter(Boolean))]; } catch (e) { return []; } };
   root._flAplicaFiltroDias = function (q) {
     if (ativo() && root.__flFiltroOrigem) q = q.eq('fonte', root.__flFiltroOrigem);
+    if (ativo() && root.__flFiltroDif) {                                  // coluna DIF.: onde houve diferença/correção
+      const f = root.__flFiltroDif, ids = idsValorAlterado();
+      if (f === 'conc') q = q.eq('fonte', 'conciliacao');
+      else if (f === 'ajuste') q = q.eq('fonte', 'ajuste_manual');
+      else if (f === 'valor') q = ids.length ? q.in('id', ids) : q.eq('id', -1);
+      else q = ids.length ? q.or('fonte.in.(conciliacao,ajuste_manual),id.in.(' + ids.join(',') + ')') : q.in('fonte', ['conciliacao', 'ajuste_manual']);
+    }
     const v = root.__flFiltroDias, conc = root.__flDiasConc;
     if (!ativo() || !v || !conc) return q;
     if (v === 'conc') return conc.length ? q.in('data_pagamento', conc) : q.eq('id', -1);
@@ -955,7 +964,23 @@
       const cv = tr.children[8]; // lapisinho minúsculo ao lado do VALOR, só nas linhas que vieram do Fluxo
       if (rid && f === 'fluxo' && cv && !cv.querySelector('.fl-edv')) cv.insertAdjacentHTML('beforeend', ' <span class="fl-edv" style="cursor:pointer;font-size:9px;opacity:.65;margin-left:2px" title="Corrigir o valor desta linha do Fluxo (ex.: centavos de imposto)" onclick="event.stopPropagation();_flEditarValor(' + rid + ')">✏️</span>');
     });
-    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130) + 'px';
+    // coluna DIF. (logo depois da Origem): marca as linhas que são/trazem uma diferença — Conciliação, Ajuste manual, Valor corrigido — e dá para filtrar
+    { const cg3 = tbl.querySelector('colgroup'); if (cg3 && cg3.children[7]) { const c = document.createElement('col'); c.style.width = '11ch'; cg3.insertBefore(c, cg3.children[8]); }
+      if (heads[0] && heads[0].children[7]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 8px;text-align:left;white-space:nowrap'; th.textContent = 'DIF.'; th.title = 'Diferença: Conciliação do dia, Ajuste manual ou Valor corrigido (Fluxo ≠ extrato)'; heads[0].insertBefore(th, heads[0].children[8]); }
+      if (heads[1] && heads[1].children[7]) { const th = document.createElement('th'); th.style.cssText = 'padding:4px 6px';
+        const op = [['', 'Todas'], ['dif', 'Com diferença'], ['conc', 'Conciliação'], ['ajuste', 'Ajuste manual'], ['valor', 'Valor corrigido']];
+        th.innerHTML = '<select class="si" data-filtro="registro-dif" style="width:100%;font-size:11px" onchange="__flFiltroDif=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">' + op.map(o => '<option value="' + o[0] + '"' + (root.__flFiltroDif === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
+        heads[1].insertBefore(th, heads[1].children[8]); }
+      const vAlt = new Map(); (S.g('fl_valores_alterados_163') || []).forEach(x => { if (x.id && !vAlt.has(String(x.id))) vAlt.set(String(x.id), x.para - x.de); });
+      tbl.querySelectorAll('tbody tr').forEach(tr => {
+        if (!tr.children[7]) return; const rid = tr.dataset.rid, f = rid ? fontePorId.get(String(rid)) : null, va = rid ? vAlt.get(String(rid)) : undefined;
+        const td = document.createElement('td'); td.style.cssText = 'padding:7px 8px;font-size:11.5px;white-space:nowrap;font-weight:600';
+        if (f === 'conciliacao') { td.textContent = '⚖ Conciliação'; td.style.color = '#d97706'; }
+        else if (f === 'ajuste_manual') { td.textContent = '✎ Ajuste'; td.style.color = '#ca8a04'; }
+        else if (va !== undefined) { td.textContent = '💲 ' + (va > 0 ? '+' : '') + fmt(va); td.style.color = '#0ea5e9'; td.title = 'Valor corrigido: diferença em relação ao valor original do Fluxo'; }
+        tr.insertBefore(td, tr.children[8]);
+      }); }
+    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130 + 110) + 'px';
   }
   // ── saldo do DIA filtrado: Registro × extrato (banco) e a diferença, logo abaixo da barra de saldo ──
   let diaBusy = false, diaCache = { k: '', ts: 0, h: '' };
