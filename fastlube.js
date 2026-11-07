@@ -580,9 +580,9 @@
       td.style.cssText = 'padding:7px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:' + (v != null && v < 0 ? '#dc2626' : 'var(--slate)');
       const eIgn = rid && ign.has(String(rid));
       td.innerHTML = (v != null ? 'R$ ' + fmt(v) : (eIgn ? '<i style="font-size:11px">ignorada</i>' : ''))
-        + (rid ? ' <button class="icon-btn" style="padding:0 3px" title="Editar a data desta linha' + (fontePorId.get(String(rid)) === 'ajuste_manual' ? ' (e valor/histórico do ajuste)' : '') + '" onclick="event.stopPropagation();_flEditarLinha(' + rid + ')">✏️</button>' : '')
         + (rid && fontePorId.get(String(rid)) === 'ajuste_manual' ? ' <button class="icon-btn" style="padding:0 3px" title="Excluir este ajuste" onclick="event.stopPropagation();_flExcluirAjuste(' + rid + ')">🗑</button>' : '')
         + (rid ? ' <button class="icon-btn" style="padding:0 4px" title="' + (eIgn ? 'Voltar a considerar esta linha (volta como pendente)' : 'Ignorar esta linha: fica apagada, fora do saldo e do TXT') + '" onclick="event.stopPropagation();_flIgnorarLinha(' + rid + ',' + (eIgn ? 'false' : 'true') + ')">' + (eIgn ? '↩' : '🚫') + '</button>' : '');
+      { const dc = tr.children[1]; if (rid && dc && !dc.querySelector('.fl-ed')) dc.insertAdjacentHTML('beforeend', ' <button class="icon-btn fl-ed" style="padding:0 3px;float:right" title="Editar a data desta linha' + (fontePorId.get(String(rid)) === 'ajuste_manual' ? ' (e valor/histórico do ajuste)' : '') + '" onclick="event.stopPropagation();_flEditarLinha(' + rid + ')">✏️</button>'); } // lápis ao lado da data
       if (rid && fontePorId.get(String(rid)) === 'ajuste_manual') { tr.style.setProperty('background', 'rgba(250,204,21,.30)', 'important'); [...tr.children].forEach(c => { c.style.background = 'transparent'; }); tr.title = 'Ajuste manual (incluído para acerto do saldo diário)'; }
       if (eIgn) { tr.style.opacity = '.42'; tr.style.textDecoration = 'line-through'; tr.title = 'Linha ignorada: fora do saldo e do TXT'; }
       tr.insertBefore(td, tr.children[8]);
