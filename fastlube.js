@@ -350,7 +350,7 @@
       const ls = extDia[d];
       const ent = { dia: d, total: ls.length, cobertas: 0, add: [], conc: null, excesso: [], grupos: gruposDia[d] || [] }; rel.detalhe.push(ent);
       const sobra = ls.filter(l => !l.explicada), diretas = sobra.filter(l => !casavel(l)), pend = sobra.filter(l => casavel(l)), R = livres(d);
-      const adiciona = l => { if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); };
+      const adiciona = l => { if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; ent.ignV = (ent.ignV || 0) + l.c; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); };
       diretas.forEach(adiciona);                                  // aplicações, tarifas, IOF, impostos do banco: só existem no extrato
       const Lp = pend.reduce((a, l) => a + l.c, 0), Rs = R.reduce((a, l) => a + l.c, 0);
       if (pend.length && !R.length) pend.forEach(adiciona);       // sobra do extrato e nada sobrando no Fluxo: só está no extrato
@@ -380,6 +380,21 @@
       } else if (!pend.length && R.length) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); }
       ent.cobertas = ls.filter(l => l.explicada).length; rel.explicadas += ent.cobertas;
       ent.outroDia = ls.filter(l => /^(dia|soma dia)/.test(l.via || '')).map(l => ({ v: l.c, h: String(l.r.historico_bancario || ''), via: l.via }));
+    });
+    // FECHAMENTO DO DIA: o que o extrato pagou no dia × o que o Registro terá (Fluxo + linhas trazidas). Qualquer diferença vira UMA linha de Conciliação (saída se faltou, entrada se sobrou), explicada no histórico — o saldo do dia passa a bater.
+    dias.forEach(d => {
+      const ent = rel.detalhe.find(x => x.dia === d); if (!ent) return;
+      const A = extDia[d].reduce((a, l) => a + l.c, 0), regF = (fluxoDia[d] || []).reduce((a, x) => a + x.c, 0);
+      const regN = novas.filter(n => n.r.data_pagamento === d && (n.fonte === 'extrato_compl' || n.fonte === 'conciliacao')).reduce((a, n) => a + cents(n.r.valor_saida) - cents(n.r.valor_entrada), 0);
+      const dif = A - regF - regN - (ent.ignV || 0); if (!dif) return;
+      if (rejeitadas.has('flkk' + d + '|' + dif)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; }
+      const outros = (ent.outroDia || []), sobras = livres(d);
+      const hist = 'Conciliação do dia ' + brData(d) + ': o extrato pagou R$ ' + fmt(A / 100) + ' e o Registro tinha R$ ' + fmt((regF + regN) / 100) + ' (diferença ' + fmt(Math.abs(dif) / 100) + ').'
+        + (outros.length ? ' Pagos neste dia no extrato, mas lançados no Fluxo em outro dia: ' + listaValores(outros.map(o => cents(o.v / 100)), 6) + '.' : '')
+        + (sobras.length ? ' Lançados no Fluxo sem pagamento igual no extrato deste dia: ' + sobras.slice(0, 6).map(x => x.nome + ' ' + fmt(x.c / 100)).join(' + ') + (sobras.length > 6 ? ' + …' : '') + '.' : '');
+      novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif > 0 ? dif / 100 : 0, valor_entrada: dif < 0 ? -dif / 100 : 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
+      rel.conciliacoes.push({ dia: d, dif, ls: A, rs: regF + regN, hist }); ent.conc = { dif, ls: A, rs: regF + regN, hist, sisp: [], fluxo: sobras.map(x => ({ v: x.c, n: x.nome })) };
+      ent.excesso = [];
     });
     // dias que só têm Fluxo sem par e nenhum extrato
     Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
@@ -531,7 +546,7 @@
       if (d.add && d.add.length) h += 'Estas saídas estavam <b>só no extrato</b> (o Fluxo não tem), então trouxe para o Registro:' + d.add.map(a => li(v$(a.v) + ' — ' + E(a.h))).join('') ;
       if (d.outroDia && d.outroDia.length) h += '<div style="margin-top:4px">Estas saídas do extrato só bateram com pagamentos do Fluxo de <b>outro dia</b> (até 3 dias de diferença):' + d.outroDia.map(o => li(v$(o.v) + ' — ' + E(o.h) + ' (' + E(o.via) + ')')).join('') + '</div>';
       if (d.ignoradas) h += '<div style="margin-top:4px;color:var(--slate)">Você tinha ignorado ' + d.ignoradas + ' linha(s) do extrato deste dia — não trouxe de novo.</div>';
-      if (d.conc) h += '<div style="margin-top:4px">Os pagamentos <b>Sispag</b> do extrato (' + v$(d.conc.ls) + ') não fecharam exatamente com o que o Fluxo tem neste dia (' + v$(d.conc.rs) + '). Para o saldo do dia bater, incluí <b>uma linha de Conciliação de ' + v$(d.conc.dif) + '</b> (a diferença). O histórico dela mostra as somas.</div>';
+      if (d.conc) h += '<div style="margin-top:4px">As saídas do extrato neste dia (' + v$(d.conc.ls) + ') não fecharam exatamente com o que o Registro tem (' + v$(d.conc.rs) + '). Para o saldo do dia bater, incluí <b>uma linha de Conciliação de ' + v$(Math.abs(d.conc.dif)) + (d.conc.dif < 0 ? ' como ENTRADA (o Fluxo tinha saída a mais)' : ' como saída') + '</b> (a diferença). O histórico dela explica o motivo.</div>';
       if (alerta) h += '<div style="margin-top:4px;color:#b45309"><b>O Fluxo tem pagamento(s) neste dia que NÃO aparece(m) no extrato do banco</b> (total ' + v$(d.excesso.reduce((a, e) => a + e.v, 0)) + '):' + d.excesso.slice(0, 12).map(e => li(v$(e.v) + (e.n ? ' — ' + E(e.n) : ''))).join('') + (d.excesso.length > 12 ? li('… e mais ' + (d.excesso.length - 12)) : '') + '<span style="color:var(--slate)">Pode ter sido pago em outro dia ou por outro banco. Se NÃO saiu deste banco, clique em 🚫 nessa linha (ela sai do saldo) — ou em ✏️ para mudar a data — e traga os pagamentos de novo.</span></div>';
       h += '</div></div>';
     });
@@ -898,6 +913,29 @@
     });
     const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130) + 'px';
   }
+  // ── saldo do DIA filtrado: Registro × extrato (banco) e a diferença, logo abaixo da barra de saldo ──
+  let diaBusy = false, diaCache = { k: '', ts: 0, h: '' };
+  async function injetarSaldoDia() {
+    const slot = document.getElementById('lancctbSaldoRegSlot'); if (!slot) return;
+    const dia = _lancctbRegistroDataExata || ((_lancctbRegistroDataDe && _lancctbRegistroDataDe === _lancctbRegistroDataAte) ? _lancctbRegistroDataDe : '');
+    let box = document.getElementById('flSaldoDia');
+    if (!dia) { if (box) box.remove(); return; }
+    const conta = contaAtual(), k = conta + '|' + dia;
+    if (diaBusy) return;
+    if (!(diaCache.k === k && Date.now() - diaCache.ts < 6000)) {
+      diaBusy = true;
+      try {
+        const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+        const ref = await carregarRef(conta, { de: '', ate: dia }), reg = await carregarRegistro(conta, '', dia);
+        const liq = l => l.reduce((a, x) => a + cents(x.valor_entrada) - cents(x.valor_saida), 0), ini = cents((ag && ag.saldo_inicial) || 0);
+        const sR = ini + liq(ref), sG = ini + liq(reg), dif = sG - sR, cor = dif === 0 ? 'var(--teal)' : '#dc2626';
+        const chip = (t, v, c) => '<span style="display:inline-block;margin-right:14px"><span style="font-size:11px;color:var(--slate)">' + t + '</span> <b style="color:' + (c || 'var(--ink)') + '">' + v + '</b></span>';
+        diaCache = { k, ts: Date.now(), h: '<span style="font-size:12px;font-weight:700;margin-right:14px">📅 Saldo no fim de ' + brData(dia) + '</span>' + chip('Registro contábil', 'R$ ' + fmt(sG / 100)) + chip('Banco (extrato)', 'R$ ' + fmt(sR / 100)) + chip('Diferença', (dif === 0 ? 'bate ✓' : 'R$ ' + fmt(dif / 100) + (dif > 0 ? ' (Registro a MAIS)' : ' (Registro a MENOS)')), cor) };
+      } finally { diaBusy = false; }
+    }
+    if (!box) { box = document.createElement('div'); box.id = 'flSaldoDia'; box.style.cssText = 'margin:6px 0;padding:6px 10px;border:1px solid var(--border);border-radius:8px;display:flex;flex-wrap:wrap;align-items:center;gap:2px'; slot.insertAdjacentElement('afterend', box); }
+    if (box.innerHTML !== diaCache.h) box.innerHTML = diaCache.h;
+  }
   let obs = null, tmr = null;
   (function () { const st = document.createElement('style'); st.textContent = 'body[data-fl="1"] #lancctbRegraBuscaFluxoWrap{display:none !important}'; document.head.appendChild(st); })();
   root._flPosRender = function () {
@@ -907,7 +945,7 @@
     const alvo = document.getElementById('lancctbConteudoAba'); if (!alvo) return;
     // a barra de saldo (saldo inicial / entradas / saídas / saldo final) às vezes era apagada por uma atualização da tela que chegava depois: se ficar vazia, preenche de novo
     const garantirBarraSaldo = () => { const slot = document.getElementById('lancctbSaldoRegSlot'); if (!slot || slot.innerHTML.trim() !== '') return; const agora = Date.now(); if (agora - (root.__flSaldoTs || 0) < 3000) return; root.__flSaldoTs = agora; _lancctbRegistroSaldoPreencher(0).catch(() => {}); };
-    const rodar = () => { clearTimeout(tmr); tmr = setTimeout(() => { injetarSaldo().catch(e => console.warn('Saldo (Fast Lube):', e)); garantirBarraSaldo(); try { const bf = document.querySelector('.action-bar-sticky [data-etapa="fluxo"]'); if (bf) bf.style.display = 'none'; } catch (e) {} }, 250); };
+    const rodar = () => { clearTimeout(tmr); tmr = setTimeout(() => { injetarSaldo().catch(e => console.warn('Saldo (Fast Lube):', e)); injetarSaldoDia().catch(e => console.warn('Saldo do dia:', e)); garantirBarraSaldo(); try { const bf = document.querySelector('.action-bar-sticky [data-etapa="fluxo"]'); if (bf) bf.style.display = 'none'; } catch (e) {} }, 250); };
     if (!obs) { obs = new MutationObserver(rodar); }
     obs.disconnect(); obs.observe(alvo, { childList: true, subtree: true });
     rodar();
