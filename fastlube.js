@@ -143,6 +143,31 @@
     const rot = String(nome || '').replace('_lancctbProcessar', '').replace(/FonteRegistro/, 'Pagamentos/Recebimentos');
     toast('Processando ' + rot + ' — ' + banco + ' — ' + per, 'info');
   };
+  // ── filtro "Dias": todos / conciliados / não conciliados (Fast Lube). Dia conciliado = o saldo de fechamento do dia no Registro é igual ao do extrato.
+  root.__flFiltroDias = root.__flFiltroDias || '';
+  root._flFiltroDiasHtml = function () {
+    if (!ativo()) return '';
+    const v = root.__flFiltroDias;
+    return '<select class="si" data-filtro="registro-dias" title="Mostra só os lançamentos dos dias cujo saldo (Registro × extrato) já bate, ou só dos que ainda não batem" onchange="__flFiltroDias=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">'
+      + '<option value=""' + (v === '' ? ' selected' : '') + '>Todos os dias</option><option value="conc"' + (v === 'conc' ? ' selected' : '') + '>Dias conciliados</option><option value="nao"' + (v === 'nao' ? ' selected' : '') + '>Dias NÃO conciliados</option></select>';
+  };
+  root._flPrepararFiltroDias = async function () {
+    root.__flDiasConc = null;
+    if (!ativo() || !root.__flFiltroDias) return;
+    const conta = contaAtual();
+    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+    const ref = await carregarRef(conta, { de: '', ate: '' }), reg = await carregarRegistro(conta, '', '');
+    const mv = l => { const m = {}; l.forEach(x => { m[x.data_pagamento] = (m[x.data_pagamento] || 0) + cents(x.valor_entrada) - cents(x.valor_saida); }); return m; };
+    const mr = mv(ref), mg = mv(reg); let sr = cents((ag && ag.saldo_inicial) || 0), sg = sr; const conc = [];
+    [...new Set([...Object.keys(mr), ...Object.keys(mg)])].sort().forEach(d => { sr += mr[d] || 0; sg += mg[d] || 0; if (sr === sg) conc.push(d); });
+    root.__flDiasConc = conc;
+  };
+  root._flAplicaFiltroDias = function (q) {
+    const v = root.__flFiltroDias, conc = root.__flDiasConc;
+    if (!ativo() || !v || !conc) return q;
+    if (v === 'conc') return conc.length ? q.in('data_pagamento', conc) : q.eq('id', -1);
+    return conc.length ? q.not('data_pagamento', 'in', '(' + conc.join(',') + ')') : q;
+  };
   // ── 1) subir o Fluxo ──
   root._flSubirFluxo = async function () {
     await abrirLancctbFluxoImportModal();
