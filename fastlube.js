@@ -290,10 +290,25 @@
     Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate)).forEach(d => { const R = livres(d); if (R.length) rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); });
     return rel;
   }
+  // dias do período cujo saldo de fechamento (Registro × extrato) já bate E que já receberam linhas do extrato
+  async function diasJaConciliados(conta, p) {
+    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+    const ref = await carregarRef(conta, { de: '', ate: p.ate }), reg = await carregarRegistro(conta, '', p.ate);
+    const mv = l => { const m = {}; l.forEach(x => { m[x.data_pagamento] = (m[x.data_pagamento] || 0) + cents(x.valor_entrada) - cents(x.valor_saida); }); return m; };
+    const mr = mv(ref), mg = mv(reg), proc = new Set(reg.filter(l => ['extrato_receb', 'extrato_compl', 'conciliacao'].includes(l.fonte)).map(l => l.data_pagamento));
+    let sr = cents((ag && ag.saldo_inicial) || 0), sg = sr; const out = [];
+    [...new Set([...Object.keys(mr), ...Object.keys(mg)])].sort().forEach(d => { sr += mr[d] || 0; sg += mg[d] || 0; if (sr === sg && proc.has(d) && (!p.de || d >= p.de)) out.push(d); });
+    return out;
+  }
   root._flTrazerExtrato = async function (modo) {
     const comPagamentos = modo === 'pag', comRecebimentos = modo === 'receb';
     if (!ativo()) return;
     const conta = contaAtual(), p = periodo();
+    if (!p.de && !p.ate) { toast('Escolha o período (um dia, vários dias ou o mês) em "Filtrar por período" ou no seletor de mês antes de trazer do extrato.', 'err'); return; }
+    // trava: dia que já foi trazido do extrato e já bate com o saldo do extrato não pode ser processado de novo
+    const bloq = await diasJaConciliados(conta, p);
+    if (bloq.length) { janela('🔒 Dia(s) já conciliado(s)', '<div style="font-size:13px">O saldo do Registro destes dias já bate com o extrato bancário, então não reprocesso:</div><div style="margin:8px 0;font-weight:700">' + bloq.slice(0, 40).map(brData).join(' · ') + (bloq.length > 40 ? ' …' : '') + '</div><div style="font-size:12px;color:var(--slate)">Escolha um período a partir do próximo dia ainda não conciliado.</div>', 640); return; }
+    if (!confirm((comPagamentos ? 'Trazer os PAGAMENTOS' : 'Trazer os RECEBIMENTOS') + ' do extrato de ' + (p.de ? brData(p.de) : 'o início') + ' até ' + (p.ate ? brData(p.ate) : 'o fim') + '?')) return;
     const ref = await carregarRef(conta, p);
     if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta no período. Suba o extrato lá primeiro.', 'err'); return; }
     const novas = []; let nEnt = 0, nSai = 0, explicadas = 0, explicadasOutroDia = 0;
