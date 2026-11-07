@@ -91,6 +91,7 @@
       + '<button class="btn bo" onclick="_flTrazerExtrato(\'pag\')" title="Traz do extrato os PAGAMENTOS (saídas) que o Fluxo não explica (aplicações, tarifas, impostos...), para o saldo diário bater. Nada do Fluxo é tirado.">⬇ Trazer pagamentos do extrato</button>'
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
+      + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
       + '<button class="btn bo" onclick="_flAbrirRelatorios()" title="Relatórios gerados pelos botões de recebimentos e pagamentos do extrato (o que foi trazido, diferenças, avisos).">📑 Relatórios</button>'
       + '<button class="btn bo" onclick="_flConciliarSaldo()" title="Compara, dia a dia, o saldo do extrato bancário com o saldo do Registro Contábil.">⚖ Conciliar saldo</button>'
       + '<button class="btn bo" onclick="_flIgnorarFiltradas()" title="Ignora todas as linhas filtradas: ficam apagadas, fora do saldo e do TXT, e o extrato pode trazer o pagamento delas de novo.">🚫 Ignorar filtradas (' + n + ')</button>'
@@ -503,6 +504,66 @@
       + (lista.length ? lista.map(x => '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;max-width:1100px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px"><div><b>' + E(x.tipo) + ' — ' + E(x.banco) + ' — ' + brData(x.de) + (x.ate && x.ate !== x.de ? ' a ' + brData(x.ate) : '') + '</b></div><div style="font-size:11.5px;color:var(--slate)">gerado em ' + dt(x.em) + ' <button class="icon-btn" title="Apagar este relatório" onclick="_flApagarRel(' + x.id + ')">🗑</button></div></div>' + htmlRel(x) + '</div>').join('') : '<div style="color:var(--slate);padding:20px">Nenhum relatório ainda.</div>');
   };
   root._flApagarRel = function (id) { if (!confirm('Apagar este relatório?')) return; try { S.s(RELKEY, lerRel().filter(x => x.id !== id)); } catch (e) {} root._flAbrirRelatorios(); };
+
+  // ───────── página "Ignorados": resgatar linhas ignoradas (mesmo banco, outro banco, outra data) ─────────
+  const BANCOS = { '1': 'Itaú', '4': 'Banco do Brasil' };
+  const ORIGENS = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
+  root.__flIgn = root.__flIgn || { rows: [], f: { banco: '', origem: '', texto: '', de: '', ate: '', valor: '' }, sel: new Set() };
+  root._flAbrirIgnorados = async function () {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    el.innerHTML = '<div style="padding:20px;color:var(--slate)">Carregando as linhas ignoradas…</div>';
+    const r = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte').eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).eq('status_conciliacao', 'ignorado'));
+    root.__flIgn.rows = (r.data || []).sort(porDataId); root.__flIgn.sel = new Set(); desenharIgnorados();
+  };
+  function ignFiltradas() {
+    const f = root.__flIgn.f, t = norm(f.texto), v = f.valor ? num(f.valor) : 0;
+    return root.__flIgn.rows.filter(x => (!f.banco || String(x.conta_bancaria_id) === f.banco) && (!f.origem || (x.fonte || '') === f.origem) && (!f.de || x.data_pagamento >= f.de) && (!f.ate || x.data_pagamento <= f.ate)
+      && (!t || norm(x.historico_bancario).indexOf(t) >= 0) && (!v || Math.abs(Number(x.valor_saida || x.valor_entrada) - v) < 0.005));
+  }
+  function desenharIgnorados() {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    const g = root.__flIgn, lista = ignFiltradas(), mostra = lista.slice(0, 400), f = g.f;
+    const sel = x => 'style="padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)"';
+    const opB = '<option value="">Todos os bancos</option>' + Object.keys(BANCOS).map(k => '<option value="' + k + '"' + (f.banco === k ? ' selected' : '') + '>' + BANCOS[k] + '</option>').join('');
+    const opO = '<option value="">Todas as origens</option>' + Object.keys(ORIGENS).map(k => '<option value="' + k + '"' + (f.origem === k ? ' selected' : '') + '>' + ORIGENS[k] + '</option>').join('');
+    let h = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">🚫 Lançamentos ignorados — Fast Lube</div></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:980px">Aqui ficam as linhas que você ignorou (fora do saldo e do TXT). Se ela faltar em outro banco, ou em outra data, <b>resgate</b>: ela volta como pendente no banco e na data que você escolher.</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px">'
+      + '<select ' + sel() + ' onchange="__flIgn.f.banco=this.value;_flIgnRedesenhar()">' + opB + '</select><select ' + sel() + ' onchange="__flIgn.f.origem=this.value;_flIgnRedesenhar()">' + opO + '</select>'
+      + '<input style="width:220px;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)" placeholder="🔎 texto do histórico" value="' + E(f.texto) + '" oninput="__flIgn.f.texto=this.value;_flIgnRedesenhar(true)"><input style="width:110px;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)" placeholder="valor" value="' + E(f.valor) + '" oninput="__flIgn.f.valor=this.value;_flIgnRedesenhar(true)">'
+      + '<span style="font-size:11.5px;color:var(--slate)">de</span><input type="date" ' + sel() + ' value="' + E(f.de) + '" onchange="__flIgn.f.de=this.value;_flIgnRedesenhar()"><span style="font-size:11.5px;color:var(--slate)">até</span><input type="date" ' + sel() + ' value="' + E(f.ate) + '" onchange="__flIgn.f.ate=this.value;_flIgnRedesenhar()"></div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;padding:8px 10px;border:1px solid var(--border);border-radius:8px;max-width:980px"><b style="font-size:12.5px">Resgatar selecionadas (' + g.sel.size + '):</b>'
+      + '<select id="flIgnBanco" ' + sel() + '><option value="">no mesmo banco</option><option value="1">para o Itaú</option><option value="4">para o Banco do Brasil</option></select>'
+      + '<span style="font-size:11.5px;color:var(--slate)">na data</span><input id="flIgnData" type="date" ' + sel() + ' title="Deixe em branco para manter a data da linha"><span style="font-size:11px;color:var(--slate)">(em branco = mantém a data)</span>'
+      + '<button class="btn bp bsm" onclick="_flResgatar()" ' + (g.sel.size ? '' : 'disabled') + '>↩ Resgatar</button></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:4px">' + lista.length + ' linha(s) ignorada(s)' + (lista.length > mostra.length ? ' — mostrando as primeiras ' + mostra.length + ' (refine o filtro)' : '') + '</div>'
+      + '<div style="overflow:auto;max-height:calc(100vh - 380px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="padding:6px 8px"><input type="checkbox" onchange="_flIgnSelTodos(this.checked)"></th><th style="padding:6px 8px;text-align:left">Banco</th><th style="padding:6px 8px;text-align:left">Data</th><th style="padding:6px 8px;text-align:left">Origem</th><th style="padding:6px 8px;text-align:right">Valor</th><th style="padding:6px 8px;text-align:left">Histórico bancário</th><th style="padding:6px 8px"></th></tr></thead><tbody>'
+      + (mostra.length ? mostra.map(x => { const ent = Number(x.valor_entrada) > 0; return '<tr style="border-bottom:1px solid var(--border)"><td style="padding:5px 8px;text-align:center"><input type="checkbox" ' + (g.sel.has(x.id) ? 'checked' : '') + ' onchange="_flIgnSel(' + x.id + ',this.checked)"></td><td style="padding:5px 8px;white-space:nowrap">' + E(BANCOS[String(x.conta_bancaria_id)] || x.conta_bancaria_id) + '</td><td style="padding:5px 8px;white-space:nowrap">' + brData(x.data_pagamento) + '</td><td style="padding:5px 8px;white-space:nowrap;font-size:11.5px">' + E(ORIGENS[x.fonte] || '—') + '</td><td style="padding:5px 8px;text-align:right;white-space:nowrap;color:' + (ent ? 'var(--teal)' : '#dc2626') + '">' + (ent ? '+' : '−') + ' R$ ' + fmt(ent ? x.valor_entrada : x.valor_saida) + '</td><td style="padding:5px 8px;font-size:11.5px;line-height:1.3;max-width:760px">' + E(String(x.historico_bancario || '')) + '</td><td style="padding:5px 8px;text-align:center"><button class="btn bo bsm" title="Resgatar só esta linha, no mesmo banco e na mesma data" onclick="_flResgatar(' + x.id + ')">↩</button></td></tr>'; }).join('') : '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--slate)">Nenhuma linha ignorada com esses filtros.</td></tr>')
+      + '</tbody></table></div>';
+    el.innerHTML = h;
+  }
+  root._flIgnRedesenhar = function (mantemFoco) {
+    const a = document.activeElement, id = a && a.getAttribute && a.getAttribute('placeholder'), pos = a && a.selectionStart; desenharIgnorados();
+    if (mantemFoco && id) { const n = [...document.querySelectorAll('#lancctbConteudoAba input')].find(i => i.getAttribute('placeholder') === id); if (n) { n.focus(); try { n.setSelectionRange(pos, pos); } catch (e) {} } }
+  };
+  root._flIgnSel = function (id, on) { const s0 = root.__flIgn.sel; if (on) s0.add(id); else s0.delete(id); const b = document.querySelector('#lancctbConteudoAba b'); desenharIgnorados(); };
+  root._flIgnSelTodos = function (on) { const s0 = root.__flIgn.sel; ignFiltradas().slice(0, 400).forEach(x => { if (on) s0.add(x.id); else s0.delete(x.id); }); desenharIgnorados(); };
+  root._flResgatar = async function (idUnico) {
+    const g = root.__flIgn, ids = idUnico ? [idUnico] : [...g.sel]; if (!ids.length) { toast('Marque as linhas que quer resgatar.', 'err'); return; }
+    const banco = idUnico ? '' : (document.getElementById('flIgnBanco') || {}).value || '', data = idUnico ? '' : (document.getElementById('flIgnData') || {}).value || '';
+    const rot = (banco ? ' para o ' + BANCOS[banco] : ' no mesmo banco') + (data ? ', com a data ' + brData(data) : ', mantendo a data');
+    if (!confirm('Resgatar ' + ids.length + ' linha(s)' + rot + '? Elas voltam como pendentes e entram no saldo.')) return;
+    let feitas = 0;
+    for (let i = 0; i < ids.length; i += 200) {
+      const lote = ids.slice(i, i + 200), up = { status_conciliacao: 'pendente' }; if (banco) up.conta_bancaria_id = Number(banco); if (data) up.data_pagamento = data;
+      const r = await _supaClient.from('lancamentos_extrato').update(up).in('id', lote).eq('status_conciliacao', 'ignorado').select('id');
+      if (r.error) { toast('Erro ao resgatar: ' + r.error.message, 'err'); return; }
+      feitas += (r.data || []).length;
+      if (banco) await _supaClient.from('fluxo_caixa_lancamentos').update({ conta_bancaria_id: Number(banco) }).in('lancamento_extrato_id', lote);
+    }
+    toast(feitas + ' linha(s) resgatada(s)' + rot + ' ✓', 'ok');
+    root.__flIgn.rows = root.__flIgn.rows.filter(x => ids.indexOf(x.id) < 0); root.__flIgn.sel = new Set(); desenharIgnorados();
+  };
 
   // ───────── ajuste manual, editar data, excluir ajuste ─────────
   function dialogoForm(titulo, corpo, aoSalvar) {
