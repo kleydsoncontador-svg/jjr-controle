@@ -55013,6 +55013,28 @@ async function _lancctbAplicParseBradescoCdbMultiDet(file){
 // precisar de nenhum código novo).
 const APLICAUTMAIS_ANCORAS=[/aplic\s*aut\s*mais/i,/extrato\s*consolidado\s*de\s*movimenta[çc][ãa]o/i,/resgates\s*antecipados/i,/posi[çc][ãa]o\s*em\s*ser\s*no\s*dia/i,/acum\.?\s*m[êe]s/i];
 function _aplicautmaisScoreAncoras(t){ return APLICAUTMAIS_ANCORAS.reduce((s,rx)=>s+(rx.test(t||'')?1:0),0); }
+// Conferência/reparo das 3 identidades que TODA linha de resgate do Aut Mais obedece (OCR às vezes erra 1 célula,
+// ex.: Rendimento Líquido 0,02 lido como 0,52 — mudava o Rendimento do Mês). Vale para qualquer empresa.
+//   (1) Bruto − IOF − IRRF = Líquido Resgatado   (2) Principal + Rend. Bruto = Valor Bruto   (3) Principal + Rend. Líquido = Valor Líquido
+// rg = [principal, bruto, iof, irrf, liquido, rendBruto, rendLiquido]. Se UMA única célula, trocada por um valor, faz as 3 fecharem, ela é corrigida.
+function _aplicautmaisRepararLinha(rg){
+  const r2=v=>Math.round(v*100)/100, tol=0.015;
+  const falha=a=>Math.abs(a[1]-a[2]-a[3]-a[4])>tol||Math.abs(a[0]+a[5]-a[1])>tol||Math.abs(a[0]+a[6]-a[4])>tol;
+  if(!falha(rg)) return null;
+  // para cada célula, valor que fecharia a equação em que ela aparece
+  const cand=[
+    [0,a=>a[1]-a[5]],[0,a=>a[4]-a[6]],
+    [1,a=>a[2]+a[3]+a[4]],[1,a=>a[0]+a[5]],
+    [2,a=>a[1]-a[3]-a[4]],[3,a=>a[1]-a[2]-a[4]],
+    [4,a=>a[1]-a[2]-a[3]],[4,a=>a[0]+a[6]],
+    [5,a=>a[1]-a[0]],[6,a=>a[4]-a[0]]];
+  const sol=[];
+  cand.forEach(([i,f])=>{ const t=rg.slice(); t[i]=r2(f(rg)); if(t[i]>=0&&t[i]!==rg[i]&&!falha(t)&&!sol.some(x=>x.i===i&&x.v===t[i])) sol.push({i,v:t[i]}); });
+  const celulas=[...new Set(sol.map(x=>x.i))];
+  if(celulas.length!==1||sol.filter(x=>x.i===celulas[0]).length!==1) return false; // ambíguo ou sem conserto de 1 célula: não mexe, só avisa
+  const x=sol[0], de=rg[x.i]; rg[x.i]=x.v; return {i:x.i,de,para:x.v};
+}
+const _APLICAUTMAIS_NOMES=['Valor Principal Resgatado','Valor Bruto Resgatado','IOF Retido','IRRF Retido','Valor Líquido Resgatado','Rendimento Pago (Bruto)','Rendimento Pago (Líquido)'];
 async function _lancctbAplicParseItauAutMaisOcrDet(file){
   const buf=await file.arrayBuffer();
   const pdf=await pdfjsLib.getDocument({data:buf}).promise;
@@ -55084,12 +55106,15 @@ async function _lancctbAplicParseItauAutMaisOcrDet(file){
   // Dados diários COMPLETOS (inclui Rendimento Pago e Posição em Ser no Dia,
   // que o formato {colunas,linhas} acima não carrega) — usado pelo "Extrair
   // sem IA" dos Ganhos/Rendimentos (_aplicfinItauAutMaisViaOcr).
-  const diario=[];
+  const diario=[], avisosOcr=[];
+  let acumNums=null;
   linhasNumeros.forEach(L=>{
+    if(L.ehAcum&&!acumNums) acumNums=L.numeros;
     if(!L.ehAcum&&L.data&&L.numeros.length>=5){
       const nn=L.numeros.length, ex=L.numeros.slice(0,nn-5), posicao=L.numeros.slice(nn-5);
       if(ex.length===7||ex.length===8){
         const rg=ex.length===8?ex.slice(1):ex;
+        { const rp=_aplicautmaisRepararLinha(rg); if(rp) avisosOcr.push('Linha '+L.data+': "'+_APLICAUTMAIS_NOMES[rp.i]+'" lida pelo OCR como '+rp.de.toFixed(2).replace('.',',')+' foi corrigida para '+rp.para.toFixed(2).replace('.',',')+' (as 3 contas da linha só fecham assim).'); else if(rp===false) avisosOcr.push('Linha '+L.data+': as contas do resgate não fecham (Bruto−IOF−IRRF=Líquido; Principal+Rendimento=Valor) — confira esta linha no PDF.'); }
         diario.push({data:L.data,aplicacao:ex.length===8?ex[0]:0,principal:rg[0],bruto:rg[1],iof:rg[2],irrf:rg[3],liquido:rg[4],rendBruto:rg[5],rendLiq:rg[6],posicao});
       } else if(ex.length===1){
         diario.push({data:L.data,aplicacao:ex[0],principal:0,bruto:0,iof:0,irrf:0,liquido:0,rendBruto:0,rendLiq:0,posicao});
@@ -55107,6 +55132,7 @@ async function _lancctbAplicParseItauAutMaisOcrDet(file){
     const extras=L.numeros.slice(0,n-5);
     if(extras.length===7||extras.length===8){
       const resg=extras.length===8?extras.slice(1):extras; // extras[0] seria Aplicação, descarta aqui
+      _aplicautmaisRepararLinha(resg);
       const [principalResg,brutoResg,iofResg,irrfResg,liquidoResg]=resg;
       linhas.push({ Data:L.data, Principal:principalResg, Bruto:brutoResg, IOF:iofResg, IRRF:irrfResg, Liquido:liquidoResg, Historico:'Resgate' });
       resgatesParaConferir.push({data:L.data,brutoResg,iofResg,irrfResg,liquidoResg});
@@ -55124,7 +55150,7 @@ async function _lancctbAplicParseItauAutMaisOcrDet(file){
     if(Math.abs(calc-r.liquidoResg)>0.02) console.warn('[aplicautmais] resgate de '+r.data+' não fecha: bruto-iof-irrf='+calc+' vs líquido='+r.liquidoResg);
   });
 
-  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, diario };
+  return { colunas:['Data','Principal','Bruto','IOF','IRRF','Liquido','Historico'], linhas, diario, avisosOcr, acum:acumNums };
 }
 
 // ── MODELO: Itaú "APLIC AUT MAIS - Extrato Consolidado de Movimentação",
@@ -55838,8 +55864,16 @@ async function _aplicfinItauAutMaisViaOcr(file,pageCount){
     mk('final_position','irrf','Última Posição → Provisão de IRRF',posFinal[3],'LAST_POSITION'),
     mk('final_position','net','Última Posição → Saldo Líquido',posFinal[4],'LAST_POSITION'),
   ];
-  const warnings=['Extrato em IMAGEM lido por OCR — confira os valores (principalmente vírgulas) antes de confirmar.'];
+  const warnings=['Extrato em IMAGEM lido por OCR — confira os valores (principalmente vírgulas) antes de confirmar.'].concat(ocr.avisosOcr||[]);
   const validations=[];
+  // confere com a linha "Acum. Mês" do próprio PDF: ela traz os totais (Aplic., Principal, Bruto, IOF, IRRF, Líquido, Rend. Bruto, Rend. Líquido); coluna em branco (zero) é pulada
+  if(ocr.acum&&ocr.acum.length){
+    const A=ocr.acum.slice(), n=A.length;
+    // colunas em branco no "Acum. Mês" (total zero) deslocam a posição: conferimos só as ancoradas na ponta (da direita: Líquido Resgatado, Rend. Bruto, Rend. Líquido; da esquerda: Aplicações, Principal, Bruto)
+    const pares=n>=6?[['Aplicações',tot.applications,A[0]],['Principal Resgatado',tot.principal_redeemed,A[1]],['Valor Bruto Resgatado',tot.gross_redeemed,A[2]],['Valor Líquido Resgatado',tot.net_redeemed,A[n-3]],['Rendimento Pago (Bruto)',tot.paid_yield_gross,A[n-2]],['Rendimento Pago (Líquido)',tot.paid_yield_net,A[n-1]]]:[];
+    pares.forEach(([nome,soma,v],i)=>{ if(v==null) return; const okc=Math.abs(v-soma)<=0.02; validations.push({name:'acum_mes_'+i,ok:okc,detail:nome+': soma das linhas '+soma.toFixed(2)+' × "Acum. Mês" do PDF '+v.toFixed(2)});
+      if(!okc) warnings.push('VALIDATION_FAILED: '+nome+' somando as linhas dá '+soma.toFixed(2).replace('.',',')+', mas o "Acum. Mês" do PDF diz '+v.toFixed(2).replace('.',',')+' — o OCR pode ter errado uma célula dessa coluna.'); });
+  }
   const calc=r2(tot.gross_redeemed-tot.iof_retido-tot.irrf_retido);
   const ok=Math.abs(calc-tot.net_redeemed)<=0.05;
   validations.push({name:'bruto_menos_impostos_igual_liquido',ok,detail:`${tot.gross_redeemed} − ${tot.iof_retido} − ${tot.irrf_retido} = ${calc.toFixed(2)} (esperado ${tot.net_redeemed})`});
