@@ -97,6 +97,40 @@
   // chips da regra: a Fast Lube ganha CNPJ/CPF e junta com " | " (outras empresas não mudam)
   root._flHistChipsExtra = () => (String(_lancctbEidAtual) === EID ? [{ tok: '{FLUXO_CNPJ}', rot: 'CNPJ/CPF (Fluxo)' }] : []);
   root._flHistJuntador = () => (String(_lancctbEidAtual) === EID ? ' | ' : ' ');
+  // ── regra em PARTES (Fast Lube): o histórico do Registro vem separado por " | "; a regra guarda as partes escolhidas (separadas por " | ")
+  //    e vale para todo lançamento cujo histórico tenha TODAS as partes, em qualquer posição.
+  root._flGatilhoBate = function (g, t) {
+    g = String(g || ''); t = String(t || '');
+    if (g.indexOf(' | ') >= 0 && String(_lancctbEidAtual) === EID) return g.split(' | ').map(x => x.trim().toLowerCase()).filter(Boolean).every(p => t.toLowerCase().indexOf(p) >= 0);
+    return t.indexOf(g) >= 0;
+  };
+  root._flRegraChips = function (hist) {
+    const velho = document.getElementById('flGatilhoPartes'); if (velho) velho.remove();
+    if (String(_lancctbEidAtual) !== EID) return;
+    const partes = String(hist || '').split(' | ').map(x => x.trim()).filter(Boolean);
+    if (partes.length < 2) return;
+    const campo = document.getElementById('lancctbRegraHistoricoGatilho'); if (!campo) return;
+    const sel = []; // índices na ordem em que foram marcados
+    const wrap = document.createElement('div'); wrap.id = 'flGatilhoPartes'; wrap.style.cssText = 'margin:6px 0 4px';
+    wrap.innerHTML = '<div style="font-size:11px;color:var(--slate);margin-bottom:5px">Marque as partes do histórico (separadas por <b>|</b>) que devem aparecer, na ordem que quiser. A regra vale para todo lançamento que tiver <b>todas</b> as partes marcadas, em qualquer posição do histórico.</div><div style="display:flex;flex-wrap:wrap;gap:6px"></div>';
+    const lista = wrap.lastChild;
+    const atualizar = () => {
+      campo.value = sel.map(i => partes[i]).join(' | ');
+      [...lista.children].forEach((lb, i) => { const k = sel.indexOf(i); lb.querySelector('input').checked = k >= 0; lb.querySelector('.fln').textContent = k >= 0 ? String(k + 1) : ''; lb.querySelector('.fln').style.visibility = k >= 0 ? 'visible' : 'hidden'; lb.style.borderColor = k >= 0 ? 'var(--teal)' : 'var(--border)'; });
+      try { _lancctbRegraAvaliarDas(); } catch (e) {}
+    };
+    partes.forEach((pt, i) => {
+      const lb = document.createElement('label');
+      lb.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;border:1px solid var(--border);border-radius:14px;padding:3px 10px 3px 7px;font-size:11.5px;max-width:100%';
+      lb.title = pt;
+      lb.innerHTML = '<input type="checkbox"><span class="fln" style="min-width:12px;font-weight:700;color:var(--teal);visibility:hidden"></span><span style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:340px">' + E(pt) + '</span>';
+      lb.querySelector('input').addEventListener('change', e => { const k = sel.indexOf(i); if (e.target.checked && k < 0) sel.push(i); else if (!e.target.checked && k >= 0) sel.splice(k, 1); atualizar(); });
+      lista.appendChild(lb);
+    });
+    campo.insertAdjacentElement('afterend', wrap);
+    campo.value = ''; // começa vazio: o usuário vai clicando nas partes que quer
+    try { _lancctbRegraAvaliarDas(); } catch (e) {}
+  };
   // ── 1) subir o Fluxo ──
   root._flSubirFluxo = async function () {
     await abrirLancctbFluxoImportModal();
@@ -188,6 +222,26 @@
     const sel = []; let s = alvo; while (s !== 0) { const p = reach.get(s); sel.push(p.k); s = p.prev; }
     return sel;
   }
+  // há subconjunto dos itens (em centavos) que soma exatamente o alvo? programação dinâmica (0/1); devolve os índices ou null
+  function exatoSubset(itens, alvo) {
+    if (alvo === 0) return [];
+    if (alvo < 0 || alvo > 60000000) return null;
+    const via = new Int16Array(alvo + 1).fill(-1); via[0] = -2;
+    for (let k = 0; k < itens.length; k++) { const c = itens[k].c; if (c <= 0 || c > alvo) continue; for (let t = alvo; t >= c; t--) { if (via[t] === -1 && via[t - c] !== -1) via[t] = k; } }
+    if (via[alvo] === -1) return null;
+    const sel = []; let t = alvo; while (t > 0) { const k = via[t]; sel.push(k); t -= itens[k].c; } return sel;
+  }
+  function escolherDia(linhas, A) {
+    const total = linhas.reduce((a, l) => a + l.c, 0);
+    if (A >= total) return { add: linhas, resid: A - total };
+    const extras = linhas.filter(l => !l.sispag), sisp = linhas.filter(l => l.sispag);
+    let sel = exatoSubset(extras, A); if (sel) return { add: sel.map(i => extras[i]), resid: 0 };
+    const somaEx = extras.reduce((a, l) => a + l.c, 0);
+    if (somaEx <= A) { const resto = A - somaEx, s2 = exatoSubset(sisp, resto); if (s2) return { add: extras.concat(s2.map(i => sisp[i])), resid: 0 }; return { add: extras, resid: resto }; }
+    const s3 = exatoSubset(linhas, A); if (s3) return { add: s3.map(i => linhas[i]), resid: 0 };
+    return { add: [], resid: A };
+  }
+  root._flTeste = { exatoSubset, escolherDia };
   root._flTrazerExtrato = async function (modo) {
     const comPagamentos = modo === 'pag', comRecebimentos = modo === 'receb';
     if (!ativo()) return;
@@ -196,33 +250,39 @@
     if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta no período. Suba o extrato lá primeiro.', 'err'); return; }
     const novas = []; let nEnt = 0, nSai = 0, explicadas = 0, explicadasOutroDia = 0;
     if (comRecebimentos) ref.forEach(r => { if (Number(r.valor_entrada) > 0 && !(Number(r.valor_saida) > 0)) { novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; } });
+    let relatorio = null;
     if (comPagamentos) {
-      // linhas do Fluxo já no Registro (por dia) para "explicar" os débitos do extrato
-      const d0 = p.de ? new Date(p.de + 'T12:00:00') : null, d1 = p.ate ? new Date(p.ate + 'T12:00:00') : null;
-      const sh = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
-      const fx = await carregarRegistro(conta, d0 ? sh(d0, -3) : '', d1 ? sh(d1, 3) : '', q => q.eq('fonte', 'fluxo').gt('valor_saida', 0));
-      const porDia = {}; fx.forEach(f => { (porDia[f.data_pagamento] = porDia[f.data_pagamento] || []).push({ id: f.id, c: cents(f.valor_saida), usado: false }); });
-      const disp = d => (porDia[d] || []).filter(x => !x.usado);
-      const tentar = (dia, alvo) => {
-        const it = disp(dia); if (!it.length) return false;
-        const igual = it.find(x => x.c === alvo); if (igual) { igual.usado = true; return true; }
-        const sel = subsetSum(it, alvo); if (!sel) return false; sel.forEach(k => { it[k].usado = true; }); return true;
-      };
-      const saidas = ref.filter(r => Number(r.valor_saida) > 0).sort((a, b) => cents(b.valor_saida) - cents(a.valor_saida));
-      saidas.forEach(r => {
-        const alvo = cents(r.valor_saida), dia = r.data_pagamento;
-        if (tentar(dia, alvo)) { explicadas++; return; }
-        for (const dd of [-1, 1, -2, 2, -3, 3]) { if (tentar(sh(new Date(dia + 'T12:00:00'), dd), alvo)) { explicadasOutroDia++; return; } }
-        novas.push({ r, fonte: 'extrato_compl', pref: 'flc' }); nSai++;
+      // Conta DIA A DIA: o que o extrato debitou no dia (X) menos o que o Registro já tem de saída no dia (Fluxo + o que já foi trazido e classificado) (F).
+      // A diferença A = X − F é o que falta; escolhe, entre as saídas do extrato daquele dia, as que somam EXATAMENTE A (primeiro as que não são Sispag: aplicações, tarifas, impostos...).
+      // Nada do Fluxo é tirado. As linhas "extrato_compl" ainda pendentes são refeitas do zero (as já classificadas ficam).
+      const antigas = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,hash_dedup,status_conciliacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'extrato_compl'));
+      const emPeriodo = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate);
+      const apagar = (antigas.data || []).filter(x => emPeriodo(x) && x.status_conciliacao === 'pendente').map(x => x.id);
+      for (let i = 0; i < apagar.length; i += 200) { const d = await _supaClient.from('lancamentos_extrato').delete().in('id', apagar.slice(i, i + 200)); if (d.error) { toast('Erro ao refazer as linhas anteriores: ' + d.error.message, 'err'); return; } }
+      const mantidas = (antigas.data || []).filter(x => emPeriodo(x) && x.status_conciliacao !== 'pendente');
+      const jaTem = new Set(mantidas.map(x => x.hash_dedup));
+      const Fdia = {}, Cdia = {};
+      (await carregarRegistro(conta, p.de, p.ate, q => q.eq('fonte', 'fluxo').gt('valor_saida', 0))).forEach(f => { Fdia[f.data_pagamento] = (Fdia[f.data_pagamento] || 0) + cents(f.valor_saida); });
+      mantidas.forEach(f => { Cdia[f.data_pagamento] = (Cdia[f.data_pagamento] || 0) + cents(f.valor_saida); });
+      const porDia = {};
+      ref.filter(r => Number(r.valor_saida) > 0 && !jaTem.has('flc' + r.id)).forEach(r => { (porDia[r.data_pagamento] = porDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), sispag: /SISPAG/i.test(r.historico_bancario || '') }); });
+      relatorio = [];
+      Object.keys(porDia).sort().forEach(dia => {
+        const linhas = porDia[dia], X = linhas.reduce((a, l) => a + l.c, 0) + (Cdia[dia] || 0), F = (Fdia[dia] || 0) + (Cdia[dia] || 0), A = X - F;
+        if (A <= 0) { relatorio.push({ dia, X, F, add: 0, resid: A }); return; } // o Registro já tem tudo (ou mais) neste dia
+        const esc = escolherDia(linhas, A);
+        esc.add.forEach(l => { novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); nSai++; });
+        relatorio.push({ dia, X, F, add: esc.add.reduce((a, l) => a + l.c, 0), resid: esc.resid });
       });
     }
-    if (!novas.length) { toast('Nada a trazer: o extrato já está todo representado no Registro.', 'info'); return; }
+    if (!novas.length) { toast('Nada a trazer: o Registro já cobre as saídas do extrato.', 'info'); if (relatorio) root.__flRelatorioPag = relatorio; renderLancctbRegistroContabil(); return; }
     const rows = novas.map(({ r, fonte, pref }) => ({ empresa_eid: EID, conta_bancaria_id: Number(conta), data_pagamento: r.data_pagamento, valor_saida: r.valor_saida || 0, valor_entrada: r.valor_entrada || 0, historico_bancario: r.historico_bancario || null, documento: r.documento || null, informacao: r.informacao || null, origem_importacao: 'excel', hash_dedup: pref + r.id, fonte }));
     for (let i = 0; i < rows.length; i += 300) {
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
       if (up.error) { toast('Erro ao trazer do extrato: ' + up.error.message, 'err'); return; }
     }
-    toast(comPagamentos ? 'Trazidos do extrato: ' + nSai + ' pagamento(s) que o Fluxo não explica (' + explicadas + ' já estavam no Fluxo' + (explicadasOutroDia ? ', ' + explicadasOutroDia + ' em dia próximo' : '') + '). Linhas já trazidas antes não duplicam.' : 'Trazidos do extrato: ' + nEnt + ' recebimento(s). Linhas já trazidas antes não duplicam.', 'ok');
+    toast(comPagamentos ? 'Trazidos do extrato: ' + nSai + ' pagamento(s) que o Fluxo não cobre. Linhas já trazidas antes não duplicam.' : 'Trazidos do extrato: ' + nEnt + ' recebimento(s). Linhas já trazidas antes não duplicam.', 'ok');
+    if (relatorio) root.__flRelatorioPag = relatorio;
     renderLancctbRegistroContabil();
   };
 
