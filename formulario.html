@@ -43,6 +43,12 @@ input:focus,button:focus{outline:2px solid var(--acc);outline-offset:1px}
 .msg{padding:10px 12px;border-radius:8px;margin:8px 0}
 .msg.ok{background:rgba(21,115,71,.12);border:1px solid var(--ok);color:var(--ok)}
 .msg.err{background:rgba(178,34,34,.1);border:1px solid #b22222;color:#b22222}
+button.lnk{border:none;background:none;color:var(--mut);padding:2px 0;text-decoration:underline;font-size:.85rem}
+#saida{display:none;position:fixed;inset:0;z-index:100;background:rgba(0,0,0,.55);align-items:center;justify-content:center;padding:16px}
+#saida.open{display:flex}
+#saida .box{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:20px;max-width:480px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.4)}
+#saida h2{font-size:1.1rem;margin:0 0 8px}
+#saida .bt{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
 @media (max-width:640px){.grid{grid-template-columns:1fr}.wrap{padding:10px}}
 </style>
 </head>
@@ -58,6 +64,11 @@ input:focus,button:focus{outline:2px solid var(--acc);outline-offset:1px}
   </div>
   <div id="lista"></div>
 </div>
+<div id="saida" role="dialog" aria-modal="true" aria-labelledby="saidaTit"><div class="box">
+  <h2 id="saidaTit">Antes de sair…</h2>
+  <p id="saidaTxt" style="margin:0"></p>
+  <div class="bt"><button type="button" class="pri" id="saidaSalvar">Salvar rascunho</button><button type="button" id="saidaVoltar">Continuar respondendo</button><button type="button" class="lnk" id="saidaSair">Sair sem salvar</button></div>
+</div></div>
 <script src="supabase-config.js"></script>
 <script src="alerta-tipos.js"></script>
 <script>
@@ -90,7 +101,7 @@ input:focus,button:focus{outline:2px solid var(--acc);outline-offset:1px}
     }
     if(p.fornecedor!==false) h+='<div class="full"><label>'+nomeRot+'</label><input type="text" data-k="nome" value="'+esc(r.nome||'')+'"></div>';
     if(p.tipo!==false) h+='<div class="full"><label>'+tipoRot+' <span style="opacity:.75">(digite parte do nome e escolha na lista)</span></label><div class="cb" data-uso="'+(rec?'recebimento':'pagamento')+'"><input type="text" data-k="tipo" autocomplete="off" value="'+esc(r.tipo||'')+'"><div class="lst"></div></div></div>';
-    return h+'</div></div>';
+    return h+'</div><div style="margin-top:8px"><button type="button" class="lnk" data-limpar="1">Limpar as respostas deste lançamento</button></div></div>';
   }
   function completo(l){
     var r=RESP[l.id]||{}, p=l.perg||{};
@@ -104,7 +115,8 @@ input:focus,button:focus{outline:2px solid var(--acc);outline-offset:1px}
     $('prog').textContent=n+' de '+ls.length+' lançamento(s) respondido(s)';
     document.querySelectorAll('.card').forEach(function(c){ var l=ls.find(function(x){return x.id===c.dataset.id;}); c.classList.toggle('feito',!!l&&completo(l)); });
   }
-  function guardarLocal(){ try{ localStorage.setItem(LS,JSON.stringify(RESP)); }catch(e){} }
+  function guardarLocal(){}
+  var EDITS=0, AVISADO=0, SAIR=false;
   function ligar(){
     $('lista').addEventListener('input',function(e){
       var t=e.target, c=t.closest('.card'); if(!c) return;
@@ -118,14 +130,20 @@ input:focus,button:focus{outline:2px solid var(--acc);outline-offset:1px}
         RESP[id][t.dataset.k]=t.value;
         if(t.dataset.k==='tipo'){ var n=norm(t.value), lista=tiposPara(c.querySelector('.cb').dataset.uso); RESP[id].tipo_lista=lista.some(function(x){return norm(x)===n;}); abrirLista(c.querySelector('.cb')); }
       }
-      SUJO=true; guardarLocal(); progresso();
+      SUJO=true; SAIR=false; EDITS++; progresso();
+    });
+    $('lista').addEventListener('click',function(e){
+      var b=e.target.closest('[data-limpar]'); if(!b) return;
+      var c=b.closest('.card'), id=c.dataset.id, l=FORM.linhas.find(function(x){return x.id===id;});
+      if(!l||!confirm('Limpar as respostas deste lançamento? Você poderá preencher de novo.')) return;
+      RESP[id]={}; c.outerHTML=card(l); SUJO=true; SAIR=false; EDITS++; progresso();
     });
     $('lista').addEventListener('focusin',function(e){ if(e.target.dataset&&e.target.dataset.k==='tipo') abrirLista(e.target.closest('.cb')); });
     $('lista').addEventListener('mousedown',function(e){
       var o=e.target.closest('.opt'); if(!o) return; e.preventDefault();
       var cb=o.closest('.cb'), c=cb.closest('.card'), id=c.dataset.id, inp=cb.querySelector('input');
       inp.value=o.dataset.v; RESP[id]=RESP[id]||{}; RESP[id].tipo=o.dataset.v; RESP[id].tipo_lista=!o.classList.contains('extra');
-      fecharListas(); SUJO=true; guardarLocal(); progresso();
+      fecharListas(); SUJO=true; SAIR=false; EDITS++; progresso();
     });
     document.addEventListener('mousedown',function(e){ if(!e.target.closest('.cb')) fecharListas(); });
     $('lista').addEventListener('keydown',function(e){
@@ -150,35 +168,57 @@ input:focus,button:focus{outline:2px solid var(--acc);outline-offset:1px}
     if(!h) return;
     lst.innerHTML=h; lst.classList.add('open');
   }
-  async function salvar(final){
+  function fmtDt(d){ try{ return new Date(d).toLocaleString('pt-BR'); }catch(e){ return ''; } }
+  function modoLeitura(){
+    document.querySelectorAll('#lista input').forEach(function(i){ i.disabled=true; });
+    document.querySelectorAll('[data-limpar]').forEach(function(b){ b.remove(); });
+    $('bar').style.display='none'; SUJO=false; SAIR=true;
+    $('sub').textContent='';
+    aviso('Suas respostas foram enviadas em '+fmtDt(FORM.enviado_em)+' e não podem mais ser alteradas por este link. Se precisar corrigir algo, entre em contato com a contabilidade e solicite um novo link.','ok');
+    window.scrollTo(0,0);
+  }
+  async function salvar(final,viaSaida){
     try{
       if(final){
         var faltam=FORM.linhas.filter(function(l){return !completo(l);}).length;
-        if(faltam&&!confirm('Ainda há '+faltam+' lançamento(s) sem resposta completa. Enviar assim mesmo?')) return;
+        var msg=faltam?('Ainda há '+faltam+' lançamento(s) sem resposta completa.\n\nDepois de enviar, NÃO será possível alterar as respostas por este link. Enviar assim mesmo?'):'Depois de enviar, NÃO será possível alterar as respostas por este link. Confirma o envio?';
+        if(!confirm(msg)) return;
       }
       $('btnRasc').disabled=$('btnEnv').disabled=true;
       var ok=await rpc('pa_form_save',{p_token:TOKEN,p_respostas:RESP,p_final:!!final});
       if(!ok) throw new Error('não salvou');
       SUJO=false;
-      aviso(final?'Respostas enviadas. Muito obrigado! Se precisar corrigir algo, é só alterar e enviar de novo.':'Rascunho salvo. Você pode continuar depois pelo mesmo link.','ok');
-      window.scrollTo(0,0);
-    }catch(e){ aviso('Não foi possível salvar agora. Verifique a internet e tente de novo.','err'); }
+      if(final){ FORM.enviado_em=new Date().toISOString(); modoLeitura(); fecharSaida(); }
+      else { aviso('Rascunho salvo ✓. Você já pode fechar a página: quando voltar por este link, suas respostas estarão aqui.','ok'); fecharSaida(); window.scrollTo(0,0); }
+    }catch(e){ aviso('Não foi possível salvar. Verifique a internet e tente de novo. Se as respostas já tiverem sido enviadas antes, entre em contato com a contabilidade para pedir um novo link.','err'); }
     $('btnRasc').disabled=$('btnEnv').disabled=false;
+  }
+  function fecharSaida(){ $('saida').classList.remove('open'); }
+  function mostrarSaida(){
+    if(!SUJO||SAIR||EDITS<=AVISADO||FORM.enviado_em) return;
+    AVISADO=EDITS;
+    var n=FORM.linhas.filter(function(l){ var r=RESP[l.id]; return r&&Object.keys(r).some(function(k){return r[k]!==''&&r[k]!=null&&k!=='tipo_lista';}); }).length;
+    $('saidaTxt').textContent='Você já respondeu '+n+' de '+FORM.linhas.length+' lançamento(s). Deseja salvar um rascunho? Se não salvar, quando voltar a este link você terá que responder novamente o que já preencheu.';
+    $('saida').classList.add('open');
   }
   async function iniciar(){
     if(TOKEN.length<32){ $('sub').textContent=''; aviso('Link inválido. Peça um novo link ao seu contador.','err'); return; }
     try{ FORM=await rpc('pa_form_get',{p_token:TOKEN}); }catch(e){ $('sub').textContent=''; aviso('Não foi possível abrir o formulário. Verifique a internet e tente de novo.','err'); return; }
     if(!FORM){ $('sub').textContent=''; aviso('Este link expirou ou não existe. Peça um novo link ao seu contador.','err'); return; }
     $('tit').textContent='Esclarecimento de lançamentos — '+(FORM.empresa||'');
-    $('sub').textContent='Para fechar a contabilidade, precisamos entender os lançamentos abaixo. Responda cada um e clique em “Enviar respostas”. Você pode salvar um rascunho e continuar depois.';
+    $('sub').textContent='Para fechar a contabilidade, precisamos entender os lançamentos abaixo. Responda cada um e clique em “Enviar respostas”. Você pode salvar um rascunho e continuar depois, mas depois de enviar não será possível alterar.';
     RESP=FORM.respostas||{};
-    try{ var loc=JSON.parse(localStorage.getItem(LS)||'null'); if(loc&&!Object.keys(RESP).length) RESP=loc; }catch(e){}
-    if(FORM.enviado_em) aviso('Suas respostas já foram enviadas. Você pode ajustar e enviar novamente.','ok');
+    try{ localStorage.removeItem(LS); }catch(e){}
     $('lista').innerHTML=FORM.linhas.map(card).join('');
     $('bar').style.display='flex';
     $('btnRasc').onclick=function(){salvar(false);}; $('btnEnv').onclick=function(){salvar(true);};
-    window.addEventListener('beforeunload',function(e){ if(SUJO){ e.preventDefault(); e.returnValue=''; } });
+    window.addEventListener('beforeunload',function(e){ if(SUJO&&!SAIR){ e.preventDefault(); e.returnValue=''; } });
+    document.documentElement.addEventListener('mouseleave',function(e){ if(e.clientY<=0) mostrarSaida(); });
+    $('saidaSalvar').onclick=function(){ salvar(false,true); };
+    $('saidaVoltar').onclick=fecharSaida;
+    $('saidaSair').onclick=function(){ SAIR=true; fecharSaida(); aviso('Tudo bem. Suas respostas não foram salvas — ao voltar por este link, será preciso responder de novo.','err'); };
     ligar(); progresso();
+    if(FORM.enviado_em) modoLeitura();
   }
   iniciar();
 })();

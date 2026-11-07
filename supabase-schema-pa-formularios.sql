@@ -40,7 +40,8 @@ begin
   update public.pa_formularios
      set respostas = p_respostas,
          enviado_em = case when p_final then now() else enviado_em end
-   where token = p_token and expira_em > now();
+   where token = p_token and expira_em > now()
+     and enviado_em is null; -- depois de ENVIADO (final) o link não aceita mais alteração: o cliente pede novo link ao escritório
   return found;
 end;
 $$;
