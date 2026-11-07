@@ -258,7 +258,11 @@
       const antigas = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,hash_dedup,status_conciliacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'extrato_compl'));
       const emPeriodo = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate);
       const apagar = (antigas.data || []).filter(x => emPeriodo(x) && x.status_conciliacao === 'pendente').map(x => x.id);
-      for (let i = 0; i < apagar.length; i += 200) { const d = await _supaClient.from('lancamentos_extrato').delete().in('id', apagar.slice(i, i + 200)); if (d.error) { toast('Erro ao refazer as linhas anteriores: ' + d.error.message, 'err'); return; } }
+      for (let i = 0; i < apagar.length; i += 200) {
+        const lote = apagar.slice(i, i + 200); // libera o que estiver ligado (comprovantes etc. voltam a pendente e são reassociados sozinhos) antes de apagar
+        for (const t of ['comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios', 'notas_fiscais_parcelas']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', lote);
+        await _supaClient.from('aplicacoes_financeiras_movimentos').update({ lancamento_extrato_id: null }).in('lancamento_extrato_id', lote);
+        const d = await _supaClient.from('lancamentos_extrato').delete().in('id', lote); if (d.error) { toast('Erro ao refazer as linhas anteriores: ' + d.error.message, 'err'); return; } }
       const mantidas = (antigas.data || []).filter(x => emPeriodo(x) && x.status_conciliacao !== 'pendente');
       const jaTem = new Set(mantidas.map(x => x.hash_dedup));
       const Fdia = {}, Cdia = {};
