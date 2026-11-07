@@ -722,13 +722,14 @@
   };
 
   // ───────── ajuste manual, editar data, excluir ajuste ─────────
-  function dialogoForm(titulo, corpo, aoSalvar) {
+  function dialogoForm(titulo, corpo, aoSalvar, comSemAprender) {
     let el = document.getElementById('mFlForm');
     if (!el) { el = document.createElement('div'); el.className = 'mb'; el.id = 'mFlForm'; el.innerHTML = '<div class="modal" style="width:96%;max-width:520px"></div>'; document.body.appendChild(el); }
-    el.firstChild.innerHTML = '<div class="mt" style="display:flex;justify-content:space-between;align-items:center"><span>' + titulo + '</span><button id="flFormX" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button></div><div style="margin:8px 0">' + corpo + '</div><div class="ma"><button class="btn bp" id="flFormOk">Salvar</button><button class="btn bo" id="flFormCancel">Cancelar</button></div>';
+    el.firstChild.innerHTML = '<div class="mt" style="display:flex;justify-content:space-between;align-items:center"><span>' + titulo + '</span><button id="flFormX" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button></div><div style="margin:8px 0">' + corpo + '</div><div class="ma"><button class="btn bp" id="flFormOk">' + (comSemAprender ? 'Salvar e aprender' : 'Salvar') + '</button>' + (comSemAprender ? '<button class="btn bo" id="flFormSemAp" title="Corrige só esta linha, sem guardar o pagador na memória (correção pontual)">Salvar sem aprender</button>' : '') + '<button class="btn bo" id="flFormCancel">Cancelar</button></div>';
     const fechar = () => closeModal('mFlForm');
     el.querySelector('#flFormX').onclick = el.querySelector('#flFormCancel').onclick = fechar;
-    el.querySelector('#flFormOk').onclick = async () => { const r = await aoSalvar(el); if (r !== false) fechar(); };
+    el.querySelector('#flFormOk').onclick = async () => { const r = await aoSalvar(el, true); if (r !== false) fechar(); };
+    const sa = el.querySelector('#flFormSemAp'); if (sa) sa.onclick = async () => { const r = await aoSalvar(el, false); if (r !== false) fechar(); };
     openModal('mFlForm'); return el;
   }
   const num = t => { const x = parseFloat(String(t || '').replace(/\./g, '').replace(',', '.')); return isNaN(x) ? 0 : x; };
@@ -782,17 +783,17 @@
     if (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial') { toast('Esta linha já está classificada. Desclassifique antes de editar o valor.', 'err'); return; }
     const ent = Number(x.valor_entrada) > 0, atual = ent ? Number(x.valor_entrada) : Number(x.valor_saida);
     dialogoForm('✏️ Corrigir valor (linha do Fluxo)',
-      '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">' + E(String(x.historico_bancario || '').slice(0, 160)) + '<br>Dia ' + brData(x.data_pagamento) + ' · valor no Fluxo: <b>R$ ' + fmt(atual) + '</b><br>A correção fica registrada (valor original guardado) e o sistema lembra deste pagador para os próximos meses.</div>'
+      '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">' + E(String(x.historico_bancario || '').slice(0, 160)) + '<br>Dia ' + brData(x.data_pagamento) + ' · valor no Fluxo: <b>R$ ' + fmt(atual) + '</b><br>A correção fica registrada (valor original guardado) <br><b>Salvar e aprender</b>: o sistema lembra deste pagador. <b>Salvar sem aprender</b>: correção pontual, nada é guardado na memória.</div>'
       + '<label style="font-size:12px">Valor correto (R$)</label><input id="flEdVal" value="' + fmt(atual) + '" style="' + ESTI + '">',
-      async el => {
+      async (el, aprender) => {
         const v = num(el.querySelector('#flEdVal').value); if (!(v > 0)) { toast('Informe o valor.', 'err'); return false; }
         if (Math.round(v * 100) === Math.round(atual * 100)) return;
         const r = await _supaClient.from('lancamentos_extrato').update(ent ? { valor_entrada: v } : { valor_saida: v }).eq('id', id).in('status_conciliacao', ['pendente']);
         if (r.error) { toast('Erro ao salvar: ' + r.error.message, 'err'); return false; }
-        gravarLogValor([{ id, em: new Date().toISOString(), por: quemFez(), dia: x.data_pagamento, nome: String(x.historico_bancario || '').split(' | ')[0].slice(0, 60), de: atual, para: v, via: 'edição manual (✏️ do valor)' }]);
-        try { const m = S.g('fl_tol_pagadores_163') || {}, k = String(x.historico_bancario || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim(); if (k && Math.abs(v - atual) <= 1) { m[k] = (m[k] || 0) + 1; S.s('fl_tol_pagadores_163', m); } } catch (e) {}
+        gravarLogValor([{ id, em: new Date().toISOString(), por: quemFez(), dia: x.data_pagamento, nome: String(x.historico_bancario || '').split(' | ')[0].slice(0, 60), de: atual, para: v, via: aprender ? 'edição manual (✏️ do valor)' : 'edição manual (✏️ do valor) — pontual, sem aprender' }]);
+        try { const m = S.g('fl_tol_pagadores_163') || {}, k = String(x.historico_bancario || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim(); if (aprender && k && Math.abs(v - atual) <= 1) { m[k] = (m[k] || 0) + 1; S.s('fl_tol_pagadores_163', m); } } catch (e) {}
         toast('Valor corrigido ✓ (original R$ ' + fmt(atual) + ' guardado no registro)', 'ok'); renderLancctbRegistroContabil();
-      });
+      }, true);
   };
   root._flExcluirAjuste = async function (id) {
     if (!confirm('Excluir este ajuste manual?')) return;
