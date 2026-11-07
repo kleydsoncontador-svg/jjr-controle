@@ -285,7 +285,7 @@
   async function conciliarPagamentos(conta, p, ref, novas, simular) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
-    const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
+    const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte,hash_dedup').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
     const noPer = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate);
     const apagar = (ant.data || []).filter(x => noPer(x) && x.status_conciliacao === 'pendente').map(x => x.id);
     for (let i = 0; !simular && i < apagar.length; i += 200) {
@@ -294,7 +294,9 @@
       await _supaClient.from('aplicacoes_financeiras_movimentos').update({ lancamento_extrato_id: null }).in('lancamento_extrato_id', lote);
       const d = await _supaClient.from('lancamentos_extrato').delete().in('id', lote); if (d.error) { toast('Erro ao refazer as linhas anteriores: ' + d.error.message, 'err'); return null; }
     }
-    const diasFechados = new Set((ant.data || []).filter(x => noPer(x) && x.status_conciliacao !== 'pendente').map(x => x.data_pagamento));
+    // dia FECHADO = já tem linha trazida e CLASSIFICADA (não se mexe). Linha que você IGNOROU não fecha o dia: ela só impede que o mesmo item seja trazido de novo.
+    const diasFechados = new Set((ant.data || []).filter(x => noPer(x) && (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial')).map(x => x.data_pagamento));
+    const rejeitadas = new Set((ant.data || []).filter(x => x.status_conciliacao === 'ignorado').map(x => x.hash_dedup));
     // 2) Fluxo (Registro) por dia, e saídas do extrato por dia
     const fxr = await todosPorId(() => {
       let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
@@ -325,7 +327,7 @@
       const ls = extDia[d];
       const ent = { dia: d, total: ls.length, cobertas: 0, add: [], conc: null, excesso: [] }; rel.detalhe.push(ent);
       const sobra = ls.filter(l => !l.explicada), diretas = sobra.filter(l => !casavel(l)), pend = sobra.filter(l => casavel(l)), R = livres(d);
-      const adiciona = l => { novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); };
+      const adiciona = l => { if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); };
       diretas.forEach(adiciona);                                  // aplicações, tarifas, IOF, impostos do banco: só existem no extrato
       const Lp = pend.reduce((a, l) => a + l.c, 0), Rs = R.reduce((a, l) => a + l.c, 0);
       if (pend.length && !R.length) pend.forEach(adiciona);       // sobra do extrato e nada sobrando no Fluxo: só está no extrato
@@ -334,8 +336,11 @@
         if (dif === 0) { pend.forEach(l => { l.explicada = true; l.via = 'grupo'; }); }          // o que sobrou dos dois lados fecha exatamente
         else if (dif > 0) {
           const hist = nomeCat(pend) + ' (extrato: ' + listaValores(pend.map(l => l.c), 8) + '; soma do Fluxo de Caixa: ' + listaValores(R.map(x => x.c), 10) + '; diferença ' + fmt(dif / 100) + ')';
-          novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif / 100, valor_entrada: 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
-          rel.conciliacoes.push({ dia: d, dif, ls: Lp, rs: Rs, hist }); ent.conc = { dif, ls: Lp, rs: Rs, hist, sisp: pend.map(l => ({ v: l.c, h: String(l.r.historico_bancario || '') })), fluxo: R.map(x => ({ v: x.c, n: x.nome })) };
+          if (rejeitadas.has('flkk' + d + '|' + dif)) ent.ignoradas = (ent.ignoradas || 0) + 1;
+          else {
+            novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif / 100, valor_entrada: 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
+            rel.conciliacoes.push({ dia: d, dif, ls: Lp, rs: Rs, hist }); ent.conc = { dif, ls: Lp, rs: Rs, hist, sisp: pend.map(l => ({ v: l.c, h: String(l.r.historico_bancario || '') })), fluxo: R.map(x => ({ v: x.c, n: x.nome })) };
+          }
         } else { rel.excessos.push({ dia: d, dif, ls: Lp, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); ent.sobraSispag = Lp; }
       } else if (!pend.length && R.length) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); }
       ent.cobertas = ls.filter(l => l.explicada).length; rel.explicadas += ent.cobertas;
@@ -459,6 +464,7 @@
       h += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px"><div style="font-weight:700;margin-bottom:4px">Dia ' + brData(d.dia) + ' — ' + chip + '</div><div style="font-size:12.5px;line-height:1.45">';
       if (d.total) h += 'O extrato tem <b>' + d.total + '</b> saída(s) neste dia. <b>' + d.cobertas + '</b> já estavam no Fluxo de Caixa (por isso não trouxe de novo, para não contar duas vezes).<br>';
       if (d.add && d.add.length) h += 'Estas saídas estavam <b>só no extrato</b> (o Fluxo não tem), então trouxe para o Registro:' + d.add.map(a => li(v$(a.v) + ' — ' + E(a.h))).join('') ;
+      if (d.ignoradas) h += '<div style="margin-top:4px;color:var(--slate)">Você tinha ignorado ' + d.ignoradas + ' linha(s) do extrato deste dia — não trouxe de novo.</div>';
       if (d.conc) h += '<div style="margin-top:4px">Os pagamentos <b>Sispag</b> do extrato (' + v$(d.conc.ls) + ') não fecharam exatamente com o que o Fluxo tem neste dia (' + v$(d.conc.rs) + '). Para o saldo do dia bater, incluí <b>uma linha de Conciliação de ' + v$(d.conc.dif) + '</b> (a diferença). O histórico dela mostra as somas.</div>';
       if (alerta) h += '<div style="margin-top:4px;color:#b45309"><b>O Fluxo tem pagamento(s) neste dia que NÃO aparece(m) no extrato do banco</b> (total ' + v$(d.excesso.reduce((a, e) => a + e.v, 0)) + '):' + d.excesso.slice(0, 12).map(e => li(v$(e.v) + (e.n ? ' — ' + E(e.n) : ''))).join('') + (d.excesso.length > 12 ? li('… e mais ' + (d.excesso.length - 12)) : '') + '<span style="color:var(--slate)">Pode ter sido pago em outro dia ou por outro banco. Se NÃO saiu deste banco, clique em 🚫 nessa linha (ela sai do saldo) — ou em ✏️ para mudar a data — e traga os pagamentos de novo.</span></div>';
       h += '</div></div>';
