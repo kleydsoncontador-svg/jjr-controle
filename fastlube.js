@@ -278,16 +278,17 @@
   // Por dia: (1) saída do extrato com o MESMO valor de uma linha do Fluxo = é a mesma saída, não traz; (2) saída do extrato (Sispag) = SOMA exata de linhas do Fluxo do dia = não traz;
   // (3) idem (1) em dia próximo (±3) só quando o valor é igual; (4) o que sobra do extrato: aplicações/tarifas/impostos... entram como linha do extrato;
   // sobra de Sispag com sobra de Fluxo no mesmo dia: entra só a DIFERENÇA, como "Conciliação", com a conta explicada no histórico; sobra de Fluxo maior que a do extrato é apenas avisada.
-  const catExtrato = h => { h = String(h || '').toUpperCase(); if (/SISPAG/.test(h)) return 'sispag'; if (/APLIC/.test(h)) return 'aplic'; return 'outros'; };
+  // categorias do extrato: sispag / outros (podem casar com o Fluxo, por valor igual ou por SOMA exata de linhas) · aplic / banco (aplicações, tarifas, IOF, impostos do banco: nunca estão no Fluxo, entram sempre)
+  const catExtrato = h => { h = String(h || '').toUpperCase(); if (/SISPAG/.test(h)) return 'sispag'; if (/APLIC/.test(h)) return 'aplic'; if (/\bTAR\b|TAR\/|TARIFA|\bIOF\b|DA REC|CONTR IMP|FIN VENDA|JUROS|CUSTAS/.test(h)) return 'banco'; return 'outros'; };
   const nomeCat = ls => [...new Set(ls.map(l => String(l.r.historico_bancario || '').trim()).filter(Boolean))].slice(0, 3).join(' / ') || 'Extrato';
   const listaValores = (vs, max) => { const f = x => fmt(x / 100); return vs.length <= max ? vs.map(f).join(' + ') : vs.slice(0, max).map(f).join(' + ') + ' + … (+' + (vs.length - max) + ')'; };
-  async function conciliarPagamentos(conta, p, ref, novas) {
+  async function conciliarPagamentos(conta, p, ref, novas, simular) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
     const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
     const noPer = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate);
     const apagar = (ant.data || []).filter(x => noPer(x) && x.status_conciliacao === 'pendente').map(x => x.id);
-    for (let i = 0; i < apagar.length; i += 200) {
+    for (let i = 0; !simular && i < apagar.length; i += 200) {
       const lote = apagar.slice(i, i + 200);
       for (const t of ['comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios', 'notas_fiscais_parcelas']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', lote);
       await _supaClient.from('aplicacoes_financeiras_movimentos').update({ lancamento_extrato_id: null }).in('lancamento_extrato_id', lote);
@@ -307,34 +308,37 @@
     ref.filter(r => Number(r.valor_saida) > 0 && !diasFechados.has(r.data_pagamento)).forEach(r => { (extDia[r.data_pagamento] = extDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), cat: catExtrato(r.historico_bancario), explicada: false, via: '' }); });
     const dias = Object.keys(extDia).sort();
     const livres = d => (fluxoDia[d] || []).filter(x => !x.usado);
+    const casavel = l => l.cat === 'sispag' || l.cat === 'outros';
     // passada A: mesmo dia, mesmo valor
-    dias.forEach(d => extDia[d].slice().sort((a, b) => b.c - a.c).forEach(l => { if (l.cat === 'aplic') return; const f = livres(d).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'mesmo valor'; } }));
-    // passada B: mesmo dia, Sispag = soma exata de linhas do Fluxo
-    dias.forEach(d => extDia[d].filter(l => !l.explicada && l.cat === 'sispag').sort((a, b) => b.c - a.c).forEach(l => {
+    dias.forEach(d => extDia[d].slice().sort((a, b) => b.c - a.c).forEach(l => { if (!casavel(l)) return; const f = livres(d).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'mesmo valor'; } }));
+    // passada B: mesmo dia, a saída do extrato = SOMA exata de linhas do Fluxo (qualquer tipo, menos aplicação/tarifa)
+    dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       const it = livres(d); if (!it.length) return; const sel = exatoSubset(it, l.c); if (sel) { sel.forEach(k => { it[k].usado = true; }); l.explicada = true; l.via = 'soma de ' + sel.length; }
     }));
-    // passada C: dia próximo (±3), só valor igual
+    // passada C: dia próximo (±3): valor igual, depois soma de linhas de UM mesmo dia
     let outroDia = 0;
-    dias.forEach(d => extDia[d].filter(l => !l.explicada && l.cat !== 'aplic').forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const f = livres(sh(d, dd)).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'dia ' + (dd > 0 ? '+' : '') + dd; outroDia++; return; } } }));
+    dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const f = livres(sh(d, dd)).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'dia ' + (dd > 0 ? '+' : '') + dd; outroDia++; return; } } }));
+    dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const it = livres(sh(d, dd)); if (!it.length) continue; const sel = exatoSubset(it, l.c); if (sel) { sel.forEach(k => { it[k].usado = true; }); l.explicada = true; l.via = 'soma dia ' + dd; outroDia++; return; } } }));
     // 3) o que sobra
     const rel = { linhasAdicionadas: 0, conciliacoes: [], excessos: [], explicadas: 0, outroDia, dias: dias.length, fechados: [...diasFechados].length, detalhe: [] };
     dias.forEach(d => {
-      const ls = extDia[d]; rel.explicadas += ls.filter(l => l.explicada).length;
-      const ent = { dia: d, total: ls.length, cobertas: ls.filter(l => l.explicada).length, add: [], conc: null, excesso: [] }; rel.detalhe.push(ent);
-      const sobra = ls.filter(l => !l.explicada), extras = sobra.filter(l => l.cat !== 'sispag'), sisp = sobra.filter(l => l.cat === 'sispag'), R = livres(d);
-      extras.forEach(l => { novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); });
-      const Ls = sisp.reduce((a, l) => a + l.c, 0), Rs = R.reduce((a, l) => a + l.c, 0);
-      if (sisp.length && !R.length) { sisp.forEach(l => { novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); }); return; }
-      if (sisp.length && R.length) {
-        const dif = Ls - Rs;
-        if (dif > 0) {
-          const hist = nomeCat(sisp) + ' (extrato: ' + listaValores(sisp.map(l => l.c), 8) + '; soma do Fluxo de Caixa: ' + listaValores(R.map(x => x.c), 10) + '; diferença ' + fmt(dif / 100) + ')';
+      const ls = extDia[d];
+      const ent = { dia: d, total: ls.length, cobertas: 0, add: [], conc: null, excesso: [] }; rel.detalhe.push(ent);
+      const sobra = ls.filter(l => !l.explicada), diretas = sobra.filter(l => !casavel(l)), pend = sobra.filter(l => casavel(l)), R = livres(d);
+      const adiciona = l => { novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); };
+      diretas.forEach(adiciona);                                  // aplicações, tarifas, IOF, impostos do banco: só existem no extrato
+      const Lp = pend.reduce((a, l) => a + l.c, 0), Rs = R.reduce((a, l) => a + l.c, 0);
+      if (pend.length && !R.length) pend.forEach(adiciona);       // sobra do extrato e nada sobrando no Fluxo: só está no extrato
+      else if (pend.length && R.length) {
+        const dif = Lp - Rs;
+        if (dif === 0) { pend.forEach(l => { l.explicada = true; l.via = 'grupo'; }); }          // o que sobrou dos dois lados fecha exatamente
+        else if (dif > 0) {
+          const hist = nomeCat(pend) + ' (extrato: ' + listaValores(pend.map(l => l.c), 8) + '; soma do Fluxo de Caixa: ' + listaValores(R.map(x => x.c), 10) + '; diferença ' + fmt(dif / 100) + ')';
           novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif / 100, valor_entrada: 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
-          rel.conciliacoes.push({ dia: d, dif, ls: Ls, rs: Rs, hist }); ent.conc = { dif, ls: Ls, rs: Rs, hist, sisp: sisp.map(l => ({ v: l.c, h: String(l.r.historico_bancario || '') })), fluxo: R.map(x => ({ v: x.c, n: x.nome })) };
-        } else if (dif < 0) { rel.excessos.push({ dia: d, dif, ls: Ls, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); ent.sobraSispag = Ls; }
-        return;
-      }
-      if (!sisp.length && R.length) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); }
+          rel.conciliacoes.push({ dia: d, dif, ls: Lp, rs: Rs, hist }); ent.conc = { dif, ls: Lp, rs: Rs, hist, sisp: pend.map(l => ({ v: l.c, h: String(l.r.historico_bancario || '') })), fluxo: R.map(x => ({ v: x.c, n: x.nome })) };
+        } else { rel.excessos.push({ dia: d, dif, ls: Lp, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); ent.sobraSispag = Lp; }
+      } else if (!pend.length && R.length) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); ent.excesso = R.map(x => ({ v: x.c, n: x.nome })); }
+      ent.cobertas = ls.filter(l => l.explicada).length; rel.explicadas += ent.cobertas;
     });
     // dias que só têm Fluxo sem par e nenhum extrato
     Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate)).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
@@ -396,6 +400,12 @@
       todosDiasConciliados(conta).then(set => { bloq = set; if (!feito) desenhar(); }).catch(() => {});
     });
   }
+  // simulação (não grava nada): devolve o que o botão de pagamentos faria no período — usada para conferir o motor
+  root._flSimularPagamentos = async function (de, ate) {
+    const conta = contaAtual(), p = { de, ate }, ref = await carregarRef(conta, p), novas = [];
+    const rel = await conciliarPagamentos(conta, p, ref, novas, true);
+    return { rel, novas: novas.map(x => ({ fonte: x.fonte, v: x.r.valor_saida, h: String(x.r.historico_bancario || '').slice(0, 110) })) };
+  };
   root._flTrazerExtrato = async function (modo) {
     const comPagamentos = modo === 'pag', comRecebimentos = modo === 'receb';
     if (!ativo()) return;
