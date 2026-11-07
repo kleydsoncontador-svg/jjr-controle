@@ -178,10 +178,11 @@
     if (ativo() && root.__flFiltroOrigem) q = q.eq('fonte', root.__flFiltroOrigem);
     if (ativo() && root.__flFiltroDif) {                                  // coluna DIF.: onde houve diferença/correção
       const f = root.__flFiltroDif, ids = idsValorAlterado();
-      if (f === 'conc') q = q.eq('fonte', 'conciliacao');
+      const marc = Object.keys((S.g('fl_dif_marcas_163') || {})).map(Number).filter(Boolean);
+      if (f === 'conc') q = marc.length ? q.or('fonte.eq.conciliacao,id.in.(' + marc.join(',') + ')') : q.eq('fonte', 'conciliacao');
       else if (f === 'ajuste') q = q.eq('fonte', 'ajuste_manual');
       else if (f === 'valor') q = ids.length ? q.in('id', ids) : q.eq('id', -1);
-      else q = ids.length ? q.or('fonte.in.(conciliacao,ajuste_manual),id.in.(' + ids.join(',') + ')') : q.in('fonte', ['conciliacao', 'ajuste_manual']);
+      else { const todos = ids.concat(marc); q = todos.length ? q.or('fonte.in.(conciliacao,ajuste_manual),id.in.(' + todos.join(',') + ')') : q.in('fonte', ['conciliacao', 'ajuste_manual']); }
     }
     const v = root.__flFiltroDias, conc = root.__flDiasConc;
     if (!ativo() || !v || !conc) return q;
@@ -447,9 +448,13 @@
       novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif > 0 ? dif / 100 : 0, valor_entrada: dif < 0 ? -dif / 100 : 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
       rel.conciliacoes.push({ dia: d, dif, ls: A, rs: regF + regN, hist }); ent.conc = { dif, ls: A, rs: regF + regN, hist, sisp: [], fluxo: sobras.map(x => ({ v: x.c, n: x.nome })) };
       ent.excesso = [];
+      sobras.forEach(x => { rel.marcasDif = rel.marcasDif || {}; rel.marcasDif[x.id] = d; });   // linhas do Fluxo sem par que entraram na explicação da Conciliação: ficam marcadas na coluna DIF.
     });
     // dias que só têm Fluxo sem par e nenhum extrato
     Object.keys(fluxoDia).filter(d => !extDia[d] && (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).sort().forEach(d => { const R = livres(d); if (R.length) { rel.excessos.push({ dia: d, dif: -R.reduce((a, x) => a + x.c, 0), ls: 0, rs: R.reduce((a, x) => a + x.c, 0), fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); } });
+    if (!simular) {
+      try { const dset = new Set(dias), antM = S.g('fl_dif_marcas_163') || {}, novoM = {}; Object.keys(antM).forEach(k => { if (!dset.has(antM[k])) novoM[k] = antM[k]; }); Object.assign(novoM, rel.marcasDif || {}); S.s('fl_dif_marcas_163', novoM); } catch (e) {}
+    }
     rel.ajustesCent = ajustesCent;
     if (!simular && ajustesCent.length) {
       const log = []; let ok = 0;
@@ -971,12 +976,14 @@
         const op = [['', 'Todas'], ['dif', 'Com diferença'], ['conc', 'Conciliação'], ['ajuste', 'Ajuste manual'], ['valor', 'Valor corrigido']];
         th.innerHTML = '<select class="si" data-filtro="registro-dif" style="width:100%;font-size:11px" onchange="__flFiltroDif=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">' + op.map(o => '<option value="' + o[0] + '"' + (root.__flFiltroDif === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
         heads[1].insertBefore(th, heads[1].children[8]); }
+      const marcasDif = S.g('fl_dif_marcas_163') || {};
       const vAlt = new Map(); (S.g('fl_valores_alterados_163') || []).forEach(x => { if (x.id && !vAlt.has(String(x.id))) vAlt.set(String(x.id), x.para - x.de); });
       tbl.querySelectorAll('tbody tr').forEach(tr => {
         if (!tr.children[7]) return; const rid = tr.dataset.rid, f = rid ? fontePorId.get(String(rid)) : null, va = rid ? vAlt.get(String(rid)) : undefined;
         const td = document.createElement('td'); td.style.cssText = 'padding:7px 8px;font-size:11.5px;white-space:nowrap;font-weight:600';
         if (f === 'conciliacao') { td.textContent = '⚖ Conciliação'; td.style.color = '#d97706'; }
         else if (f === 'ajuste_manual') { td.textContent = '✎ Ajuste'; td.style.color = '#ca8a04'; }
+        else if (rid && marcasDif[String(rid)]) { td.textContent = '⚖ na conciliação'; td.style.color = '#d97706'; td.title = 'Linha do Fluxo sem pagamento igual no extrato deste dia: entrou na explicação da Conciliação'; }
         else if (va !== undefined) { td.textContent = '💲 ' + (va > 0 ? '+' : '') + fmt(va); td.style.color = '#0ea5e9'; td.title = 'Valor corrigido: diferença em relação ao valor original do Fluxo'; }
         tr.insertBefore(td, tr.children[8]);
       }); }
