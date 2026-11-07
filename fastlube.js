@@ -387,6 +387,11 @@
       const A = extDia[d].reduce((a, l) => a + l.c, 0), regF = (fluxoDia[d] || []).reduce((a, x) => a + x.c, 0);
       const regN = novas.filter(n => n.r.data_pagamento === d && (n.fonte === 'extrato_compl' || n.fonte === 'conciliacao')).reduce((a, n) => a + cents(n.r.valor_saida) - cents(n.r.valor_entrada), 0);
       const dif = A - regF - regN - (ent.ignV || 0); if (!dif) return;
+      // diferença = EXATAMENTE pagamentos do extrato que o Fluxo só tinha em OUTRO dia: traz esses pagamentos do extrato como eles são (histórico do próprio Sispag), sem 'Conciliação' nem explicação
+      if (dif > 0) {
+        const cand = extDia[d].filter(l => /^(dia|soma dia)/.test(l.via || '')), selX = cand.length ? exatoSubset(cand, dif) : null;
+        if (selX) { selX.forEach(k => { const l = cand[k]; if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); l.via = 'trazida (valor exato)'; }); return; }
+      }
       if (rejeitadas.has('flkk' + d + '|' + dif)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; }
       const outros = (ent.outroDia || []), sobras = livres(d);
       const hist = 'Conciliação do dia ' + brData(d) + ': o extrato pagou R$ ' + fmt(A / 100) + ' e o Registro tinha R$ ' + fmt((regF + regN) / 100) + ' (diferença ' + fmt(Math.abs(dif) / 100) + ').'
