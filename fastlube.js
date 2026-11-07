@@ -50,8 +50,8 @@
     if (!ativo()) return '';
     const n = (root.__regIdsFiltrados || []).length;
     return '<button class="btn bp" onclick="_flSubirFluxo()" title="Sobe o Fluxo de Caixa do mês (Excel). O banco de cada linha vem da coluna Portador: ITAU → Itaú, BANCO DO BRASIL → Banco do Brasil.">⬆ Subir Fluxo de Caixa</button>'
-      + '<button class="btn bo" onclick="_flTrazerExtrato(false)" title="Traz do extrato bancário desta conta (aba Extrato Bancário) todos os RECEBIMENTOS do período para o Registro.">⬇ Trazer recebimentos do extrato</button>'
-      + '<button class="btn bo" onclick="_flTrazerExtrato(true)" title="Traz os recebimentos E os pagamentos do extrato que o Fluxo não explica (aplicações, tarifas, impostos...), para o saldo diário bater. Nada do Fluxo é tirado.">⬇ Trazer recebimentos e pagamentos do extrato</button>'
+      + '<button class="btn bo" onclick="_flTrazerExtrato(\'receb\')" title="Traz do extrato bancário desta conta (aba Extrato Bancário) todos os RECEBIMENTOS (entradas) do período para o Registro.">⬇ Trazer recebimentos do extrato</button>'
+      + '<button class="btn bo" onclick="_flTrazerExtrato(\'pag\')" title="Traz do extrato os PAGAMENTOS (saídas) que o Fluxo não explica (aplicações, tarifas, impostos...), para o saldo diário bater. Nada do Fluxo é tirado.">⬇ Trazer pagamentos do extrato</button>'
       + '<button class="btn bo" onclick="_flConciliarSaldo()" title="Compara, dia a dia, o saldo do extrato bancário com o saldo do Registro Contábil.">⚖ Conciliar saldo</button>'
       + '<button class="btn bo" onclick="_flIgnorarFiltradas()" title="Ignora todas as linhas filtradas: ficam apagadas, fora do saldo e do TXT, e o extrato pode trazer o pagamento delas de novo.">🚫 Ignorar filtradas (' + n + ')</button>'
       + '<button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="_flExcluirFiltradas()" title="Exclui do Registro TODAS as linhas que estão filtradas na tela (não só a página atual).">🗑 Excluir filtradas (' + n + ')</button>';
@@ -140,13 +140,14 @@
     const sel = []; let s = alvo; while (s !== 0) { const p = reach.get(s); sel.push(p.k); s = p.prev; }
     return sel;
   }
-  root._flTrazerExtrato = async function (comPagamentos) {
+  root._flTrazerExtrato = async function (modo) {
+    const comPagamentos = modo === 'pag', comRecebimentos = modo === 'receb';
     if (!ativo()) return;
     const conta = contaAtual(), p = periodo();
     const ref = await carregarRef(conta, p);
     if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta no período. Suba o extrato lá primeiro.', 'err'); return; }
     const novas = []; let nEnt = 0, nSai = 0, explicadas = 0, explicadasOutroDia = 0;
-    ref.forEach(r => { if (Number(r.valor_entrada) > 0 && !(Number(r.valor_saida) > 0)) { novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; } });
+    if (comRecebimentos) ref.forEach(r => { if (Number(r.valor_entrada) > 0 && !(Number(r.valor_saida) > 0)) { novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; } });
     if (comPagamentos) {
       // linhas do Fluxo já no Registro (por dia) para "explicar" os débitos do extrato
       const d0 = p.de ? new Date(p.de + 'T12:00:00') : null, d1 = p.ate ? new Date(p.ate + 'T12:00:00') : null;
@@ -173,7 +174,7 @@
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
       if (up.error) { toast('Erro ao trazer do extrato: ' + up.error.message, 'err'); return; }
     }
-    toast('Trazidos do extrato: ' + nEnt + ' recebimento(s)' + (comPagamentos ? ' e ' + nSai + ' pagamento(s) que o Fluxo não explica (' + explicadas + ' já estavam no Fluxo' + (explicadasOutroDia ? ', ' + explicadasOutroDia + ' em dia próximo' : '') + ')' : '') + '. Linhas já trazidas antes não duplicam.', 'ok');
+    toast(comPagamentos ? 'Trazidos do extrato: ' + nSai + ' pagamento(s) que o Fluxo não explica (' + explicadas + ' já estavam no Fluxo' + (explicadasOutroDia ? ', ' + explicadasOutroDia + ' em dia próximo' : '') + '). Linhas já trazidas antes não duplicam.' : 'Trazidos do extrato: ' + nEnt + ' recebimento(s). Linhas já trazidas antes não duplicam.', 'ok');
     renderLancctbRegistroContabil();
   };
 
@@ -212,8 +213,10 @@
     const conta = contaAtual();
     const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
     const reg = await carregarRegistro(conta, '', '');
-    const igR = await _lancctbFetchTudo(() => _supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
+    const igR = await _lancctbFetchTudo(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
     const ign = new Set((igR.data || []).map(x => String(x.id)));
+    const fontePorId = new Map(); reg.forEach(l => fontePorId.set(String(l.id), l.fonte)); (igR.data || []).forEach(l => fontePorId.set(String(l.id), l.fonte));
+    const ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento' };
     let s = cents((ag && ag.saldo_inicial) || 0); const mapa = new Map();
     reg.forEach(l => { s += cents(l.valor_entrada) - cents(l.valor_saida); mapa.set(String(l.id), s / 100); });
     if (!document.body.contains(tbl)) return;
@@ -232,7 +235,18 @@
       if (eIgn) { tr.style.opacity = '.42'; tr.style.textDecoration = 'line-through'; tr.title = 'Linha ignorada: fora do saldo e do TXT'; }
       tr.insertBefore(td, tr.children[8]);
     });
-    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140) + 'px';
+    // coluna ORIGEM (logo depois do PF/PJ, antes do Valor): de onde veio a linha
+    const cg2 = tbl.querySelector('colgroup'); if (cg2 && cg2.children[6]) { const c = document.createElement('col'); c.style.width = '17ch'; cg2.insertBefore(c, cg2.children[7]); }
+    if (heads[0] && heads[0].children[6]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 8px;text-align:left;white-space:nowrap'; th.textContent = 'Origem'; th.title = 'De onde veio esta linha: Fluxo de Caixa, ou extrato bancário (recebimento / pagamento trazido pelos botões)'; heads[0].insertBefore(th, heads[0].children[7]); }
+    if (heads[1] && heads[1].children[6]) { const th = document.createElement('th'); th.style.cssText = 'padding:4px 6px'; heads[1].insertBefore(th, heads[1].children[7]); }
+    tbl.querySelectorAll('tbody tr').forEach(tr => {
+      const cel = tr.children[6]; if (!cel) return;
+      const td = document.createElement('td'); const rid = tr.dataset.rid, f = rid ? fontePorId.get(String(rid)) : null;
+      td.style.cssText = 'padding:7px 8px;font-size:11.5px;white-space:nowrap;color:' + (f === 'fluxo' ? 'var(--teal)' : 'var(--slate)');
+      td.textContent = f ? (ROT[f] || f) : '';
+      tr.insertBefore(td, tr.children[7]);
+    });
+    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130) + 'px';
   }
   let obs = null, tmr = null;
   root._flPosRender = function () {
