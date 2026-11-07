@@ -89,6 +89,9 @@
     return '<button class="btn bp" onclick="_flSubirFluxo()" title="Sobe o Fluxo de Caixa do mês (Excel). O banco de cada linha vem da coluna Portador: ITAU → Itaú, BANCO DO BRASIL → Banco do Brasil.">⬆ Subir Fluxo de Caixa</button>'
       + '<button class="btn bo" onclick="_flTrazerExtrato(\'receb\')" title="Traz do extrato bancário desta conta (aba Extrato Bancário) todos os RECEBIMENTOS (entradas) do período para o Registro.">⬇ Trazer recebimentos do extrato</button>'
       + '<button class="btn bo" onclick="_flTrazerExtrato(\'pag\')" title="Traz do extrato os PAGAMENTOS (saídas) que o Fluxo não explica (aplicações, tarifas, impostos...), para o saldo diário bater. Nada do Fluxo é tirado.">⬇ Trazer pagamentos do extrato</button>'
+      + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
+      + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
+      + '<button class="btn bo" onclick="_flAbrirRelatorios()" title="Relatórios gerados pelos botões de recebimentos e pagamentos do extrato (o que foi trazido, diferenças, avisos).">📑 Relatórios</button>'
       + '<button class="btn bo" onclick="_flConciliarSaldo()" title="Compara, dia a dia, o saldo do extrato bancário com o saldo do Registro Contábil.">⚖ Conciliar saldo</button>'
       + '<button class="btn bo" onclick="_flIgnorarFiltradas()" title="Ignora todas as linhas filtradas: ficam apagadas, fora do saldo e do TXT, e o extrato pode trazer o pagamento delas de novo.">🚫 Ignorar filtradas (' + n + ')</button>'
       + '<button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="_flExcluirFiltradas()" title="Exclui do Registro TODAS as linhas que estão filtradas na tela (não só a página atual).">🗑 Excluir filtradas (' + n + ')</button>';
@@ -406,24 +409,118 @@
       if (!relatorio) return;
       nSai = relatorio.linhasAdicionadas;
     }
-    if (!novas.length) { toast('Nada a trazer: o Registro já cobre as saídas do extrato.', 'info'); if (relatorio) root.__flRelatorioPag = relatorio; renderLancctbRegistroContabil(); return; }
+    if (!novas.length) { registrarRel(comPagamentos, conta, p, 0, relatorio); toast('Nada a trazer: o Registro já cobre este período. Veja o relatório em 📑 Relatórios.', 'info'); renderLancctbRegistroContabil(); return; }
     const rows = novas.map(({ r, fonte, pref }) => ({ empresa_eid: EID, conta_bancaria_id: Number(conta), data_pagamento: r.data_pagamento, valor_saida: r.valor_saida || 0, valor_entrada: r.valor_entrada || 0, historico_bancario: r.historico_bancario || null, documento: r.documento || null, informacao: r.informacao || null, origem_importacao: 'excel', hash_dedup: pref + r.id, fonte }));
     for (let i = 0; i < rows.length; i += 300) {
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
       if (up.error) { toast('Erro ao trazer do extrato: ' + up.error.message, 'err'); return; }
     }
     toast(comPagamentos ? 'Trazidos do extrato: ' + nSai + ' pagamento(s) que o Fluxo não cobre. Linhas já trazidas antes não duplicam.' : 'Trazidos do extrato: ' + nEnt + ' recebimento(s). Linhas já trazidas antes não duplicam.', 'ok');
-    if (relatorio) { root.__flRelatorioPag = relatorio; mostrarRelatorioPag(relatorio); }
+    registrarRel(comPagamentos, conta, p, comPagamentos ? nSai : nEnt, relatorio);
     renderLancctbRegistroContabil();
   };
-  function mostrarRelatorioPag(r) {
-    let h = '<div style="font-size:13px;margin-bottom:8px">Dias com saída no extrato: <b>' + r.dias + '</b> · saídas do extrato já cobertas pelo Fluxo: <b>' + r.explicadas + '</b>' + (r.outroDia ? ' (' + r.outroDia + ' em dia próximo, mesmo valor)' : '') + ' · linhas trazidas: <b>' + r.linhasAdicionadas + '</b>' + (r.fechados ? ' · ' + r.fechados + ' dia(s) já classificado(s) não foram mexidos' : '') + '</div>';
-    h += '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">O que foi trazido é só o que o extrato tem e o Fluxo não cobre. Nada do Fluxo foi tirado.</div>';
-    if (r.conciliacoes.length) h += '<div style="font-weight:700;margin:8px 0 4px">Linhas de Conciliação (só a diferença do dia, explicada no histórico)</div>' + r.conciliacoes.map(c => '<div style="padding:5px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;font-size:12px"><b>' + brData(c.dia) + '</b> — R$ ' + fmt(c.dif / 100) + '<br><span style="color:var(--slate)">' + E(c.hist) + '</span></div>').join('');
-    if (r.excessos.length) h += '<div style="font-weight:700;margin:10px 0 4px;color:#b45309">Dias em que o Fluxo tem a MAIS do que o extrato (nada foi mexido — ignore 🚫 o que não saiu deste banco e rode de novo)</div>' + r.excessos.map(c => '<div style="padding:5px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;font-size:12px"><b>' + brData(c.dia) + '</b> — Fluxo sem par: ' + c.fluxo + ' linha(s), R$ ' + fmt(c.rs / 100) + (c.ls ? ' · sobra do extrato (Sispag): R$ ' + fmt(c.ls / 100) : '') + '</div>').join('');
-    if (!r.conciliacoes.length && !r.excessos.length) h += '<div style="color:var(--teal);font-weight:600">Nenhuma diferença pendente nos dias processados.</div>';
-    janela('⬇ Pagamentos do extrato — resumo', h, 900);
+  // ───────── relatórios guardados ─────────
+  const RELKEY = 'fl_relatorios_' + EID;
+  const lerRel = () => { try { return S.g(RELKEY) || []; } catch (e) { return []; } };
+  const nomeBanco = c => { const ag = (_lancctbRegistroAgenciasCache || []).find(a => String(a.id) === String(c)); return ag ? (_lancctbNomeBancoExibicao(ag.banco_nome) + (ag.conta_corrente ? ' Cc ' + ag.conta_corrente : '')) : 'conta ' + c; };
+  function registrarRel(pag, conta, p, trouxe, r) {
+    try {
+      const l = lerRel();
+      l.unshift({ id: Date.now(), em: new Date().toISOString(), tipo: pag ? 'Pagamentos' : 'Recebimentos', conta, banco: nomeBanco(conta), de: p.de, ate: p.ate, trouxe, rel: r ? { dias: r.dias, explicadas: r.explicadas, outroDia: r.outroDia, linhasAdicionadas: r.linhasAdicionadas, fechados: r.fechados, conciliacoes: r.conciliacoes, excessos: r.excessos } : null });
+      S.s(RELKEY, l.slice(0, 120));
+    } catch (e) { console.warn('Relatório não guardado:', e); }
   }
+  function htmlRel(x) {
+    const r = x.rel; let h = '';
+    if (!r) return '<div style="font-size:12.5px">Recebimentos trazidos do extrato: <b>' + x.trouxe + '</b>.</div>';
+    h += '<div style="font-size:12.5px;margin-bottom:6px">Dias com saída no extrato: <b>' + r.dias + '</b> · saídas do extrato já cobertas pelo Fluxo: <b>' + r.explicadas + '</b>' + (r.outroDia ? ' (' + r.outroDia + ' em dia próximo, mesmo valor)' : '') + ' · linhas trazidas: <b>' + r.linhasAdicionadas + '</b>' + (r.fechados ? ' · ' + r.fechados + ' dia(s) já classificado(s) não mexidos' : '') + '</div>';
+    if (r.conciliacoes && r.conciliacoes.length) h += '<div style="font-weight:700;margin:8px 0 4px">Linhas de Conciliação (só a diferença do dia)</div>' + r.conciliacoes.map(c => '<div style="padding:5px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;font-size:12px"><b>' + brData(c.dia) + '</b> — R$ ' + fmt(c.dif / 100) + '<br><span style="color:var(--slate)">' + E(c.hist) + '</span></div>').join('');
+    if (r.excessos && r.excessos.length) h += '<div style="font-weight:700;margin:8px 0 4px;color:#b45309">Dias em que o Fluxo tem a MAIS do que o extrato (nada foi mexido — ignore 🚫 o que não saiu deste banco e traga de novo)</div>' + r.excessos.map(c => '<div style="padding:5px 8px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;font-size:12px"><b>' + brData(c.dia) + '</b> — Fluxo sem par: ' + c.fluxo + ' linha(s), R$ ' + fmt(c.rs / 100) + (c.ls ? ' · sobra do extrato (Sispag): R$ ' + fmt(c.ls / 100) : '') + '</div>').join('');
+    if ((!r.conciliacoes || !r.conciliacoes.length) && (!r.excessos || !r.excessos.length)) h += '<div style="color:var(--teal);font-weight:600;font-size:12.5px">Nenhuma diferença pendente nos dias processados.</div>';
+    return h;
+  }
+  root._flAbrirRelatorios = function () {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    const lista = lerRel(), dt = d => { try { return new Date(d).toLocaleString('pt-BR'); } catch (e) { return ''; } };
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:12px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">📑 Relatórios gerados — Fast Lube</div></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Cada vez que você traz recebimentos ou pagamentos do extrato, o resultado fica guardado aqui (banco, período, o que foi trazido e os avisos).</div>'
+      + (lista.length ? lista.map(x => '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;max-width:1100px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px"><div><b>' + E(x.tipo) + ' — ' + E(x.banco) + ' — ' + brData(x.de) + (x.ate && x.ate !== x.de ? ' a ' + brData(x.ate) : '') + '</b></div><div style="font-size:11.5px;color:var(--slate)">gerado em ' + dt(x.em) + ' <button class="icon-btn" title="Apagar este relatório" onclick="_flApagarRel(' + x.id + ')">🗑</button></div></div>' + htmlRel(x) + '</div>').join('') : '<div style="color:var(--slate);padding:20px">Nenhum relatório ainda.</div>');
+  };
+  root._flApagarRel = function (id) { if (!confirm('Apagar este relatório?')) return; try { S.s(RELKEY, lerRel().filter(x => x.id !== id)); } catch (e) {} root._flAbrirRelatorios(); };
+
+  // ───────── ajuste manual, editar data, excluir ajuste ─────────
+  function dialogoForm(titulo, corpo, aoSalvar) {
+    let el = document.getElementById('mFlForm');
+    if (!el) { el = document.createElement('div'); el.className = 'mb'; el.id = 'mFlForm'; el.innerHTML = '<div class="modal" style="width:96%;max-width:520px"></div>'; document.body.appendChild(el); }
+    el.firstChild.innerHTML = '<div class="mt" style="display:flex;justify-content:space-between;align-items:center"><span>' + titulo + '</span><button id="flFormX" style="background:none;border:none;font-size:18px;cursor:pointer;color:var(--slate)">✕</button></div><div style="margin:8px 0">' + corpo + '</div><div class="ma"><button class="btn bp" id="flFormOk">Salvar</button><button class="btn bo" id="flFormCancel">Cancelar</button></div>';
+    const fechar = () => closeModal('mFlForm');
+    el.querySelector('#flFormX').onclick = el.querySelector('#flFormCancel').onclick = fechar;
+    el.querySelector('#flFormOk').onclick = async () => { const r = await aoSalvar(el); if (r !== false) fechar(); };
+    openModal('mFlForm'); return el;
+  }
+  const num = t => { const x = parseFloat(String(t || '').replace(/\./g, '').replace(',', '.')); return isNaN(x) ? 0 : x; };
+  const ESTI = 'width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink);font:inherit';
+  const HIST_AJUSTE = 'Ajuste incluído para acerto do saldo diário';
+  async function difDia(conta, dia) {
+    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+    const ref = await carregarRef(conta, { de: '', ate: dia }), reg = await carregarRegistro(conta, '', dia);
+    const liq = l => l.reduce((a, x) => a + cents(x.valor_entrada) - cents(x.valor_saida), 0);
+    return liq(ref) - liq(reg); // extrato − Registro ao fim do dia (centavos)
+  }
+  root._flNovoAjuste = async function () {
+    if (!ativo()) return;
+    const conta = contaAtual();
+    const dia = _lancctbRegistroDataExata || ((_lancctbRegistroDataDe && _lancctbRegistroDataDe === _lancctbRegistroDataAte) ? _lancctbRegistroDataDe : '') || _lancctbRegistroDataDe || '';
+    let sug = null; if (dia) { try { sug = await difDia(conta, dia); } catch (e) {} }
+    const tipo0 = sug != null && sug > 0 ? 'entrada' : 'saida', val0 = sug ? fmt(Math.abs(sug) / 100) : '';
+    dialogoForm('➕ Adicionar ajuste — ' + E(nomeBanco(conta)),
+      '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">A linha entra com origem <b>Ajuste manual</b> (em amarelo) e dá para editar ou excluir depois.' + (sug != null ? '<br>Diferença do dia ' + brData(dia) + ' (extrato − Registro): <b>R$ ' + fmt(sug / 100) + '</b> ' + (sug === 0 ? '(já bate)' : '(valor sugerido abaixo)') : '') + '</div>'
+      + '<label style="font-size:12px">Data</label><input id="flAjData" type="date" value="' + E(dia) + '" style="' + ESTI + '">'
+      + '<label style="font-size:12px;display:block;margin-top:8px">Tipo</label><select id="flAjTipo" style="' + ESTI + '"><option value="saida"' + (tipo0 === 'saida' ? ' selected' : '') + '>Saída (pagamento)</option><option value="entrada"' + (tipo0 === 'entrada' ? ' selected' : '') + '>Entrada (recebimento)</option></select>'
+      + '<label style="font-size:12px;display:block;margin-top:8px">Valor (R$)</label><input id="flAjValor" value="' + E(val0) + '" placeholder="0,00" style="' + ESTI + '">'
+      + '<label style="font-size:12px;display:block;margin-top:8px">Histórico bancário</label><textarea id="flAjHist" rows="2" style="' + ESTI + '">' + HIST_AJUSTE + '</textarea>',
+      async el => {
+        const d = el.querySelector('#flAjData').value, t = el.querySelector('#flAjTipo').value, v = num(el.querySelector('#flAjValor').value), h = el.querySelector('#flAjHist').value.trim() || HIST_AJUSTE;
+        if (!d) { toast('Escolha a data.', 'err'); return false; }
+        if (!(v > 0)) { toast('Informe o valor.', 'err'); return false; }
+        const r = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid: EID, conta_bancaria_id: Number(conta), data_pagamento: d, valor_saida: t === 'saida' ? v : 0, valor_entrada: t === 'entrada' ? v : 0, historico_bancario: h, origem_importacao: 'manual', hash_dedup: 'flm' + Date.now() + Math.random().toString(36).slice(2, 7), fonte: 'ajuste_manual', status_conciliacao: 'pendente' });
+        if (r.error) { toast('Erro ao incluir o ajuste: ' + r.error.message, 'err'); return false; }
+        toast('Ajuste incluído ✓', 'ok'); renderLancctbRegistroContabil();
+      });
+  };
+  root._flEditarLinha = async function (id) {
+    const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle(); if (!x) return;
+    if (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial') { toast('Esta linha já está classificada. Desclassifique antes de editar.', 'err'); return; }
+    const aj = x.fonte === 'ajuste_manual', ent = Number(x.valor_entrada) > 0;
+    dialogoForm('✏️ Editar linha' + (aj ? ' (ajuste manual)' : ''),
+      '<label style="font-size:12px">Data</label><input id="flEdData" type="date" value="' + E(x.data_pagamento) + '" style="' + ESTI + '">'
+      + (aj ? '<label style="font-size:12px;display:block;margin-top:8px">Tipo</label><select id="flEdTipo" style="' + ESTI + '"><option value="saida"' + (!ent ? ' selected' : '') + '>Saída</option><option value="entrada"' + (ent ? ' selected' : '') + '>Entrada</option></select><label style="font-size:12px;display:block;margin-top:8px">Valor (R$)</label><input id="flEdValor" value="' + fmt(ent ? x.valor_entrada : x.valor_saida) + '" style="' + ESTI + '"><label style="font-size:12px;display:block;margin-top:8px">Histórico bancário</label><textarea id="flEdHist" rows="2" style="' + ESTI + '">' + E(x.historico_bancario || '') + '</textarea>' : '<div style="font-size:12px;color:var(--slate);margin-top:8px">' + E(String(x.historico_bancario || '').slice(0, 160)) + '</div>'),
+      async el => {
+        const d = el.querySelector('#flEdData').value; if (!d) { toast('Escolha a data.', 'err'); return false; }
+        const up = { data_pagamento: d };
+        if (aj) { const t = el.querySelector('#flEdTipo').value, v = num(el.querySelector('#flEdValor').value); if (!(v > 0)) { toast('Informe o valor.', 'err'); return false; } up.valor_saida = t === 'saida' ? v : 0; up.valor_entrada = t === 'entrada' ? v : 0; up.historico_bancario = el.querySelector('#flEdHist').value.trim() || HIST_AJUSTE; }
+        const r = await _supaClient.from('lancamentos_extrato').update(up).eq('id', id); if (r.error) { toast('Erro ao salvar: ' + r.error.message, 'err'); return false; }
+        toast('Linha atualizada ✓', 'ok'); renderLancctbRegistroContabil();
+      });
+  };
+  root._flExcluirAjuste = async function (id) {
+    if (!confirm('Excluir este ajuste manual?')) return;
+    for (const t of ['comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios', 'notas_fiscais_parcelas']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).eq('lancamento_extrato_id', id);
+    await _supaClient.from('lancamentos_contabeis').delete().eq('lancamento_extrato_id', id);
+    const r = await _supaClient.from('lancamentos_extrato').delete().eq('id', id).eq('fonte', 'ajuste_manual');
+    if (r.error) { toast('Erro ao excluir: ' + r.error.message, 'err'); return; }
+    toast('Ajuste excluído.', 'ok'); renderLancctbRegistroContabil();
+  };
+  root._flAlterarDataFiltradas = function () {
+    const ids = (root.__regIdsFiltrados || []).slice(); if (!ids.length) { toast('Nenhuma linha filtrada.', 'err'); return; }
+    dialogoForm('📅 Alterar data das filtradas (' + ids.length + ')', '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">A nova data vale para as ' + ids.length + ' linha(s) filtradas (todas as páginas). Linhas já classificadas não são alteradas — desclassifique antes.</div><label style="font-size:12px">Nova data</label><input id="flBulkData" type="date" style="' + ESTI + '">',
+      async el => {
+        const d = el.querySelector('#flBulkData').value; if (!d) { toast('Escolha a nova data.', 'err'); return false; }
+        let feitas = 0;
+        for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: d }).in('id', ids.slice(i, i + 200)).in('status_conciliacao', ['pendente', 'ignorado']).select('id'); if (r.error) { toast('Erro: ' + r.error.message, 'err'); return false; } feitas += (r.data || []).length; }
+        toast(feitas + ' linha(s) com a data alterada para ' + brData(d) + (feitas < ids.length ? ' · ' + (ids.length - feitas) + ' já classificada(s) não foram alteradas' : ''), 'ok'); renderLancctbRegistroContabil();
+      });
+  };
 
   // ── 3) conciliar saldo dia a dia ──
   root._flConciliarSaldo = async function () {
@@ -463,7 +560,7 @@
     const igR = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
     const ign = new Set((igR.data || []).map(x => String(x.id)));
     const fontePorId = new Map(); reg.forEach(l => fontePorId.set(String(l.id), l.fonte)); (igR.data || []).forEach(l => fontePorId.set(String(l.id), l.fonte));
-    const ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação' };
+    const ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
     let s = cents((ag && ag.saldo_inicial) || 0); const mapa = new Map();
     reg.forEach(l => { s += cents(l.valor_entrada) - cents(l.valor_saida); mapa.set(String(l.id), s / 100); });
     if (!document.body.contains(tbl)) return;
@@ -483,7 +580,10 @@
       td.style.cssText = 'padding:7px 10px;text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap;color:' + (v != null && v < 0 ? '#dc2626' : 'var(--slate)');
       const eIgn = rid && ign.has(String(rid));
       td.innerHTML = (v != null ? 'R$ ' + fmt(v) : (eIgn ? '<i style="font-size:11px">ignorada</i>' : ''))
+        + (rid ? ' <button class="icon-btn" style="padding:0 3px" title="Editar a data desta linha' + (fontePorId.get(String(rid)) === 'ajuste_manual' ? ' (e valor/histórico do ajuste)' : '') + '" onclick="event.stopPropagation();_flEditarLinha(' + rid + ')">✏️</button>' : '')
+        + (rid && fontePorId.get(String(rid)) === 'ajuste_manual' ? ' <button class="icon-btn" style="padding:0 3px" title="Excluir este ajuste" onclick="event.stopPropagation();_flExcluirAjuste(' + rid + ')">🗑</button>' : '')
         + (rid ? ' <button class="icon-btn" style="padding:0 4px" title="' + (eIgn ? 'Voltar a considerar esta linha (volta como pendente)' : 'Ignorar esta linha: fica apagada, fora do saldo e do TXT') + '" onclick="event.stopPropagation();_flIgnorarLinha(' + rid + ',' + (eIgn ? 'false' : 'true') + ')">' + (eIgn ? '↩' : '🚫') + '</button>' : '');
+      if (rid && fontePorId.get(String(rid)) === 'ajuste_manual') { tr.style.setProperty('background', 'rgba(250,204,21,.30)', 'important'); [...tr.children].forEach(c => { c.style.background = 'transparent'; }); tr.title = 'Ajuste manual (incluído para acerto do saldo diário)'; }
       if (eIgn) { tr.style.opacity = '.42'; tr.style.textDecoration = 'line-through'; tr.title = 'Linha ignorada: fora do saldo e do TXT'; }
       tr.insertBefore(td, tr.children[8]);
     });
@@ -491,7 +591,7 @@
     const cg2 = tbl.querySelector('colgroup'); if (cg2 && cg2.children[6]) { const c = document.createElement('col'); c.style.width = '17ch'; cg2.insertBefore(c, cg2.children[7]); }
     if (heads[0] && heads[0].children[6]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 8px;text-align:left;white-space:nowrap'; th.textContent = 'Origem'; th.title = 'De onde veio esta linha: Fluxo de Caixa, ou extrato bancário (recebimento / pagamento trazido pelos botões)'; heads[0].insertBefore(th, heads[0].children[7]); }
     if (heads[1] && heads[1].children[6]) { const th = document.createElement('th'); th.style.cssText = 'padding:4px 6px';
-      const op = [['', 'Todas'], ['fluxo', 'Fluxo de Caixa'], ['extrato_receb', 'Extrato · recebimento'], ['extrato_compl', 'Extrato · pagamento'], ['conciliacao', 'Conciliação']];
+      const op = [['', 'Todas'], ['fluxo', 'Fluxo de Caixa'], ['extrato_receb', 'Extrato · recebimento'], ['extrato_compl', 'Extrato · pagamento'], ['conciliacao', 'Conciliação'], ['ajuste_manual', 'Ajuste manual']];
       th.innerHTML = '<select class="si" data-filtro="registro-origem" style="width:100%;font-size:11px" onchange="__flFiltroOrigem=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">' + op.map(o => '<option value="' + o[0] + '"' + (root.__flFiltroOrigem === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
       heads[1].insertBefore(th, heads[1].children[7]); }
     tbl.querySelectorAll('tbody tr').forEach(tr => {
