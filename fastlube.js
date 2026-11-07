@@ -358,6 +358,18 @@
     });
     const fx = fxr.data || [];
     const fluxoDia = {}; fx.forEach(f => { (fluxoDia[f.data_pagamento] = fluxoDia[f.data_pagamento] || []).push({ id: f.id, c: cents(f.valor_saida), usado: false, h: String(f.historico_bancario || ''), cls: f.status_conciliacao === 'conciliado' || f.status_conciliacao === 'parcial', nome: String(f.historico_bancario || '').split(' | ')[0].slice(0, 60) }); });
+    // ICMS PARTILHADO: o valor certo é o da aba ICMS (guia). Se a NF do histórico está lá e o valor do Registro difere por centavos (até R$ 1,00), o Registro passa a ter o valor da aba ICMS; a diferença para o extrato é tratada pela Conciliação do dia.
+    const ajustesIcms = [], icmsOk = new Set();
+    if (typeof _lancctbIcmsLer === 'function') {
+      const cacheIcms = {}, lerIcms = m => { if (!(m in cacheIcms)) { try { cacheIcms[m] = _lancctbIcmsLer(EID, m) || []; } catch (e) { cacheIcms[m] = []; } } return cacheIcms[m]; };
+      Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).forEach(d => fluxoDia[d].forEach(x => {
+        if (x.cls || !/PARTILHAD/i.test(x.h)) return; const m = x.h.match(/N[úu]mero\s+(\d+)/); if (!m) return;
+        const mes = d.slice(0, 7), ant = new Date(d.slice(0, 4), +d.slice(5, 7) - 2, 1), mesAnt = ant.getFullYear() + '-' + String(ant.getMonth() + 1).padStart(2, '0');
+        const linha = [mes, mesAnt].reduce((r, k) => r || lerIcms(k).find(z => String(z.doc).replace(/\D/g, '') === m[1]), null); if (!linha) return;
+        const V = cents(linha.valor); if (!V || Math.abs(V - x.c) > 100) return; icmsOk.add(x.id); if (V === x.c) return;
+        ajustesIcms.push({ id: x.id, dia: d, de: x.c, para: V, nome: x.nome, nf: m[1] }); x.c = V;
+      }));
+    }
     const extDia = {};
     ref.filter(r => Number(r.valor_saida) > 0 && !diasFechados.has(r.data_pagamento)).forEach(r => { (extDia[r.data_pagamento] = extDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), cat: catExtrato(r.historico_bancario), explicada: false, via: '' }); });
     const dias = Object.keys(extDia).sort();
@@ -374,7 +386,7 @@
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       let melhor = null;
       livres(d).forEach(x => { if (x.cls) return; const dif = Math.abs(x.c - l.c); if (dif === 0 || dif > 100) return; if (!(TRIB.test(x.h) || tolMem[chavePag(x.h)])) return; if (!melhor || dif < melhor.dif) melhor = { x, dif }; });
-      if (melhor) { melhor.x.usado = true; l.explicada = true; l.via = 'tributo (centavos)'; ajustesCent.push({ id: melhor.x.id, dia: d, de: melhor.x.c, para: l.c, nome: melhor.x.nome, chave: chavePag(melhor.x.h), h: melhor.x.h }); }
+      if (melhor) { melhor.x.usado = true; l.explicada = true; l.via = 'tributo (centavos)'; if (!icmsOk.has(melhor.x.id)) ajustesCent.push({ id: melhor.x.id, dia: d, de: melhor.x.c, para: l.c, nome: melhor.x.nome, chave: chavePag(melhor.x.h), h: melhor.x.h }); }
     }));
     // passada B: mesmo dia, a saída do extrato = SOMA exata de linhas do Fluxo (qualquer tipo, menos aplicação/tarifa)
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
@@ -473,6 +485,12 @@
     }
     if (!simular) {
       try { const dset = new Set(dias), antM = S.g('fl_dif_marcas_163') || {}, novoM = {}; Object.keys(antM).forEach(k => { if (!dset.has(antM[k])) novoM[k] = antM[k]; }); Object.assign(novoM, rel.marcasDif || {}); S.s('fl_dif_marcas_163', novoM); } catch (e) {}
+    }
+    rel.ajustesIcms = ajustesIcms;
+    if (!simular && ajustesIcms.length) {
+      const logI = [];
+      for (const a of ajustesIcms) { const r = await _supaClient.from('lancamentos_extrato').update({ valor_saida: a.para / 100 }).eq('id', a.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente'); if (!r.error) logI.push({ id: a.id, em: new Date().toISOString(), por: quemFez(), dia: a.dia, nome: a.nome, de: a.de / 100, para: a.para / 100, via: 'ICMS Partilhado: valor confirmado na aba ICMS (NF ' + a.nf + ')' }); }
+      gravarLogValor(logI);
     }
     rel.ajustesCent = ajustesCent;
     if (!simular && ajustesCent.length) {
@@ -1003,7 +1021,7 @@
         if (f === 'conciliacao') { td.textContent = '⚖ Conciliação'; td.style.color = '#d97706'; }
         else if (f === 'ajuste_manual') { td.textContent = '✎ Ajuste'; td.style.color = '#ca8a04'; }
         else if (rid && marcasDif[String(rid)]) { td.textContent = '⚖ na conciliação'; td.style.color = '#d97706'; td.title = 'Linha do Fluxo sem pagamento igual no extrato deste dia: entrou na explicação da Conciliação'; }
-        else if (va !== undefined) { td.textContent = '💲 ' + (va > 0 ? '+' : '') + fmt(va); td.style.color = '#0ea5e9'; td.title = 'Valor corrigido: diferença em relação ao valor original do Fluxo'; }
+        else if (va !== undefined) { td.innerHTML = '💲 ' + (va > 0 ? '+' : '') + fmt(va) + '<div style="font-size:9px;font-weight:400;opacity:.8;line-height:1">Ajustado</div>'; td.style.color = '#0ea5e9'; td.title = 'Valor corrigido: diferença em relação ao valor original do Fluxo'; }
         tr.insertBefore(td, tr.children[8]);
       }); }
     const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 130 + 110) + 'px';
