@@ -347,7 +347,8 @@
     return partes.map(pt => {
       const nm = normN(pt.nome), v = Math.round(Number(pt.valor) * 100);
       for (const [tipo, comp] of tent.concat([['ferias', mAnt], ['ferias', mCur], ['rescisao', mAnt], ['rescisao', mCur]])) {
-        const c = rows.find(r => !usados.has(r.id) && r.tipo === tipo && r.competencia === comp && Math.round(Number(r.valor) * 100) === v && (!nm || normN(r.nome).indexOf(nm) === 0 || nm.indexOf(normN(r.nome)) === 0));
+        let c = rows.find(r => !usados.has(r.id) && r.tipo === tipo && r.competencia === comp && Math.round(Number(r.valor) * 100) === v && (!nm || normN(r.nome).indexOf(nm) === 0 || nm.indexOf(normN(r.nome)) === 0));
+        if (!c && nm) { const p1 = nm.split(' ')[0], viz = rows.filter(r => !usados.has(r.id) && r.tipo === tipo && r.competencia === comp && Math.round(Number(r.valor) * 100) === v && normN(r.nome).split(' ')[0] === p1); if (viz.length === 1) c = viz[0]; } // nome do comprovante abreviado/diferente: mesmo valor + mesmo 1º nome + único no relatório
         if (c) { usados.add(c.id); return { historico: 'Pagamento ref. ' + (ROT_FOLHA[tipo] || tipo) + ' ' + comp.slice(5) + '/' + comp.slice(0, 4) + ' - ' + c.nome, nome: c.nome, cpf: c.cpf || pt.cpf || null, tipo, competencia: comp.slice(5) + '/' + comp.slice(0, 4) }; }
       }
       return { historico: 'Folha a identificar' + (pt.nome ? ' - ' + pt.nome : ''), nome: pt.nome, cpf: pt.cpf || null, tipo: null, competencia: null };
