@@ -92,6 +92,7 @@
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
+      + '<button class="btn bo" onclick="_flClassificarFolha()" title="Linhas do Fluxo de UMA pessoa (rescisão, férias, adiantamento, salário) casam com o relatório da folha por tipo + valor + nome e já saem classificadas. Não mexe em saldo.">👥 Classificar folha</button>'
       + '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
       + '<button class="btn bo" onclick="_flExcelRelatorio(\'todos\')" title="Gera um Excel para o cliente com 5 abas: Ajustes e conciliações, Datas alteradas, Valores alterados, Ignorados e Fluxo × extrato por dia. Mostra o que foi preciso fazer para chegar ao saldo do extrato.">📊 Excel p/ cliente</button>'
       + '<button class="btn bo" onclick="_flAbrirDatas()" title="Lançamentos cuja data foi alterada em relação à data de origem (Fluxo ou extrato): quando, quem, data original e nova. Dá para voltar à data original.">📆 Datas alteradas</button>'
@@ -404,6 +405,14 @@
     }
     return feitas;
   }
+  // botão próprio: a classificação da folha pelo Fluxo não mexe em saldo, então vale também para dias já conciliados (🔒), que o calendário do "Trazer pagamentos" não deixa escolher
+  root._flClassificarFolha = async function () {
+    if (!ativo()) return;
+    const conta = contaAtual(), p = periodo();
+    toast('Classificando a folha pelo Fluxo…', 'info');
+    try { const n = await classificarFolhaDoFluxo(conta, p, null); toast(n ? 'Folha: ' + n + ' pagamento(s) de rescisão/férias/adiantamento/salário classificados pelo relatório da folha ✓' : 'Nenhuma linha do Fluxo da folha para classificar neste período (já classificadas, sem par único no relatório ou fora do tipo).', n ? 'ok' : 'info'); } catch (e) { toast('Erro: ' + e.message, 'err'); }
+    renderLancctbRegistroContabil();
+  };
   async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
