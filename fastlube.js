@@ -336,7 +336,7 @@
   const listaValores = (vs, max) => { const f = x => fmt(x / 100); return vs.length <= max ? vs.map(f).join(' + ') : vs.slice(0, max).map(f).join(' + ') + ' + … (+' + (vs.length - max) + ')'; };
   // Histórico das partes da folha: "Pagamento ref. Salário 06/2026 - NOME", com o tipo e a competência do RELATÓRIO DA FOLHA (aba Folha / folha_liquidos), achado por valor + nome.
   // Quem não é achado no relatório fica com um texto neutro (sem a palavra "Sispag Salários", que casava com a Regra de adiantamento de férias): o Processar FOPAG identifica depois.
-  const ROT_FOLHA = { salario: 'Salário', adiantamento: 'Adiantamento', ferias: 'Férias', rescisao: 'Rescisão' };
+  const ROT_FOLHA = { salario: 'salário', adiantamento: 'adiantamento', ferias: 'férias', rescisao: 'rescisão' }; // minúsculo: é o texto que a aba Folha reconhece para marcar a pessoa como conciliada
   async function histPartesFolha(dia, partes) {
     const normN = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
     const y = +dia.slice(0, 4), m = +dia.slice(5, 7), d = +dia.slice(8, 10), pad = n => String(n).padStart(2, '0');
