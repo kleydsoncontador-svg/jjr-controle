@@ -92,7 +92,6 @@
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
-      + '<button class="btn bo" onclick="_flConsolidarTributos()" title="Soma numa linha só as parcelas de IRPJ (F03-IRPJ) e CSLL (F04-CSLL) lançadas no mesmo dia. Isto também é feito sozinho ao subir o Fluxo.">∑ Consolidar IRPJ/CSLL</button>'
       + '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
       + '<button class="btn bo" onclick="_flExcelRelatorio(\'todos\')" title="Gera um Excel para o cliente com 5 abas: Ajustes e conciliações, Datas alteradas, Valores alterados, Ignorados e Fluxo × extrato por dia. Mostra o que foi preciso fazer para chegar ao saldo do extrato.">📊 Excel p/ cliente</button>'
       + '<button class="btn bo" onclick="_flAbrirDatas()" title="Lançamentos cuja data foi alterada em relação à data de origem (Fluxo ou extrato): quando, quem, data original e nova. Dá para voltar à data original.">📆 Datas alteradas</button>'
@@ -265,8 +264,7 @@
       }
       criadas += lig.length; marcarManuais(lig.map(x => x.id));
     }
-    let consol = 0; try { consol = (await consolidarTributos(false)).length; } catch (e) { console.warn('Consolidar IRPJ/CSLL:', e); }
-    if (consol) toast('Fast Lube: ' + consol + ' grupo(s) de IRPJ/CSLL (parcelas do mesmo dia) somados em uma linha só.', 'ok');
+    // (soma automática de IRPJ/CSLL desligada a pedido do usuário em 09/11/2026: o pagamento vem do extrato)
     toast('Fast Lube: ' + criadas + ' linha(s) do Fluxo levadas ao Registro' + (semBanco ? ' · ' + semBanco + ' sem banco (ex.: CARTEIRA) ficaram de fora' : '') + (porRegra ? ' · ' + porRegra + ' barradas pela regra' : '') + (jaExc ? ' · ' + jaExc + ' já excluídas por você' : '') + '.', 'ok');
     return { criadas, semBanco, porRegra };
   }
