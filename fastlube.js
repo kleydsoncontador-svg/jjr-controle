@@ -362,7 +362,7 @@
     const nums = Object.values(CONTA_FOLHA).concat(padrao.dif_folha ? [String(padrao.dif_folha)] : []);
     const pc = (await _supaClient.from('plano_contas').select('id,numero_conta').eq('empresa_eid', EID).in('numero_conta', nums)).data || [];
     const idDe = n => { const c = pc.find(x => String(x.numero_conta) === String(n)); return c ? c.id : null; };
-    const comp = (dia.slice(5, 7) === '01' ? '12/' + (+dia.slice(0, 4) - 1) : String(+dia.slice(5, 7) - 1).padStart(2, '0') + '/' + dia.slice(0, 4));
+    const comp = (+dia.slice(8, 10) > 10) ? dia.slice(5, 7) + '/' + dia.slice(0, 4) : (dia.slice(5, 7) === '01' ? '12/' + (+dia.slice(0, 4) - 1) : String(+dia.slice(5, 7) - 1).padStart(2, '0') + '/' + dia.slice(0, 4)); // dia até 10 = salário do mês anterior; depois = adiantamento do mês
     return itens.map(it => {
       if (it.tipo_folha) return Object.assign({}, it, { conta_contabil_id: idDe(CONTA_FOLHA[it.tipo_folha]) || null });
       const dif = idDe(padrao.dif_folha); // sem identificar no relatório: vai para a conta da DIFERENÇA (padrão), com o texto de diferença
