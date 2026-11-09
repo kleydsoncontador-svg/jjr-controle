@@ -374,6 +374,36 @@
     });
   }
   root._flAplicarContasFolha = aplicarContasFolha;
+  // ───────── FOLHA PELO FLUXO: linhas do Fluxo de UMA pessoa (rescisão, férias, adiantamento, salário) casam com o RELATÓRIO DA FOLHA por tipo + valor exato + nome → já saem classificadas ─────────
+  // Ex.: "A03-RESCISAO | RESCISAO MURILO" R$ 1.583,45 = rescisão de MURILO AUGUSTO SAMPAIO (06/2026) → "Pagamento ref. rescisão 06-2026 - MURILO AUGUSTO SAMPAIO", D 647 / C banco. Só classifica quando o par é ÚNICO.
+  async function classificarFolhaDoFluxo(conta, p, diasSel) {
+    const normN = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+    const regs = (await todosPorId(() => { let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,composicao_tributo').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').gt('valor_saida', 0); if (p.de) q = q.gte('data_pagamento', p.de); if (p.ate) q = q.lte('data_pagamento', p.ate); return q; })).data || [];
+    const alvo = regs.filter(r => (!diasSel || diasSel.has(r.data_pagamento)) && !(r.composicao_tributo || []).length && /A0[1-3]-/i.test(r.historico_bancario || '') && !/FOLHA\s*\|/i.test(r.historico_bancario || '') && !/FGTS|INSS|IRRF|SINDIC|PENS/i.test(r.historico_bancario || ''));
+    if (!alvo.length) return 0;
+    const ent = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id', conta).single(); const ag = ent.data;
+    const pc = (await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid', EID).in('numero_conta', ['187', '567', '724', '647'])).data || [];
+    const contaDe = n => pc.find(x => String(x.numero_conta) === n);
+    const MAPA = { salario: ['187', 'salário'], adiantamento: ['724', 'adiantamento'], ferias: ['567', 'férias'], rescisao: ['647', 'rescisão'] };
+    if (!ag || !ag.conta_contabil_id) return 0;
+    const meses = [...new Set(alvo.map(r => r.data_pagamento.slice(0, 7)))], comps = new Set();
+    meses.forEach(m => { const y = +m.slice(0, 4), mm = +m.slice(5, 7); comps.add(m); comps.add(mm === 1 ? (y - 1) + '-12' : y + '-' + String(mm - 1).padStart(2, '0')); });
+    const rows = (await todosPorId(() => _supaClient.from('folha_liquidos').select('id,tipo,competencia,nome,cpf,valor').eq('empresa_eid', EID).in('competencia', [...comps]))).data || [];
+    const usadas = new Set(); let feitas = 0;
+    for (const r of alvo) {
+      const h = normN(r.historico_bancario), tipo = /RESCISAO/.test(h) ? 'rescisao' : /FERIAS/.test(h) ? 'ferias' : /ADIANT/.test(h) ? 'adiantamento' : 'salario', v = Math.round(Number(r.valor_saida) * 100);
+      const cand = rows.filter(x => !usadas.has(x.id) && x.tipo === tipo && Math.round(Number(x.valor) * 100) === v && normN(x.nome).split(' ').some(t => t.length >= 4 && h.indexOf(t) >= 0));
+      if (cand.length !== 1) continue;                                  // ambíguo ou sem par: não inventa
+      const f = cand[0], [num, rot] = MAPA[tipo], cc = contaDe(num); if (!cc) continue;
+      const hist = 'Pagamento ref. ' + rot + ' ' + f.competencia.slice(5) + '-' + f.competencia.slice(0, 4) + ' - ' + f.nome, cpf = String(f.cpf || '').replace(/\D/g, '') || null;
+      const base = { empresa_eid: EID, data: r.data_pagamento, valor: Number(r.valor_saida), historico: hist, lancamento_extrato_id: r.id, origem_match: 'regra', cliente_fornecedor_nome: f.nome, cnpj_cpf: cpf };
+      const rpc = await _supaClient.rpc('criar_lancamento_partida_dobrada', { linhas: [Object.assign({}, base, { classificacao: ag.plano_contas.classificacao, conta_contabil_id: ag.conta_contabil_id, tipo: 'C' }), Object.assign({}, base, { classificacao: cc.classificacao, conta_contabil_id: cc.id, tipo: 'D' })] });
+      if (rpc.error) { console.warn('Folha pelo Fluxo:', rpc.error.message); continue; }
+      await _supaClient.from('lancamentos_extrato').update({ status_conciliacao: 'conciliado' }).eq('id', r.id).eq('status_conciliacao', 'pendente');
+      usadas.add(f.id); feitas++;
+    }
+    return feitas;
+  }
   async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
@@ -672,6 +702,7 @@
       relatorio = await conciliarPagamentos(conta, p, ref, novas, false, diasSel);
       if (!relatorio) return;
       nSai = relatorio.linhasAdicionadas;
+      try { const nf = await classificarFolhaDoFluxo(conta, p, diasSel); if (nf) toast('Folha: ' + nf + ' pagamento(s) de rescisão/férias/adiantamento/salário classificados pelo relatório da folha.', 'ok'); } catch (e) { console.warn('Folha pelo Fluxo:', e); }
     }
     if (!novas.length) { registrarRel(comPagamentos, conta, p, 0, relatorio, 0); toast('Nada a trazer: o Registro já cobre este período. Veja o relatório em 📑 Relatórios.', 'info'); renderLancctbRegistroContabil(); return; }
     const rows = novas.map(({ r, fonte, pref }) => ({ empresa_eid: EID, conta_bancaria_id: Number(conta), data_pagamento: r.data_pagamento, valor_saida: r.valor_saida || 0, valor_entrada: r.valor_entrada || 0, historico_bancario: r.historico_bancario || null, documento: r.documento || null, informacao: r.informacao || null, origem_importacao: 'excel', hash_dedup: pref + r.id, fonte }));
