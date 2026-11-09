@@ -58,6 +58,10 @@
     let regras = []; try { regras = S.g('fl_fluxo_regras_excluir_' + EID) || []; } catch (e) {}
     return regras.some(r => r && r.campo && r.contem && norm(f[r.campo]).indexOf(norm(r.contem)) >= 0);
   }
+  // Tributos que o Fluxo traz mas NÃO entram no Registro da Fast Lube (vêm pelo extrato/Processar Tributos): são criados já IGNORADOS (ficam em 🚫 Ignorados, fora do saldo e do TXT)
+  const CODIGOS_IGNORAR = ['F02-COFINS', 'A04-GPS', 'F01-PIS', 'F10-DARF IR FUNCIONARIOS', 'F06-IPI', 'F17-DARFS SERV'];
+  const ignoraAuto = f => { const c = norm(f && f.descricao_conta_origem); return !!c && CODIGOS_IGNORAR.some(k => c.indexOf(norm(k)) === 0); };
+  root._flIgnoraAuto = ignoraAuto;
   // Os vínculos Fluxo ↔ linha do Registro da Fast Lube são intencionais: entram na lista de associações MANUAIS (as rotinas que revalidam/soltam preservam essa lista)
   function marcarManuais(ids) {
     try {
@@ -250,7 +254,7 @@
     let criadas = 0;
     for (let i = 0; i < itens.length; i += 300) {
       const lote = itens.slice(i, i + 300);
-      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: histFluxo(f), documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo' }));
+      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: histFluxo(f), documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo', status_conciliacao: ignoraAuto(f) ? 'ignorado' : 'pendente' }));
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows, { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
       if (up.error) { toast('Fast Lube: erro ao criar linhas do Registro: ' + up.error.message, 'err'); return null; }
       const hs = rows.map(r => r.hash_dedup);
