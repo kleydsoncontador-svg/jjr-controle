@@ -468,7 +468,7 @@
       }));
       const casa = (it, exato) => { const L = (porNf[it.nf] || []).filter(r => !r.usada && r.v); let best = null; L.forEach(r => { const dif = Math.abs(r.v - it.x.c); if (exato ? dif === 0 : dif <= 100) if (!best || dif < best.dif) best = { r, dif }; }); return best; };
       itens.forEach(it => { const b = casa(it, true); if (b) { b.r.usada = true; it.fim = b.r; icmsOk.add(it.x.id); } });                // 1º: quem já tem o valor exato de uma linha da aba
-      itens.forEach(it => { if (it.fim) return; const b = casa(it, false); if (!b) return; b.r.usada = true; it.fim = b.r; icmsOk.add(it.x.id); if (b.r.v !== it.x.c) { ajustesIcms.push({ id: it.x.id, dia: it.d, de: it.x.c, para: b.r.v, nome: it.x.nome, nf: it.nf, tipo: b.r.tipo, linhas: (porNf[it.nf] || []).length }); it.x.c = b.r.v; } });
+      itens.forEach(it => { if (it.fim) return; const b = casa(it, false); if (!b) return; b.r.usada = true; it.fim = b.r; icmsOk.add(it.x.id); if (b.r.v > it.x.c) { /* só sobe quando a aba ICMS é MAIOR; pago a mais = juros de mora (Processar Tributos separa na conta padrão) */ ajustesIcms.push({ id: it.x.id, dia: it.d, de: it.x.c, para: b.r.v, nome: it.x.nome, nf: it.nf, tipo: b.r.tipo, linhas: (porNf[it.nf] || []).length }); it.x.c = b.r.v; } });
     }
     const extDia = {};
     ref.filter(r => Number(r.valor_saida) > 0).forEach(r => { const ja = trazidas.has('flc' + r.id); (extDia[r.data_pagamento] = extDia[r.data_pagamento] || []).push({ r, c: cents(r.valor_saida), cat: catExtrato(r.historico_bancario), explicada: ja, via: ja ? 'já trazida' : '' }); });

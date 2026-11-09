@@ -893,7 +893,7 @@ html.dark-mode span.af-sem-txt-badge, :root[data-theme="dark"] span.af-sem-txt-b
 <script src="calc-ui.js?v=27"></script>
 <script src="analises-explicacoes.js?v=1"></script>
 <script src="lembretes.js?v=6"></script>
-<script src="fastlube.js?v=66"></script>
+<script src="fastlube.js?v=67"></script>
 <script src="analises.js?v=6"></script>
 <script>
 /* Campos "Adicionar empresa" / "— Escolha uma empresa —" (pedido do usuário 24/10/2026: "em todo site, onde houver esses botões de adicionar empresas, deve-se dar pra pesquisar por nome ou ID").
@@ -37795,6 +37795,14 @@ function _lancctbIcmsAcharPagamento(l,ctx){
       if(hit.length===1) return {rows:[hit[0]],mes};
     }
   }
+  // NF citada pelo Fluxo, pago A MAIS em até R$ 1,00 (juros de mora; ex.: ICMS-DIFAL NF 271710 R$ 18,13 paga R$ 18,22): é a NF + juros — o resto vai para Despesas com juros (Contas padrão)
+  if(nfsFx.size&&ufProva){
+    for(const k of [0,-1,-2]){
+      const mes=mesAdd(k);
+      const hit=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&r.uf===ufProva&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&(cents-Math.round(r.valor*100))>0&&(cents-Math.round(r.valor*100))<=100&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade)));
+      if(hit.length===1) return {rows:[hit[0]],mes,juros:cents-Math.round(hit[0].valor*100)};
+    }
+  }
   for(const k of [-1,0,-2]){
     const mes=mesAdd(k);
     const livres=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&(!ufH||r.uf===ufH)&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade))); // NF de grupo que uma guia da pasta aglutina nunca é avulsa
@@ -38008,6 +38016,8 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
   const rows=r.rows, r0=rows[0], tipo=r0.tipo;
   const rotulo=rows.length===1?`${tipo} ref. ${r0.compet} NF ${r0.doc} UF ${r0.uf} UN ${r0.unidade}`:`${tipo} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${rows.length} NFs)`;
   const valor=Math.round((l.valor_saida||0)*100)/100;
+  const jur=r.juros>0?r.juros/100:0; let contaJuros=null;
+  if(jur>0){ const cpj=(S.g('lancctb_contas_padrao_'+eid)||{}).juros_pagos; if(cpj){ const { data: pj } = await _supaClient.from('plano_contas').select('id,classificacao').eq('empresa_eid',eid).eq('numero_conta',String(cpj)).maybeSingle(); contaJuros=pj||null; } if(!contaJuros) return null; } // sem a conta padrão "Despesas com juros": não trata como juros
   const semMarca=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
   const desfazer=()=>{ rows.forEach(x=>{ if(r.parcial){ ctx.parcialPago[x.id]=Math.max(0,(ctx.parcialPago[x.id]||0)-Math.round((l.valor_saida||0)*100)); x.extras=(x.extras||[]).filter(i=>i!==l.id); x.pago=Math.max(0,(x.pago||0)-Math.round((l.valor_saida||0)*100)); if(x.ext===l.id) x.ext=(x.extras||[])[0]||null; } else if(x.ext===l.id) x.ext=null; ctx.usados.delete(x.id); }); ctx.feitos.delete(l.id); };
   const _cParte=Math.round(valor*100);
@@ -38043,19 +38053,21 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
   if(regra){
     const linhas=[
       { empresa_eid:eid, data:l.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:'C', valor, historico:histItem, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
-      { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor, historico:histItem, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
+      { empresa_eid:eid, data:l.data_pagamento, classificacao:regra.plano_contas.classificacao, conta_contabil_id:regra.conta_contabil_id, tipo:regra.dc, valor:Math.round((valor-jur)*100)/100, historico:histItem, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' },
     ];
+    if(jur>0) linhas.push({ empresa_eid:eid, data:l.data_pagamento, classificacao:contaJuros.classificacao, conta_contabil_id:contaJuros.id, tipo:regra.dc, valor:jur, historico:`Juros de mora ref. ${rotulo}`, lancamento_extrato_id:l.id, regra_matching_id:regra.id, origem_match:'regra' });
     const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
     if(error){ console.error('ICMS: erro ao gerar o lançamento:',error); desfazer(); return null; }
     await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado', historico_bancario:`[${rotulo}] ${semMarca}`.trim() }).eq('id',l.id);
     return 'resolvido';
   }
   // Sem Regra ainda (1ª vez deste tipo): identifica na própria linha e abre a classificação — a Regra criada (gatilho = tipo do imposto) resolve os próximos sozinha.
-  const item={ codigo:null, denominacao:tipo, valor, resumo:rotulo, competencia:r0.compet, gatilho:gatUn, historico:histItem };
+  const item={ codigo:null, denominacao:tipo, valor:Math.round((valor-jur)*100)/100, resumo:rotulo, competencia:r0.compet, gatilho:gatUn, historico:histItem };
+  const itensComp=[item]; if(jur>0) itensComp.push({ codigo:null, denominacao:'Juros de mora', valor:jur, resumo:`Juros de mora ref. ${rotulo}`, competencia:r0.compet, gatilho:'Juros de mora', historico:`Juros de mora ref. ${rotulo}`, conta_contabil_id:contaJuros.id });
   const novoHist=`[${rotulo}] ${semMarca}`.trim();
-  const { error: eU } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:novoHist, origem_importacao:'tributo_composicao', composicao_tributo:[item] }).eq('id',l.id);
+  const { error: eU } = await _supaClient.from('lancamentos_extrato').update({ historico_bancario:novoHist, origem_importacao:'tributo_composicao', composicao_tributo:itensComp }).eq('id',l.id);
   if(eU){ console.error('ICMS: erro ao identificar o pagamento:',eU); desfazer(); return null; }
-  l.historico_bancario=novoHist; l.composicao_tributo=[item]; composicoesParaAbrir.push(l);
+  l.historico_bancario=novoHist; l.composicao_tributo=itensComp; composicoesParaAbrir.push(l);
   return 'marcado';
 }
 // O rótulo impresso na GNRE ("ICMS/ST POR APURAÇÃO") nem sempre diz o tipo real: a GNRE do PR 07/2026 (164) de R$ 3.792,03 é, na base, o DIFAL Não Contribuinte. Quando o valor total de UMA UNIDADE+UF+competência
