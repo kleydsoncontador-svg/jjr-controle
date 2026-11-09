@@ -1006,6 +1006,7 @@
       if (h0) { const idx = [...h0.children].findIndex(t => /^fluxo de caixa/i.test((t.textContent || '').trim()));
         if (idx >= 0) { const n = h0.children.length; h0.children[idx].remove(); if (h1 && h1.children.length === n) h1.children[idx].remove(); if (cg0 && cg0.children.length === n) cg0.children[idx].remove();
           tbl.querySelectorAll('tbody tr').forEach(tr => { if (tr.children.length === n) tr.children[idx].remove(); }); } } }
+    { const cgD = tbl.querySelector('colgroup'); if (cgD && cgD.children[1]) cgD.children[1].style.width = '15ch'; const fd = tbl.querySelector('input[data-filtro="registro-data"]'); if (fd) { fd.style.minWidth = '118px'; fd.style.padding = '2px 3px'; } } // filtro de Data: abre mais (mostra a data inteira)
     const cg = tbl.querySelector('colgroup'); if (cg && cg.children[7]) { const c = document.createElement('col'); c.style.width = '19ch'; cg.insertBefore(c, cg.children[8]); }
     const heads = tbl.querySelectorAll('thead tr');
     if (heads[0] && heads[0].children[7]) { const th = document.createElement('th'); th.style.cssText = 'padding:8px 10px;min-width:150px;text-align:right;white-space:nowrap'; th.textContent = 'Saldo'; th.title = 'Saldo da conta após este lançamento (saldo inicial da conta + movimentos em ordem de data)'; heads[0].insertBefore(th, heads[0].children[8]); }
@@ -1061,7 +1062,7 @@
         else if (va !== undefined) { td.innerHTML = '💲 ' + (va > 0 ? '+' : '') + fmt(va) + '<div style="font-size:9px;font-weight:400;opacity:.8;line-height:1">Ajustado</div>'; td.style.color = '#0ea5e9'; td.title = 'Valor corrigido: diferença em relação ao valor original do Fluxo'; }
         tr.insertBefore(td, tr.children[8]);
       }); }
-    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 150 + 110) + 'px';
+    const w = parseInt(tbl.style.minWidth) || 0; if (w) tbl.style.minWidth = (w + 140 + 150 + 110 + 40) + 'px';
   }
   // ── saldo do DIA filtrado: Registro × extrato (banco) e a diferença, logo abaixo da barra de saldo ──
   let diaBusy = false, diaCache = { k: '', ts: 0, h: '' };
