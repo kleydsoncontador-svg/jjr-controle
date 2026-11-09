@@ -804,6 +804,7 @@
       if (data) { const mapa = new Map(g.rows.map(x => [x.id, x])); gravarLogData((r.data || []).map(row => mapa.get(row.id)).filter(a => a && a.data_pagamento !== data).map(a => entLog(a, data, 'resgate (🚫 Ignorados)'))); }
       if (banco) await _supaClient.from('fluxo_caixa_lancamentos').update({ conta_bancaria_id: Number(banco) }).in('lancamento_extrato_id', lote);
     }
+    logIgnorados(ids, 'resgatou (página Ignorados)');
     toast(feitas + ' linha(s) resgatada(s)' + rot + ' ✓', 'ok');
     root.__flIgn.rows = root.__flIgn.rows.filter(x => ids.indexOf(x.id) < 0); root.__flIgn.sel = new Set(); desenharIgnorados();
   };
@@ -1103,7 +1104,17 @@
   };
 
   // ── ignorar / voltar a considerar ──
+  // registro de quem ignorou/resgatou o quê (auditoria: se uma linha voltar a ficar pendente, dá para saber quando e por quem)
+  async function logIgnorados(ids, acao) {
+    try {
+      const rows = []; for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario').in('id', ids.slice(i, i + 200)); (r.data || []).forEach(x => rows.push(x)); }
+      const em = new Date().toISOString(), por = quemFez();
+      const novos = rows.map(x => ({ id: x.id, em, por, acao, conta: x.conta_bancaria_id, dia: x.data_pagamento, v: Number(x.valor_entrada) > 0 ? Number(x.valor_entrada) : -Number(x.valor_saida || 0), h: String(x.historico_bancario || '').slice(0, 90) }));
+      S.s('fl_ignorados_log_163', novos.concat(S.g('fl_ignorados_log_163') || []).slice(0, 3000));
+    } catch (e) {}
+  }
   async function marcarIgnorado(ids, ignorar) {
+    logIgnorados(ids, ignorar ? 'ignorou' : 'voltou a considerar');
     if (ignorar) {
       for (let i = 0; i < ids.length; i += 200) {
         const lote = ids.slice(i, i + 200);
