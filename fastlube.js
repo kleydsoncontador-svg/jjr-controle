@@ -334,6 +334,26 @@
   const catExtrato = h => { h = String(h || '').toUpperCase(); if (/SISPAG/.test(h)) return 'sispag'; if (/APLIC/.test(h)) return 'aplic'; if (/\bTAR\b|TAR\/|TARIFA|\bIOF\b|DA REC|CONTR IMP|FIN VENDA|JUROS|CUSTAS/.test(h)) return 'banco'; return 'outros'; };
   const nomeCat = ls => [...new Set(ls.map(l => String(l.r.historico_bancario || '').trim()).filter(Boolean))].slice(0, 3).join(' / ') || 'Extrato';
   const listaValores = (vs, max) => { const f = x => fmt(x / 100); return vs.length <= max ? vs.map(f).join(' + ') : vs.slice(0, max).map(f).join(' + ') + ' + … (+' + (vs.length - max) + ')'; };
+  // Histórico das partes da folha: "Pagamento ref. Salário 06/2026 - NOME", com o tipo e a competência do RELATÓRIO DA FOLHA (aba Folha / folha_liquidos), achado por valor + nome.
+  // Quem não é achado no relatório fica com um texto neutro (sem a palavra "Sispag Salários", que casava com a Regra de adiantamento de férias): o Processar FOPAG identifica depois.
+  const ROT_FOLHA = { salario: 'Salário', adiantamento: 'Adiantamento', ferias: 'Férias', rescisao: 'Rescisão' };
+  async function histPartesFolha(dia, partes) {
+    const normN = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim();
+    const y = +dia.slice(0, 4), m = +dia.slice(5, 7), d = +dia.slice(8, 10), pad = n => String(n).padStart(2, '0');
+    const mAnt = m === 1 ? (y - 1) + '-12' : y + '-' + pad(m - 1), mCur = y + '-' + pad(m);
+    const tent = d <= 10 ? [['salario', mAnt], ['salario', mCur]] : d <= 14 ? [['salario', mAnt], ['adiantamento', mCur]] : [['adiantamento', mCur], ['adiantamento', mAnt], ['salario', mAnt]];
+    const rows = (await todosPorId(() => _supaClient.from('folha_liquidos').select('id,tipo,competencia,nome,cpf,valor').eq('empresa_eid', EID).in('competencia', [mAnt, mCur]))).data || [];
+    const usados = new Set();
+    return partes.map(pt => {
+      const nm = normN(pt.nome), v = Math.round(Number(pt.valor) * 100);
+      for (const [tipo, comp] of tent.concat([['ferias', mAnt], ['ferias', mCur], ['rescisao', mAnt], ['rescisao', mCur]])) {
+        const c = rows.find(r => !usados.has(r.id) && r.tipo === tipo && r.competencia === comp && Math.round(Number(r.valor) * 100) === v && (!nm || normN(r.nome).indexOf(nm) === 0 || nm.indexOf(normN(r.nome)) === 0));
+        if (c) { usados.add(c.id); return { historico: 'Pagamento ref. ' + (ROT_FOLHA[tipo] || tipo) + ' ' + comp.slice(5) + '/' + comp.slice(0, 4) + ' - ' + c.nome, nome: c.nome, cpf: c.cpf || pt.cpf || null, tipo, competencia: comp.slice(5) + '/' + comp.slice(0, 4) }; }
+      }
+      return { historico: 'Folha a identificar' + (pt.nome ? ' - ' + pt.nome : ''), nome: pt.nome, cpf: pt.cpf || null, tipo: null, competencia: null };
+    });
+  }
+  root._flHistPartesFolha = histPartesFolha;
   async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
@@ -506,7 +526,9 @@
           // amarra cada Sispag ao COMPROVANTE do mesmo dia e valor (ainda não usado): traz quem foi pago (nome/CPF) para o Processar FOPAG identificar salário/diferença/adiantamento
           const cps = ((await _supaClient.from('comprovantes_bancarios').select('id,valor_pago,cliente_fornecedor_nome,cnpj_cpf,status_conciliacao,lancamento_extrato_id').eq('empresa_eid', EID).eq('data_pagamento', cp.dia)).data) || [];
           const livresC = cps.filter(c => c.status_conciliacao === 'pendente' && !c.lancamento_extrato_id), usadosC = new Set();
-          const itens = cp.partes.map(pt => { const c = livresC.find(k => !usadosC.has(k.id) && Math.round(Number(k.valor_pago) * 100) === pt.c); if (c) usadosC.add(c.id); return { codigo: null, denominacao: 'Sispag Salários', valor: pt.c / 100, resumo: pt.h, competencia: null, gatilho: 'Sispag Salários', historico: pt.h, origem: 'folha', comprovante_id: c ? c.id : null, nome: c ? c.cliente_fornecedor_nome : null, cpf: c ? c.cnpj_cpf : null }; });
+          const base = cp.partes.map(pt => { const c = livresC.find(k => !usadosC.has(k.id) && Math.round(Number(k.valor_pago) * 100) === pt.c); if (c) usadosC.add(c.id); return { valor: pt.c / 100, nome: c ? c.cliente_fornecedor_nome : null, cpf: c ? c.cnpj_cpf : null, comprovante_id: c ? c.id : null, h: pt.h }; });
+          const hs = await histPartesFolha(cp.dia, base);
+          const itens = base.map((b, i) => ({ codigo: null, denominacao: hs[i].historico, valor: b.valor, resumo: hs[i].historico, competencia: hs[i].competencia, gatilho: hs[i].historico, historico: hs[i].historico, origem: 'folha', tipo_folha: hs[i].tipo, comprovante_id: b.comprovante_id, nome: hs[i].nome || b.nome, cpf: hs[i].cpf || b.cpf }));
           const marca = '[PAGAMENTO COMPOSTO: ' + cp.nome + ' = ' + cp.partes.length + ' Sispag Salários] ';
           const u = await _supaClient.from('lancamentos_extrato').update({ historico_bancario: marca + String(x.historico_bancario || ''), origem_importacao: 'tributo_composicao', composicao_tributo: itens }).eq('id', cp.id).eq('status_conciliacao', 'pendente');
           if (!u.error) nOk++;
