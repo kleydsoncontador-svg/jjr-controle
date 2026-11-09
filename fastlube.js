@@ -355,6 +355,21 @@
     });
   }
   root._flHistPartesFolha = histPartesFolha;
+  // Contas da folha (as mesmas de sempre): salário 187 · adiantamento de salário 724 · férias 567 · rescisão/homologação 647 · diferença = "Diferença de folha" das Contas padrão. Quem tem conta já sai classificado.
+  const CONTA_FOLHA = { salario: '187', adiantamento: '724', ferias: '567', rescisao: '647' };
+  async function aplicarContasFolha(dia, itens) {
+    const padrao = (() => { try { return S.g('lancctb_contas_padrao_' + EID) || {}; } catch (e) { return {}; } })();
+    const nums = Object.values(CONTA_FOLHA).concat(padrao.dif_folha ? [String(padrao.dif_folha)] : []);
+    const pc = (await _supaClient.from('plano_contas').select('id,numero_conta').eq('empresa_eid', EID).in('numero_conta', nums)).data || [];
+    const idDe = n => { const c = pc.find(x => String(x.numero_conta) === String(n)); return c ? c.id : null; };
+    const comp = (dia.slice(5, 7) === '01' ? '12/' + (+dia.slice(0, 4) - 1) : String(+dia.slice(5, 7) - 1).padStart(2, '0') + '/' + dia.slice(0, 4));
+    return itens.map(it => {
+      if (it.tipo_folha) return Object.assign({}, it, { conta_contabil_id: idDe(CONTA_FOLHA[it.tipo_folha]) || null });
+      const dif = idDe(padrao.dif_folha); // sem identificar no relatório: vai para a conta da DIFERENÇA (padrão), com o texto de diferença
+      return Object.assign({}, it, { historico: 'Diferença folha ' + (it.competencia || comp) + ' - ' + (it.nome || ''), denominacao: 'Diferença folha', resumo: 'Diferença folha', gatilho: 'Diferença folha', conta_contabil_id: dif || null });
+    });
+  }
+  root._flAplicarContasFolha = aplicarContasFolha;
   async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
@@ -529,10 +544,10 @@
           const livresC = cps.filter(c => c.status_conciliacao === 'pendente' && !c.lancamento_extrato_id), usadosC = new Set();
           const base = cp.partes.map(pt => { const c = livresC.find(k => !usadosC.has(k.id) && Math.round(Number(k.valor_pago) * 100) === pt.c); if (c) usadosC.add(c.id); return { valor: pt.c / 100, nome: c ? c.cliente_fornecedor_nome : null, cpf: c ? c.cnpj_cpf : null, comprovante_id: c ? c.id : null, h: pt.h }; });
           const hs = await histPartesFolha(cp.dia, base);
-          const itens = base.map((b, i) => ({ codigo: null, denominacao: hs[i].historico, valor: b.valor, resumo: hs[i].historico, competencia: hs[i].competencia, gatilho: hs[i].historico, historico: hs[i].historico, origem: 'folha', tipo_folha: hs[i].tipo, comprovante_id: b.comprovante_id, nome: hs[i].nome || b.nome, cpf: hs[i].cpf || b.cpf }));
+          const itens = await aplicarContasFolha(cp.dia, base.map((b, i) => ({ codigo: null, denominacao: hs[i].historico, valor: b.valor, resumo: hs[i].historico, competencia: hs[i].competencia, gatilho: hs[i].historico, historico: hs[i].historico, origem: 'folha', tipo_folha: hs[i].tipo, comprovante_id: b.comprovante_id, nome: hs[i].nome || b.nome, cpf: hs[i].cpf || b.cpf })));
           const marca = '[PAGAMENTO COMPOSTO: ' + cp.nome + ' = ' + cp.partes.length + ' Sispag Salários] ';
           const u = await _supaClient.from('lancamentos_extrato').update({ historico_bancario: marca + String(x.historico_bancario || ''), origem_importacao: 'tributo_composicao', composicao_tributo: itens }).eq('id', cp.id).eq('status_conciliacao', 'pendente');
-          if (!u.error) nOk++;
+          if (!u.error) { nOk++; try { if (typeof _lancctbPagCompostoPostarSePronto === 'function') await _lancctbPagCompostoPostarSePronto(cp.id); } catch (e) {} }
         } catch (e) { console.warn('Composição da folha:', e); }
       }
       rel.composicoesAplicadas = nOk;
