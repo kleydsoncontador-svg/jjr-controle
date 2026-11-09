@@ -503,7 +503,10 @@
         try {
           const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,historico_bancario,composicao_tributo,status_conciliacao').eq('id', cp.id).maybeSingle();
           if (!x || x.status_conciliacao !== 'pendente' || (x.composicao_tributo || []).length) continue;
-          const itens = cp.partes.map(pt => ({ codigo: null, denominacao: 'Sispag Salários', valor: pt.c / 100, resumo: pt.h, competencia: null, gatilho: 'Sispag Salários', historico: pt.h }));
+          // amarra cada Sispag ao COMPROVANTE do mesmo dia e valor (ainda não usado): traz quem foi pago (nome/CPF) para o Processar FOPAG identificar salário/diferença/adiantamento
+          const cps = ((await _supaClient.from('comprovantes_bancarios').select('id,valor_pago,cliente_fornecedor_nome,cnpj_cpf,status_conciliacao,lancamento_extrato_id').eq('empresa_eid', EID).eq('data_pagamento', cp.dia)).data) || [];
+          const livresC = cps.filter(c => c.status_conciliacao === 'pendente' && !c.lancamento_extrato_id), usadosC = new Set();
+          const itens = cp.partes.map(pt => { const c = livresC.find(k => !usadosC.has(k.id) && Math.round(Number(k.valor_pago) * 100) === pt.c); if (c) usadosC.add(c.id); return { codigo: null, denominacao: 'Sispag Salários', valor: pt.c / 100, resumo: pt.h, competencia: null, gatilho: 'Sispag Salários', historico: pt.h, origem: 'folha', comprovante_id: c ? c.id : null, nome: c ? c.cliente_fornecedor_nome : null, cpf: c ? c.cnpj_cpf : null }; });
           const marca = '[PAGAMENTO COMPOSTO: ' + cp.nome + ' = ' + cp.partes.length + ' Sispag Salários] ';
           const u = await _supaClient.from('lancamentos_extrato').update({ historico_bancario: marca + String(x.historico_bancario || ''), origem_importacao: 'tributo_composicao', composicao_tributo: itens }).eq('id', cp.id).eq('status_conciliacao', 'pendente');
           if (!u.error) nOk++;
