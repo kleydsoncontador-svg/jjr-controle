@@ -70,7 +70,7 @@
   }
   // Tributos que o Fluxo traz mas NÃO entram no Registro da Fast Lube (vêm pelo extrato/Processar Tributos): são criados já IGNORADOS (ficam em 🚫 Ignorados, fora do saldo e do TXT)
   const CODIGOS_IGNORAR = ['F02-COFINS', 'A04-GPS', 'F01-PIS', 'F10-DARF IR FUNCIONARIOS', 'F06-IPI', 'F17-DARFS SERV'];
-  const ignoraAuto = f => { if (EID() !== '163') return false; const c = norm(f && f.descricao_conta_origem); return !!c && CODIGOS_IGNORAR.some(k => c.indexOf(norm(k)) === 0); };
+  const ignoraAuto = f => { if (EID() === '4') return norm(f && f.descricao_conta_origem).indexOf('FORA:') === 0; if (EID() !== '163') return false; const c = norm(f && f.descricao_conta_origem); return !!c && CODIGOS_IGNORAR.some(k => c.indexOf(norm(k)) === 0); };
   root._flIgnoraAuto = ignoraAuto;
   // Os vínculos Fluxo ↔ linha do Registro da Fast Lube são intencionais: entram na lista de associações MANUAIS (as rotinas que revalidam/soltam preservam essa lista)
   function marcarManuais(ids) {
@@ -233,7 +233,10 @@
       if (typeof v === 'number' && v > 20000 && v < 80000) { const t = new Date(Math.round((v - 25569) * 86400000)); return t.getUTCFullYear() + '-' + pad(t.getUTCMonth() + 1) + '-' + pad(t.getUTCDate()); }
       try { return _lancctbDataIsoFlex(v); } catch (e) { return null; }
     };
-    const linhas = [], fora = []; let corrigidas = 0, anteriores = 0, transf = 0;
+    const linhas = [], foraL = []; let corrigidas = 0, anteriores = 0;
+    const chaveBanco = tx => { const n = norm(tx); return n.indexOf('BRADESCO') >= 0 ? 'BRADESCO' : n.indexOf('ITAU') >= 0 ? 'ITAU' : (n.indexOf('BRASIL') >= 0 || n.indexOf('BB') >= 0) ? 'BRASIL' : n.indexOf('MERC') >= 0 ? 'MERCADO' : ''; };
+    const meuKey = chaveBanco(nomeBanco);
+    const transfBancos = tx => { const m = String(tx).match(/\(([^()]*?)\s*P\s*\/\s*([^()]*?)\)/i); if (!m) return null; const o = chaveBanco(m[1]), d = chaveBanco(m[2]); return o && d ? { orig: o, dest: d } : null; };
     for (const f of files) {
       const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true });
       const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
@@ -242,21 +245,28 @@
       if (cD < 0 || cDeb < 0 || cCre < 0 || cV < 0) { toast('"' + f.name + '": não é o layout de Fluxo da Rufato (faltam dtpgto, pladeb, placre ou vlliq).', 'err'); return; }
       for (let i = 1; i < aoa.length; i++) {
         const r = aoa[i], deb = String(r[cDeb] == null ? '' : r[cDeb]).trim(), cre = String(r[cCre] == null ? '' : r[cCre]).trim();
-        if (!deb || !cre || norm(deb) === 'PLADEB') continue;
+        if (norm(deb) === 'PLADEB' || (!deb && !cre)) continue;
         const dia = diaIso(r[cD]); if (!dia) continue;
         const v = Math.abs(Number(r[cV])); if (!(v > 0)) continue;
         if (d0 && dia < d0) { anteriores++; continue; }
         const descr = String(cH >= 0 && r[cH] != null ? r[cH] : '').trim() || '(sem descrição)';
-        let entrada = null, corrigida = false;
-        if (deb === cur && cre !== cur) entrada = true;
+        // Tudo é importado (nada some). O lado do banco no arquivo manda, salvo quando o histórico diz "(ORIGEM P/ DESTINO)": aí o banco aberto é saída se for a origem e entrada se for o destino.
+        const t = transfBancos(descr);
+        let entrada = null, corrigida = false, fora = '';
+        if (t && meuKey && t.orig !== t.dest && (t.orig === meuKey || t.dest === meuKey)) {
+          entrada = t.dest === meuKey;
+          const peloArquivo = (deb === cur && cre !== cur) ? true : (cre === cur && deb !== cur) ? false : null;
+          if (peloArquivo !== entrada) corrigida = true;
+        }
+        else if (deb === cur && cre !== cur) entrada = true;
         else if (cre === cur && deb !== cur) entrada = false;
-        else if (deb === cur && cre === cur) { fora.push({ dia, v, descr, motivo: 'mesma conta nos dois lados' }); continue; }
+        else if (deb === cur && cre === cur) { entrada = false; fora = 'mesma conta nos dois lados, sem indicação no histórico'; }
         else if (bancos.has(cre) && !bancos.has(deb)) { entrada = false; corrigida = true; }
         else if (bancos.has(deb) && !bancos.has(cre)) { entrada = true; corrigida = true; }
-        else { fora.push({ dia, v, descr, motivo: (bancos.has(deb) && bancos.has(cre)) ? 'transferência entre outros bancos (não envolve este banco)' : 'nenhum banco da empresa na linha (contas ' + deb + ' / ' + cre + ')' }); continue; }
+        else { entrada = false; fora = (bancos.has(deb) && bancos.has(cre)) ? 'transferência entre outros bancos (não envolve este banco)' : 'nenhum banco da empresa na linha (contas ' + (deb || '-') + ' / ' + (cre || '-') + ')'; }
         if (corrigida) corrigidas++;
-        if (bancos.has(deb) && bancos.has(cre)) transf++;
-        linhas.push({ empresa_eid: eid, data: dia, descricao: descr, valor_saida: entrada ? 0 : v, valor_entrada: entrada ? v : 0, port_nom: nomeBanco, arquivo_origem: f.name });
+        if (fora) foraL.push({ dia, v, descr, motivo: fora });
+        linhas.push({ empresa_eid: eid, data: dia, descricao: descr, valor_saida: entrada ? 0 : v, valor_entrada: entrada ? v : 0, port_nom: nomeBanco, arquivo_origem: f.name, descricao_conta_origem: fora ? 'FORA: ' + fora : null });
       }
     }
     // duplicidade (mesmo dia, valores e descrição já no Fluxo deste banco): conta as ocorrências, para repetições legítimas dentro do arquivo
@@ -270,8 +280,8 @@
       if (e.error) { toast('Erro ao importar o Fluxo: ' + e.error.message, 'err'); return; }
     }
     try { if (corrigidas) S.s('fl_fluxo_banco_corrigido_' + eid, [{ em: new Date().toISOString(), banco: nomeBanco, arquivos: files.map(f => f.name), n: corrigidas }].concat(S.g('fl_fluxo_banco_corrigido_' + eid) || []).slice(0, 200)); } catch (e) {}
-    toast('Fluxo ' + nomeBanco + ': ' + novas.length + ' linha(s) importada(s)' + (dup ? ' · ' + dup + ' já existiam' : '') + (corrigidas ? ' · ' + corrigidas + ' com banco errado corrigidas para ' + nomeBanco : '') + (fora.length ? ' · ' + fora.length + ' fora (ignoradas)' : '') + (anteriores ? ' · ' + anteriores + ' anteriores a ' + brData(d0) + ' (não mexo)' : '') + '.', 'ok');
-    if (fora.length) janela('Linhas do Fluxo que não entraram (' + fora.length + ')', '<div style="font-size:12.5px;margin-bottom:8px">Não envolvem este banco nem outro banco da empresa, ou não fazem parte:</div><table style="width:100%;border-collapse:collapse;font-size:12px">' + fora.slice(0, 200).map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 6px;white-space:nowrap">' + brData(x.dia) + '</td><td style="padding:4px 6px;text-align:right;white-space:nowrap">' + fmt(x.v) + '</td><td style="padding:4px 6px">' + E(x.descr).slice(0, 120) + '</td><td style="padding:4px 6px;color:var(--slate)">' + E(x.motivo) + '</td></tr>').join('') + '</table>', 900);
+    toast('Fluxo ' + nomeBanco + ': ' + novas.length + ' linha(s) importada(s)' + (dup ? ' · ' + dup + ' já existiam' : '') + (corrigidas ? ' · ' + corrigidas + ' com banco/sentido corrigidos' : '') + (foraL.length ? ' · ' + foraL.length + ' sem relação com o banco (entram como Ignoradas)' : '') + (anteriores ? ' · ' + anteriores + ' anteriores a ' + brData(d0) + ' (não mexo)' : '') + '.', 'ok');
+    if (foraL.length) janela('Linhas do Fluxo sem relação clara com este banco (' + foraL.length + ')', '<div style="font-size:12.5px;margin-bottom:8px">Entraram como <b>Ignoradas</b> (nada foi perdido): veja em 🚫 Ignorados e resgate para o banco certo, se for o caso.</div><table style="width:100%;border-collapse:collapse;font-size:12px">' + foraL.slice(0, 200).map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 6px;white-space:nowrap">' + brData(x.dia) + '</td><td style="padding:4px 6px;text-align:right;white-space:nowrap">' + fmt(x.v) + '</td><td style="padding:4px 6px">' + E(x.descr).slice(0, 120) + '</td><td style="padding:4px 6px;color:var(--slate)">' + E(x.motivo) + '</td></tr>').join('') + '</table>', 900);
     await root._flAposImportarFluxo();
   }
   root._flSubirFluxo = async function () {
