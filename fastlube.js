@@ -30,14 +30,14 @@
   const ativo = () => root._flContaRef(eidAtual(), contaAtual());
   const dormir = ms => new Promise(r => setTimeout(r, ms));
   // lê TODAS as linhas de uma consulta paginando pelo id (estável; o paginador geral estava cortando ~1.000 linhas)
+  // (Bradesco da Rufato tem ~67 mil linhas: páginas de 1.000 lidas em ondas de 8 ao mesmo tempo, ordenadas pelo id)
   async function todosPorId(build) {
-    const out = []; let ultimo = 0;
+    let out = [], off = 0; const ONDA = 8;
     for (;;) {
-      const r = await build().gt('id', ultimo).order('id', { ascending: true }).limit(1000);
-      if (r.error) return { data: out, error: r.error };
-      const d = r.data || []; out.push(...d);
-      if (d.length < 1000) break;
-      ultimo = d[d.length - 1].id;
+      const rs = await Promise.all(Array.from({ length: ONDA }, (_, i) => build().order('id', { ascending: true }).range(off + i * 1000, off + i * 1000 + 999)));
+      for (const r of rs) { if (r.error) return { data: out, error: r.error }; out = out.concat(r.data || []); }
+      if ((rs[ONDA - 1].data || []).length < 1000) break;
+      off += ONDA * 1000;
     }
     return { data: out, error: null };
   }
