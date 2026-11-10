@@ -24187,6 +24187,23 @@ async function _lancctbProcessarTransferencias(){
     const _paradas=new Set(); pares.forEach(p=>{ _paradas.add(p.e.id); _paradas.add(p.s.id); });
     // DESLIGADO em 01/11/2026 (pedido do usuário): "se não tem o outro lado, não classifique como transferência entre contas, deixe pendente" — sem a contraparte carregada o lançamento fica PENDENTE.
     const soltas=[];
+    // CONTRAPARTE JÁ LANÇADA: o outro banco já foi classificado na conta de passagem (ex.: o Itaú recebeu o PIX/TED da própria empresa) e este lado ficou PENDENTE: o par só existe se o OUTRO lado também for único.
+    // Sem este passo a conta de passagem ficava com saldo (um lado lançado e o outro não). Só lança quando há UMA contraparte (mesmo dia, mesmo valor, outra conta, já com a conta de passagem).
+    try{
+      const jaPar=new Set(); pares.forEach(p=>{ jaPar.add(p.e.id); jaPar.add(p.s.id); });
+      const cand=L.filter(x=>!jaPar.has(x.id));
+      if(cand.length){
+        const datas=[...new Set(cand.map(x=>x.data_pagamento))];
+        const { data: ja } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida').eq('empresa_eid',eid).eq('status_conciliacao','conciliado').in('conta_bancaria_id',[...contas.keys()]).in('data_pagamento',datas));
+        const idsJa=(ja||[]).map(x=>x.id), comPass=new Set();
+        for(let i=0;i<idsJa.length;i+=200){ const { data: lcp } = await _supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id').eq('estornado',false).eq('conta_contabil_id',cPad.id).in('lancamento_extrato_id',idsJa.slice(i,i+200)); (lcp||[]).forEach(r=>comPass.add(r.lancamento_extrato_id)); }
+        const usoOutro=new Map(), achados=[];
+        cand.forEach(x=>{ const ehE=Number(x.valor_entrada)>0, v=cent(ehE?x.valor_entrada:x.valor_saida);
+          const outros=(ja||[]).filter(j=>comPass.has(j.id)&&j.conta_bancaria_id!==x.conta_bancaria_id&&j.data_pagamento===x.data_pagamento&&cent(ehE?j.valor_saida:j.valor_entrada)===v);
+          if(outros.length===1){ achados.push({x,j:outros[0]}); usoOutro.set(outros[0].id,(usoOutro.get(outros[0].id)||0)+1); } });
+        achados.forEach(a=>{ if(usoOutro.get(a.j.id)===1){ a.x._jaLancada=true; soltas.push(a.x); } });
+      }
+    }catch(eC){ console.warn('Transferências: contraparte já lançada não verificada:',eC); }
     if(!pares.length&&!soltas.length){ _lancctbEtapaMarcar('transf'); toast('Nenhuma transferência entre contas encontrada neste período'+(ambiguos?` (${ambiguos} lançamento(s) ambíguo(s) ficaram de fora)`:'')+'.','ok'); fim(); return; }
     const total=pares.reduce((s,p)=>s+Number(p.e.valor_entrada),0);
     if(!confirm(`Encontrei ${pares.length} transferência(s) entre contas correntes da empresa (R$ ${_fmt(total)} no total)${soltas.length?` e ${soltas.length} transferência(s) com o nome da própria empresa cujo outro lado ainda não está carregado (R$ ${_fmt(soltas.reduce((a,x)=>a+Number(x.valor_entrada>0?x.valor_entrada:x.valor_saida),0))}) — só este lado será classificado`:''}.\n\nCada lado será classificado com a conta ${cPad.numero_conta} - ${cPad.descricao}.\n${ambiguos?`\nFicam de fora ${ambiguos} lançamento(s) ambíguo(s): a quantidade de entradas e saídas do mesmo valor no mesmo dia não bate.\n`:''}\nConfirmar?`)){ fim(); return; }
@@ -24208,7 +24225,7 @@ async function _lancctbProcessarTransferencias(){
     }
     for(const x of soltas){ // lado único (o outro banco ainda não foi carregado)
       const b=contas.get(x.conta_bancaria_id), ehE=Number(x.valor_entrada)>0, v=Number(ehE?x.valor_entrada:x.valor_saida);
-      const hx=`Transferência entre contas correntes - ${ehE?'recebida':'enviada'} (outro lado ainda não carregado)`;
+      const hx=`Transferência entre contas correntes - ${ehE?'recebida':'enviada'} (${x._jaLancada?'outro lado já lançado':'outro lado ainda não carregado'})`;
       const lin=ehE?[{ empresa_eid:eid, data:x.data_pagamento, classificacao:b.plano_contas.classificacao, conta_contabil_id:b.conta_contabil_id, tipo:'D', valor:v, historico:hx, lancamento_extrato_id:x.id, origem_match:'regra' },
                      { empresa_eid:eid, data:x.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:'C', valor:v, historico:hx, lancamento_extrato_id:x.id, origem_match:'regra' }]
                    :[{ empresa_eid:eid, data:x.data_pagamento, classificacao:cPad.classificacao, conta_contabil_id:cPad.id, tipo:'D', valor:v, historico:hx, lancamento_extrato_id:x.id, origem_match:'regra' },
