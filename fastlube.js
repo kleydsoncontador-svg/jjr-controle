@@ -9,7 +9,7 @@
   // Empresas no modelo "Registro Contábil pelo Fluxo". desde = início do modelo (antes disso nada é tocado). port = portador do Fluxo → conta bancária.
   const CFG = {
     '163': { nome: 'Fast Lube', nomes: { '1': 'Itaú', '4': 'Banco do Brasil' }, port: [[/ITAU/, 1], [/BANCO DO BRASIL|^BB\b/, 4]], semFluxo: [], desde: '', corrigeSentido: false },
-    '4': { nome: 'Rufato', nomes: { '23': 'Bradesco', '25': 'Itaú', '26': 'Banco do Brasil', '28': 'Mercado Pago ...4235' }, port: [[/BRADESCO/, 23], [/ITAU/, 25], [/BANCO DO BRASIL|^BB\b/, 26], [/MERCADO\s*PAGO|\bMP\b/, 28]], semFluxo: ['93543986564'], desde: '2026-10-01', corrigeSentido: true }
+    '4': { nome: 'Rufato', nomes: { '23': 'Bradesco', '25': 'Itaú', '26': 'Banco do Brasil', '28': 'Mercado Pago ...4235' }, port: [[/BRADESCO/, 23], [/ITAU/, 25], [/BANCO DO BRASIL|^BB\b/, 26], [/MERCADO\s*PAGO|\bMP\b/, 28]], semFluxo: ['93543986564'], desde: '2026-10-01', corrigeSentido: true, fluxoLancamento: true }
   };
   const EID = () => { const e = String(_lancctbEidAtual); return CFG[e] ? e : '163'; };
   const cfg = () => CFG[EID()];
@@ -212,7 +212,74 @@
     return conc.length ? q.not('data_pagamento', 'in', '(' + conc.join(',') + ')') : q;
   };
   // ── 1) subir o Fluxo ──
+  // ───────── RUFATO: Fluxo de Caixa em layout de lançamento contábil (dtpgto | pladeb | placre | vlliq | plahis | descr ...), um arquivo por banco (EXCLUSIVO da Rufato).
+  // Conta do banco no CRÉDITO = saída; no DÉBITO = entrada. Se o arquivo (subido dentro de UM banco) traz outro banco no lugar do banco certo (ela errou a conta), corrige para o banco aberto.
+  // Banco deste lado + outro banco do outro lado = transferência entre contas (fica como está; você classifica). Sem nenhum banco = não faz parte: ignora e avisa.
+  async function importarFluxoRufato(conta, files) {
+    if (!files.length) return;
+    if (typeof XLSX === 'undefined') { toast('Leitor de Excel não carregado.', 'err'); return; }
+    const eid = EID();
+    const ags = (await _supaClient.from('agencias_bancarias').select('id,banco_nome,conta_contabil_id').eq('empresa_eid', eid)).data || [];
+    const idsCtb = ags.map(a => a.conta_contabil_id).filter(Boolean);
+    const pc = idsCtb.length ? ((await _supaClient.from('plano_contas').select('id,numero_conta').in('id', idsCtb)).data || []) : [];
+    const numPorId = new Map(pc.map(p => [p.id, String(p.numero_conta).trim()]));
+    const bancos = new Set(); ags.forEach(a => { const n = numPorId.get(a.conta_contabil_id); if (n) bancos.add(n); });
+    const ag = ags.find(a => String(a.id) === String(conta)), cur = ag && numPorId.get(ag.conta_contabil_id);
+    if (!cur) { toast('Esta conta bancária não tem conta contábil cadastrada em Agência Bancária.', 'err'); return; }
+    const nomeBanco = cfg().nomes[String(conta)] || '', d0 = desde();
+    const pad = n => String(n).padStart(2, '0');
+    const diaIso = v => {
+      if (v instanceof Date && !isNaN(v)) return v.getFullYear() + '-' + pad(v.getMonth() + 1) + '-' + pad(v.getDate());
+      if (typeof v === 'number' && v > 20000 && v < 80000) { const t = new Date(Math.round((v - 25569) * 86400000)); return t.getUTCFullYear() + '-' + pad(t.getUTCMonth() + 1) + '-' + pad(t.getUTCDate()); }
+      try { return _lancctbDataIsoFlex(v); } catch (e) { return null; }
+    };
+    const linhas = [], fora = []; let corrigidas = 0, anteriores = 0, transf = 0;
+    for (const f of files) {
+      const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true });
+      const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
+      const h = (aoa[0] || []).map(x => norm(x));
+      const ix = n => h.indexOf(n), cD = ix('DTPGTO'), cDeb = ix('PLADEB'), cCre = ix('PLACRE'), cV = ix('VLLIQ'), cH = ix('DESCR');
+      if (cD < 0 || cDeb < 0 || cCre < 0 || cV < 0) { toast('"' + f.name + '": não é o layout de Fluxo da Rufato (faltam dtpgto, pladeb, placre ou vlliq).', 'err'); return; }
+      for (let i = 1; i < aoa.length; i++) {
+        const r = aoa[i], deb = String(r[cDeb] == null ? '' : r[cDeb]).trim(), cre = String(r[cCre] == null ? '' : r[cCre]).trim();
+        if (!deb || !cre || norm(deb) === 'PLADEB') continue;
+        const dia = diaIso(r[cD]); if (!dia) continue;
+        const v = Math.abs(Number(r[cV])); if (!(v > 0)) continue;
+        if (d0 && dia < d0) { anteriores++; continue; }
+        const descr = String(cH >= 0 && r[cH] != null ? r[cH] : '').trim() || '(sem descrição)';
+        let entrada = null, corrigida = false;
+        if (deb === cur && cre !== cur) entrada = true;
+        else if (cre === cur && deb !== cur) entrada = false;
+        else if (deb === cur && cre === cur) { fora.push({ dia, v, descr, motivo: 'mesma conta nos dois lados' }); continue; }
+        else if (bancos.has(cre) && !bancos.has(deb)) { entrada = false; corrigida = true; }
+        else if (bancos.has(deb) && !bancos.has(cre)) { entrada = true; corrigida = true; }
+        else { fora.push({ dia, v, descr, motivo: (bancos.has(deb) && bancos.has(cre)) ? 'transferência entre outros bancos (não envolve este banco)' : 'nenhum banco da empresa na linha (contas ' + deb + ' / ' + cre + ')' }); continue; }
+        if (corrigida) corrigidas++;
+        if (bancos.has(deb) && bancos.has(cre)) transf++;
+        linhas.push({ empresa_eid: eid, data: dia, descricao: descr, valor_saida: entrada ? 0 : v, valor_entrada: entrada ? v : 0, port_nom: nomeBanco, arquivo_origem: f.name });
+      }
+    }
+    // duplicidade (mesmo dia, valores e descrição já no Fluxo deste banco): conta as ocorrências, para repetições legítimas dentro do arquivo
+    const exist = (await todosPorId(() => { let q = _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,valor_saida,valor_entrada').eq('empresa_eid', eid).eq('port_nom', nomeBanco); if (d0) q = q.gte('data', d0); return q; })).data || [];
+    const ch = x => x.data + '|' + cents(x.valor_saida) + '|' + cents(x.valor_entrada) + '|' + String(x.descricao || '').trim();
+    const jaTem = new Map(); exist.forEach(x => jaTem.set(ch(x), (jaTem.get(ch(x)) || 0) + 1));
+    const vistas = new Map(), novas = []; let dup = 0;
+    linhas.forEach(x => { const k = ch(x), n = (vistas.get(k) || 0) + 1; vistas.set(k, n); if (n <= (jaTem.get(k) || 0)) dup++; else novas.push(x); });
+    for (let i = 0; i < novas.length; i += 400) {
+      const e = await _supaClient.from('fluxo_caixa_lancamentos').insert(novas.slice(i, i + 400));
+      if (e.error) { toast('Erro ao importar o Fluxo: ' + e.error.message, 'err'); return; }
+    }
+    try { if (corrigidas) S.s('fl_fluxo_banco_corrigido_' + eid, [{ em: new Date().toISOString(), banco: nomeBanco, arquivos: files.map(f => f.name), n: corrigidas }].concat(S.g('fl_fluxo_banco_corrigido_' + eid) || []).slice(0, 200)); } catch (e) {}
+    toast('Fluxo ' + nomeBanco + ': ' + novas.length + ' linha(s) importada(s)' + (dup ? ' · ' + dup + ' já existiam' : '') + (corrigidas ? ' · ' + corrigidas + ' com banco errado corrigidas para ' + nomeBanco : '') + (fora.length ? ' · ' + fora.length + ' fora (ignoradas)' : '') + (anteriores ? ' · ' + anteriores + ' anteriores a ' + brData(d0) + ' (não mexo)' : '') + '.', 'ok');
+    if (fora.length) janela('Linhas do Fluxo que não entraram (' + fora.length + ')', '<div style="font-size:12.5px;margin-bottom:8px">Não envolvem este banco nem outro banco da empresa, ou não fazem parte:</div><table style="width:100%;border-collapse:collapse;font-size:12px">' + fora.slice(0, 200).map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 6px;white-space:nowrap">' + brData(x.dia) + '</td><td style="padding:4px 6px;text-align:right;white-space:nowrap">' + fmt(x.v) + '</td><td style="padding:4px 6px">' + E(x.descr).slice(0, 120) + '</td><td style="padding:4px 6px;color:var(--slate)">' + E(x.motivo) + '</td></tr>').join('') + '</table>', 900);
+    await root._flAposImportarFluxo();
+  }
   root._flSubirFluxo = async function () {
+    if (cfg().fluxoLancamento) {
+      const conta = contaAtual(), inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.xlsx,.xls'; inp.multiple = true;
+      inp.onchange = () => { importarFluxoRufato(conta, [...inp.files]).catch(e => toast('Erro ao ler o Fluxo: ' + e.message, 'err')); };
+      inp.click(); return;
+    }
     await abrirLancctbFluxoImportModal();
     const chk = document.getElementById('lancctbFluxoImportSoMesAtual'); if (chk) chk.checked = false; // o mês é o do arquivo, não o do Fechamento Atual
   };
