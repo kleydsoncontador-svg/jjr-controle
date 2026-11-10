@@ -63173,6 +63173,7 @@ function lucAbrirExcelPeriodo(){
     +'<div class="fg"><div class="fl">Período</div><select class="si" id="lucPerTipo" style="width:100%" onchange="lucPeriodoTipoMudou()"><option value="trim">Trimestre</option><option value="pers">Personalizado (de mês/ano até mês/ano)</option><option value="anual">Ano inteiro</option></select></div>'
     +'<div id="lucPerTrim" class="fg"><div class="fl">Trimestre</div><select class="si" id="lucPerTrimSel" style="width:100%">'+[1,2,3,4].map(function(t){ return '<option value="'+t+'"'+(t===Math.ceil(hojeM/3)?' selected':'')+'>'+LUC_TRIM_LABELS[t]+'</option>'; }).join('')+'</select></div>'
     +'<div id="lucPerPers" class="grid2" style="display:none"><div class="fg"><div class="fl">De</div><div style="display:flex;gap:6px"><select class="si" id="lucPerDeM">'+opMes(1)+'</select><input class="fi" id="lucPerDeA" type="number" value="'+ano+'" style="width:84px"></div></div><div class="fg"><div class="fl">Até</div><div style="display:flex;gap:6px"><select class="si" id="lucPerAteM">'+opMes(hojeM)+'</select><input class="fi" id="lucPerAteA" type="number" value="'+ano+'" style="width:84px"></div></div></div>'
+    +'<div class="fg"><div class="fl">O que gerar</div><select class="si" id="lucPerFonte" style="width:100%"><option value="cred">Créditos do ano (distribuição de lucros)</option><option value="p25">Lucros pagos relativos a 2025 (Lucros / Dividendos 2025)</option><option value="ambos">Os dois (uma aba para cada)</option></select></div>'
     +'<div class="fg"><div class="fl" id="lucPerAnoLbl">Ano</div><input class="fi" id="lucPerAno" type="number" value="'+ano+'" style="width:110px"></div>'
     +'<div style="font-size:11.5px;color:var(--slate);margin-top:4px">Usa as empresas visíveis na tela (respeita busca e filtros). Entram só os sócios com crédito no período.</div>'
     +'<div class="ma"><button class="btn bo" onclick="closeModal(\'mLucPeriodo\')">Cancelar</button><button class="btn bp" onclick="lucGerarExcelPeriodo()">📊 Gerar Excel</button></div>';
@@ -63203,36 +63204,52 @@ async function lucGerarExcelPeriodo(){
   if(!window.ExcelJS){ alert('Biblioteca Excel não carregada.'); return; }
   closeModal('mLucPeriodo');
   var NUMFMT='#,##0.00;[Red]-#,##0.00', CINZA={type:'pattern',pattern:'solid',fgColor:{argb:'FF404040'}};
-  var wb=new ExcelJS.Workbook(), ws=wb.addWorksheet('Créditos por período'.slice(0,31));
-  var nCols=4+meses.length+2;
-  var cols=[{width:44},{width:22},{width:36},{width:22}]; meses.forEach(function(){ cols.push({width:16}); }); cols.push({width:18}); cols.push({width:16}); ws.columns=cols;
-  var cab=ws.addRow(['Empresa','CNPJ','Sócio / Acionista','CPF / CNPJ Sócio'].concat(meses.map(function(m){ return 'Crédito '+m.label; })).concat(['Total '+(tipo==='trim'?LUC_TRIM_LABELS[parseInt(document.getElementById('lucPerTrimSel').value,10)]:tipo==='anual'?'do ano':'do período'),'Conta Contábil']));
-  cab.font={bold:true}; cab.eachCell(function(c){ c.border={bottom:{style:'medium',color:{argb:'FF1E3558'}}}; });
-  ws.views=[{state:'frozen',ySplit:1}];
-  var nEmp=0, nSoc=0;
-  selecionados.forEach(function(emp){
-    var eid=emp.eid, linhas=[];
-    lucSocGet(eid).forEach(function(soc){
-      var vals=meses.map(function(m){ return lucCreditoParaExcel(eid,m.ano,m.mm,soc.id)||0; });
-      var total=vals.reduce(function(a,b){ return a+b; },0);
-      if(!total) return;
-      linhas.push({soc:soc,vals:vals,total:total});
+  var wb=new ExcelJS.Workbook();
+  var fonte=document.getElementById('lucPerFonte').value, nEmp=0, nSoc=0;
+  var totRot=(tipo==='trim'?LUC_TRIM_LABELS[parseInt(document.getElementById('lucPerTrimSel').value,10)]:tipo==='anual'?'do ano':'do período');
+  // fonte 'cred': crédito de cada mês (distribuição do ano). fonte 'p25': lucros de 2025 PAGOS em cada mês (módulo Lucros / Dividendos 2025; os meses dele são sempre de 2026)
+  function montarAba(nomeAba, qual){
+    var ms=qual==='p25'?meses.filter(function(m){ return m.ano===2026; }):meses;
+    if(!ms.length) return 0;
+    var ws=wb.addWorksheet(nomeAba);
+    var nCols=4+ms.length+2, cols=[{width:44},{width:22},{width:36},{width:22}]; ms.forEach(function(){ cols.push({width:16}); }); cols.push({width:18}); cols.push({width:16}); ws.columns=cols;
+    var cab=ws.addRow(['Empresa','CNPJ','Sócio / Acionista','CPF / CNPJ Sócio'].concat(ms.map(function(m){ return (qual==='p25'?'Pago ':'Crédito ')+m.label; })).concat(['Total '+totRot,'Conta Contábil']));
+    cab.font={bold:true}; cab.eachCell(function(c){ c.border={bottom:{style:'medium',color:{argb:'FF1E3558'}}}; });
+    ws.views=[{state:'frozen',ySplit:1}];
+    var eids2025=qual==='p25'?getLuc2025Empresas().map(String):null, socTotal=0;
+    selecionados.forEach(function(emp){
+      var eid=emp.eid, linhas=[];
+      if(qual==='p25' && eids2025.indexOf(String(eid))<0) return;
+      var d25=qual==='p25'?getLuc2025Dados(eid):null;
+      lucSocGet(eid).forEach(function(soc){
+        var vals, conta=soc.conta||'';
+        if(qual==='p25'){ var d=d25[soc.id]||{meses:{},conta:''}; vals=ms.map(function(m){ return parseFloat(d.meses&&d.meses[m.mm])||0; }); conta=d.conta||conta; }
+        else vals=ms.map(function(m){ return lucCreditoParaExcel(eid,m.ano,m.mm,soc.id)||0; });
+        var total=vals.reduce(function(a,b){ return a+b; },0);
+        if(!total) return;
+        linhas.push({soc:soc,vals:vals,total:total,conta:conta});
+      });
+      if(!linhas.length) return;
+      nEmp++;
+      var rEmp=ws.addRow([emp.nome||'', emp.cnpj||'']);
+      for(var c=1;c<=nCols;c++){ var cell=rEmp.getCell(c); cell.fill=CINZA; cell.font={bold:true,color:{argb:'FFFFFFFF'}}; }
+      linhas.forEach(function(l){
+        socTotal++;
+        var r=ws.addRow(['','',l.soc.nome,fmtDoc(l.soc.doc)].concat(l.vals).concat([l.total,l.conta]));
+        for(var c2=5;c2<=4+ms.length+1;c2++) r.getCell(c2).numFmt=NUMFMT;
+        r.getCell(4+ms.length+1).font={bold:true};
+      });
     });
-    if(!linhas.length) return;
-    nEmp++;
-    var rEmp=ws.addRow([emp.nome||'', emp.cnpj||'']);
-    for(var c=1;c<=nCols;c++){ var cell=rEmp.getCell(c); cell.fill=CINZA; cell.font={bold:true,color:{argb:'FFFFFFFF'}}; }
-    linhas.forEach(function(l){
-      nSoc++;
-      var r=ws.addRow(['','',l.soc.nome,fmtDoc(l.soc.doc)].concat(l.vals).concat([l.total,l.soc.conta||'']));
-      for(var c2=5;c2<=4+meses.length+1;c2++) r.getCell(c2).numFmt=NUMFMT;
-      r.getCell(4+meses.length+1).font={bold:true};
-    });
-  });
-  if(!nSoc){ alert('Nenhum sócio com crédito em '+rotulo+' nas empresas visíveis.'); return; }
+    if(!socTotal) ws.addRow(['(nenhum sócio com '+(qual==='p25'?'pagamento de lucros de 2025':'crédito')+' neste período nas empresas visíveis)']);
+    nSoc+=socTotal; return socTotal;
+  }
+  if(fonte==='cred'||fonte==='ambos') montarAba('Créditos','cred');
+  if(fonte==='p25'||fonte==='ambos') montarAba('Pagos de 2025','p25');
+  if(!wb.worksheets.length){ alert('Os lucros de 2025 só têm pagamentos em meses de 2026: escolha um período de 2026.'); return; }
+  if(!nSoc){ alert('Nenhum sócio com valor em '+rotulo+' nas empresas visíveis.'); return; }
   var buf=await wb.xlsx.writeBuffer();
   var blob=new Blob([buf],{type:'application/octet-stream'}), url=URL.createObjectURL(blob), a=document.createElement('a');
-  a.href=url; a.download='Lucros_Creditos_'+rotulo.replace(/[^A-Za-z0-9]+/g,'_')+'.xlsx';
+  a.href=url; a.download='Lucros_'+(fonte==='p25'?'Pagos2025_':'Creditos_')+rotulo.replace(/[^A-Za-z0-9]+/g,'_')+'.xlsx';
   document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
   toast('Excel de '+rotulo+' gerado: '+nEmp+' empresa(s), '+nSoc+' sócio(s).','ok');
 }
