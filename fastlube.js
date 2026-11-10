@@ -868,7 +868,16 @@
     for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').update({ status_conciliacao: 'ignorado' }).in('id', ids.slice(i, i + 200)).eq('status_conciliacao', 'pendente').select('id'); if (r.error) { toast('Erro: ' + r.error.message, 'err'); break; } n += (r.data || []).length; }
     toast(n + ' entrada(s) duplicada(s) do extrato tirada(s) (o Fluxo já tem).', 'ok'); renderLancctbRegistroContabil(); return n;
   };
+  // faixa de andamento (a mesma dos botões Processar): mostra o que está fazendo + segundos decorridos, e some ao terminar
   root._flTrazerExtrato = async function (modo) {
+    const el = () => document.getElementById('lancctbRegistroProcessarStatus'), t0 = Date.now(), nome = modo === 'pag' ? 'Trazendo pagamentos do extrato' : 'Trazendo recebimentos do extrato';
+    root.__flEtapa = 'aguardando a escolha dos dias';
+    const tick = () => { const e = el(); if (e && root.__flEtapa) e.textContent = nome + ': ' + root.__flEtapa + ' — ' + Math.round((Date.now() - t0) / 1000) + ' s'; };
+    const tmr = setInterval(tick, 500);
+    try { return await _flTrazerExtratoInterno(modo); }
+    finally { clearInterval(tmr); root.__flEtapa = ''; const e = el(); if (e) e.textContent = ''; }
+  };
+  const _flTrazerExtratoInterno = async function (modo) {
     const comPagamentos = modo === 'pag', comRecebimentos = modo === 'receb';
     if (!ativo()) return;
     const conta = contaAtual();
@@ -876,10 +885,13 @@
     if (!escolha) return;
     const p = { de: escolha.de, ate: escolha.ate }, diasSel = new Set(escolha.dias || []);
     // trava de segurança (o calendário já marca os dias conciliados; isto cobre qualquer escape)
+    root.__flEtapa = 'conferindo os dias já conciliados';
     const bloq = (await diasJaConciliados(conta, p)).filter(d => diasSel.has(d));
     if (bloq.length) { janela('🔒 Dia(s) já conciliado(s)', '<div style="font-size:13px">O saldo do Registro destes dias já bate com o extrato bancário, então não reprocesso:</div><div style="margin:8px 0;font-weight:700">' + bloq.slice(0, 40).map(brData).join(' · ') + '</div>', 640); return; }
+    root.__flEtapa = 'lendo o extrato bancário';
     const ref = (await carregarRef(conta, p)).filter(r => diasSel.has(r.data_pagamento));
     if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta nos dias escolhidos. Suba o extrato lá primeiro.', 'err'); return; }
+    root.__flEtapa = 'comparando com o Fluxo (entrada/saída)';
     if (cfg().corrigeSentido) { try { await corrigirSentido(conta, ref, true); } catch (e) { console.warn('Corrigir sentido:', e); } }
     const novas = []; let nEnt = 0, nSai = 0, explicadas = 0, explicadasOutroDia = 0;
     if (comRecebimentos) {
@@ -890,12 +902,15 @@
     }
     let relatorio = null;
     if (comPagamentos) {
+      root.__flEtapa = 'conciliando os pagamentos com o Fluxo';
       relatorio = await conciliarPagamentos(conta, p, ref, novas, false, diasSel);
       if (!relatorio) return;
       nSai = relatorio.linhasAdicionadas;
+      root.__flEtapa = 'classificando a folha';
       try { const nf = await classificarFolhaDoFluxo(conta, p, diasSel); if (nf) toast('Folha: ' + nf + ' pagamento(s) de rescisão/férias/adiantamento/salário classificados pelo relatório da folha.', 'ok'); } catch (e) { console.warn('Folha pelo Fluxo:', e); }
     }
     if (!novas.length) { registrarRel(comPagamentos, conta, p, 0, relatorio, 0); toast('Nada a trazer: o Registro já cobre este período. Veja o relatório em 📑 Relatórios.', 'info'); renderLancctbRegistroContabil(); return; }
+    root.__flEtapa = 'gravando ' + novas.length + ' linha(s) no Registro';
     const rows = novas.map(({ r, fonte, pref }) => ({ empresa_eid: EID(), conta_bancaria_id: Number(conta), data_pagamento: r.data_pagamento, valor_saida: r.valor_saida || 0, valor_entrada: r.valor_entrada || 0, historico_bancario: r.historico_bancario || null, documento: r.documento || null, informacao: r.informacao || null, origem_importacao: 'excel', hash_dedup: pref + r.id, fonte }));
     for (let i = 0; i < rows.length; i += 300) {
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
