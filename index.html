@@ -70266,7 +70266,21 @@ function _cronOrientSalvar(){
   S.s('cron_orientacoes_tarefas',o); toast('Orientação salva','ok');
 }
 // Pedido do usuário 21/10/2026: Salvar Balanço Patrimonial / DRE / ECD / ECF são tarefas ANUAIS — a tela da tarefa mostra uma coluna por ANO (a partir de 2021 até o ano do fechamento), não por mês.
-function _cronTarefaEhAnual(nome){ return /Balan[cç]o|\bDRE\b|\bECD\b|\bECF\b/i.test(String(nome||'')); }
+// Periodicidade de cada tarefa (pedido do usuário 10/11/2026): 'anual' (colunas por ano, desde 2021) | 'trimestral' (4 trimestres do ano do fechamento) | 'mensal' (12 meses do ano do fechamento). Só o Kleydson escolhe.
+// Sem escolha gravada, vale o padrão antigo: Balanço/DRE/ECD/ECF = anual; o resto = mensal. Guardada por NOME da tarefa em 'cron_tarefa_periodicidade'.
+function _cronTarefaPeriodGet(nome){
+  let o={}; try{ const v=S.g('cron_tarefa_periodicidade'); if(v&&typeof v==='object'&&!Array.isArray(v)) o=v; }catch(e){}
+  const p=o[String(nome||'')]; if(p==='anual'||p==='trimestral'||p==='mensal') return p;
+  return /Balan[cç]o|\bDRE\b|\bECD\b|\bECF\b/i.test(String(nome||''))?'anual':'mensal';
+}
+function _cronTarefaEhAnual(nome){ return _cronTarefaPeriodGet(nome)==='anual'; }
+function _cronTarefaEhTrimestral(nome){ return _cronTarefaPeriodGet(nome)==='trimestral'; }
+function _cronTarefaSetPeriod(nome,p){
+  if(!_ehKleydson(currentUser)){ toast('Só o administrador escolhe a periodicidade.','err'); return; }
+  if(!['anual','trimestral','mensal'].includes(p)) return;
+  const o=Object.assign({},S.g('cron_tarefa_periodicidade')||{}); o[nome]=p; S.s('cron_tarefa_periodicidade',o);
+  toast('Periodicidade: '+p,'ok'); _cronAtribRenderFull();
+}
 const CRON_ANUAL_ANO_INICIAL=2021;
 // Ano fora da vida da empresa (entrou depois ou saiu antes) fica em branco.
 function _cronAnoForaPeriodo(e,ano){
@@ -70297,10 +70311,13 @@ function _cronDetRestaurarExcluidas(){
 function _cronAtribTarefaDetalheHtml(nome){
   const anoFech=(S.fechAtual()||'').split('-')[0];
   const anual=_cronTarefaEhAnual(nome);
+  const trim=_cronTarefaEhTrimestral(nome), periodo=_cronTarefaPeriodGet(nome);
   const meses12=anual
     ? Array.from({length:Math.max(1,(+anoFech||CRON_ANUAL_ANO_INICIAL)-CRON_ANUAL_ANO_INICIAL+1)},(_,i)=>String(CRON_ANUAL_ANO_INICIAL+i))
+    : trim ? ['03','06','09','12'].map(m=>anoFech+'-'+m) // trimestral: a coluna é o último mês do trimestre
     : Array.from({length:12},(_,i)=>anoFech+'-'+String(i+1).padStart(2,'0'));
-  const fech=anual?anoFech:S.fechAtual();
+  const _fa=S.fechAtual()||'';
+  const fech=anual?anoFech:trim?(_fa?_fa.slice(0,4)+'-'+String(Math.ceil(+_fa.slice(5,7)/3)*3).padStart(2,'0'):''):S.fechAtual();
   const linhas=[];
   const stCron=_cronTarefaStatusGet()[nome]||{};
   S.emps().forEach(e=>{
@@ -70308,8 +70325,8 @@ function _cronAtribTarefaDetalheHtml(nome){
     const idx=tarefas.findIndex(t=>(t.nome||'')===nome);
     const resps=[...new Set(_cronAtribuicoes().filter(a=>(a.tipo==='tarefa'||a.tipo==='cliente_novo')&&a.nome===nome&&(a.empresas||[]).map(String).includes(String(e.eid))).map(a=>a.resp))];
     // Empresa com a tarefa JÁ no checklist (criada na Visão Geral) mantém o vínculo antigo; empresa só atribuída aqui usa o status próprio do Cronograma.
-    if((idx<0||anual)&&!resps.length) return;
-    const usaChk=idx>=0&&!anual; // tarefa anual do Cronograma NUNCA usa o checklist da Visão Geral
+    if((idx<0||anual||trim)&&!resps.length) return;
+    const usaChk=idx>=0&&!anual&&!trim; // tarefa anual/trimestral do Cronograma NUNCA usa o checklist da Visão Geral
     linhas.push({eid:String(e.eid),nome:e.nome||'',resp:resps.join(', ')||'—',idx:usaChk?idx:-1,item:usaChk?tarefas[idx]:{nome,info:'',formato:'',meses:stCron[String(e.eid)]||{}},emp:e});
   });
   const _excl=_cronDetExcluidas(nome); const _linhasTodas=linhas.filter(l=>!_excl.includes(l.eid)); linhas.length=0; _linhasTodas.forEach(l=>linhas.push(l));
@@ -70325,7 +70342,8 @@ function _cronAtribTarefaDetalheHtml(nome){
   <div style="flex:1 1 380px;min-width:300px">
   <button class="btn bo bsm" onclick="_cronAtribFecharTarefa()" style="margin-bottom:12px">← Voltar à lista de tarefas</button>
   <div class="ptitle" style="margin-bottom:4px">${esc(nome)}</div>
-  <div style="font-size:12px;color:var(--slate);margin-bottom:12px">${linhas.length!==_totalLinhas?linhas.length+' de '+_totalLinhas:linhas.length} empresa${_totalLinhas!==1?'s':''} com esta tarefa atribuída.${_adm&&_excl.length?` <a onclick="_cronDetRestaurarExcluidas()" style="cursor:pointer;color:var(--teal);text-decoration:underline">Restaurar ${_excl.length} tirada${_excl.length!==1?'s':''} da lista</a>.`:''} É uma tarefa à parte do Cronograma (cobrada só do responsável, não aparece na Visão Geral da empresa).${anual?` Tarefa ANUAL: uma coluna por ano, a partir de ${CRON_ANUAL_ANO_INICIAL}.`:''} Clique numa célula pra alternar Pendente → Entregue → N/A → Sem Movimento.</div>
+  <div style="font-size:12px;color:var(--slate);margin-bottom:12px">${linhas.length!==_totalLinhas?linhas.length+' de '+_totalLinhas:linhas.length} empresa${_totalLinhas!==1?'s':''} com esta tarefa atribuída.${_adm&&_excl.length?` <a onclick="_cronDetRestaurarExcluidas()" style="cursor:pointer;color:var(--teal);text-decoration:underline">Restaurar ${_excl.length} tirada${_excl.length!==1?'s':''} da lista</a>.`:''} É uma tarefa à parte do Cronograma (cobrada só do responsável, não aparece na Visão Geral da empresa).${anual?` Tarefa ANUAL: uma coluna por ano, a partir de ${CRON_ANUAL_ANO_INICIAL}.`:trim?' Tarefa TRIMESTRAL: uma coluna por trimestre.':''} Clique numa célula pra alternar Pendente → Entregue → N/A → Sem Movimento.</div>
+  ${_adm?`<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span style="font-size:11px;font-weight:700;color:var(--slate);text-transform:uppercase;letter-spacing:.04em">Periodicidade</span>${[['anual','Anual'],['trimestral','Trimestral'],['mensal','Mensal']].map(([k,r])=>`<button class="btn ${periodo===k?'bp':'bo'} bsm" onclick="_cronTarefaSetPeriod(${esc(JSON.stringify(nome))},'${k}')" title="${k==='anual'?'Uma coluna por ano, desde '+CRON_ANUAL_ANO_INICIAL:k==='trimestral'?'4 colunas por ano (1º ao 4º trimestre), a partir de 2026':'12 colunas por ano (jan a dez), a partir de 2026'}">${r}</button>`).join('')}</div>`:''}
   </div>
   <div style="flex:0 1 min(48%,780px);min-width:340px">${_cronOrientacaoHtml(nome,true)}</div>
   </div>`;
@@ -70334,15 +70352,15 @@ function _cronAtribTarefaDetalheHtml(nome){
     return h;
   }
   h+=`<div style="overflow:auto;max-height:70vh;border:1px solid var(--border);border-radius:var(--r)"><table class="pend-t" style="width:100%;border-collapse:collapse;font-size:12px;background:var(--white)"><thead style="position:sticky;top:0;z-index:2"><tr>
-    <th style="${_cronTh()}">ID</th>${_adm?`<th style="${_cronTh()};width:28px"></th>`:''}<th style="${_cronTh()}">Empresa</th><th style="${_cronTh()}">Grupo</th><th style="${_cronTh()}">CNPJ</th><th style="${_cronTh()}">Responsável</th><th style="${_cronTh()}">Último fechamento</th>${meses12.map(m=>`<th class="pmes" style="${_cronTh()};text-align:center${m===fech?';background:rgba(20,184,166,.5)':''}">${anual?m:_cronMesAA(m)}</th>`).join('')}</tr>
+    <th style="${_cronTh()}">ID</th>${_adm?`<th style="${_cronTh()};width:28px"></th>`:''}<th style="${_cronTh()}">Empresa</th><th style="${_cronTh()}">Grupo</th><th style="${_cronTh()}">CNPJ</th><th style="${_cronTh()}">Responsável</th><th style="${_cronTh()}">Último fechamento</th>${meses12.map(m=>`<th class="pmes" style="${_cronTh()};text-align:center${m===fech?';background:rgba(20,184,166,.5)':''}">${anual?m:trim?(Math.ceil(+m.slice(5,7)/3)+'º tri/'+m.slice(2,4)):_cronMesAA(m)}</th>`).join('')}</tr>
     <tr>${[['id','ID',60],..._adm?[null]:[],['empresa','Empresa',200],['grupo','Grupo',130],['cnpj','CNPJ',130],['resp','Responsável',110]].map(c=>c===null?`<th style="${_cronTh()};padding:3px"></th>`:`<th style="${_cronTh()};padding:3px 4px"><input id="cronDetF_${c[0]}" class="si" placeholder="🔎 ${c[1]}" value="${esc(_cronDetFiltro[c[0]])}" oninput="_cronDetSetFiltro('${c[0]}',this.value,this)" style="width:100%;min-width:${c[2]-8}px;font-size:11px;padding:3px 5px"></th>`).join('')}<th style="${_cronTh()};padding:3px 4px"><select id="cronDetF_ultfech" class="si" onchange="_cronDetSetFiltro('ultfech',this.value,null)" style="width:100%;font-size:11px;padding:3px 4px"><option value="">Todas</option><option value="__vazias"${_cronDetFiltro.ultfech==='__vazias'?' selected':''}>Vazias</option>${_datasUF.map(d=>`<option value="${d}"${_cronDetFiltro.ultfech===d?' selected':''}>${d.split('-').reverse().join('/')}</option>`).join('')}</select></th>${meses12.map(()=>`<th style="${_cronTh()};padding:3px"></th>`).join('')}</tr></thead><tbody>`;
   linhas.forEach(l=>{
     h+=`<tr><td style="${_cronTd()};font-family:var(--mono)">${esc(l.eid)}</td>${_adm?`<td style="${_cronTd()};padding:4px 2px;text-align:center"><button class="icon-btn" title="Tirar esta empresa da lista (só você vê este botão)" onclick="_cronDetExcluirEmpresa('${esc(l.eid)}')">🗑</button></td>`:''}<td style="${_cronTd()};font-weight:600"><a onclick="goEmpresa('${esc(l.eid)}')" title="Abrir a Visão Geral desta empresa" style="cursor:pointer;color:inherit;text-decoration:underline dotted">${esc(l.nome)}</a></td><td style="${_cronTd()};font-size:11px;color:var(--slate)">${esc((l.emp&&l.emp.grupoNome)||'—')}</td><td onclick="copiarCnpjSoNumeros(this,'${esc((l.emp&&(l.emp.cnpjNum||l.emp.cnpj))||'')}')" title="Clique para copiar o CNPJ (só números)" style="${_cronTd()};font-family:var(--mono);white-space:nowrap;cursor:copy">${esc((l.emp&&l.emp.cnpj)||'—')}</td><td style="${_cronTd()}">${esc(l.resp)}</td><td style="${_cronTd()};white-space:nowrap;font-size:11.5px">${l.emp&&l.emp.ultimoFechamento?esc(l.emp.ultimoFechamento.split('-').reverse().join('/')):''}</td>`;
     meses12.forEach(m=>{
       const cur=m===fech;
       if(anual?_cronAnoForaPeriodo(l.emp,m):_cronMesForaPeriodo(l.emp,m)){ h+=`<td class="pmes${cur?' pcur':''}"></td>`; return; }
-      if(!anual&&foraDoTrimestre(l.item,m,l.eid)){ h+=`<td class="pmes${cur?' pcur':''}" style="text-align:center;color:var(--slate)" title="Não se aplica a este mês">—</td>`; return; }
-      const auto=anual?null:_itemAutoValor(l.item,l.eid,m);
+      if(!anual&&!trim&&foraDoTrimestre(l.item,m,l.eid)){ h+=`<td class="pmes${cur?' pcur':''}" style="text-align:center;color:var(--slate)" title="Não se aplica a este mês">—</td>`; return; }
+      const auto=(anual||trim)?null:_itemAutoValor(l.item,l.eid,m);
       const v=auto!==null?auto:((l.item.meses||{})[m]||'');
       if(auto!==null){
         h+=`<td class="pmes${cur?' pcur':''} ${v==='ok'?'pok':''}" style="text-align:center" title="Automático"><span class="${v==='ok'?'pcell-ok':''}" style="${v==='ok'?'':'color:var(--slate)'}">${v==='ok'?'✓':'—'}</span></td>`;
