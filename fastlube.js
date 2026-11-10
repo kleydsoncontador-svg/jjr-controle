@@ -1295,13 +1295,31 @@
     tbl.dataset.flSaldo = '1';
     const conta = contaAtual();
     const { data: ag } = await agSaldo(conta, 'saldo_inicial');
-    const reg = await carregarRegistro(conta, '', '');
-    const igR = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
-    const ign = new Set((igR.data || []).map(x => String(x.id)));
-    const fontePorId = new Map(); reg.forEach(l => fontePorId.set(String(l.id), l.fonte)); (igR.data || []).forEach(l => fontePorId.set(String(l.id), l.fonte));
     const ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
-    let s = cents((ag && ag.saldo_inicial) || 0); const mapa = new Map();
-    reg.forEach(l => { s += cents(l.valor_entrada) - cents(l.valor_saida); mapa.set(String(l.id), s / 100); });
+    // Só as ~50 linhas da página precisam de saldo/origem: o saldo corrido é somado no servidor (saldo_linhas_registro) — antes baixava o mês inteiro (até ~30 mil linhas) a cada abertura
+    const rids = [...tbl.querySelectorAll('tbody tr')].map(tr => tr.dataset.rid).filter(Boolean).map(Number);
+    let ign = new Set(), fontePorId = new Map(), mapa = new Map(), rapido = false;
+    try {
+      if (rids.length) {
+        const [rp, info] = await Promise.all([
+          _supaClient.rpc('saldo_linhas_registro', { p_eid: String(EID()), p_conta: Number(conta), p_desde: desde() || null, p_ids: rids }),
+          _supaClient.from('lancamentos_extrato').select('id,fonte,status_conciliacao').in('id', rids)]);
+        if (!rp.error && !info.error) {
+          const base = cents((ag && ag.saldo_inicial) || 0);
+          (rp.data || []).forEach(x => mapa.set(String(x.id), (base + Math.round(Number(x.saldo) * 100)) / 100));
+          (info.data || []).forEach(x => { fontePorId.set(String(x.id), x.fonte); if (x.status_conciliacao === 'ignorado') ign.add(String(x.id)); });
+          rapido = true;
+        }
+      } else rapido = true;
+    } catch (e) { console.warn('Saldo rápido indisponível, usando o jeito completo:', e); }
+    if (!rapido) {
+      const reg = await carregarRegistro(conta, '', '');
+      const igR = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
+      ign = new Set((igR.data || []).map(x => String(x.id)));
+      reg.forEach(l => fontePorId.set(String(l.id), l.fonte)); (igR.data || []).forEach(l => fontePorId.set(String(l.id), l.fonte));
+      let sc = cents((ag && ag.saldo_inicial) || 0);
+      reg.forEach(l => { sc += cents(l.valor_entrada) - cents(l.valor_saida); mapa.set(String(l.id), sc / 100); });
+    }
     if (!document.body.contains(tbl)) return;
     // Fast Lube não tem mais Fluxo de Caixa como item: tira a coluna "Fluxo de Caixa" do Registro
     { const h0 = tbl.querySelector('thead tr'), h1 = tbl.querySelector('thead tr:nth-child(2)'), cg0 = tbl.querySelector('colgroup');
