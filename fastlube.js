@@ -866,8 +866,9 @@
   };
   // devolve o conjunto de ids de `itens` ({id,data,c}) que têm entrada correspondente (1 para 1) no Fluxo da conta: mesmo valor em centavos, mesmo dia primeiro, depois até 3 dias
   async function pareiaEntradasComFluxo(conta, itens) {
-    const out = new Set(); if (!itens.length) return out;
+    const out = new Set(); out.diasFluxo = new Set(); if (!itens.length) return out;
     const fl = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_entrada', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)'))).data || [];
+    out.diasFluxo = new Set(fl.map(x => x.data_pagamento));
     const usado = new Set(), dd = (a, b) => Math.abs((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 864e5);
     const livres = f => fl.filter(x => !usado.has(x.id) && cents(x.valor_entrada) === f.c);
     for (const lim of [0, 3]) itens.forEach(it => { if (out.has(it.id)) return; const m = livres(it).filter(x => dd(x.data_pagamento, it.data) <= lim).sort((a, b) => dd(a.data_pagamento, it.data) - dd(b.data_pagamento, it.data))[0]; if (m) { usado.add(m.id); out.add(it.id); } });
@@ -876,8 +877,9 @@
   // tira (ignora — nada é apagado) as entradas "Extrato · recebimento" ainda pendentes que o Fluxo já cobre
   root._flTirarDuplicadasEntrada = async function () {
     if (!ativo()) return 0; const conta = contaAtual();
-    const ex = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'extrato_receb').eq('status_conciliacao', 'pendente').gt('valor_entrada', 0))).data || [];
+    const ex = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,historico_bancario').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'extrato_receb').eq('status_conciliacao', 'pendente').gt('valor_entrada', 0))).data || [];
     const dup = await pareiaEntradasComFluxo(conta, ex.map(x => ({ id: x.id, data: x.data_pagamento, c: cents(x.valor_entrada) })));
+    ex.forEach(x => { if (/LIQUIDACAO DE COBRANCA/i.test(String(x.historico_bancario || '')) && dup.diasFluxo.has(x.data_pagamento)) dup.add(x.id); });
     const ids = [...dup]; let n = 0;
     for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').update({ status_conciliacao: 'ignorado' }).in('id', ids.slice(i, i + 200)).eq('status_conciliacao', 'pendente').select('id'); if (r.error) { toast('Erro: ' + r.error.message, 'err'); break; } n += (r.data || []).length; }
     toast(n + ' entrada(s) duplicada(s) do extrato tirada(s) (o Fluxo já tem).', 'ok'); renderLancctbRegistroContabil(); return n;
@@ -917,7 +919,9 @@
       const entR = ref.filter(r => Number(r.valor_entrada) > 0 && !(Number(r.valor_saida) > 0));
       // Rufato (Registro pelo Fluxo): entrada que o Fluxo já tem (mesmo valor, até 3 dias) NÃO é trazida de novo — antes duplicava transferências entre contas e rendimentos
       const jaNoFluxo = cfg().fluxoLancamento ? await pareiaEntradasComFluxo(conta, entR.map(r => ({ id: r.id, data: r.data_pagamento, c: cents(r.valor_entrada) }))) : new Set();
-      entR.forEach(r => { if (jaNoFluxo.has(r.id)) { explicadas++; return; } novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; });
+      // 'LIQUIDACAO DE COBRANCA' no extrato é o TOTAL do dia dos boletos; o Fluxo traz cada boleto. Se o Fluxo tem entradas no dia, o total já está coberto (trazer dobrava o recebimento)
+      const cobrCoberta = r => cfg().fluxoLancamento && /LIQUIDACAO DE COBRANCA/i.test(String(r.historico_bancario || '')) && jaNoFluxo.diasFluxo && jaNoFluxo.diasFluxo.has(r.data_pagamento);
+      entR.forEach(r => { if (jaNoFluxo.has(r.id) || cobrCoberta(r)) { explicadas++; return; } novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; });
     }
     let relatorio = null;
     if (comPagamentos) {
