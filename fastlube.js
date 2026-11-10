@@ -122,14 +122,22 @@
     if (partes.length < 2) return;
     const campo = document.getElementById('lancctbRegraHistoricoGatilho'); if (!campo) return;
     const sel = []; // índices na ordem em que foram marcados
+    const cur = partes.slice(), extras = []; // cur = texto ATUAL de cada parte (o usuário pode encurtar à mão, ex.: só "FCP/AL"); extras = trechos digitados que não são de nenhuma parte
     const wrap = document.createElement('div'); wrap.id = 'flGatilhoPartes'; wrap.style.cssText = 'margin:6px 0 4px';
     wrap.innerHTML = '<div style="font-size:11px;color:var(--slate);margin-bottom:5px">Marque as partes do histórico (separadas por <b>|</b>) que devem aparecer, na ordem que quiser. A regra vale para todo lançamento que tiver <b>todas</b> as partes marcadas, em qualquer posição do histórico.</div><div style="display:flex;flex-wrap:wrap;gap:6px"></div>';
     const lista = wrap.lastChild;
-    const atualizar = () => {
-      campo.value = sel.map(i => partes[i]).join(' | ');
-      [...lista.children].forEach((lb, i) => { const k = sel.indexOf(i); lb.querySelector('input').checked = k >= 0; lb.querySelector('.fln').textContent = k >= 0 ? String(k + 1) : ''; lb.querySelector('.fln').style.visibility = k >= 0 ? 'visible' : 'hidden'; lb.style.borderColor = k >= 0 ? 'var(--teal)' : 'var(--border)'; });
+    const pintar = () => {
+      [...lista.children].forEach((lb, i) => { const k = sel.indexOf(i); lb.querySelector('input').checked = k >= 0; lb.querySelector('span:last-child').textContent = cur[i]; lb.title = partes[i]; lb.querySelector('.fln').textContent = k >= 0 ? String(k + 1) : ''; lb.querySelector('.fln').style.visibility = k >= 0 ? 'visible' : 'hidden'; lb.style.borderColor = k >= 0 ? 'var(--teal)' : 'var(--border)'; });
       try { _lancctbRegraAvaliarDas(); } catch (e) {}
     };
+    const atualizar = () => { campo.value = sel.map(i => cur[i]).concat(extras).join(' | '); pintar(); };
+    // o usuário pode EDITAR o texto à mão (encurtar uma parte, ex.: "FCP/AL - MEL ESPOSA… - Linha digitável…" → "FCP/AL"): vale como certo; a regra casa por trecho contido em qualquer posição do histórico
+    campo.addEventListener('input', () => {
+      const digitado = campo.value.split(' | ').map(x => x.trim()).filter(Boolean), nSel = [];
+      extras.length = 0;
+      digitado.forEach(tp => { const i = partes.findIndex((p, ix) => nSel.indexOf(ix) < 0 && (cur[ix] === tp || p.toLowerCase().indexOf(tp.toLowerCase()) >= 0 || cur[ix].toLowerCase().indexOf(tp.toLowerCase()) >= 0)); if (i >= 0) { cur[i] = tp; nSel.push(i); } else extras.push(tp); });
+      sel.length = 0; nSel.forEach(i => sel.push(i)); pintar();
+    });
     partes.forEach((pt, i) => {
       const lb = document.createElement('label');
       lb.style.cssText = 'display:flex;align-items:center;gap:6px;cursor:pointer;border:1px solid var(--border);border-radius:14px;padding:3px 10px 3px 7px;font-size:11.5px;max-width:100%';
