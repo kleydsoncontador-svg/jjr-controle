@@ -899,7 +899,12 @@
     // trava de segurança (o calendário já marca os dias conciliados; isto cobre qualquer escape)
     root.__flEtapa = 'conferindo os dias já conciliados';
     const bloq = (await diasJaConciliados(conta, p)).filter(d => diasSel.has(d));
-    if (bloq.length) { janela('🔒 Dia(s) já conciliado(s)', '<div style="font-size:13px">O saldo do Registro destes dias já bate com o extrato bancário, então não reprocesso:</div><div style="margin:8px 0;font-weight:700">' + bloq.slice(0, 40).map(brData).join(' · ') + '</div>', 640); return; }
+    if (bloq.length) {
+      // antes: UM dia conciliado cancelava tudo. Agora só esse(s) dia(s) são pulados e o resto é processado
+      bloq.forEach(d => diasSel.delete(d));
+      if (!diasSel.size) { janela('🔒 Dia(s) já conciliado(s)', '<div style="font-size:13px">O saldo do Registro destes dias já bate com o extrato bancário, então não reprocesso:</div><div style="margin:8px 0;font-weight:700">' + bloq.slice(0, 40).map(brData).join(' · ') + '</div>', 640); return; }
+      toast('Pulei ' + bloq.length + ' dia(s) já conciliado(s) (' + bloq.slice(0, 6).map(brData).join(', ') + (bloq.length > 6 ? '…' : '') + ') e sigo com os outros ' + diasSel.size + ' dia(s).', 'info');
+    }
     root.__flEtapa = 'lendo o extrato bancário';
     const ref = (await carregarRef(conta, p)).filter(r => diasSel.has(r.data_pagamento));
     if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta nos dias escolhidos. Suba o extrato lá primeiro.', 'err'); return; }
