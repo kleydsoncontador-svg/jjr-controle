@@ -237,7 +237,12 @@
     const chaveBanco = tx => { const n = norm(tx); return n.indexOf('BRADESCO') >= 0 ? 'BRADESCO' : n.indexOf('ITAU') >= 0 ? 'ITAU' : (n.indexOf('BRASIL') >= 0 || n.indexOf('BB') >= 0) ? 'BRASIL' : n.indexOf('MERC') >= 0 ? 'MERCADO' : ''; };
     const meuKey = chaveBanco(nomeBanco);
     const transfBancos = tx => { const m = String(tx).match(/\(([^()]*?)\s*P\s*\/\s*([^()]*?)\)/i); if (!m) return null; const o = chaveBanco(m[1]), d = chaveBanco(m[2]); return o && d ? { orig: o, dest: d } : null; };
+    const barra = t => { const e = document.getElementById('lancctbRegistroProcessarStatus'); if (e) e.textContent = t; };
+    const ceda = () => new Promise(r => setTimeout(r, 0));
+    try {
+    let nf = 0;
     for (const f of files) {
+      nf++; barra('Fluxo ' + nomeBanco + ': lendo o arquivo ' + nf + '/' + files.length + ' (' + f.name + ')'); await ceda();
       const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true });
       const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
       // o relatório vem com quebras de nível (linha "SALDO" no topo, subtotais "CRÉDITO"/"DÉBITO" entre os blocos): o cabeçalho pode estar em qualquer linha do começo; só entram as linhas com data na coluna dtpgto
@@ -271,6 +276,7 @@
         linhas.push({ empresa_eid: eid, data: dia, descricao: descr, valor_saida: entrada ? 0 : v, valor_entrada: entrada ? v : 0, port_nom: nomeBanco, arquivo_origem: f.name, descricao_conta_origem: fora ? 'FORA: ' + fora : null });
       }
     }
+    barra('Fluxo ' + nomeBanco + ': conferindo o que já existe (' + linhas.length + ' linhas lidas)'); await ceda();
     // duplicidade (mesmo dia, valores e descrição já no Fluxo deste banco): conta as ocorrências, para repetições legítimas dentro do arquivo
     const exist = (await todosPorId(() => { let q = _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,valor_saida,valor_entrada').eq('empresa_eid', eid).eq('port_nom', nomeBanco); if (d0) q = q.gte('data', d0); return q; })).data || [];
     const ch = x => x.data + '|' + cents(x.valor_saida) + '|' + cents(x.valor_entrada) + '|' + String(x.descricao || '').trim();
@@ -278,13 +284,16 @@
     const vistas = new Map(), novas = []; let dup = 0;
     linhas.forEach(x => { const k = ch(x), n = (vistas.get(k) || 0) + 1; vistas.set(k, n); if (n <= (jaTem.get(k) || 0)) dup++; else novas.push(x); });
     for (let i = 0; i < novas.length; i += 400) {
+      barra('Fluxo ' + nomeBanco + ': gravando ' + Math.min(i + 400, novas.length) + '/' + novas.length);
       const e = await _supaClient.from('fluxo_caixa_lancamentos').insert(novas.slice(i, i + 400));
       if (e.error) { toast('Erro ao importar o Fluxo: ' + e.error.message, 'err'); return; }
     }
     try { if (corrigidas) S.s('fl_fluxo_banco_corrigido_' + eid, [{ em: new Date().toISOString(), banco: nomeBanco, arquivos: files.map(f => f.name), n: corrigidas }].concat(S.g('fl_fluxo_banco_corrigido_' + eid) || []).slice(0, 200)); } catch (e) {}
     toast('Fluxo ' + nomeBanco + ': ' + novas.length + ' linha(s) importada(s)' + (dup ? ' · ' + dup + ' já existiam' : '') + (corrigidas ? ' · ' + corrigidas + ' com banco/sentido corrigidos' : '') + (foraL.length ? ' · ' + foraL.length + ' sem relação com o banco (entram como Ignoradas)' : '') + (anteriores ? ' · ' + anteriores + ' anteriores a ' + brData(d0) + ' (não mexo)' : '') + '.', 'ok');
     if (foraL.length) janela('Linhas do Fluxo sem relação clara com este banco (' + foraL.length + ')', '<div style="font-size:12.5px;margin-bottom:8px">Entraram como <b>Ignoradas</b> (nada foi perdido): veja em 🚫 Ignorados e resgate para o banco certo, se for o caso.</div><table style="width:100%;border-collapse:collapse;font-size:12px">' + foraL.slice(0, 200).map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="padding:4px 6px;white-space:nowrap">' + brData(x.dia) + '</td><td style="padding:4px 6px;text-align:right;white-space:nowrap">' + fmt(x.v) + '</td><td style="padding:4px 6px">' + E(x.descr).slice(0, 120) + '</td><td style="padding:4px 6px;color:var(--slate)">' + E(x.motivo) + '</td></tr>').join('') + '</table>', 900);
+    barra('Fluxo ' + nomeBanco + ': levando ao Registro Contábil…'); await ceda();
     await root._flAposImportarFluxo();
+    } finally { barra(''); }
   }
   root._flSubirFluxo = async function () {
     if (cfg().fluxoLancamento) {
@@ -584,6 +593,7 @@
     const livres = d => (fluxoDia[d] || []).filter(x => !x.usado);
     const casavel = l => l.cat === 'sispag' || l.cat === 'outros';
     // passada A: mesmo dia, mesmo valor
+    root.__flEtapa = 'casando por valor igual, dia a dia'; await new Promise(r => setTimeout(r, 0));
     dias.forEach(d => extDia[d].slice().sort((a, b) => b.c - a.c).forEach(l => { if (!casavel(l) && l.cat !== 'banco') return; /* imposto/tarifa do banco também casa quando o valor é IGUAL ao de uma linha do Fluxo no mesmo dia (ex.: 'Contr Imp' = pagamento de importação já lançado no Fluxo) */ const f = livres(d).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'mesmo valor'; } }));
     // passada A2 (tributos): o cliente erra centavos (até R$ 1,00) em IPTU/ICMS/IRPJ/CSLL/PIS/COFINS/FGTS...: a saída do extrato casa com a linha do Fluxo de imposto de valor MUITO próximo.
     // O pagador que já teve esse ajuste fica na memória (fl_tol_pagadores_163) e passa a valer mesmo sem a palavra do imposto no nome.
@@ -591,6 +601,7 @@
     const chavePag = h => String(h || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim();
     let tolMem = {}; try { tolMem = S.g('fl_tol_pagadores_' + EID()) || {}; } catch (e) {}
     const ajustesCent = [];
+    root.__flEtapa = 'casando somas de várias linhas'; await new Promise(r => setTimeout(r, 0));
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       let melhor = null;
       livres(d).forEach(x => { if (x.cls) return; const dif = Math.abs(x.c - l.c); if (dif === 0 || dif > 100) return; if (!(TRIB.test(x.h) || tolMem[chavePag(x.h)])) return; if (!melhor || dif < melhor.dif) melhor = { x, dif }; });
@@ -612,6 +623,7 @@
     }));
     // passada C: dia próximo (±3): valor igual, depois soma de linhas de UM mesmo dia
     let outroDia = 0;
+    root.__flEtapa = 'procurando pagamentos de dias vizinhos'; await new Promise(r => setTimeout(r, 0));
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const f = livres(sh(d, dd)).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'dia ' + (dd > 0 ? '+' : '') + dd; outroDia++; return; } } }));
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const it = livres(sh(d, dd)); if (!it.length) continue; const sel = exatoSubset(it, l.c); if (sel) { sel.forEach(k => { it[k].usado = true; }); l.explicada = true; l.via = 'soma dia ' + dd; outroDia++; return; } } }));
     // 3) o que sobra
