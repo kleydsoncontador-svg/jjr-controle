@@ -596,7 +596,7 @@
     const casavel = l => l.cat === 'sispag' || l.cat === 'outros';
     // passada A: mesmo dia, mesmo valor
     root.__flEtapa = 'casando por valor igual, dia a dia'; await new Promise(r => setTimeout(r, 0));
-    dias.forEach(d => extDia[d].slice().sort((a, b) => b.c - a.c).forEach(l => { if (!casavel(l) && l.cat !== 'banco') return; /* imposto/tarifa do banco também casa quando o valor é IGUAL ao de uma linha do Fluxo no mesmo dia (ex.: 'Contr Imp' = pagamento de importação já lançado no Fluxo) */ const f = livres(d).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'mesmo valor'; } }));
+    dias.forEach(d => extDia[d].slice().sort((a, b) => b.c - a.c).forEach(l => { if (!casavel(l) && l.cat !== 'banco' && !(l.cat === 'aplic' && cfg().fluxoLancamento)) return; /* Rufato: o Fluxo já traz a aplicação (ex.: 'CDB FACIL BRADESCO / APLICACAO CDB') — mesma data e valor = mesma saída, não traz de novo */ /* imposto/tarifa do banco também casa quando o valor é IGUAL ao de uma linha do Fluxo no mesmo dia (ex.: 'Contr Imp' = pagamento de importação já lançado no Fluxo) */ const f = livres(d).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'mesmo valor'; } }));
     // passada A2 (tributos): o cliente erra centavos (até R$ 1,00) em IPTU/ICMS/IRPJ/CSLL/PIS/COFINS/FGTS...: a saída do extrato casa com a linha do Fluxo de imposto de valor MUITO próximo.
     // O pagador que já teve esse ajuste fica na memória (fl_tol_pagadores_163) e passa a valer mesmo sem a palavra do imposto no nome.
     const TRIB = /IPTU|PREFEITURA|ICMS|IRPJ|CSLL|\bPIS\b|COFINS|FGTS|\bGPS\b|DARF|GNRE|\bINSS\b|\bISS\b|IMPOSTO|TRIBUT|\bDAS\b|\bGP\d/i;
