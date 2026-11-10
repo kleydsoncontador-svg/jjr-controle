@@ -70271,7 +70271,14 @@ function _cronOrientSalvar(){
 function _cronTarefaPeriodGet(nome){
   let o={}; try{ const v=S.g('cron_tarefa_periodicidade'); if(v&&typeof v==='object'&&!Array.isArray(v)) o=v; }catch(e){}
   const p=o[String(nome||'')]; if(p==='anual'||p==='trimestral'||p==='mensal') return p;
+  if(nome===CRON_DOC_PERIOD_CHAVE) return 'mensal';
   return /Balan[cç]o|\bDRE\b|\bECD\b|\bECF\b/i.test(String(nome||''))?'anual':'mensal';
+}
+const CRON_DOC_PERIOD_CHAVE='__documentacao_recebida__';
+function _cronPeriodSeletorHtml(nome,periodo){
+  if(!_ehKleydson(currentUser)) return '';
+  const q=esc(JSON.stringify(nome));
+  return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span style="font-size:11px;font-weight:700;color:var(--slate);text-transform:uppercase;letter-spacing:.04em">Periodicidade</span>${[['anual','Anual'],['trimestral','Trimestral'],['mensal','Mensal']].map(([k,r])=>`<button class="btn ${periodo===k?'bp':'bo'} bsm" onclick="_cronTarefaSetPeriod(${q},'${k}')" title="${k==='anual'?'Uma coluna por ano, desde '+CRON_ANUAL_ANO_INICIAL:k==='trimestral'?'4 colunas por ano (1º ao 4º trimestre), a partir de 2026':'12 colunas por ano (jan a dez), a partir de 2026'}">${r}</button>`).join('')}</div>`;
 }
 function _cronTarefaEhAnual(nome){ return _cronTarefaPeriodGet(nome)==='anual'; }
 function _cronTarefaEhTrimestral(nome){ return _cronTarefaPeriodGet(nome)==='trimestral'; }
@@ -70343,7 +70350,7 @@ function _cronAtribTarefaDetalheHtml(nome){
   <button class="btn bo bsm" onclick="_cronAtribFecharTarefa()" style="margin-bottom:12px">← Voltar à lista de tarefas</button>
   <div class="ptitle" style="margin-bottom:4px">${esc(nome)}</div>
   <div style="font-size:12px;color:var(--slate);margin-bottom:12px">${linhas.length!==_totalLinhas?linhas.length+' de '+_totalLinhas:linhas.length} empresa${_totalLinhas!==1?'s':''} com esta tarefa atribuída.${_adm&&_excl.length?` <a onclick="_cronDetRestaurarExcluidas()" style="cursor:pointer;color:var(--teal);text-decoration:underline">Restaurar ${_excl.length} tirada${_excl.length!==1?'s':''} da lista</a>.`:''} É uma tarefa à parte do Cronograma (cobrada só do responsável, não aparece na Visão Geral da empresa).${anual?` Tarefa ANUAL: uma coluna por ano, a partir de ${CRON_ANUAL_ANO_INICIAL}.`:trim?' Tarefa TRIMESTRAL: uma coluna por trimestre.':''} Clique numa célula pra alternar Pendente → Entregue → N/A → Sem Movimento.</div>
-  ${_adm?`<div style="display:flex;align-items:center;gap:6px;margin-bottom:12px;flex-wrap:wrap"><span style="font-size:11px;font-weight:700;color:var(--slate);text-transform:uppercase;letter-spacing:.04em">Periodicidade</span>${[['anual','Anual'],['trimestral','Trimestral'],['mensal','Mensal']].map(([k,r])=>`<button class="btn ${periodo===k?'bp':'bo'} bsm" onclick="_cronTarefaSetPeriod(${esc(JSON.stringify(nome))},'${k}')" title="${k==='anual'?'Uma coluna por ano, desde '+CRON_ANUAL_ANO_INICIAL:k==='trimestral'?'4 colunas por ano (1º ao 4º trimestre), a partir de 2026':'12 colunas por ano (jan a dez), a partir de 2026'}">${r}</button>`).join('')}</div>`:''}
+  ${_cronPeriodSeletorHtml(nome,periodo)}
   </div>
   <div style="flex:0 1 min(48%,780px);min-width:340px">${_cronOrientacaoHtml(nome,true)}</div>
   </div>`;
@@ -70547,7 +70554,18 @@ function _cronAtribDocumentacaoHtml(){
   if(_cronDocFiltroStatus==='ok') rows=rows.filter(r=>r.docs.pend.length===0);
   else if(_cronDocFiltroStatus==='pend') rows=rows.filter(r=>r.docs.pend.length>0);
   if(_cronDocFiltroResp) rows=rows.filter(r=>_cronRespCobrancaDe(r.eid)===_cronDocFiltroResp);
-  let h=`<div style="font-size:12.5px;color:var(--slate);margin-bottom:10px">Documentação de ${fmtMes(D.V)} — controle simples, sem listar documento por documento: está tudo recebido ou não, quem cobra e quando você cobrou.</div>`;
+  const periodoDoc=_cronTarefaPeriodGet(CRON_DOC_PERIOD_CHAVE), anoF=(S.fechAtual()||'').slice(0,4), fechA=S.fechAtual()||'';
+  // colunas por período (pedido do usuário 10/11/2026): mensal = 12 meses do ano do fechamento; trimestral = 4 trimestres; anual = 1 coluna por ano desde 2021. Cada coluna: todos os documentos do período recebidos?
+  const colsDoc=periodoDoc==='anual'
+    ? Array.from({length:Math.max(1,(+anoF||CRON_ANUAL_ANO_INICIAL)-CRON_ANUAL_ANO_INICIAL+1)},(_,i)=>{ const a=String(CRON_ANUAL_ANO_INICIAL+i); return {rot:a,meses:Array.from({length:12},(_,k)=>a+'-'+_cronP2(k+1))}; })
+    : periodoDoc==='trimestral'
+    ? [1,2,3,4].map(q=>({rot:q+'º tri/'+anoF.slice(2),meses:[0,1,2].map(k=>anoF+'-'+_cronP2((q-1)*3+k+1))}))
+    : Array.from({length:12},(_,k)=>({rot:_cronMesAA(anoF+'-'+_cronP2(k+1)),meses:[anoF+'-'+_cronP2(k+1)]}));
+  const _docPeriodo=(e,meses)=>{ const docs=S.chk(String(e.eid)).documentos||[]; const pend=[]; let considerou=false;
+    meses.forEach(m=>{ if(m>fechA||_cronMesForaPeriodo(e,m)) return; docs.forEach(d=>{ if(d.fimAPartir&&m>=d.fimAPartir) return; if(foraDoTrimestre(d,m,e.eid)) return; considerou=true; if(!_cronOk(_cronValItem(e,d,m))) pend.push((d.nome||'(sem nome)')+' ('+_cronMesAA(m)+')'); }); });
+    return {considerou,pend}; };
+  const _cur=m=>meses=>meses.includes(fechA);
+  let h=`<div style="font-size:12.5px;color:var(--slate);margin-bottom:10px">Documentação de ${fmtMes(D.V)} — controle simples, sem listar documento por documento: está tudo recebido ou não, quem cobra e quando você cobrou. As colunas à direita mostram, por ${periodoDoc==='anual'?'ano':periodoDoc==='trimestral'?'trimestre':'mês'}, se tudo foi recebido.</div>${_cronPeriodSeletorHtml(CRON_DOC_PERIOD_CHAVE,periodoDoc)}`;
   // Barra de filtros
   h+=`<div style="display:flex;gap:8px;margin-bottom:10px;flex-wrap:wrap;align-items:center">
     <input class="fi" style="flex:1;min-width:160px;max-width:260px" placeholder="🔎 Filtrar empresa…" value="${esc(_cronDocFiltroNome)}" oninput="_cronDocSetFiltro('nome',this.value)">
@@ -70572,8 +70590,8 @@ function _cronAtribDocumentacaoHtml(){
   }
   h+=`<div style="overflow-x:auto;max-height:65vh;overflow-y:auto;border:1px solid var(--border);border-radius:var(--r)"><table style="width:100%;border-collapse:collapse;font-size:12.5px;background:var(--white)"><thead style="position:sticky;top:0"><tr>
     <th style="${_cronTh()};text-align:center"><input type="checkbox" onchange="_cronDocToggleSelTodos(this.checked)" title="Selecionar/deselecionar todas"></th>
-    <th style="${_cronTh()}">ID</th><th style="${_cronTh()}">Empresa</th><th style="${_cronTh()}">Status</th><th style="${_cronTh()}">Responsável pela cobrança</th><th style="${_cronTh()}">Cobrado em</th></tr></thead><tbody>`;
-  if(!rows.length) h+=`<tr><td colspan="6" style="${_cronTd()};color:var(--slate)">Nenhuma empresa com documentação cadastrada.</td></tr>`;
+    <th style="${_cronTh()}">ID</th><th style="${_cronTh()}">Empresa</th><th style="${_cronTh()}">Status</th><th style="${_cronTh()}">Responsável pela cobrança</th><th style="${_cronTh()}">Cobrado em</th>${colsDoc.map(c=>`<th class="pmes" style="${_cronTh()};text-align:center${c.meses.includes(fechA)?';background:rgba(20,184,166,.5)':''}">${c.rot}</th>`).join('')}</tr></thead><tbody>`;
+  if(!rows.length) h+=`<tr><td colspan="${6+colsDoc.length}" style="${_cronTd()};color:var(--slate)">Nenhuma empresa com documentação cadastrada.</td></tr>`;
   rows.forEach(r=>{
     const tudo=r.docs.pend.length===0;
     const ultimaAuto=_cronUltimaCobranca(r.eid);
@@ -70585,7 +70603,9 @@ function _cronAtribDocumentacaoHtml(){
     h+=`<tr><td style="${_cronTd()};text-align:center"><input type="checkbox" ${_cronDocSelecionados.has(r.eid)?'checked':''} onchange="_cronDocToggleSel('${r.eid}',this.checked)"></td><td style="${_cronTd()};font-family:var(--mono)">${esc(r.eid)}</td><td style="${_cronTd()};font-weight:600">${esc(r.nome)}</td>
       <td style="${_cronTd()}"><span class="badge" style="background:${tudo?'var(--green-bg)':'var(--amber-bg)'};color:${tudo?'var(--green)':'var(--amber)'}">${tudo?'Tudo recebido':r.docs.pend.length+' pendente'+(r.docs.pend.length>1?'s':'')}</span></td>
       <td style="${_cronTd()}"><select class="si" onchange="_cronRespCobrancaSalvar('${r.eid}',this.value)" style="width:100%;min-width:120px"><option value="">— Nenhum —</option>${resps.map(x=>`<option value="${esc(x)}" ${_cronRespCobrancaDe(r.eid)===x?'selected':''}>${esc(x)}</option>`).join('')}</select></td>
-      <td style="${_cronTd()}">${cobrCol}</td></tr>`;
+      <td style="${_cronTd()}">${cobrCol}</td>${(()=>{ const emp=S.emps().find(x=>String(x.eid)===String(r.eid)); return colsDoc.map(c=>{ const cur=c.meses.includes(fechA); if(!emp) return `<td class="pmes${cur?' pcur':''}"></td>`; const x=_docPeriodo(emp,c.meses);
+        if(!x.considerou) return `<td class="pmes${cur?' pcur':''}" style="text-align:center;color:var(--slate)" title="Sem documento a receber neste período">—</td>`;
+        return x.pend.length?`<td class="pmes${cur?' pcur':''} ppend" style="text-align:center" title="Faltam:\n${esc(x.pend.slice(0,25).join('\n'))}"><span class="badge" style="background:var(--amber-bg);color:var(--amber)">${x.pend.length}</span></td>`:`<td class="pmes${cur?' pcur':''} pok" style="text-align:center" title="Tudo recebido"><span class="pcell-ok">✓</span></td>`; }).join(''); })()}</tr>`;
   });
   h+=`</tbody></table></div>`;
   return h;
