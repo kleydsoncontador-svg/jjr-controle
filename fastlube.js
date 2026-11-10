@@ -406,6 +406,8 @@
   async function agSaldo(conta, cols) {
     const r = await _supaClient.from('agencias_bancarias').select(cols).eq('id', conta).maybeSingle();
     const d = desde(); if (!d || !r.data) return r;
+    // soma no servidor (saldo_extrato_conta): tudo antes do mês de 'desde' (Rufato Bradesco: ~58 mil linhas antigas)
+    if (/^\d{4}-\d{2}-01$/.test(d)) { try { const rp = await _supaClient.rpc('saldo_extrato_conta', { p_eid: String(EID()), p_conta: Number(conta), p_mes: d.slice(0, 7) }); const x = rp && !rp.error && rp.data && rp.data[0]; if (x) return { data: Object.assign({}, r.data, { saldo_inicial: (cents(r.data.saldo_inicial || 0) + cents(x.ant)) / 100 }), error: null }; } catch (e) {} }
     const l = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,valor_entrada,valor_saida').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).lt('data_pagamento', d).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)'));
     const sal = cents(r.data.saldo_inicial || 0) + (l.data || []).reduce((a, x) => a + cents(x.valor_entrada) - cents(x.valor_saida), 0);
     return { data: Object.assign({}, r.data, { saldo_inicial: sal / 100 }), error: null };
