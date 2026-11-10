@@ -240,10 +240,12 @@
     for (const f of files) {
       const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true });
       const aoa = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, raw: true, defval: '' });
-      const h = (aoa[0] || []).map(x => norm(x));
+      // o relatório vem com quebras de nível (linha "SALDO" no topo, subtotais "CRÉDITO"/"DÉBITO" entre os blocos): o cabeçalho pode estar em qualquer linha do começo; só entram as linhas com data na coluna dtpgto
+      let hi = aoa.findIndex(row => { const t = row.map(x => norm(x)); return t.includes('DTPGTO') && t.includes('PLADEB') && t.includes('PLACRE') && t.includes('VLLIQ'); });
+      if (hi < 0) { toast('"' + f.name + '": não é o layout de Fluxo da Rufato (faltam dtpgto, pladeb, placre ou vlliq).', 'err'); return; }
+      const h = aoa[hi].map(x => norm(x));
       const ix = n => h.indexOf(n), cD = ix('DTPGTO'), cDeb = ix('PLADEB'), cCre = ix('PLACRE'), cV = ix('VLLIQ'), cH = ix('DESCR');
-      if (cD < 0 || cDeb < 0 || cCre < 0 || cV < 0) { toast('"' + f.name + '": não é o layout de Fluxo da Rufato (faltam dtpgto, pladeb, placre ou vlliq).', 'err'); return; }
-      for (let i = 1; i < aoa.length; i++) {
+      for (let i = hi + 1; i < aoa.length; i++) {
         const r = aoa[i], deb = String(r[cDeb] == null ? '' : r[cDeb]).trim(), cre = String(r[cCre] == null ? '' : r[cCre]).trim();
         if (norm(deb) === 'PLADEB' || (!deb && !cre)) continue;
         const dia = diaIso(r[cD]); if (!dia) continue;
