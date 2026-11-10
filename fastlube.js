@@ -6,7 +6,17 @@
    • Coluna Saldo (corrente) ao lado do Valor; "Conciliar saldo" mostra dia a dia onde o Registro difere do extrato; "Excluir filtradas" apaga em lote o que está filtrado.
    Depende de funções globais do index.html (_supaClient, S, toast, _lancctb*). */
 (function (root) {
-  const EID = '163', CONTAS = { '1': 'ITAU', '4': 'BANCO DO BRASIL' };
+  // Empresas no modelo "Registro Contábil pelo Fluxo". desde = início do modelo (antes disso nada é tocado). port = portador do Fluxo → conta bancária.
+  const CFG = {
+    '163': { nome: 'Fast Lube', nomes: { '1': 'Itaú', '4': 'Banco do Brasil' }, port: [[/ITAU/, 1], [/BANCO DO BRASIL|^BB\b/, 4]], semFluxo: [], desde: '', corrigeSentido: false },
+    '4': { nome: 'Rufato', nomes: { '23': 'Bradesco', '25': 'Itaú', '26': 'Banco do Brasil', '28': 'Mercado Pago ...4235' }, port: [[/BRADESCO/, 23], [/ITAU/, 25], [/BANCO DO BRASIL|^BB\b/, 26], [/MERCADO\s*PAGO|\bMP\b/, 28]], semFluxo: ['93543986564'], desde: '2026-10-01', corrigeSentido: true }
+  };
+  const EID = () => { const e = String(_lancctbEidAtual); return CFG[e] ? e : '163'; };
+  const cfg = () => CFG[EID()];
+  const NOME = () => cfg().nome;
+  const desde = () => cfg().desde || '';
+  const NOMES = new Proxy({}, { get: (t, k) => cfg().nomes[k], ownKeys: () => Object.keys(cfg().nomes), getOwnPropertyDescriptor: (t, k) => (k in cfg().nomes ? { enumerable: true, configurable: true, value: cfg().nomes[k] } : undefined), has: (t, k) => k in cfg().nomes });
+  const ctIds = () => Object.keys(cfg().nomes).map(Number);
   const E = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const r2 = v => Math.round(v * 100) / 100;
   const cents = v => Math.round(Number(v || 0) * 100);
@@ -16,7 +26,7 @@
   const contaAtual = () => String(_lancctbExtratoContaSel || '');
   const brData = d => String(d || '').split('-').reverse().join('/');
   root._flStatusExcluidos = () => ativo() ? '(reabsorvido,referencia)' : '(ignorado,reabsorvido,referencia)'; // Fast Lube: linha ignorada continua visível (apagada)
-  root._flContaRef = (eid, conta) => String(eid) === EID && CONTAS[String(conta)] !== undefined;
+  root._flContaRef = (eid, conta) => !!CFG[String(eid)] && CFG[String(eid)].nomes[String(conta)] !== undefined;
   const ativo = () => root._flContaRef(eidAtual(), contaAtual());
   const dormir = ms => new Promise(r => setTimeout(r, ms));
   // lê TODAS as linhas de uma consulta paginando pelo id (estável; o paginador geral estava cortando ~1.000 linhas)
@@ -35,9 +45,9 @@
 
   // ── portador do Fluxo → conta bancária ──
   function contaDoPortador(p) {
-    const n = norm(p);
-    if (n.indexOf('ITAU') >= 0) return 1;
-    if (n.indexOf('BANCO DO BRASIL') >= 0 || /^BB\b/.test(n)) return 4;
+    const n = norm(p), c = cfg();
+    if ((c.semFluxo || []).some(x => n.indexOf(x) >= 0)) return null;
+    for (const [re, id] of c.port) if (re.test(n)) return id;
     return null; // CARTEIRA e outros: não são banco → não vão pro Registro
   }
   // Histórico bancário das linhas vindas do Fluxo (pedido 07/11/2026): Razão social | Número X (Parcela N) | CNPJ/CPF n | Descrição da conta | Histórico | MATRIZ/FILIAL 003
@@ -55,26 +65,26 @@
   }
   // regras "não trazer do fluxo" (o usuário vai definir): [{campo:'descricao_conta_origem'|'descricao'|'cliente_fornecedor_nome'|'unidade'|'forma_pagamento', contem:'texto'}]
   function excluidoPorRegra(f) {
-    let regras = []; try { regras = S.g('fl_fluxo_regras_excluir_' + EID) || []; } catch (e) {}
+    let regras = []; try { regras = S.g('fl_fluxo_regras_excluir_' + EID()) || []; } catch (e) {}
     return regras.some(r => r && r.campo && r.contem && norm(f[r.campo]).indexOf(norm(r.contem)) >= 0);
   }
   // Tributos que o Fluxo traz mas NÃO entram no Registro da Fast Lube (vêm pelo extrato/Processar Tributos): são criados já IGNORADOS (ficam em 🚫 Ignorados, fora do saldo e do TXT)
   const CODIGOS_IGNORAR = ['F02-COFINS', 'A04-GPS', 'F01-PIS', 'F10-DARF IR FUNCIONARIOS', 'F06-IPI', 'F17-DARFS SERV'];
-  const ignoraAuto = f => { const c = norm(f && f.descricao_conta_origem); return !!c && CODIGOS_IGNORAR.some(k => c.indexOf(norm(k)) === 0); };
+  const ignoraAuto = f => { if (EID() !== '163') return false; const c = norm(f && f.descricao_conta_origem); return !!c && CODIGOS_IGNORAR.some(k => c.indexOf(norm(k)) === 0); };
   root._flIgnoraAuto = ignoraAuto;
   // Os vínculos Fluxo ↔ linha do Registro da Fast Lube são intencionais: entram na lista de associações MANUAIS (as rotinas que revalidam/soltam preservam essa lista)
   function marcarManuais(ids) {
     try {
-      const k = 'lancctb_fluxo_manual_' + EID, at = new Set((S.g(k) || []).map(Number)); let mudou = false;
+      const k = 'lancctb_fluxo_manual_' + EID(), at = new Set((S.g(k) || []).map(Number)); let mudou = false;
       ids.forEach(i => { if (!at.has(Number(i))) { at.add(Number(i)); mudou = true; } });
       if (mudou) S.s(k, [...at]);
     } catch (e) {}
   }
   function desmarcarManuais(ids) {
-    try { const k = 'lancctb_fluxo_manual_' + EID, rm = new Set(ids.map(Number)); S.s(k, (S.g(k) || []).filter(x => !rm.has(Number(x)))); } catch (e) {}
+    try { const k = 'lancctb_fluxo_manual_' + EID(), rm = new Set(ids.map(Number)); S.s(k, (S.g(k) || []).filter(x => !rm.has(Number(x)))); } catch (e) {}
   }
-  const getExcl = () => { try { return new Set((S.g('fl_fluxo_excluidos_' + EID) || []).map(String)); } catch (e) { return new Set(); } };
-  const setExcl = set => { try { S.s('fl_fluxo_excluidos_' + EID, [...set]); } catch (e) {} };
+  const getExcl = () => { try { return new Set((S.g('fl_fluxo_excluidos_' + EID()) || []).map(String)); } catch (e) { return new Set(); } };
+  const setExcl = set => { try { S.s('fl_fluxo_excluidos_' + EID(), [...set]); } catch (e) {} };
 
   // ── janelinha simples de resultado ──
   function janela(titulo, html, largura) {
@@ -93,6 +103,7 @@
     return '<button class="btn bp" onclick="_flSubirFluxo()" title="Sobe o Fluxo de Caixa do mês (Excel). O banco de cada linha vem da coluna Portador: ITAU → Itaú, BANCO DO BRASIL → Banco do Brasil.">⬆ Subir Fluxo de Caixa</button>'
       + '<button class="btn bo" style="color:#0f9d00;border-color:#14c200;font-weight:700;text-shadow:0 0 5px rgba(20,194,0,.55);box-shadow:0 0 8px rgba(20,194,0,.5)" onclick="_flTrazerExtrato(\'receb\')" title="Traz do extrato bancário desta conta (aba Extrato Bancário) todos os RECEBIMENTOS (entradas) do período para o Registro.">⬇ Trazer recebimentos do extrato</button>'
       + '<button class="btn bo" style="color:#ff2a2a;border-color:#ff2a2a;font-weight:700;text-shadow:0 0 6px #ff2a2a,0 0 12px rgba(255,42,42,.7);box-shadow:0 0 8px rgba(255,42,42,.45)" onclick="_flTrazerExtrato(\'pag\')" title="Traz do extrato os PAGAMENTOS (saídas) que o Fluxo não explica (aplicações, tarifas, impostos...), para o saldo diário bater. Nada do Fluxo é tirado.">⬇ Trazer pagamentos do extrato</button>'
+      + (cfg().corrigeSentido ? '<button class="btn bo" onclick="_flCorrigirSentido()" title="Acha no Fluxo linhas lançadas como entrada que o extrato mostra como saída (ou o contrário) e inverte o sentido. Só mexe em linha do Fluxo ainda não classificada e que não tem par no mesmo sentido; tudo fica em 💲 Valores alterados.">🔁 Corrigir entrada/saída</button>' : '')
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
@@ -106,18 +117,18 @@
   };
 
   // chips da regra: a Fast Lube ganha CNPJ/CPF e junta com " | " (outras empresas não mudam)
-  root._flHistChipsExtra = () => (String(_lancctbEidAtual) === EID ? [{ tok: '{FLUXO_CNPJ}', rot: 'CNPJ/CPF (Fluxo)' }] : []);
+  root._flHistChipsExtra = () => (String(_lancctbEidAtual) === EID() ? [{ tok: '{FLUXO_CNPJ}', rot: 'CNPJ/CPF (Fluxo)' }] : []);
   root._flHistJuntador = () => ' '; // Histórico Utilizado personalizado: só espaço entre os campos (sem a barra vertical |)
   // ── regra em PARTES (Fast Lube): o histórico do Registro vem separado por " | "; a regra guarda as partes escolhidas (separadas por " | ")
   //    e vale para todo lançamento cujo histórico tenha TODAS as partes, em qualquer posição.
   root._flGatilhoBate = function (g, t) {
     g = String(g || ''); t = String(t || '');
-    if (g.indexOf(' | ') >= 0 && String(_lancctbEidAtual) === EID) return g.split(' | ').map(x => x.trim().toLowerCase()).filter(Boolean).every(p => t.toLowerCase().indexOf(p) >= 0);
+    if (g.indexOf(' | ') >= 0 && String(_lancctbEidAtual) === EID()) return g.split(' | ').map(x => x.trim().toLowerCase()).filter(Boolean).every(p => t.toLowerCase().indexOf(p) >= 0);
     return t.indexOf(g) >= 0;
   };
   root._flRegraChips = function (hist) {
     const velho = document.getElementById('flGatilhoPartes'); if (velho) velho.remove();
-    if (String(_lancctbEidAtual) !== EID) return;
+    if (String(_lancctbEidAtual) !== EID()) return;
     const partes = String(hist || '').split(' | ').map(x => x.trim()).filter(Boolean);
     if (partes.length < 2) return;
     const campo = document.getElementById('lancctbRegraHistoricoGatilho'); if (!campo) return;
@@ -174,7 +185,7 @@
     root.__flDiasConc = null;
     if (!ativo() || !root.__flFiltroDias) return;
     const conta = contaAtual();
-    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+    const { data: ag } = await agSaldo(conta, 'saldo_inicial');
     const ref = await carregarRef(conta, { de: '', ate: '' }), reg = await carregarRegistro(conta, '', '');
     const mv = l => { const m = {}; l.forEach(x => { m[x.data_pagamento] = (m[x.data_pagamento] || 0) + cents(x.valor_entrada) - cents(x.valor_saida); }); return m; };
     const mr = mv(ref), mg = mv(reg); let sr = cents((ag && ag.saldo_inicial) || 0), sg = sr; const conc = [];
@@ -184,12 +195,12 @@
   root.__flFiltroOrigem = root.__flFiltroOrigem || '';
   root.__flFiltroDif = root.__flFiltroDif || '';
   root._flLimparFiltros = function () { root.__flFiltroOrigem = ''; root.__flFiltroDif = ''; };
-  const idsValorAlterado = () => { try { return [...new Set((S.g('fl_valores_alterados_163') || []).map(x => x.id).filter(Boolean))]; } catch (e) { return []; } };
+  const idsValorAlterado = () => { try { return [...new Set((S.g('fl_valores_alterados_' + EID()) || []).map(x => x.id).filter(Boolean))]; } catch (e) { return []; } };
   root._flAplicaFiltroDias = function (q) {
     if (ativo() && root.__flFiltroOrigem) q = q.eq('fonte', root.__flFiltroOrigem);
     if (ativo() && root.__flFiltroDif) {                                  // coluna DIF.: onde houve diferença/correção
       const f = root.__flFiltroDif, ids = idsValorAlterado();
-      const marc = Object.keys((S.g('fl_dif_marcas_163') || {})).map(Number).filter(Boolean);
+      const marc = Object.keys((S.g('fl_dif_marcas_' + EID()) || {})).map(Number).filter(Boolean);
       if (f === 'conc') q = marc.length ? q.or('fonte.eq.conciliacao,id.in.(' + marc.join(',') + ')') : q.eq('fonte', 'conciliacao');
       else if (f === 'ajuste') q = q.eq('fonte', 'ajuste_manual');
       else if (f === 'valor') q = ids.length ? q.in('id', ids) : q.eq('id', -1);
@@ -205,16 +216,16 @@
     await abrirLancctbFluxoImportModal();
     const chk = document.getElementById('lancctbFluxoImportSoMesAtual'); if (chk) chk.checked = false; // o mês é o do arquivo, não o do Fechamento Atual
   };
-  root._flReligarFluxo = async function () { const r = await converterFluxo(); const { data: lig } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos').select('id').eq('empresa_eid', EID).not('lancamento_extrato_id', 'is', null)); marcarManuais((lig || []).map(x => x.id)); return r; };
+  root._flReligarFluxo = async function () { const r = await converterFluxo(); const { data: lig } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos').select('id').eq('empresa_eid', EID()).not('lancamento_extrato_id', 'is', null)); marcarManuais((lig || []).map(x => x.id)); return r; };
   root._flAposImportarFluxo = async function () {
-    if (eidAtual() !== EID) return;
+    if (eidAtual() !== EID()) return;
     await converterFluxo();
     try { renderLancctbRegistroContabil(); } catch (e) {}
   };
   // ───────── CONSOLIDAR IRPJ / CSLL: o cliente manda "parcelas" do mesmo tributo no mesmo dia (mesmo código F03-IRPJ / F04-CSLL): vira UMA linha com a soma ─────────
   const COD_TRIB = /\bF\d{2}-(IRPJ|CSLL|CSSL)\b/i;
   async function consolidarTributos(simular) {
-    const regs = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_saida,historico_bancario,documento').eq('empresa_eid', EID).eq('fonte', 'fluxo').gt('valor_saida', 0).eq('status_conciliacao', 'pendente'))).data || [];
+    const regs = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_saida,historico_bancario,documento').eq('empresa_eid', EID()).eq('fonte', 'fluxo').gt('valor_saida', 0).eq('status_conciliacao', 'pendente'))).data || [];
     const grupos = {};
     regs.forEach(r => { const m = String(r.historico_bancario || '').match(COD_TRIB); if (!m) return; const k = r.conta_bancaria_id + '|' + r.data_pagamento + '|' + m[1].toUpperCase().replace('CSSL', 'CSLL'); (grupos[k] = grupos[k] || []).push(r); });
     const lista = Object.values(grupos).filter(g => g.length > 1).map(g => g.sort((a, b) => a.id - b.id));
@@ -235,7 +246,7 @@
       logC.push({ em: new Date().toISOString(), dia: keep.data_pagamento, mantida: keep.id, linhas: g.map(x => ({ id: x.id, v: Number(x.valor_saida), h: x.historico_bancario, doc: x.documento })) });
     }
     gravarLogValor(logV);
-    try { S.s('fl_consolidados_163', logC.concat(S.g('fl_consolidados_163') || []).slice(0, 500)); } catch (e) {}
+    try { S.s('fl_consolidados_' + EID(), logC.concat(S.g('fl_consolidados_' + EID()) || []).slice(0, 500)); } catch (e) {}
     return lista;
   }
   root._flConsolidarTributos = async function () {
@@ -249,10 +260,11 @@
   async function converterFluxo() {
     const { data: fx, error } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos')
       .select('id,empresa_eid,data,descricao,valor_saida,valor_entrada,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,port_nom,descricao_conta_origem,unidade,forma_pagamento')
-      .eq('empresa_eid', EID).is('lancamento_extrato_id', null));
-    if (error) { toast('Fast Lube: não consegui ler o Fluxo: ' + error.message, 'err'); return null; }
+      .eq('empresa_eid', EID()).is('lancamento_extrato_id', null));
+    if (error) { toast(NOME() + ': não consegui ler o Fluxo: ' + error.message, 'err'); return null; }
     const excl = getExcl(), itens = []; let semBanco = 0, porRegra = 0, jaExc = 0, semValor = 0;
     (fx || []).forEach(f => {
+      if (desde() && String(f.data) < desde()) { semValor++; return; } // antes do início do modelo novo: não mexe
       if (excl.has(String(f.id))) { jaExc++; return; }
       const c = contaDoPortador(f.port_nom); if (!c) { semBanco++; return; }
       if (excluidoPorRegra(f)) { porRegra++; return; }
@@ -262,29 +274,29 @@
     let criadas = 0;
     for (let i = 0; i < itens.length; i += 300) {
       const lote = itens.slice(i, i + 300);
-      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: histFluxo(f), documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo', status_conciliacao: ignoraAuto(f) ? 'ignorado' : 'pendente' }));
+      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID(), conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: histFluxo(f), documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo', status_conciliacao: ignoraAuto(f) ? 'ignorado' : 'pendente' }));
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows, { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
-      if (up.error) { toast('Fast Lube: erro ao criar linhas do Registro: ' + up.error.message, 'err'); return null; }
+      if (up.error) { toast(NOME() + ': erro ao criar linhas do Registro: ' + up.error.message, 'err'); return null; }
       const hs = rows.map(r => r.hash_dedup);
-      const sel = await _supaClient.from('lancamentos_extrato').select('id,hash_dedup').eq('empresa_eid', EID).in('hash_dedup', hs);
-      if (sel.error) { toast('Fast Lube: erro ao ligar o Fluxo ao Registro: ' + sel.error.message, 'err'); return null; }
+      const sel = await _supaClient.from('lancamentos_extrato').select('id,hash_dedup').eq('empresa_eid', EID()).in('hash_dedup', hs);
+      if (sel.error) { toast(NOME() + ': erro ao ligar o Fluxo ao Registro: ' + sel.error.message, 'err'); return null; }
       const idPorHash = new Map((sel.data || []).map(x => [x.hash_dedup, x.id]));
-      const lig = lote.filter(({ f }) => idPorHash.has('flx' + f.id)).map(({ f, c }) => ({ id: f.id, empresa_eid: EID, data: f.data, descricao: f.descricao || '(sem descrição)', lancamento_extrato_id: idPorHash.get('flx' + f.id), status_associado: 'associado', conta_bancaria_id: c }));
+      const lig = lote.filter(({ f }) => idPorHash.has('flx' + f.id)).map(({ f, c }) => ({ id: f.id, empresa_eid: EID(), data: f.data, descricao: f.descricao || '(sem descrição)', lancamento_extrato_id: idPorHash.get('flx' + f.id), status_associado: 'associado', conta_bancaria_id: c }));
       for (let k = 0; k < lig.length; k += 200) {
         const u = await _supaClient.from('fluxo_caixa_lancamentos').upsert(lig.slice(k, k + 200), { onConflict: 'id' });
-        if (u.error) { toast('Fast Lube: erro ao marcar o Fluxo como associado: ' + u.error.message, 'err'); return null; }
+        if (u.error) { toast(NOME() + ': erro ao marcar o Fluxo como associado: ' + u.error.message, 'err'); return null; }
       }
       criadas += lig.length; marcarManuais(lig.map(x => x.id));
     }
     // (soma automática de IRPJ/CSLL desligada a pedido do usuário em 09/11/2026: o pagamento vem do extrato)
-    toast('Fast Lube: ' + criadas + ' linha(s) do Fluxo levadas ao Registro' + (semBanco ? ' · ' + semBanco + ' sem banco (ex.: CARTEIRA) ficaram de fora' : '') + (porRegra ? ' · ' + porRegra + ' barradas pela regra' : '') + (jaExc ? ' · ' + jaExc + ' já excluídas por você' : '') + '.', 'ok');
+    toast(NOME() + ': ' + criadas + ' linha(s) do Fluxo levadas ao Registro' + (semBanco ? ' · ' + semBanco + ' sem banco (ex.: CARTEIRA) ficaram de fora' : '') + (porRegra ? ' · ' + porRegra + ' barradas pela regra' : '') + (jaExc ? ' · ' + jaExc + ' já excluídas por você' : '') + '.', 'ok');
     return { criadas, semBanco, porRegra };
   }
 
   // reescreve o histórico bancário das linhas do Registro que vieram do Fluxo (as já convertidas antes da regra de concatenação)
   root._flRefazerHistoricos = async function () {
-    const { data: fx } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,descricao_conta_origem,unidade,port_nom,lancamento_extrato_id').eq('empresa_eid', EID).not('lancamento_extrato_id', 'is', null));
-    const rows = []; (fx || []).forEach(f => { const c = contaDoPortador(f.port_nom); if (!c) return; rows.push({ empresa_eid: EID, conta_bancaria_id: c, data_pagamento: f.data, hash_dedup: 'flx' + f.id, origem_importacao: 'excel', historico_bancario: histFluxo(f) }); });
+    const { data: fx } = await todosPorId(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,data,descricao,cliente_fornecedor_nome,cnpj_cpf,documento_numero,numero,parcela,descricao_conta_origem,unidade,port_nom,lancamento_extrato_id').eq('empresa_eid', EID()).not('lancamento_extrato_id', 'is', null));
+    const rows = []; (fx || []).forEach(f => { const c = contaDoPortador(f.port_nom); if (!c) return; rows.push({ empresa_eid: EID(), conta_bancaria_id: c, data_pagamento: f.data, hash_dedup: 'flx' + f.id, origem_importacao: 'excel', historico_bancario: histFluxo(f) }); });
     for (let i = 0; i < rows.length; i += 300) { const u = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup' }); if (u.error) { toast('Erro ao refazer históricos: ' + u.error.message, 'err'); return 0; } }
     return rows.length;
   };
@@ -297,15 +309,23 @@
   }
   async function carregarRef(conta, p) {
     const r = await todosPorId(() => {
-      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,documento,informacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'referencia');
+      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,documento,informacao').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'referencia');
       if (p.de) q = q.gte('data_pagamento', p.de); if (p.ate) q = q.lte('data_pagamento', p.ate);
       return q;
     });
     return (r.data || []).sort(porDataId);
   }
+  async function agSaldo(conta, cols) {
+    const r = await _supaClient.from('agencias_bancarias').select(cols).eq('id', conta).maybeSingle();
+    const d = desde(); if (!d || !r.data) return r;
+    const l = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,valor_entrada,valor_saida').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).lt('data_pagamento', d).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)'));
+    const sal = cents(r.data.saldo_inicial || 0) + (l.data || []).reduce((a, x) => a + cents(x.valor_entrada) - cents(x.valor_saida), 0);
+    return { data: Object.assign({}, r.data, { saldo_inicial: sal / 100 }), error: null };
+  }
   async function carregarRegistro(conta, de, ate, extra) {
+    { const d0 = desde(); if (d0 && (!de || de < d0)) de = d0; }
     const r = await todosPorId(() => {
-      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,fonte,status_conciliacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
+      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,fonte,status_conciliacao').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
       if (de) q = q.gte('data_pagamento', de); if (ate) q = q.lte('data_pagamento', ate);
       if (extra) q = extra(q);
       return q;
@@ -352,7 +372,7 @@
     const y = +dia.slice(0, 4), m = +dia.slice(5, 7), d = +dia.slice(8, 10), pad = n => String(n).padStart(2, '0');
     const mAnt = m === 1 ? (y - 1) + '-12' : y + '-' + pad(m - 1), mCur = y + '-' + pad(m);
     const tent = d <= 10 ? [['salario', mAnt], ['salario', mCur]] : d <= 14 ? [['salario', mAnt], ['adiantamento', mCur]] : [['adiantamento', mCur], ['adiantamento', mAnt], ['salario', mAnt]];
-    const rows = (await todosPorId(() => _supaClient.from('folha_liquidos').select('id,tipo,competencia,nome,cpf,valor').eq('empresa_eid', EID).in('competencia', [mAnt, mCur]))).data || [];
+    const rows = (await todosPorId(() => _supaClient.from('folha_liquidos').select('id,tipo,competencia,nome,cpf,valor').eq('empresa_eid', EID()).in('competencia', [mAnt, mCur]))).data || [];
     const usados = new Set();
     return partes.map(pt => {
       const nm = normN(pt.nome), v = Math.round(Number(pt.valor) * 100);
@@ -368,16 +388,16 @@
   // Contas da folha (as mesmas de sempre): salário 187 · adiantamento de salário 724 · férias 567 · rescisão/homologação 647 · diferença = "Diferença de folha" das Contas padrão. Quem tem conta já sai classificado.
   const CONTA_FOLHA = { salario: '187', adiantamento: '724', ferias: '567', rescisao: '647' };
   async function aplicarContasFolha(dia, itens) {
-    const padrao = (() => { try { return S.g('lancctb_contas_padrao_' + EID) || {}; } catch (e) { return {}; } })();
+    const padrao = (() => { try { return S.g('lancctb_contas_padrao_' + EID()) || {}; } catch (e) { return {}; } })();
     const nums = Object.values(CONTA_FOLHA).concat(padrao.dif_folha ? [String(padrao.dif_folha)] : []);
-    const pc = (await _supaClient.from('plano_contas').select('id,numero_conta').eq('empresa_eid', EID).in('numero_conta', nums)).data || [];
+    const pc = (await _supaClient.from('plano_contas').select('id,numero_conta').eq('empresa_eid', EID()).in('numero_conta', nums)).data || [];
     const idDe = n => { const c = pc.find(x => String(x.numero_conta) === String(n)); return c ? c.id : null; };
     const comp = (+dia.slice(8, 10) > 10) ? dia.slice(5, 7) + '/' + dia.slice(0, 4) : (dia.slice(5, 7) === '01' ? '12/' + (+dia.slice(0, 4) - 1) : String(+dia.slice(5, 7) - 1).padStart(2, '0') + '/' + dia.slice(0, 4)); // dia até 10 = salário do mês anterior; depois = adiantamento do mês
-    // PENSÃO ALIMENTÍCIA: quem está na lista (S 'fl_folha_pensao_163') não é diferença de folha: vai na conta 653 (Pensão alimentícia a pagar) com o histórico "Pagamento ref. pensão alimentícia - NOME"
-    let pensao = []; try { pensao = S.g('fl_folha_pensao_163'); } catch (e) {}
-    if (!Array.isArray(pensao) || !pensao.length) { pensao = ['TAINA RAIANE DE BRITO OLIVEIRA', 'REGILAINE ROCHA DA SILVA']; try { S.s('fl_folha_pensao_163', pensao); } catch (e) {} }
+    // PENSÃO ALIMENTÍCIA: quem está na lista (S 'fl_folha_pensao_' + EID()) não é diferença de folha: vai na conta 653 (Pensão alimentícia a pagar) com o histórico "Pagamento ref. pensão alimentícia - NOME"
+    let pensao = []; try { pensao = S.g('fl_folha_pensao_' + EID()); } catch (e) {}
+    if (!Array.isArray(pensao) || !pensao.length) { pensao = EID() !== '163' ? [] : ['TAINA RAIANE DE BRITO OLIVEIRA', 'REGILAINE ROCHA DA SILVA']; try { S.s('fl_folha_pensao_' + EID(), pensao); } catch (e) {} }
     const nN = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/\s+/g, ' ').trim(), listaP = pensao.map(nN);
-    const pensaoId = (await _supaClient.from('plano_contas').select('id').eq('empresa_eid', EID).eq('numero_conta', '653').maybeSingle()).data;
+    const pensaoId = (await _supaClient.from('plano_contas').select('id').eq('empresa_eid', EID()).eq('numero_conta', '653').maybeSingle()).data;
     return itens.map(it => {
       if (!it.tipo_folha && pensaoId && listaP.some(n => n && nN(it.nome).indexOf(n.split(' ').slice(0, 2).join(' ')) === 0)) { const h = 'Pagamento ref. pensão alimentícia - ' + (it.nome || ''); return Object.assign({}, it, { historico: h, denominacao: h, resumo: h, gatilho: h, tipo_folha: 'pensao', conta_contabil_id: pensaoId.id }); }
       if (it.tipo_folha) return Object.assign({}, it, { conta_contabil_id: idDe(CONTA_FOLHA[it.tipo_folha]) || it.conta_contabil_id || null });
@@ -389,18 +409,19 @@
   // ───────── FOLHA PELO FLUXO: linhas do Fluxo de UMA pessoa (rescisão, férias, adiantamento, salário) casam com o RELATÓRIO DA FOLHA por tipo + valor exato + nome → já saem classificadas ─────────
   // Ex.: "A03-RESCISAO | RESCISAO MURILO" R$ 1.583,45 = rescisão de MURILO AUGUSTO SAMPAIO (06/2026) → "Pagamento ref. rescisão 06-2026 - MURILO AUGUSTO SAMPAIO", D 647 / C banco. Só classifica quando o par é ÚNICO.
   async function classificarFolhaDoFluxo(conta, p, diasSel) {
+    if (EID() !== '163') return 0; // regras de código do Fluxo (A01-A03...) são da Fast Lube
     const normN = t => String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, '').toUpperCase().replace(/[^A-Z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
-    const regs = (await todosPorId(() => { let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,composicao_tributo').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').gt('valor_saida', 0); if (p.de) q = q.gte('data_pagamento', p.de); if (p.ate) q = q.lte('data_pagamento', p.ate); return q; })).data || [];
+    const regs = (await todosPorId(() => { let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,composicao_tributo').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').gt('valor_saida', 0); if (p.de) q = q.gte('data_pagamento', p.de); if (p.ate) q = q.lte('data_pagamento', p.ate); return q; })).data || [];
     const alvo = regs.filter(r => (!diasSel || diasSel.has(r.data_pagamento)) && !(r.composicao_tributo || []).length && /A0[1-3]-/i.test(r.historico_bancario || '') && !/FOLHA\s*\|/i.test(r.historico_bancario || '') && !/FGTS|INSS|IRRF|SINDIC|PENS/i.test(r.historico_bancario || ''));
     if (!alvo.length) return 0;
     const ent = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id', conta).single(); const ag = ent.data;
-    const pc = (await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid', EID).in('numero_conta', ['187', '567', '724', '647'])).data || [];
+    const pc = (await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid', EID()).in('numero_conta', ['187', '567', '724', '647'])).data || [];
     const contaDe = n => pc.find(x => String(x.numero_conta) === n);
     const MAPA = { salario: ['187', 'salário'], adiantamento: ['724', 'adiantamento'], ferias: ['567', 'férias'], rescisao: ['647', 'rescisão'] };
     if (!ag || !ag.conta_contabil_id) return 0;
     const meses = [...new Set(alvo.map(r => r.data_pagamento.slice(0, 7)))], comps = new Set();
     meses.forEach(m => { const y = +m.slice(0, 4), mm = +m.slice(5, 7); comps.add(m); comps.add(mm === 1 ? (y - 1) + '-12' : y + '-' + String(mm - 1).padStart(2, '0')); });
-    const rows = (await todosPorId(() => _supaClient.from('folha_liquidos').select('id,tipo,competencia,nome,cpf,valor').eq('empresa_eid', EID).in('competencia', [...comps]))).data || [];
+    const rows = (await todosPorId(() => _supaClient.from('folha_liquidos').select('id,tipo,competencia,nome,cpf,valor').eq('empresa_eid', EID()).in('competencia', [...comps]))).data || [];
     const usadas = new Set(); let feitas = 0;
     for (const r of alvo) {
       const h = normN(r.historico_bancario), tipo = /RESCISAO/.test(h) ? 'rescisao' : /FERIAS/.test(h) ? 'ferias' : /ADIANT/.test(h) ? 'adiantamento' : 'salario', v = Math.round(Number(r.valor_saida) * 100);
@@ -408,7 +429,7 @@
       if (cand.length !== 1) continue;                                  // ambíguo ou sem par: não inventa
       const f = cand[0], [num, rot] = MAPA[tipo], cc = contaDe(num); if (!cc) continue;
       const hist = 'Pagamento ref. ' + rot + ' ' + f.competencia.slice(5) + '-' + f.competencia.slice(0, 4) + ' - ' + f.nome, cpf = String(f.cpf || '').replace(/\D/g, '') || null;
-      const base = { empresa_eid: EID, data: r.data_pagamento, valor: Number(r.valor_saida), historico: hist, lancamento_extrato_id: r.id, origem_match: 'regra', cliente_fornecedor_nome: f.nome, cnpj_cpf: cpf };
+      const base = { empresa_eid: EID(), data: r.data_pagamento, valor: Number(r.valor_saida), historico: hist, lancamento_extrato_id: r.id, origem_match: 'regra', cliente_fornecedor_nome: f.nome, cnpj_cpf: cpf };
       const rpc = await _supaClient.rpc('criar_lancamento_partida_dobrada', { linhas: [Object.assign({}, base, { classificacao: ag.plano_contas.classificacao, conta_contabil_id: ag.conta_contabil_id, tipo: 'C' }), Object.assign({}, base, { classificacao: cc.classificacao, conta_contabil_id: cc.id, tipo: 'D' })] });
       if (rpc.error) { console.warn('Folha pelo Fluxo:', rpc.error.message); continue; }
       await _supaClient.from('lancamentos_extrato').update({ status_conciliacao: 'conciliado' }).eq('id', r.id).eq('status_conciliacao', 'pendente');
@@ -437,7 +458,7 @@
   async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
-    const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte,hash_dedup,valor_saida,valor_entrada').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
+    const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte,hash_dedup,valor_saida,valor_entrada').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
     const noPer = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate) && (!diasSel || diasSel.has(x.data_pagamento));
     const apagar = (ant.data || []).filter(x => noPer(x) && x.status_conciliacao === 'pendente').map(x => x.id);
     for (let i = 0; !simular && i < apagar.length; i += 200) {
@@ -455,7 +476,7 @@
     const rejeitadas = new Set((ant.data || []).filter(x => x.status_conciliacao === 'ignorado').map(x => x.hash_dedup));
     // 2) Fluxo (Registro) por dia, e saídas do extrato por dia
     const fxr = await todosPorId(() => {
-      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,status_conciliacao').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
+      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,status_conciliacao').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)');
       const de0 = p.de ? sh(p.de, -3) : '', ate0 = p.ate ? sh(p.ate, 3) : '';
       if (de0) q = q.gte('data_pagamento', de0); if (ate0) q = q.lte('data_pagamento', ate0);
       return q;
@@ -466,7 +487,7 @@
     // cada linha do Fluxo casa com UMA linha da aba (a de valor mais próximo, até R$ 1,00) e cada linha da aba é usada uma só vez. Sem par claro, o valor não é mexido.
     const ajustesIcms = [], icmsOk = new Set();
     if (typeof _lancctbIcmsLer === 'function') {
-      const cacheIcms = {}, lerIcms = m => { if (!(m in cacheIcms)) { try { cacheIcms[m] = _lancctbIcmsLer(EID, m) || []; } catch (e) { cacheIcms[m] = []; } } return cacheIcms[m]; };
+      const cacheIcms = {}, lerIcms = m => { if (!(m in cacheIcms)) { try { cacheIcms[m] = _lancctbIcmsLer(EID(), m) || []; } catch (e) { cacheIcms[m] = []; } } return cacheIcms[m]; };
       const porNf = {}, itens = [];
       Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).forEach(d => fluxoDia[d].forEach(x => {
         if (x.cls || !/PARTILHAD/i.test(x.h)) return; const m = x.h.match(/N[úu]mero\s+(\d+)/); if (!m) return;
@@ -489,7 +510,7 @@
     // O pagador que já teve esse ajuste fica na memória (fl_tol_pagadores_163) e passa a valer mesmo sem a palavra do imposto no nome.
     const TRIB = /IPTU|PREFEITURA|ICMS|IRPJ|CSLL|\bPIS\b|COFINS|FGTS|\bGPS\b|DARF|GNRE|\bINSS\b|\bISS\b|IMPOSTO|TRIBUT|\bDAS\b|\bGP\d/i;
     const chavePag = h => String(h || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim();
-    let tolMem = {}; try { tolMem = S.g('fl_tol_pagadores_163') || {}; } catch (e) {}
+    let tolMem = {}; try { tolMem = S.g('fl_tol_pagadores_' + EID()) || {}; } catch (e) {}
     const ajustesCent = [];
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       let melhor = null;
@@ -576,13 +597,13 @@
     {
       const outros = {};
       if (p.de) {
-        const ant = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)').lt('data_pagamento', sh(p.de, -3)))).data || [];
+        const ant = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_saida', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)').lt('data_pagamento', sh(p.de, -3)))).data || [];
         ant.forEach(f => { (outros[f.data_pagamento] = outros[f.data_pagamento] || []).push({ id: f.id, c: cents(f.valor_saida), nome: String(f.historico_bancario || '').split(' | ')[0].slice(0, 60) }); });
         Object.keys(fluxoDia).filter(d => d < p.de).forEach(d => { const L = livres(d); if (L.length) outros[d] = (outros[d] || []).concat(L); });
       }
       Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).forEach(d => { const L = livres(d); if (L.length) outros[d] = L; });
       const cand = Object.keys(outros).filter(d => !extDia[d] && !diasFechados.has(d)).sort(), comExt = new Set();
-      for (let k = 0; k < cand.length; k += 100) { const r = await _supaClient.from('lancamentos_extrato').select('data_pagamento').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'referencia').gt('valor_saida', 0).in('data_pagamento', cand.slice(k, k + 100)); (r.data || []).forEach(x => comExt.add(x.data_pagamento)); }
+      for (let k = 0; k < cand.length; k += 100) { const r = await _supaClient.from('lancamentos_extrato').select('data_pagamento').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'referencia').gt('valor_saida', 0).in('data_pagamento', cand.slice(k, k + 100)); (r.data || []).forEach(x => comExt.add(x.data_pagamento)); }
       cand.forEach(d => {
         const R = outros[d], Rs = R.reduce((a, x) => a + x.c, 0); if (!Rs) return;
         if (comExt.has(d)) { rel.excessos.push({ dia: d, dif: -Rs, ls: 0, rs: Rs, fluxo: R.length }); rel.detalhe.push({ dia: d, total: 0, cobertas: 0, add: [], conc: null, excesso: R.map(x => ({ v: x.c, n: x.nome })) }); return; }
@@ -594,7 +615,7 @@
       });
     }
     if (!simular) {
-      try { const dset = new Set(dias), antM = S.g('fl_dif_marcas_163') || {}, novoM = {}; Object.keys(antM).forEach(k => { if (!dset.has(antM[k])) novoM[k] = antM[k]; }); Object.assign(novoM, rel.marcasDif || {}); S.s('fl_dif_marcas_163', novoM); } catch (e) {}
+      try { const dset = new Set(dias), antM = S.g('fl_dif_marcas_' + EID()) || {}, novoM = {}; Object.keys(antM).forEach(k => { if (!dset.has(antM[k])) novoM[k] = antM[k]; }); Object.assign(novoM, rel.marcasDif || {}); S.s('fl_dif_marcas_' + EID(), novoM); } catch (e) {}
     }
     rel.composicoes = composicoes;
     if (!simular && composicoes.length) {
@@ -604,7 +625,7 @@
           const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,historico_bancario,composicao_tributo,status_conciliacao').eq('id', cp.id).maybeSingle();
           if (!x || x.status_conciliacao !== 'pendente' || (x.composicao_tributo || []).length) continue;
           // amarra cada Sispag ao COMPROVANTE do mesmo dia e valor (ainda não usado): traz quem foi pago (nome/CPF) para o Processar FOPAG identificar salário/diferença/adiantamento
-          const cps = ((await _supaClient.from('comprovantes_bancarios').select('id,valor_pago,cliente_fornecedor_nome,cnpj_cpf,status_conciliacao,lancamento_extrato_id').eq('empresa_eid', EID).eq('data_pagamento', cp.dia)).data) || [];
+          const cps = ((await _supaClient.from('comprovantes_bancarios').select('id,valor_pago,cliente_fornecedor_nome,cnpj_cpf,status_conciliacao,lancamento_extrato_id').eq('empresa_eid', EID()).eq('data_pagamento', cp.dia)).data) || [];
           const livresC = cps.filter(c => c.status_conciliacao === 'pendente' && !c.lancamento_extrato_id), usadosC = new Set();
           const base = cp.partes.map(pt => { const c = livresC.find(k => !usadosC.has(k.id) && Math.round(Number(k.valor_pago) * 100) === pt.c); if (c) usadosC.add(c.id); return { valor: pt.c / 100, nome: c ? c.cliente_fornecedor_nome : null, cpf: c ? c.cnpj_cpf : null, comprovante_id: c ? c.id : null, h: pt.h }; });
           const hs = await histPartesFolha(cp.dia, base);
@@ -629,16 +650,16 @@
         const r = await _supaClient.from('lancamentos_extrato').update({ valor_saida: a.para / 100 }).eq('id', a.id).eq('fonte', 'fluxo').in('status_conciliacao', ['pendente']);
         if (!r.error) { ok++; log.push({ id: a.id, em: new Date().toISOString(), por: quemFez(), dia: a.dia, nome: a.nome, de: a.de / 100, para: a.para / 100, via: 'tributo: ajuste de centavos pelo extrato' }); tolMem[a.chave] = (tolMem[a.chave] || 0) + 1; }
       }
-      try { S.s('fl_tol_pagadores_163', tolMem); } catch (e) {}
+      try { S.s('fl_tol_pagadores_' + EID(), tolMem); } catch (e) {}
       gravarLogValor(log); rel.ajustesAplicados = ok;
     }
     return rel;
   }
-  const LOGVALOR = 'fl_valores_alterados_163';
-  const gravarLogValor = es => { if (!es.length) return; try { S.s(LOGVALOR, es.concat(S.g(LOGVALOR) || []).slice(0, 3000)); } catch (e) {} };
+  const LOGVALOR = () => 'fl_valores_alterados_' + EID();
+  const gravarLogValor = es => { if (!es.length) return; try { S.s(LOGVALOR(), es.concat(S.g(LOGVALOR()) || []).slice(0, 3000)); } catch (e) {} };
   // dias cujo saldo de fechamento (Registro × extrato) já bate E que já receberam linhas do extrato (conciliados: não se reprocessa)
   async function todosDiasConciliados(conta) {
-    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+    const { data: ag } = await agSaldo(conta, 'saldo_inicial');
     const ref = await carregarRef(conta, { de: '', ate: '' }), reg = await carregarRegistro(conta, '', '');
     const mv = l => { const m = {}; l.forEach(x => { m[x.data_pagamento] = (m[x.data_pagamento] || 0) + cents(x.valor_entrada) - cents(x.valor_saida); }); return m; };
     const mr = mv(ref), mg = mv(reg), proc = new Set(reg.filter(l => ['extrato_receb', 'extrato_compl', 'conciliacao'].includes(l.fonte)).map(l => l.data_pagamento));
@@ -713,6 +734,43 @@
     const rel = await conciliarPagamentos(conta, p, ref, novas, true);
     return { rel, novas: novas.map(x => ({ fonte: x.fonte, v: x.r.valor_saida, h: String(x.r.historico_bancario || '').slice(0, 110) })) };
   };
+  // ───────── Rufato: o Fluxo vem com entrada lançada como saída (e vice-versa). O extrato manda: inverte o sentido da linha do Fluxo SÓ quando
+  // (a) ela não tem par no mesmo sentido (mesmo dia, mesmo valor) no extrato e (b) tem par no sentido oposto que também não tem par no Fluxo. Nunca mexe em linha classificada.
+  async function corrigirSentido(conta, ref, silencioso) {
+    const dias = [...new Set(ref.map(r => r.data_pagamento))]; if (!dias.length) return 0;
+    const fx = [];
+    for (let i = 0; i < dias.length; i += 100) {
+      const r = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').in('data_pagamento', dias.slice(i, i + 100)));
+      fx.push(...(r.data || []));
+    }
+    const flips = [];
+    dias.forEach(d => {
+      const R = ref.filter(x => x.data_pagamento === d), F = fx.filter(x => x.data_pagamento === d);
+      const refS = R.filter(x => Number(x.valor_saida) > 0).map(x => cents(x.valor_saida)), refE = R.filter(x => Number(x.valor_entrada) > 0).map(x => cents(x.valor_entrada));
+      const tira = (arr, v) => { const k = arr.indexOf(v); if (k >= 0) { arr.splice(k, 1); return true; } return false; };
+      const fS = F.filter(x => Number(x.valor_saida) > 0 && !(Number(x.valor_entrada) > 0)), fE = F.filter(x => Number(x.valor_entrada) > 0 && !(Number(x.valor_saida) > 0));
+      const sobS = fS.filter(x => !tira(refS, cents(x.valor_saida))), sobE = fE.filter(x => !tira(refE, cents(x.valor_entrada)));
+      sobS.forEach(x => { if (tira(refE, cents(x.valor_saida))) flips.push({ x, para: 'entrada' }); });
+      sobE.forEach(x => { if (tira(refS, cents(x.valor_entrada))) flips.push({ x, para: 'saida' }); });
+    });
+    if (!flips.length) { if (!silencioso) toast('Nenhuma linha do Fluxo com entrada/saída trocada neste período.', 'info'); return 0; }
+    const logV = [];
+    for (const { x, para } of flips) {
+      const v = Number(para === 'entrada' ? x.valor_saida : x.valor_entrada);
+      const u = await _supaClient.from('lancamentos_extrato').update(para === 'entrada' ? { valor_entrada: v, valor_saida: 0 } : { valor_saida: v, valor_entrada: 0 }).eq('id', x.id).eq('status_conciliacao', 'pendente');
+      if (u.error) { toast('Erro ao corrigir o sentido: ' + u.error.message, 'err'); break; }
+      logV.push({ id: x.id, em: new Date().toISOString(), por: quemFez(), dia: x.data_pagamento, nome: String(x.historico_bancario || '').split(' | ')[0].slice(0, 60), de: para === 'entrada' ? -v : v, para: para === 'entrada' ? v : -v, via: 'sentido corrigido pelo extrato: o Fluxo tinha ' + (para === 'entrada' ? 'SAÍDA' : 'ENTRADA') + ', o extrato mostra ' + (para === 'entrada' ? 'ENTRADA' : 'SAÍDA') });
+    }
+    gravarLogValor(logV);
+    toast(logV.length + ' linha(s) do Fluxo com entrada/saída trocada foram corrigidas pelo extrato (veja 💲 Valores alterados).', 'ok');
+    return logV.length;
+  }
+  root._flCorrigirSentido = async function () {
+    if (!ativo()) return;
+    const conta = contaAtual(), p = periodo(), ref = await carregarRef(conta, p);
+    if (!ref.length) { toast('Sem extrato bancário (aba Extrato Bancário) nesta conta/período para comparar.', 'err'); return; }
+    await corrigirSentido(conta, ref, false); renderLancctbRegistroContabil();
+  };
   root._flTrazerExtrato = async function (modo) {
     const comPagamentos = modo === 'pag', comRecebimentos = modo === 'receb';
     if (!ativo()) return;
@@ -725,6 +783,7 @@
     if (bloq.length) { janela('🔒 Dia(s) já conciliado(s)', '<div style="font-size:13px">O saldo do Registro destes dias já bate com o extrato bancário, então não reprocesso:</div><div style="margin:8px 0;font-weight:700">' + bloq.slice(0, 40).map(brData).join(' · ') + '</div>', 640); return; }
     const ref = (await carregarRef(conta, p)).filter(r => diasSel.has(r.data_pagamento));
     if (!ref.length) { toast('Não há extrato bancário (aba Extrato Bancário) desta conta nos dias escolhidos. Suba o extrato lá primeiro.', 'err'); return; }
+    if (cfg().corrigeSentido) { try { await corrigirSentido(conta, ref, true); } catch (e) { console.warn('Corrigir sentido:', e); } }
     const novas = []; let nEnt = 0, nSai = 0, explicadas = 0, explicadasOutroDia = 0;
     if (comRecebimentos) ref.forEach(r => { if (Number(r.valor_entrada) > 0 && !(Number(r.valor_saida) > 0)) { novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; } });
     let relatorio = null;
@@ -735,7 +794,7 @@
       try { const nf = await classificarFolhaDoFluxo(conta, p, diasSel); if (nf) toast('Folha: ' + nf + ' pagamento(s) de rescisão/férias/adiantamento/salário classificados pelo relatório da folha.', 'ok'); } catch (e) { console.warn('Folha pelo Fluxo:', e); }
     }
     if (!novas.length) { registrarRel(comPagamentos, conta, p, 0, relatorio, 0); toast('Nada a trazer: o Registro já cobre este período. Veja o relatório em 📑 Relatórios.', 'info'); renderLancctbRegistroContabil(); return; }
-    const rows = novas.map(({ r, fonte, pref }) => ({ empresa_eid: EID, conta_bancaria_id: Number(conta), data_pagamento: r.data_pagamento, valor_saida: r.valor_saida || 0, valor_entrada: r.valor_entrada || 0, historico_bancario: r.historico_bancario || null, documento: r.documento || null, informacao: r.informacao || null, origem_importacao: 'excel', hash_dedup: pref + r.id, fonte }));
+    const rows = novas.map(({ r, fonte, pref }) => ({ empresa_eid: EID(), conta_bancaria_id: Number(conta), data_pagamento: r.data_pagamento, valor_saida: r.valor_saida || 0, valor_entrada: r.valor_entrada || 0, historico_bancario: r.historico_bancario || null, documento: r.documento || null, informacao: r.informacao || null, origem_importacao: 'excel', hash_dedup: pref + r.id, fonte }));
     for (let i = 0; i < rows.length; i += 300) {
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows.slice(i, i + 300), { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
       if (up.error) { toast('Erro ao trazer do extrato: ' + up.error.message, 'err'); return; }
@@ -745,14 +804,14 @@
     renderLancctbRegistroContabil();
   };
   // ───────── relatórios guardados ─────────
-  const RELKEY = 'fl_relatorios_' + EID;
-  const lerRel = () => { try { return S.g(RELKEY) || []; } catch (e) { return []; } };
+  const RELKEY = () => 'fl_relatorios_' + EID();
+  const lerRel = () => { try { return S.g(RELKEY()) || []; } catch (e) { return []; } };
   const nomeBanco = c => { const ag = (_lancctbRegistroAgenciasCache || []).find(a => String(a.id) === String(c)); return ag ? (_lancctbNomeBancoExibicao(ag.banco_nome) + (ag.conta_corrente ? ' Cc ' + ag.conta_corrente : '')) : 'conta ' + c; };
   function registrarRel(pag, conta, p, trouxe, r, valorTotal) {
     try {
       const l = lerRel();
       l.unshift({ id: Date.now(), em: new Date().toISOString(), tipo: pag ? 'Pagamentos' : 'Recebimentos', conta, banco: nomeBanco(conta), de: p.de, ate: p.ate, trouxe, valor: valorTotal || 0, rel: r ? { dias: r.dias, explicadas: r.explicadas, outroDia: r.outroDia, linhasAdicionadas: r.linhasAdicionadas, fechados: r.fechados, detalhe: r.detalhe } : null });
-      S.s(RELKEY, l.slice(0, 120));
+      S.s(RELKEY(), l.slice(0, 120));
     } catch (e) { console.warn('Relatório não guardado:', e); }
   }
   function htmlRel(x) {
@@ -785,12 +844,12 @@
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Cada vez que você traz recebimentos ou pagamentos do extrato, o resultado fica guardado aqui (banco, período, o que foi trazido e os avisos).</div>'
       + (lista.length ? lista.map(x => '<div style="border:1px solid var(--border);border-radius:8px;padding:10px 12px;margin-bottom:10px;max-width:1100px"><div style="display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px"><div><b>' + E(x.tipo) + ' — ' + E(x.banco) + ' — ' + brData(x.de) + (x.ate && x.ate !== x.de ? ' a ' + brData(x.ate) : '') + '</b></div><div style="font-size:11.5px;color:var(--slate)">gerado em ' + dt(x.em) + ' <button class="icon-btn" title="Apagar este relatório" onclick="_flApagarRel(' + x.id + ')">🗑</button></div></div>' + htmlRel(x) + '</div>').join('') : '<div style="color:var(--slate);padding:20px">Nenhum relatório ainda.</div>');
   };
-  root._flApagarRel = function (id) { if (!confirm('Apagar este relatório?')) return; try { S.s(RELKEY, lerRel().filter(x => x.id !== id)); } catch (e) {} root._flAbrirRelatorios(); };
+  root._flApagarRel = function (id) { if (!confirm('Apagar este relatório?')) return; try { S.s(RELKEY(), lerRel().filter(x => x.id !== id)); } catch (e) {} root._flAbrirRelatorios(); };
 
   // ───────── datas alteradas: registro das mudanças + detecção pela data de origem ─────────
-  const LOGDATA = 'fl_datas_alteradas_' + EID;
-  const lerLogData = () => { try { return S.g(LOGDATA) || []; } catch (e) { return []; } };
-  const gravarLogData = es => { if (!es.length) return; try { S.s(LOGDATA, es.concat(lerLogData()).slice(0, 3000)); } catch (e) {} };
+  const LOGDATA = () => 'fl_datas_alteradas_' + EID();
+  const lerLogData = () => { try { return S.g(LOGDATA()) || []; } catch (e) { return []; } };
+  const gravarLogData = es => { if (!es.length) return; try { S.s(LOGDATA(), es.concat(lerLogData()).slice(0, 3000)); } catch (e) {} };
   const quemFez = () => { try { return (currentUser && (currentUser.nome || currentUser.name || currentUser.email)) || ''; } catch (e) { return ''; } };
   const entLog = (x, para, via) => ({ id: x.id, em: new Date().toISOString(), por: quemFez(), conta: x.conta_bancaria_id, fonte: x.fonte || '', v: Number(x.valor_entrada) > 0 ? Number(x.valor_entrada) : -Number(x.valor_saida || 0), h: String(x.historico_bancario || '').slice(0, 200), de: x.data_pagamento, para, via });
   root.__flDat = root.__flDat || { rows: [], f: { banco: '', via: '', texto: '' } };
@@ -800,7 +859,7 @@
     root.__flDat.rows = await carregarDatasAlteradas(); desenharDatas();
   };
   async function carregarDatasAlteradas() {
-    const regs = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,hash_dedup,status_conciliacao,updated_at').eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).in('fonte', ['fluxo', 'extrato_receb', 'extrato_compl', 'ajuste_manual']))).data || [];
+    const regs = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,hash_dedup,status_conciliacao,updated_at').eq('empresa_eid', EID()).in('conta_bancaria_id', ctIds()).in('fonte', ['fluxo', 'extrato_receb', 'extrato_compl', 'ajuste_manual']))).data || [];
     const idsFx = [], idsRef = [];
     regs.forEach(r => { const h = r.hash_dedup || ''; if (h.indexOf('flx') === 0) idsFx.push(+h.slice(3)); else if (h.indexOf('flr') === 0 || h.indexOf('flc') === 0) idsRef.push(+h.slice(3)); });
     const dataFx = new Map(), dataRef = new Map();
@@ -828,7 +887,7 @@
     const est = 'padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)';
     el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">📆 Lançamentos com data alterada — Fast Lube</div></div>'
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:1000px">Mostra as linhas do Registro cuja data é diferente da data de origem (a do Fluxo de Caixa ou a do extrato). Quando a alteração foi feita pelo site, aparece quem fez e como. Dá para <b>voltar à data original</b> (só linhas ainda não classificadas).</div>'
-      + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><select style="' + est + '" onchange="__flDat.f.banco=this.value;_flDatasRedesenhar()"><option value="">Todos os bancos</option><option value="1"' + (f.banco === '1' ? ' selected' : '') + '>Itaú</option><option value="4"' + (f.banco === '4' ? ' selected' : '') + '>Banco do Brasil</option></select>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><select style="' + est + '" onchange="__flDat.f.banco=this.value;_flDatasRedesenhar()"><option value="">Todos os bancos</option>' + Object.keys(NOMES).map(k => '<option value="' + k + '"' + (f.banco === k ? ' selected' : '') + '>' + NOMES[k] + '</option>').join('') + '</select>'
       + '<select style="' + est + '" onchange="__flDat.f.via=this.value;_flDatasRedesenhar()"><option value="">Todas</option><option value="reg"' + (f.via === 'reg' ? ' selected' : '') + '>Feitas pelo site (com quem/quando)</option><option value="det"' + (f.via === 'det' ? ' selected' : '') + '>Detectadas pela data de origem</option></select>'
       + '<input style="' + est + ';width:240px" placeholder="🔎 texto do histórico" value="' + E(f.texto) + '" oninput="__flDat.f.texto=this.value;_flDatasRedesenhar(true)">'
       + '<button class="btn bo bsm" onclick="_flReverterDatas()" ' + (lista.some(x => x.status === 'pendente' || x.status === 'ignorado') ? '' : 'disabled') + ' title="Volta TODAS as linhas filtradas (ainda não classificadas) para a data original">↩ Voltar à data original (' + lista.filter(x => x.status === 'pendente' || x.status === 'ignorado').length + ')</button></div>'
@@ -854,13 +913,13 @@
   };
 
   // ───────── página "Ignorados": resgatar linhas ignoradas (mesmo banco, outro banco, outra data) ─────────
-  const BANCOS = { '1': 'Itaú', '4': 'Banco do Brasil' };
+  const BANCOS = NOMES;
   const ORIGENS = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
   root.__flIgn = root.__flIgn || { rows: [], f: { banco: '', origem: '', texto: '', de: '', ate: '', valor: '' }, sel: new Set() };
   root._flAbrirIgnorados = async function () {
     const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
     el.innerHTML = '<div style="padding:20px;color:var(--slate)">Carregando as linhas ignoradas…</div>';
-    const r = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte').eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).eq('status_conciliacao', 'ignorado'));
+    const r = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte').eq('empresa_eid', EID()).in('conta_bancaria_id', ctIds()).eq('status_conciliacao', 'ignorado'));
     root.__flIgn.rows = (r.data || []).sort(porDataId); root.__flIgn.sel = new Set(); desenharIgnorados();
   };
   function ignFiltradas() {
@@ -881,7 +940,7 @@
       + '<input style="width:220px;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)" placeholder="🔎 texto do histórico" value="' + E(f.texto) + '" oninput="__flIgn.f.texto=this.value;_flIgnRedesenhar(true)"><input style="width:110px;padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)" placeholder="valor" value="' + E(f.valor) + '" oninput="__flIgn.f.valor=this.value;_flIgnRedesenhar(true)">'
       + '<span style="font-size:11.5px;color:var(--slate)">de</span><input type="date" ' + sel() + ' value="' + E(f.de) + '" onchange="__flIgn.f.de=this.value;_flIgnRedesenhar()"><span style="font-size:11.5px;color:var(--slate)">até</span><input type="date" ' + sel() + ' value="' + E(f.ate) + '" onchange="__flIgn.f.ate=this.value;_flIgnRedesenhar()"></div>'
       + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0;padding:8px 10px;border:1px solid var(--border);border-radius:8px;max-width:980px"><b style="font-size:12.5px">Resgatar selecionadas (' + g.sel.size + '):</b>'
-      + '<select id="flIgnBanco" ' + sel() + '><option value="">no mesmo banco</option><option value="1">para o Itaú</option><option value="4">para o Banco do Brasil</option></select>'
+      + '<select id="flIgnBanco" ' + sel() + '><option value="">no mesmo banco</option>' + Object.keys(NOMES).map(k => '<option value="' + k + '">para o ' + NOMES[k] + '</option>').join('') + '</select>'
       + '<span style="font-size:11.5px;color:var(--slate)">na data</span><input id="flIgnData" type="date" ' + sel() + ' title="Deixe em branco para manter a data da linha"><span style="font-size:11px;color:var(--slate)">(em branco = mantém a data)</span>'
       + '<button class="btn bp bsm" onclick="_flResgatar()" ' + (g.sel.size ? '' : 'disabled') + '>↩ Resgatar</button></div>'
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:4px">' + lista.length + ' linha(s) ignorada(s)' + (lista.length > mostra.length ? ' — mostrando as primeiras ' + mostra.length + ' (refine o filtro)' : '') + '</div>'
@@ -924,10 +983,10 @@
     for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,historico_bancario').in('id', ids.slice(i, i + 200)); (r.data || []).forEach(x => { m.set(x.id, x.conta_bancaria_id); m.set('h' + x.id, x.historico_bancario); }); }
     return m;
   }
-  const NOME_BANCO = { '1': 'Itaú', '4': 'Banco do Brasil' };
+  const NOME_BANCO = NOMES;
   root._flAbrirValores = async function () {
     const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
-    const lista = (S.g('fl_valores_alterados_163') || []), c = 'padding:5px 8px';
+    const lista = (S.g('fl_valores_alterados_' + EID()) || []), c = 'padding:5px 8px';
     el.innerHTML = '<div style="padding:20px;color:var(--slate)">Carregando os valores alterados…</div>';
     const bm = await bancosDosValores(lista), bco = x => NOME_BANCO[String(x.conta || bm.get(x.id))] || '', hbc = x => String(bm.get('h' + x.id) || x.nome || '');
     el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">💲 Valores alterados — Fast Lube</div><button class="btn bo bsm" onclick="_flExcelRelatorio(\'valores\')">📊 Gerar Excel</button></div>'
@@ -939,12 +998,12 @@
   root._flExcelRelatorio = async function (qual) {
     if (typeof XLSX === 'undefined') { toast('Biblioteca de Excel não carregada.', 'err'); return; }
     toast('Montando o Excel…', 'info');
-    const B = { '1': 'Itaú', '4': 'Banco do Brasil' }, ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
+    const B = NOMES, ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
     const dBr = d => d ? brData(d) : '';
     const wb = XLSX.utils.book_new(), add = (nome, cab, linhas, larg) => { const ws = XLSX.utils.aoa_to_sheet([cab].concat(linhas.length ? linhas : [['(nada a informar)']])); ws['!cols'] = (larg || cab.map(() => 18)).map(w => ({ wch: w })); XLSX.utils.book_append_sheet(wb, ws, nome); };
     const sel = 'id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao';
     if (qual === 'todos' || qual === 'ajustes') {
-      const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).in('fonte', ['ajuste_manual', 'conciliacao']).neq('status_conciliacao', 'ignorado'))).data || [];
+      const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID()).in('conta_bancaria_id', ctIds()).in('fonte', ['ajuste_manual', 'conciliacao']).neq('status_conciliacao', 'ignorado'))).data || [];
       add('Ajustes e conciliações', ['Banco', 'Data', 'Tipo', 'Entrada', 'Saída', 'Histórico'], r.sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 16, 14, 14, 110]);
     }
     if (qual === 'todos' || qual === 'datas') {
@@ -952,11 +1011,11 @@
       add('Datas alteradas', ['Banco', 'Data original', 'Data nova', 'Valor', 'Lançamento', 'Quando', 'Quem', 'Como'], d.map(x => [B[String(x.conta)] || x.conta, dBr(x.de), dBr(x.para), x.v, String(x.h || ''), dtBr(x.em), x.por || '', x.via || '']), [16, 14, 12, 14, 80, 18, 18, 30]);
     }
     if (qual === 'todos' || qual === 'valores') {
-      const v = S.g('fl_valores_alterados_163') || [], bm = await bancosDosValores(v);
+      const v = S.g('fl_valores_alterados_' + EID()) || [], bm = await bancosDosValores(v);
       add('Valores alterados', ['Banco', 'Dia', 'Histórico bancário', 'Valor no Fluxo', 'Valor correto', 'Diferença', 'Tipo', 'Quando', 'Quem', 'Como'], v.map(x => [NOME_BANCO[String(x.conta || bm.get(x.id))] || '', dBr(x.dia), String(bm.get('h' + x.id) || x.nome || ''), x.de, x.para, Math.round((x.para - x.de) * 100) / 100, tipoValor(x), dtBr(x.em), x.por || '', x.via || '']), [16, 12, 120, 16, 16, 12, 14, 18, 18, 50]);
     }
     if (qual === 'todos' || qual === 'ignorados') {
-      const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID).in('conta_bancaria_id', [1, 4]).eq('status_conciliacao', 'ignorado'))).data || [];
+      const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID()).in('conta_bancaria_id', ctIds()).eq('status_conciliacao', 'ignorado'))).data || [];
       add('Ignorados', ['Banco', 'Data', 'Origem', 'Entrada', 'Saída', 'Histórico'], r.sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 22, 14, 14, 110]);
     }
     if (qual === 'todos') {
@@ -968,7 +1027,7 @@
       reg.filter(x => x.fonte === 'fluxo').forEach(x => { ac(x.data_pagamento, 'ge', cents(x.valor_entrada)); ac(x.data_pagamento, 'gs', cents(x.valor_saida)); });
       add('Fluxo x extrato por dia', ['Banco', 'Dia', 'Entradas extrato', 'Entradas Fluxo', 'Diferença entradas', 'Saídas extrato', 'Saídas Fluxo', 'Diferença saídas'], Object.keys(dias).sort().map(d => { const x = dias[d]; return [nomeBanco(conta), dBr(d), x.re / 100, x.ge / 100, (x.re - x.ge) / 100, x.rs / 100, x.gs / 100, (x.rs - x.gs) / 100]; }), [16, 12, 18, 18, 18, 18, 18, 18]);
     }
-    XLSX.writeFile(wb, 'Fast Lube - ' + (qual === 'todos' ? 'ajustes para o cliente' : qual) + ' - ' + new Date().toISOString().slice(0, 10) + '.xlsx');
+    XLSX.writeFile(wb, NOME() + ' - ' + (qual === 'todos' ? 'ajustes para o cliente' : qual) + ' - ' + new Date().toISOString().slice(0, 10) + '.xlsx');
     toast('Excel gerado ✓', 'ok');
   };
 
@@ -987,7 +1046,7 @@
   const ESTI = 'width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink);font:inherit';
   const HIST_AJUSTE = 'Ajuste incluído para acerto do saldo diário';
   async function difDia(conta, dia) {
-    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+    const { data: ag } = await agSaldo(conta, 'saldo_inicial');
     const ref = await carregarRef(conta, { de: '', ate: dia }), reg = await carregarRegistro(conta, '', dia);
     const liq = l => l.reduce((a, x) => a + cents(x.valor_entrada) - cents(x.valor_saida), 0);
     return liq(ref) - liq(reg); // extrato − Registro ao fim do dia (centavos)
@@ -1008,7 +1067,7 @@
         const d = el.querySelector('#flAjData').value, t = el.querySelector('#flAjTipo').value, v = num(el.querySelector('#flAjValor').value), h = el.querySelector('#flAjHist').value.trim() || HIST_AJUSTE;
         if (!d) { toast('Escolha a data.', 'err'); return false; }
         if (!(v > 0)) { toast('Informe o valor.', 'err'); return false; }
-        const r = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid: EID, conta_bancaria_id: Number(conta), data_pagamento: d, valor_saida: t === 'saida' ? v : 0, valor_entrada: t === 'entrada' ? v : 0, historico_bancario: h, origem_importacao: 'manual', hash_dedup: 'flm' + Date.now() + Math.random().toString(36).slice(2, 7), fonte: 'ajuste_manual', status_conciliacao: 'pendente' });
+        const r = await _supaClient.from('lancamentos_extrato').insert({ empresa_eid: EID(), conta_bancaria_id: Number(conta), data_pagamento: d, valor_saida: t === 'saida' ? v : 0, valor_entrada: t === 'entrada' ? v : 0, historico_bancario: h, origem_importacao: 'manual', hash_dedup: 'flm' + Date.now() + Math.random().toString(36).slice(2, 7), fonte: 'ajuste_manual', status_conciliacao: 'pendente' });
         if (r.error) { toast('Erro ao incluir o ajuste: ' + r.error.message, 'err'); return false; }
         toast('Ajuste incluído ✓', 'ok'); renderLancctbRegistroContabil();
       });
@@ -1042,7 +1101,7 @@
         const r = await _supaClient.from('lancamentos_extrato').update(ent ? { valor_entrada: v } : { valor_saida: v }).eq('id', id).in('status_conciliacao', ['pendente']);
         if (r.error) { toast('Erro ao salvar: ' + r.error.message, 'err'); return false; }
         gravarLogValor([{ id, em: new Date().toISOString(), por: quemFez(), dia: x.data_pagamento, nome: String(x.historico_bancario || '').split(' | ')[0].slice(0, 60), de: atual, para: v, via: aprender ? 'edição manual (✏️ do valor)' : 'edição manual (✏️ do valor) — pontual, sem aprender' }]);
-        try { const m = S.g('fl_tol_pagadores_163') || {}, k = String(x.historico_bancario || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim(); if (aprender && k && Math.abs(v - atual) <= 1) { m[k] = (m[k] || 0) + 1; S.s('fl_tol_pagadores_163', m); } } catch (e) {}
+        try { const m = S.g('fl_tol_pagadores_' + EID()) || {}, k = String(x.historico_bancario || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim(); if (aprender && k && Math.abs(v - atual) <= 1) { m[k] = (m[k] || 0) + 1; S.s('fl_tol_pagadores_' + EID(), m); } } catch (e) {}
         toast('Valor corrigido ✓ (original R$ ' + fmt(atual) + ' guardado no registro)', 'ok'); renderLancctbRegistroContabil();
       }, true);
   };
@@ -1070,7 +1129,7 @@
   root._flConciliarSaldo = async function () {
     if (!ativo()) return;
     const conta = contaAtual();
-    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial,banco_nome').eq('id', conta).maybeSingle();
+    const { data: ag } = await agSaldo(conta, 'saldo_inicial,banco_nome');
     const ini = Number((ag && ag.saldo_inicial) || 0), p = periodo();
     const ref = await carregarRef(conta, { de: '', ate: p.ate });
     const reg = await carregarRegistro(conta, '', p.ate);
@@ -1099,9 +1158,9 @@
     const tbl = document.querySelector('#lancctbRegistroScrollWrap table'); if (!tbl || tbl.dataset.flSaldo === '1') return;
     tbl.dataset.flSaldo = '1';
     const conta = contaAtual();
-    const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+    const { data: ag } = await agSaldo(conta, 'saldo_inicial');
     const reg = await carregarRegistro(conta, '', '');
-    const igR = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
+    const igR = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,fonte').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'ignorado'));
     const ign = new Set((igR.data || []).map(x => String(x.id)));
     const fontePorId = new Map(); reg.forEach(l => fontePorId.set(String(l.id), l.fonte)); (igR.data || []).forEach(l => fontePorId.set(String(l.id), l.fonte));
     const ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
@@ -1158,8 +1217,8 @@
         const op = [['', 'Todas'], ['dif', 'Com diferença'], ['conc', 'Conciliação'], ['ajuste', 'Ajuste manual'], ['valor', 'Valor corrigido']];
         th.innerHTML = '<select class="si" data-filtro="registro-dif" style="width:100%;font-size:11px" onchange="__flFiltroDif=this.value;_lancctbRegistroPagina=0;renderLancctbRegistroContabil()">' + op.map(o => '<option value="' + o[0] + '"' + (root.__flFiltroDif === o[0] ? ' selected' : '') + '>' + o[1] + '</option>').join('') + '</select>';
         heads[1].insertBefore(th, heads[1].children[8]); }
-      const marcasDif = S.g('fl_dif_marcas_163') || {};
-      const vAlt = new Map(); (S.g('fl_valores_alterados_163') || []).forEach(x => { if (x.id && !vAlt.has(String(x.id))) vAlt.set(String(x.id), x.para - x.de); });
+      const marcasDif = S.g('fl_dif_marcas_' + EID()) || {};
+      const vAlt = new Map(); (S.g('fl_valores_alterados_' + EID()) || []).forEach(x => { if (x.id && !vAlt.has(String(x.id))) vAlt.set(String(x.id), x.para - x.de); });
       tbl.querySelectorAll('tbody tr').forEach(tr => {
         if (!tr.children[7]) return; const rid = tr.dataset.rid, f = rid ? fontePorId.get(String(rid)) : null, va = rid ? vAlt.get(String(rid)) : undefined;
         const td = document.createElement('td'); td.style.cssText = 'padding:7px 8px;font-size:11.5px;white-space:nowrap;font-weight:600';
@@ -1183,7 +1242,7 @@
     if (!(diaCache.k === k && Date.now() - diaCache.ts < 6000)) {
       diaBusy = true;
       try {
-        const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id', conta).maybeSingle();
+        const { data: ag } = await agSaldo(conta, 'saldo_inicial');
         const ref = await carregarRef(conta, { de: '', ate: dia }), reg = await carregarRegistro(conta, '', dia);
         const liq = l => l.reduce((a, x) => a + cents(x.valor_entrada) - cents(x.valor_saida), 0), ini = cents((ag && ag.saldo_inicial) || 0);
         const sR = ini + liq(ref), sG = ini + liq(reg), dif = sG - sR, cor = dif === 0 ? 'var(--teal)' : '#dc2626';
@@ -1197,8 +1256,8 @@
   let obs = null, tmr = null;
   (function () { const st = document.createElement('style'); st.textContent = 'body[data-fl="1"] #lancctbRegraBuscaFluxoWrap{display:none !important}'; document.head.appendChild(st); })();
   root._flPosRender = function () {
-    try { document.body.dataset.fl = (eidAtual() === EID) ? '1' : ''; } catch (e) {}
-    try { if (eidAtual() === EID) { const b = document.querySelector('.action-bar-sticky [data-etapa="fluxo"]'); if (b) b.style.display = 'none'; } } catch (e) {}
+    try { document.body.dataset.fl = (eidAtual() === EID()) ? '1' : ''; } catch (e) {}
+    try { if (eidAtual() === EID()) { const b = document.querySelector('.action-bar-sticky [data-etapa="fluxo"]'); if (b) b.style.display = 'none'; } } catch (e) {}
     if (!ativo()) { if (obs) obs.disconnect(); return; }
     const alvo = document.getElementById('lancctbConteudoAba'); if (!alvo) return;
     // a barra de saldo (saldo inicial / entradas / saídas / saldo final) às vezes era apagada por uma atualização da tela que chegava depois: se ficar vazia, preenche de novo
@@ -1216,7 +1275,7 @@
       const rows = []; for (let i = 0; i < ids.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario').in('id', ids.slice(i, i + 200)); (r.data || []).forEach(x => rows.push(x)); }
       const em = new Date().toISOString(), por = quemFez();
       const novos = rows.map(x => ({ id: x.id, em, por, acao, conta: x.conta_bancaria_id, dia: x.data_pagamento, v: Number(x.valor_entrada) > 0 ? Number(x.valor_entrada) : -Number(x.valor_saida || 0), h: String(x.historico_bancario || '').slice(0, 90) }));
-      S.s('fl_ignorados_log_163', novos.concat(S.g('fl_ignorados_log_163') || []).slice(0, 3000));
+      S.s('fl_ignorados_log_' + EID(), novos.concat(S.g('fl_ignorados_log_' + EID()) || []).slice(0, 3000));
     } catch (e) {}
   }
   async function marcarIgnorado(ids, ignorar) {
@@ -1275,7 +1334,7 @@
     toast('Excluindo ' + n + ' linha(s)…', 'info');
     const lotes = (fn) => _lancctbEmLotesDb(ids, 200, fn);
     // linhas do Fluxo ligadas: guarda que foram excluídas (não voltam) e desliga
-    const lig = await _lancctbFetchPorIds(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id').eq('empresa_eid', EID), 'lancamento_extrato_id', ids, () => false);
+    const lig = await _lancctbFetchPorIds(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id').eq('empresa_eid', EID()), 'lancamento_extrato_id', ids, () => false);
     const fluxoIds = (lig.data || []).map(f => f.id);
     await lotes(l => _supaClient.from('notas_fiscais_parcelas').update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', l));
     await lotes(l => _supaClient.from('comprovantes_bancarios').update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).in('lancamento_extrato_id', l));
