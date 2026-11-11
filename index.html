@@ -26753,6 +26753,17 @@ async function _lancctbProcessarFopag(){
     };
     const comprovSociosCache={};
     const indivSispagCache={};
+    // Carga ÚNICA (antes: 2 consultas ao banco POR lançamento — Fast Lube, 3.266 lançamentos = minutos). Comprovantes pendentes e lançamentos do extrato do período são lidos uma vez e filtrados na memória.
+    const compUsadosRun=new Set(); const _fcu=ids=>{ [].concat(ids).forEach(i=>compUsadosRun.add(i)); };
+    const _addDias=(d,n)=>{ const t=new Date(d+'T12:00:00'); t.setDate(t.getDate()+n); return t.toISOString().slice(0,10); };
+    let _compPendTodos=null, _extPorDia=null;
+    const _faixaPend=()=>{ const ds=pendencias.map(x=>x.data_pagamento).filter(Boolean).sort(); return ds.length?[ds[0],ds[ds.length-1]]:null; };
+    const _carregarCompPend=async()=>{ if(_compPendTodos) return _compPendTodos; const f=_faixaPend(); _compPendTodos=[]; if(!f) return _compPendTodos;
+      const { data: cs } = await _lancctbFetchTudoParalelo(()=>_supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id').eq('empresa_eid',eid).eq('status_conciliacao','pendente').gte('data_pagamento',_addDias(f[0],-6)).lte('data_pagamento',f[1]));
+      _compPendTodos=cs||[]; return _compPendTodos; };
+    const _carregarExtPorDia=async()=>{ if(_extPorDia) return _extPorDia; const f=_faixaPend(); _extPorDia=new Map(); if(!f) return _extPorDia;
+      const { data: ex } = await _lancctbFetchTudoParalelo(()=>_supaClient.from('lancamentos_extrato').select('id,valor_saida,historico_bancario,data_pagamento').eq('empresa_eid',eid).gt('valor_saida',0).gte('data_pagamento',_addDias(f[0],-3)).lte('data_pagamento',_addDias(f[1],3)));
+      (ex||[]).forEach(x=>{ const a=_extPorDia.get(x.data_pagamento); if(a) a.push(x); else _extPorDia.set(x.data_pagamento,[x]); }); return _extPorDia; };
     const relatoriosExtraCache={};
     // Recibos de Férias (pasta "Relatórios FOPAG para Contábil"): casa a saída
     // com o TOTAL LÍQUIDO EXATO do recibo da MESMA empresa; se houver mais de
@@ -26785,7 +26796,7 @@ async function _lancctbProcessarFopag(){
       if(eA){ console.error('Erro FOPAG (folha aberta):',eA); return false; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
       const idsCp=[...new Set(partes.map(x=>x.comprovante_id).filter(Boolean))];
-      if(idsCp.length) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',idsCp);
+      if(idsCp.length) _fcu(idsCp); if(idsCp.length) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',idsCp);
       return true;
     };
     // Pagamentos abertos antes (ou abertos agora): se uma Regra já dá a conta de todas as partes, grava sozinho.
@@ -26855,7 +26866,7 @@ async function _lancctbProcessarFopag(){
             const { error: eL } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas:linhasL });
             if(eL){ console.error('Erro FOPAG (lote):',eL); continue; }
             await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-            if(cp){ compsUsados.add(cp.id); await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',cp.id); }
+            if(cp){ compsUsados.add(cp.id); _fcu(cp.id); await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',cp.id); }
             idsResolvidos.add(l.id); resolvidos++;
             if(nomeado) consEx0.add(chaveConsumoFolha(ro,p));
           }
@@ -26973,10 +26984,8 @@ async function _lancctbProcessarFopag(){
         let mix=null;
         if(socios&&socios.length){
           if(!comprovSociosCache[l.id]){
-            const d0=new Date(l.data_pagamento+'T00:00:00'); d0.setDate(d0.getDate()-6);
-            const ini=d0.toISOString().slice(0,10);
-            const { data: cs } = await _supaClient.from('comprovantes_bancarios').select('id,data_pagamento,cliente_fornecedor_nome,cnpj_cpf,valor_pago,conta_bancaria_id')
-              .eq('empresa_eid',eid).eq('status_conciliacao','pendente').gte('data_pagamento',ini).lte('data_pagamento',l.data_pagamento);
+            const ini=_addDias(l.data_pagamento,-6);
+            const cs=(await _carregarCompPend()).filter(c=>c.data_pagamento>=ini&&c.data_pagamento<=l.data_pagamento&&!compUsadosRun.has(c.id));
             comprovSociosCache[l.id]=(cs||[]).filter(c=>(!c.conta_bancaria_id||String(c.conta_bancaria_id)===String(contaId))&&_lancctbAcharSocioPorHistorico(socios,(c.cliente_fornecedor_nome||'')+' '+(c.cnpj_cpf||''))).slice(0,16);
           }
           const cands=comprovSociosCache[l.id];
@@ -27017,7 +27026,7 @@ async function _lancctbProcessarFopag(){
             const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
             if(error){ console.error('Erro FOPAG (sócios / folha + sócios):',error); semAchado++; continue; }
             await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-            await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',mix.itens.map(x=>x.id));
+            _fcu(mix.itens.map(x=>x.id)); await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',mix.itens.map(x=>x.id));
             resolvidos++; continue;
           }
         }
@@ -27061,7 +27070,7 @@ async function _lancctbProcessarFopag(){
               const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
               if(error){ console.error('Erro FOPAG (sócios + salário do mês anterior):',error); semAchado++; continue; }
               await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-              await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',_cands.map(x=>x.id));
+              _fcu(_cands.map(x=>x.id)); await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',_cands.map(x=>x.id));
               resolvidos++; continue;
             }
           }
@@ -27100,9 +27109,7 @@ async function _lancctbProcessarFopag(){
         if(pessoasFolha.length){
           // Quem já foi pago INDIVIDUALMENTE (PIX/TED com o nome no extrato, de qualquer conta da empresa, ±3 dias, mesmo valor) não está no Sispag — sai da lista de candidatos.
           if(!indivSispagCache[l.id]){
-            const dI=new Date(l.data_pagamento+'T00:00:00'); dI.setDate(dI.getDate()-3); const dF=new Date(l.data_pagamento+'T00:00:00'); dF.setDate(dF.getDate()+3);
-            const { data: ind } = await _supaClient.from('lancamentos_extrato').select('id,valor_saida,historico_bancario').eq('empresa_eid',eid).gt('valor_saida',0)
-              .gte('data_pagamento',dI.toISOString().slice(0,10)).lte('data_pagamento',dF.toISOString().slice(0,10)).neq('id',l.id);
+            const _mapaExt=await _carregarExtPorDia(); const ind=[]; for(let dd=-3;dd<=3;dd++){ const a=_mapaExt.get(_addDias(l.data_pagamento,dd)); if(a) a.forEach(x=>{ if(x.id!==l.id) ind.push(x); }); }
             indivSispagCache[l.id]=(ind||[]).filter(x=>!/SISPAG/.test(_norm(x.historico_bancario)));
           }
           const pagoIndividual=(f,escolha)=>indivSispagCache[l.id].some(x=>Math.abs(x.valor_saida-f.valor_saida)<=0.01&&identificaPessoa(x.historico_bancario,[escolha.p]));
@@ -27347,7 +27354,7 @@ async function _lancctbProcessarFopag(){
       const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
       if(error){ console.error('Erro FOPAG (individual):',error); semAchado++; continue; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
-      if(compPessoa) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',compPessoa.id);
+      if(compPessoa) _fcu(compPessoa.id); if(compPessoa) await _supaClient.from('comprovantes_bancarios').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).eq('id',compPessoa.id);
       // Se a identificação veio do Fluxo de Caixa, marca aquela linha como
       // associada (some da lista de "não associados" e aparece na coluna
       // Fluxo do Registro Contábil).
