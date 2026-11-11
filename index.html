@@ -37811,6 +37811,36 @@ async function renderLancctbIcms(){
   else { const c=document.getElementById('lancctbIcmsContagem'); if(c) c.textContent=`${resumoTotal.n} NF(s) · R$ ${_fmt(resumoTotal.total)}`; _lancctbIcmsTotalPintar(resumoTotal.n,resumoTotal.total,false); }
 }
 // Procura, entre as NFs da base, a que o pagamento do extrato quitou. Sem UF no histórico só aceita se TODOS os candidatos forem do mesmo tipo/UF/unidade; ambíguo → null (fica pendente).
+// ── Índices da aba ICMS (Fast Lube: 75 mil NFs × 3 mil pagamentos = ~5 ms por pagamento): o mês é indexado por NF e por valor (campos que nunca mudam); as listas "livres" e os grupos são guardados por
+// VERSÃO do estado (ctx.ver sobe sempre que uma NF é usada/amarrada). Resultado idêntico ao da varredura completa.
+function _lancctbIcmsBump(ctx){ ctx.ver=(ctx.ver||0)+1; }
+function _lancctbIcmsExtIds(ctx){ if(!ctx._extIds){ ctx._extIds=new Set(); Object.keys(ctx.rows||{}).forEach(m=>(ctx.rows[m]||[]).forEach(r=>{ if(r.ext) ctx._extIds.add(r.ext); })); } return ctx._extIds; }
+function _lancctbIcmsIdx(ctx,mes){
+  ctx._idx=ctx._idx||{}; const rows=ctx.rows[mes]||[]; let ix=ctx._idx[mes];
+  if(!ix||ix.rows!==rows||ix.n!==rows.length){
+    ix={ rows, n:rows.length, byDoc:new Map() };
+    rows.forEach(r=>{ const d=String(r.doc).replace(/^0+/,''); let a=ix.byDoc.get(d); if(!a){ a=[]; ix.byDoc.set(d,a); } a.push(r); });
+    ctx._idx[mes]=ix;
+  }
+  return ix;
+}
+function _lancctbIcmsPorDocs(ctx,mes,docs){ const ix=_lancctbIcmsIdx(ctx,mes), out=[]; docs.forEach(d=>{ const a=ix.byDoc.get(d); if(a) for(const r of a) out.push(r); }); return out; }
+// NFs "livres" do mês (+ grupos por tipo|uf|unidade, soma de cada grupo, grupos por uf|unidade e índice por valor). lid = lançamento que já tem NF própria (caminho lento, sem cache).
+function _lancctbIcmsMontarLivres(ctx,mes,ufH,lid){
+  const livres=(ctx.rows[mes]||[]).filter(r=>(!r.ext||(lid!=null&&r.ext===lid))&&!ctx.usados.has(r.id)&&(!ufH||r.uf===ufH)&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade))); // NF de grupo que uma guia da pasta aglutina nunca é avulsa
+  const gs=new Map(), porUfUn=new Map(), porCents=new Map();
+  livres.forEach(r=>{ const key=r.tipo+'|'+r.uf+'|'+r.unidade; let g=gs.get(key); if(!g){ g=[]; gs.set(key,g); } g.push(r);
+    const k2=r.uf+'|'+r.unidade; let g2=porUfUn.get(k2); if(!g2){ g2=[]; porUfUn.set(k2,g2); } g2.push(r);
+    const c=Math.round(r.valor*100); let g3=porCents.get(c); if(!g3){ g3=[]; porCents.set(c,g3); } g3.push(r); });
+  const soma=new Map(); gs.forEach((g,k)=>soma.set(k,g.reduce((t,r)=>t+Math.round(r.valor*100),0)));
+  return { livres, gs, soma, porUfUn, porCents };
+}
+function _lancctbIcmsLivres(ctx,mes,ufH,lid){
+  if(lid!=null&&_lancctbIcmsExtIds(ctx).has(lid)) return _lancctbIcmsMontarLivres(ctx,mes,ufH,lid);
+  ctx._lc=ctx._lc||{}; const key=mes+'|'+(ufH||''), v=ctx.ver||0; let c=ctx._lc[key];
+  if(!c||c.ver!==v){ c=_lancctbIcmsMontarLivres(ctx,mes,ufH,null); c.ver=v; ctx._lc[key]=c; }
+  return c;
+}
 function _lancctbIcmsAcharPagamento(l,ctx){
   const hist=String(l.historico_bancario||'');
   if(!_lancctbHistoricoEhTributo(hist)) return null; // só histórico que NORMALMENTE é tributo (Sispag Tributos, Impostos GNRE…) — nunca Sispag Fornecedores/PIX comum
@@ -37832,7 +37862,7 @@ function _lancctbIcmsAcharPagamento(l,ctx){
   if(nfsFx.size&&ufProva){
     for(const k of [0,-1,-2,-3,-4,-5,-6]){
       const mes=mesAdd(k);
-      let hit=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&r.uf===ufProva&&Math.round(r.valor*100)===cents&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade)));
+      let hit=_lancctbIcmsPorDocs(ctx,mes,nfsFx).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&r.uf===ufProva&&Math.round(r.valor*100)===cents&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade)));
       if(hit.length>1&&/PARTILHAD/i.test(hist)){ const dd=hit.filter(r=>r.tipo===LANCCTB_ICMS_TIPOS.difal); if(dd.length) hit=dd; } // ICMS PARTILHADO no Fluxo = ICMS-DIFAL na aba ICMS
       if(hit.length===1) return {rows:[hit[0]],mes};
     }
@@ -37841,15 +37871,15 @@ function _lancctbIcmsAcharPagamento(l,ctx){
   if(nfsFx.size&&ufProva){
     for(const k of [0,-1,-2,-3,-4,-5,-6]){
       const mes=mesAdd(k);
-      let hit=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&r.uf===ufProva&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&(cents-Math.round(r.valor*100))>0&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade)));
+      let hit=_lancctbIcmsPorDocs(ctx,mes,nfsFx).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&r.uf===ufProva&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&(cents-Math.round(r.valor*100))>0&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade)));
       if(hit.length>1&&/PARTILHAD/i.test(hist)){ const dd=hit.filter(r=>r.tipo===LANCCTB_ICMS_TIPOS.difal); if(dd.length) hit=dd; } // ICMS PARTILHADO no Fluxo = ICMS-DIFAL na aba ICMS
       if(hit.length===1) return {rows:[hit[0]],mes,juros:cents-Math.round(hit[0].valor*100)};
     }
   }
   for(const k of [-1,0,-2]){
     const mes=mesAdd(k);
-    const livres=(ctx.rows[mes]||[]).filter(r=>(!r.ext||r.ext===l.id)&&!ctx.usados.has(r.id)&&(!ufH||r.uf===ufH)&&!(ctx.cobertos&&ctx.cobertos.has(mes+'|'+r.tipo+'|'+r.uf+'|'+r.unidade))); // NF de grupo que uma guia da pasta aglutina nunca é avulsa
-    let sing=ufProva?livres.filter(r=>r.uf===ufProva&&Math.round(r.valor*100)===cents):[];
+    const LV=_lancctbIcmsLivres(ctx,mes,ufH,l.id);
+    let sing=ufProva?(LV.porCents.get(cents)||[]).filter(r=>r.uf===ufProva):[];
     // ajuda do Fluxo de Caixa: a NF que a linha do Fluxo ligada a este extrato cita desempata candidatos iguais
     if(sing.length>1&&nfsFx.size){ const f2=sing.filter(r=>nfsFx.has(String(r.doc).replace(/^0+/,''))); if(f2.length) sing=f2; }
     if(sing.length){
@@ -37857,14 +37887,12 @@ function _lancctbIcmsAcharPagamento(l,ctx){
       sing.sort((x,y)=>String(x.data).localeCompare(String(y.data))||String(x.doc).localeCompare(String(y.doc),'pt',{numeric:true}));
       return {rows:[sing[0]],mes};
     }
-    const gs=new Map(); livres.forEach(r=>{ const key=r.tipo+'|'+r.uf+'|'+r.unidade; if(!gs.has(key)) gs.set(key,[]); gs.get(key).push(r); });
-    const ach=[...gs.values()].filter(g=>g.length>=2&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents&&(g.length>=5||(ufProva&&g[0].uf===ufProva))); // poucas NFs somando igual é coincidência fácil: só com a UF provada
+    const ach=[...LV.gs.entries()].filter(([gk,g])=>g.length>=2&&LV.soma.get(gk)===cents&&(g.length>=5||(ufProva&&g[0].uf===ufProva))).map(([gk,g])=>g); // poucas NFs somando igual é coincidência fácil: só com a UF provada
     if(ach.length===1) return {rows:ach[0],mes};
     if(ach.length>1) return {ambiguo:true};
     // Pagamento único das DUAS guias do mesmo estado (DIFAL + ST da mesma UF e unidade, ex.: PR 62.916,00 = 19.461,00 + 43.455,00): a soma dos dois tipos fecha com o banco — só com a UF provada.
     if(ufProva){
-      const porUfUn=new Map(); livres.forEach(r=>{ if(r.uf!==ufProva) return; const key=r.uf+'|'+r.unidade; if(!porUfUn.has(key)) porUfUn.set(key,[]); porUfUn.get(key).push(r); });
-      const mt=[...porUfUn.values()].filter(g=>new Set(g.map(r=>r.tipo)).size>1&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents);
+      const mt=[...LV.porUfUn.values()].filter(g=>g[0].uf===ufProva).filter(g=>new Set(g.map(r=>r.tipo)).size>1&&g.reduce((s,r)=>s+Math.round(r.valor*100),0)===cents);
       if(mt.length===1) return {rows:mt[0],mes,multiTipo:true};
       if(mt.length>1) return {ambiguo:true};
     }
@@ -37872,7 +37900,7 @@ function _lancctbIcmsAcharPagamento(l,ctx){
   // Último recurso — Fluxo de Caixa: as NFs citadas pelas linhas do Fluxo ligadas a este pagamento (e a UF delas), conferidas contra a base: a soma tem que fechar o valor do banco.
   if(nfsFx.size){
     const ufsFx=new Set(fx.map(x=>x.uf).filter(Boolean));
-    const todas=[]; for(const k of [-1,0,-2]) (ctx.rows[mesAdd(k)]||[]).forEach(r=>{ if((!r.ext||r.ext===l.id||(r.pago>0&&r.pago<Math.round(r.valor*100)-1))&&!ctx.usados.has(r.id)&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&(!ufH||r.uf===ufH)&&(!ufsFx.size||ufsFx.has(r.uf))) todas.push(r); });
+    const todas=[]; for(const k of [-1,0,-2]) _lancctbIcmsPorDocs(ctx,mesAdd(k),nfsFx).forEach(r=>{ if((!r.ext||r.ext===l.id||(r.pago>0&&r.pago<Math.round(r.valor*100)-1))&&!ctx.usados.has(r.id)&&nfsFx.has(String(r.doc).replace(/^0+/,''))&&(!ufH||r.uf===ufH)&&(!ufsFx.size||ufsFx.has(r.uf))) todas.push(r); });
     if(todas.length&&new Set(todas.map(r=>r.tipo+'|'+r.uf+'|'+r.unidade)).size===1&&Math.abs(todas.reduce((s,r)=>s+Math.round(r.valor*100),0)-cents)<=1) return {rows:todas,mes:todas[0].mes};
     // PAGAMENTO EM PARTES (pedido do usuário 30/10/2026: NF 154990, R$ 1.241,77 + R$ 66,55 = R$ 1.308,32): o Fluxo cita a MESMA NF em mais de uma saída e a soma das saídas fecha EXATAMENTE o valor da NF na base.
     // Cada saída é classificada pelo tipo da NF e a NF só sai do aberto quando as partes completam o valor. Última parte: o que falta fecha o valor.
@@ -38071,11 +38099,11 @@ async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,comp
   const jur=r.juros>0?r.juros/100:0; let contaJuros=null;
   if(jur>0){ const cpj=(S.g('lancctb_contas_padrao_'+eid)||{}).juros_pagos; if(cpj){ const { data: pj } = await _supaClient.from('plano_contas').select('id,classificacao').eq('empresa_eid',eid).eq('numero_conta',String(cpj)).maybeSingle(); contaJuros=pj||null; } if(!contaJuros) return null; } // sem a conta padrão "Despesas com juros": não trata como juros
   const semMarca=String(l.historico_bancario||'').replace(/^\[[^\]]*\]\s*/,'');
-  const desfazer=()=>{ rows.forEach(x=>{ if(r.parcial){ ctx.parcialPago[x.id]=Math.max(0,(ctx.parcialPago[x.id]||0)-Math.round((l.valor_saida||0)*100)); x.extras=(x.extras||[]).filter(i=>i!==l.id); x.pago=Math.max(0,(x.pago||0)-Math.round((l.valor_saida||0)*100)); if(x.ext===l.id) x.ext=(x.extras||[])[0]||null; } else if(x.ext===l.id) x.ext=null; ctx.usados.delete(x.id); }); ctx.feitos.delete(l.id); };
+  const desfazer=()=>{ rows.forEach(x=>{ if(r.parcial){ ctx.parcialPago[x.id]=Math.max(0,(ctx.parcialPago[x.id]||0)-Math.round((l.valor_saida||0)*100)); x.extras=(x.extras||[]).filter(i=>i!==l.id); x.pago=Math.max(0,(x.pago||0)-Math.round((l.valor_saida||0)*100)); if(x.ext===l.id) x.ext=(x.extras||[])[0]||null; } else if(x.ext===l.id) x.ext=null; ctx.usados.delete(x.id); }); ctx.feitos.delete(l.id); _lancctbIcmsBump(ctx); };
   const _cParte=Math.round(valor*100);
   if(r.parcial){ rows.forEach(x=>{ ctx.parcialPago[x.id]=(ctx.parcialPago[x.id]||0)+_cParte; x.pago=Math.max(x.pago||0,0)+_cParte; if(!x.ext) x.ext=l.id; x.extras=(x.extras||[]).concat([l.id]); if(ctx.parcialPago[x.id]>=Math.round(r.total)-1) ctx.usados.add(x.id); }); }
   else rows.forEach(x=>{ ctx.usados.add(x.id); x.ext=l.id; });
-  rows.forEach(x=>ctx.mesesTocados.add(x.mes)); ctx.feitos.add(l.id);
+  rows.forEach(x=>ctx.mesesTocados.add(x.mes)); ctx.feitos.add(l.id); _lancctbIcmsBump(ctx); if(ctx._extIds) ctx._extIds.add(l.id);
   const histItem=`Pagamento ref. ${rotulo}${r.parcial?' (pagamento em partes)':''}`;
   // Contas diferentes por unidade (pedido 29/10/2026): o gatilho sugerido leva a unidade ("ICMS-DIFAL Não Contribuinte UN 163"); vale primeiro a Regra da unidade, e a Regra antiga só com o tipo continua valendo como reserva.
   const gatUn=`${tipo} UN ${r0.unidade}`;
@@ -38207,7 +38235,7 @@ function _lancctbIcmsMarcarGrupos(ctx,extId,achou){
   partes.forEach(pt=>{ if(!pt.tipo) return;
     const g=rows.filter(r=>r.tipo===pt.tipo&&r.uf===uf&&String(r.unidade)===String(un)&&(!r.ext||r.ext===extId));
     const soma=g.reduce((t,r)=>t+Math.round(r.valor*100),0);
-    if(g.length&&Math.abs(soma-Math.round(pt.valor*100))<=2){ g.forEach(r=>{ r.ext=extId; ctx.usados.add(r.id); }); ctx.mesesTocados.add(mes); n+=g.length; } });
+    if(g.length&&Math.abs(soma-Math.round(pt.valor*100))<=2){ g.forEach(r=>{ r.ext=extId; ctx.usados.add(r.id); }); _lancctbIcmsBump(ctx); if(ctx._extIds) ctx._extIds.add(extId); ctx.mesesTocados.add(mes); n+=g.length; } });
   return n;
 }
 // Regra do usuário (30/10/2026): guia que AGLUTINA as NFs (a soma do grupo tipo+UF+unidade+competência fecha com o valor da guia) => nenhuma dessas NFs pode ser pagamento avulso.
