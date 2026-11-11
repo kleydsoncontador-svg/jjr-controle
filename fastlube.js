@@ -113,7 +113,8 @@
       + '<button class="btn bo" onclick="_flAbrirRelatorios()" title="Relatórios gerados pelos botões de recebimentos e pagamentos do extrato (o que foi trazido, diferenças, avisos).">📑 Relatórios</button>'
       + '<button class="btn bo" onclick="_flConciliarSaldo()" title="Compara, dia a dia, o saldo do extrato bancário com o saldo do Registro Contábil.">⚖ Conciliar saldo</button>'
       + '<button class="btn bo" onclick="_flIgnorarFiltradas()" title="Ignora todas as linhas filtradas: ficam apagadas, fora do saldo e do TXT, e o extrato pode trazer o pagamento delas de novo.">🚫 Ignorar filtradas (' + n + ')</button>'
-      + '<button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="_flExcluirFiltradas()" title="Exclui do Registro TODAS as linhas que estão filtradas na tela (não só a página atual).">🗑 Excluir filtradas (' + n + ')</button>';
+      + '<button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="_flExcluirFiltradas()" title="Exclui do Registro TODAS as linhas que estão filtradas na tela (não só a página atual).">🗑 Excluir filtradas (' + n + ')</button>'
+      + '<button class="btn bo" onclick="_flBuscarOutroBanco()" title="Procura, nos OUTROS bancos desta empresa, tributos ICMS (partilhado / ICMS-ST) lançados lá na mesma data e com o valor exato de linhas pendentes daqui. Você escolhe quais trazer.">🔎 Buscar em outro banco</button>';
   };
 
   // chips da regra: a Fast Lube ganha CNPJ/CPF e junta com " | " (outras empresas não mudam)
@@ -1469,6 +1470,68 @@
   };
 
   // ── 5) excluir tudo que está filtrado ──
+  // ───────── BUSCAR EM OUTRO BANCO (pedido 11/11/2026): tributo (ICMS partilhado / ICMS-ST) que o cliente pagou por um banco mas o Fluxo lançou no outro ─────────
+  // Pega as linhas PENDENTES de saída da conta aberta (ex.: "Sispag Tributos" do Itaú) e procura, nas OUTRAS contas, uma linha de tributo ICMS na MESMA data e com o MESMO valor (centavo exato).
+  // Você escolhe quais trazer: a linha do outro banco é ignorada lá (se estava classificada, a classificação é estornada, nada é apagado) e a linha daqui passa a ter o histórico dela.
+  const EH_TRIB_ICMS = /ICMS|DIFAL|GNRE|PARTILHAD|SUBSTITUI/i;
+  root._flBuscarOutroBanco = async function () {
+    if (!ativo()) return;
+    const conta = contaAtual(); if (!conta) { toast('Escolha UMA conta bancária (não "Todas as contas").', 'err'); return; }
+    const mes = _lancctbRegistroMes; if (!/^\d{4}-\d{2}$/.test(mes || '')) { toast('Escolha um mês no Registro.', 'err'); return; }
+    const d1 = mes + '-01', d2 = mes + '-31', outros = ctIds().filter(c => String(c) !== String(conta));
+    if (!outros.length) { toast('Esta empresa não tem outro banco.', 'err'); return; }
+    toast('Procurando nos outros bancos…', 'info'); await new Promise(r => setTimeout(r, 0));
+    const sel = 'id,conta_bancaria_id,data_pagamento,valor_saida,historico_bancario,informacao,documento,status_conciliacao';
+    const minhas = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID()).eq('conta_bancaria_id', Number(conta)).eq('status_conciliacao', 'pendente').gt('valor_saida', 0).gte('data_pagamento', d1).lte('data_pagamento', d2))).data || [];
+    const deles = ((await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID()).in('conta_bancaria_id', outros).in('status_conciliacao', ['pendente', 'conciliado', 'parcial']).gt('valor_saida', 0).gte('data_pagamento', d1).lte('data_pagamento', d2))).data || []).filter(x => EH_TRIB_ICMS.test(String(x.historico_bancario || '')));
+    const grupos = new Map(); deles.forEach(x => { const k = x.data_pagamento + '|' + cents(x.valor_saida); if (!grupos.has(k)) grupos.set(k, []); grupos.get(k).push(x); });
+    const usados = new Set(), pares = [];
+    minhas.sort((a, b) => a.id - b.id).forEach(a => {
+      const lst = (grupos.get(a.data_pagamento + '|' + cents(a.valor_saida)) || []).filter(b => !usados.has(b.id)); if (!lst.length) return;
+      lst.sort((p, q) => (p.status_conciliacao === 'pendente' ? 0 : 1) - (q.status_conciliacao === 'pendente' ? 0 : 1) || p.id - q.id);
+      usados.add(lst[0].id); pares.push({ a, b: lst[0], n: lst.length });
+    });
+    if (!pares.length) { toast('Nenhuma linha pendente daqui tem, em outro banco, um tributo ICMS na mesma data e com o valor exato (' + minhas.length + ' pendentes conferidas).', 'info'); return; }
+    root.__flObb = { pares, sel: new Set(pares.filter(p => p.b.status_conciliacao === 'pendente').map(p => p.b.id)) };
+    root._flObbDesenhar();
+  };
+  root._flObbDesenhar = function () {
+    const g = root.__flObb; if (!g) return; const nm = c => cfg().nomes[String(c)] || ('conta ' + c);
+    const linhas = g.pares.map(p => {
+      const conc = p.b.status_conciliacao !== 'pendente';
+      return '<tr style="border-bottom:1px solid var(--border);vertical-align:top">'
+        + '<td style="padding:5px 6px"><input type="checkbox" ' + (g.sel.has(p.b.id) ? 'checked' : '') + ' onchange="_flObbMarcar(' + p.b.id + ',this.checked)"></td>'
+        + '<td style="padding:5px 6px;white-space:nowrap">' + brData(p.a.data_pagamento) + '</td>'
+        + '<td style="padding:5px 6px;white-space:nowrap;text-align:right;color:#dc2626">R$ ' + fmt(p.a.valor_saida) + '</td>'
+        + '<td style="padding:5px 6px;max-width:220px">' + E(String(p.a.historico_bancario || '').slice(0, 90)) + '</td>'
+        + '<td style="padding:5px 6px;white-space:nowrap">' + E(nm(p.b.conta_bancaria_id)) + (conc ? '<div style="color:#b45309;font-weight:700;font-size:11px">⚠ já conciliado lá — trazer desfaz a classificação</div>' : '<div style="color:var(--slate);font-size:11px">pendente lá</div>') + (p.n > 1 ? '<div style="color:var(--slate);font-size:11px">' + p.n + ' iguais lá (uso a 1ª)</div>' : '') + '</td>'
+        + '<td style="padding:5px 6px;max-width:420px;font-size:11.5px">' + E(String(p.b.historico_bancario || '').slice(0, 220)) + '</td></tr>';
+    }).join('');
+    janela('Buscar em outro banco — ' + g.pares.length + ' achado(s)',
+      '<div style="font-size:12.5px;margin-bottom:8px;max-width:980px">Linhas <b>pendentes</b> de ' + E(nm(contaAtual())) + ' que têm, em outro banco, um tributo ICMS na <b>mesma data e com o valor exato</b>. Marque as que quer trazer: a do outro banco é <b>ignorada</b> lá (nada é apagado; se estava classificada, a classificação é estornada) e a daqui passa a ter o histórico dela.</div>'
+      + '<table style="width:100%;border-collapse:collapse;font-size:12px"><tr style="text-align:left;color:var(--slate)"><th></th><th>Data</th><th style="text-align:right">Valor</th><th>Aqui (hoje)</th><th>No outro banco</th><th>Histórico de lá</th></tr>' + linhas + '</table>'
+      + '<div style="display:flex;gap:8px;margin-top:10px;align-items:center"><button class="btn bp" onclick="_flObbAplicar()">⇄ Trazer as ' + g.sel.size + ' selecionada(s) para ' + E(nm(contaAtual())) + '</button>'
+      + '<button class="btn bo bsm" onclick="_flObbTodas(true)">Marcar todas</button><button class="btn bo bsm" onclick="_flObbTodas(false)">Desmarcar todas</button></div>', 1250);
+  };
+  root._flObbMarcar = (id, on) => { const g = root.__flObb; if (!g) return; on ? g.sel.add(id) : g.sel.delete(id); root._flObbDesenhar(); };
+  root._flObbTodas = on => { const g = root.__flObb; if (!g) return; g.sel = new Set(on ? g.pares.map(p => p.b.id) : []); root._flObbDesenhar(); };
+  root._flObbAplicar = async function () {
+    const g = root.__flObb; if (!g) return; const esc = g.pares.filter(p => g.sel.has(p.b.id)); if (!esc.length) { toast('Marque ao menos uma linha.', 'err'); return; }
+    const conc = esc.filter(p => p.b.status_conciliacao !== 'pendente').length;
+    if (!confirm('Trazer ' + esc.length + ' linha(s) do outro banco para este?\n\n• A linha do outro banco será IGNORADA lá' + (conc ? ' (' + conc + ' delas já estão classificadas: a classificação será estornada)' : '') + '.\n• A linha daqui ganha o histórico da outra (o texto atual fica guardado no registro de trocas).')) return;
+    const log = []; let ok = 0;
+    for (const p of esc) {
+      if (!(await marcarIgnorado([p.b.id], true))) { toast('Parei: erro ao ignorar a linha do outro banco.', 'err'); break; }
+      const upd = { historico_bancario: p.b.historico_bancario }; if (p.b.informacao) upd.informacao = p.b.informacao; if (p.b.documento) upd.documento = p.b.documento;
+      const r = await _supaClient.from('lancamentos_extrato').update(upd).eq('id', p.a.id);
+      if (r.error) { await marcarIgnorado([p.b.id], false); toast('Erro ao atualizar a linha daqui: ' + r.error.message + ' (a do outro banco foi devolvida).', 'err'); break; }
+      log.push({ em: new Date().toISOString(), por: quemFez(), aqui: p.a.id, de: p.b.id, banco_de: p.b.conta_bancaria_id, dia: p.a.data_pagamento, v: Number(p.a.valor_saida), hist_antigo: String(p.a.historico_bancario || '').slice(0, 200), info_antiga: p.a.informacao || null, doc_antigo: p.a.documento || null, hist_novo: String(p.b.historico_bancario || '').slice(0, 200) }); ok++;
+    }
+    try { S.s('fl_troca_banco_log_' + EID(), log.concat(S.g('fl_troca_banco_log_' + EID()) || []).slice(0, 3000)); } catch (e) {}
+    closeModal('mFlInfo'); root.__flObb = null;
+    toast(ok + ' linha(s) trazida(s) do outro banco ✓ (agora rode Processar Tributos / Regras)', 'ok'); renderLancctbRegistroContabil();
+  };
+
   root._flExcluirLinha = async function (id) {
     if (!ativo()) return;
     if (_lancctbExclusaoBloqueada(eidAtual(), _lancctbRegistroMes, 'a linha do Registro')) return;
