@@ -273,7 +273,9 @@
         else { entrada = false; fora = (bancos.has(deb) && bancos.has(cre)) ? 'transferência entre outros bancos (não envolve este banco)' : 'nenhum banco da empresa na linha (contas ' + (deb || '-') + ' / ' + (cre || '-') + ')'; }
         if (corrigida) corrigidas++;
         if (fora) foraL.push({ dia, v, descr, motivo: fora });
-        linhas.push({ empresa_eid: eid, data: dia, descricao: descr, valor_saida: entrada ? 0 : v, valor_entrada: entrada ? v : 0, port_nom: nomeBanco, arquivo_origem: f.name, descricao_conta_origem: fora ? 'FORA: ' + fora : null });
+        // histórico no padrão da Rufato (mesmas regras do Conversor: CLIENTES/devolução, FORNECEDORES, salário, pró-labore etc.); sem regra específica fica como veio
+        let descrNova = descr; try { if (typeof _rufatoReescreverHistorico === 'function' && !fora) { const rr = _rufatoReescreverHistorico(descr, entrada ? 'recebimento' : 'pagamento'); if (rr && rr.historico) descrNova = rr.historico; } } catch (e) {}
+        linhas.push({ empresa_eid: eid, data: dia, descricao: descrNova, _raw: descr, valor_saida: entrada ? 0 : v, valor_entrada: entrada ? v : 0, port_nom: nomeBanco, arquivo_origem: f.name, descricao_conta_origem: fora ? 'FORA: ' + fora : null });
       }
     }
     barra('Fluxo ' + nomeBanco + ': conferindo o que já existe (' + linhas.length + ' linhas lidas)'); await ceda();
@@ -282,7 +284,8 @@
     const ch = x => x.data + '|' + cents(x.valor_saida) + '|' + cents(x.valor_entrada) + '|' + String(x.descricao || '').trim();
     const jaTem = new Map(); exist.forEach(x => jaTem.set(ch(x), (jaTem.get(ch(x)) || 0) + 1));
     const vistas = new Map(), novas = []; let dup = 0;
-    linhas.forEach(x => { const k = ch(x), n = (vistas.get(k) || 0) + 1; vistas.set(k, n); if (n <= (jaTem.get(k) || 0)) dup++; else novas.push(x); });
+    linhas.forEach(x => { const k = ch(x), k0 = ch({ ...x, descricao: x._raw }), n = (vistas.get(k) || 0) + 1; vistas.set(k, n); if (n <= Math.max(jaTem.get(k) || 0, jaTem.get(k0) || 0)) dup++; else novas.push(x); });
+    novas.forEach(x => { delete x._raw; });
     for (let i = 0; i < novas.length; i += 400) {
       barra('Fluxo ' + nomeBanco + ': gravando ' + Math.min(i + 400, novas.length) + '/' + novas.length);
       const e = await _supaClient.from('fluxo_caixa_lancamentos').insert(novas.slice(i, i + 400));
