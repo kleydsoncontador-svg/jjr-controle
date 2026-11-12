@@ -82,7 +82,8 @@
     ref.parentElement.insertBefore(c,ref.nextSibling); return c;
   }
   function abrir(modo,eid,ano){
-    ST.modo=modo; ST.eid=String(eid||window._apuracaoEidAtual); ST.ano=ano||2026; ST.regime='comp'; ST.bloco='cont'; ST.calcCom='fisc';
+    ST.modo=modo; ST.eid=String(eid||window._apuracaoEidAtual); ST.ano=ano||2026;
+    try{ if(typeof apuracaoRegistrarForma==='function') apuracaoRegistrarForma(ST.eid,modo,ST.ano); }catch(e){} ST.regime='comp'; ST.bloco='cont'; ST.calcCom='fisc';
     ['apuracaoTipoModal','apuracaoGerenciador','apuracaoFormAnual','parteBFormAnual'].forEach(function(id){ var e=document.getElementById(id); if(e) e.style.display='none'; });
     var c=container(); if(!c){ toast('Tela de apuração não encontrada','err'); return; }
     c.style.display='flex'; desenhar();
@@ -91,6 +92,7 @@
   function voltar(){
     var c=document.getElementById('apuracaoFormPres'); if(c) c.style.display='none';
     var g=document.getElementById('apuracaoGerenciador'); if(g) g.style.display='flex';
+    try{ if(ST.modo!=='rb'&&typeof renderApuracaoGerenciador==='function') renderApuracaoGerenciador(ST.eid); }catch(e){}
     var fa=document.getElementById('apuracaoFormAnual'); if(ST.modo==='rb'&&fa){ if(g) g.style.display='none'; fa.style.display='flex'; }
   }
   function titulo(){ return ST.modo==='rb'?('Apuração por Receita Bruta — Lucro Real — '+ST.ano+' (mensal)'):('Lucro Presumido — '+ST.ano+' (trimestral)'); }
