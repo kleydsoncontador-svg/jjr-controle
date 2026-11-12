@@ -28,7 +28,10 @@
     var cont=document.getElementById('apuracaoFormAnoConteudo'), t=cont&&cont.querySelector('table'); if(!t) return null;
     var L=[];
     t.querySelectorAll('tr').forEach(function(tr){
-      var cells=[].slice.call(tr.cells).slice(1); if(!cells.length) return;
+      var cells=[].slice.call(tr.cells);
+      // só descarta a 1ª coluna quando é a coluna estreita dos botões (+ e ⚙); linhas de título (colspan) começam direto na descrição
+      if(cells.length&&cells[0].colSpan<=1&&(/width\s*:\s*36px/.test(cells[0].getAttribute('style')||'')||(!cells[0].textContent.trim()&&cells.length>2&&!cells[0].querySelector('input')))) cells=cells.slice(1);
+      if(!cells.length) return;
       var trS=tr.getAttribute('style')||'', linha=[];
       cells.forEach(function(td){
         var inp=td.querySelector('input'), sty=td.getAttribute('style')||'', isty=inp?(inp.getAttribute('style')||''):'';
