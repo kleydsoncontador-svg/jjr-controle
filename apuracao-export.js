@@ -214,14 +214,18 @@
       var r=M.real[i], b=M.rb[i], tr_=r.c+r.i, tb=b.c+b.i, esc=M.escolha[i]||'', menor=Math.abs(tr_-tb)<0.005?'ambos':(tr_<tb?'real':'rb');
       if(esc==='real'){ acC+=r.c; acI+=r.i; acT+=tr_; } else if(esc==='rb'){ acC+=b.c; acI+=b.i; acT+=tb; }
       var linha=function(op,rot,v,t){
+        // cada mês é um "quadrinho": moldura grossa em volta das duas linhas (as colunas de saldo ocupam as duas linhas, dentro do quadro)
         var verde=(menor===op||menor==='ambos'), bg=verde?'background:#dcfce7;':'', marcado=(esc===op);
-        return '<tr style="'+bg+'">'+(op==='real'?'<td rowspan="2" style="'+td+';text-align:left;font-weight:700;background:#f0f4f8;vertical-align:middle">'+MESES[i]+'</td>':'')
-          +'<td style="'+td+';text-align:left;'+bg+'">'+rot+(verde?' <span style="font-size:10.5px;color:#166534;font-weight:700">● menor valor</span>':'')+'</td>'
-          +'<td style="'+td+';'+bg+'">'+FMT(v.c)+'</td><td style="'+td+';'+bg+'">'+FMT(v.i)+'</td><td style="'+td+';font-weight:700;'+bg+'">'+FMT(t)+'</td>'
-          +'<td style="'+td+';text-align:center;'+bg+'"><label style="cursor:pointer"><input type="radio" name="apmel_'+i+'" '+(marcado?'checked':'')+' onclick="_apMelhorEscolher('+i+',\''+op+'\',this)"> escolhi</label></td>'
-          +(op==='real'?'<td rowspan="2" style="'+td+';font-weight:700;background:#fef9c3;vertical-align:middle">'+(esc?FMT(acC):'—')+'</td><td rowspan="2" style="'+td+';font-weight:700;background:#fef9c3;vertical-align:middle">'+(esc?FMT(acI):'—')+'</td><td rowspan="2" style="'+td+';font-weight:800;background:#FFD700;vertical-align:middle">'+(esc?FMT(acT):'—')+'</td>':'')+'</tr>';
+        var BD='2px solid #3B5B8C', topo=(op==='real')?';border-top:'+BD:'', base=(op==='rb')?';border-bottom:'+BD:'';
+        var ladoE=';border-left:'+BD, ladoD=';border-right:'+BD, doisLados=topo+';border-bottom:'+BD;
+        return '<tr style="'+bg+'">'+(op==='real'?'<td rowspan="2" style="'+td+';text-align:left;font-weight:700;background:#f0f4f8;vertical-align:middle'+doisLados+ladoE+'">'+MESES[i]+'</td>':'')
+          +'<td style="'+td+';text-align:left;'+bg+topo+base+'">'+rot+(verde?' <span style="font-size:10.5px;color:#166534;font-weight:700">● menor valor</span>':'')+'</td>'
+          +'<td style="'+td+';'+bg+topo+base+'">'+FMT(v.c)+'</td><td style="'+td+';'+bg+topo+base+'">'+FMT(v.i)+'</td><td style="'+td+';font-weight:700;'+bg+topo+base+'">'+FMT(t)+'</td>'
+          +'<td style="'+td+';text-align:center;'+bg+topo+base+'"><label style="cursor:pointer"><input type="radio" name="apmel_'+i+'" '+(marcado?'checked':'')+' onclick="_apMelhorEscolher('+i+',\''+op+'\',this)"> escolhi</label></td>'
+          +(op==='real'?'<td rowspan="2" style="'+td+';font-weight:700;background:#fef9c3;vertical-align:middle'+doisLados+'">'+(esc?FMT(acC):'—')+'</td><td rowspan="2" style="'+td+';font-weight:700;background:#fef9c3;vertical-align:middle'+doisLados+'">'+(esc?FMT(acI):'—')+'</td><td rowspan="2" style="'+td+';font-weight:800;background:#FFD700;vertical-align:middle'+doisLados+ladoD+'">'+(esc?FMT(acT):'—')+'</td>':'')+'</tr>';
       };
       linhas+=linha('real','Lucro Real (balanço de suspensão/redução)',r,tr_)+linha('rb','Receita Bruta (estimativa)',b,tb);
+      if(i<11) linhas+='<tr><td colspan="9" style="border:none;height:12px;padding:0;background:transparent"></td></tr>'; // espaço entre os quadros dos meses
     }
     var corpo='<div style="font-size:12.5px;color:#555;margin:0 0 10px;padding:10px 12px;background:#f5f5f5;border-radius:4px">Valores mensais a recolher: <b>Lucro Real</b> (o que está na apuração anual) × <b>Receita Bruta</b> (apuração por estimativa). A linha <span style="background:#dcfce7;padding:0 6px">verde clara</span> é a de <b>menor valor</b> (ou zero) do mês. Marque <b>escolhi</b> na opção adotada: o saldo ao lado soma, mês a mês, só o que foi escolhido.</div>'
       +'<div style="overflow:visible"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+'">MÊS</th><th style="'+th+';text-align:left">OPÇÃO</th><th style="'+th+'">CSLL A RECOLHER</th><th style="'+th+'">IRPJ A RECOLHER</th><th style="'+th+'">TOTAL DO MÊS</th><th style="'+th+'">ESCOLHA</th><th style="'+th+'">SALDO CSLL ACUMULADO</th><th style="'+th+'">SALDO IRPJ ACUMULADO</th><th style="'+th+'">SALDO ESCOLHIDO ACUMULADO</th></tr></thead><tbody>'+linhas+'</tbody></table></div>';
