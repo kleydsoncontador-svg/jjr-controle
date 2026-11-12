@@ -71,7 +71,7 @@
   var per=function(){ return ST.modo==='rb'?'M':'T'; };
   function dados(){ var d=null; try{ d=S.g(chave()); }catch(e){} d=d||{}; d.comp=d.comp||{cont:{},fisc:{},ded:{}}; d.caixa=d.caixa||{cont:{},fisc:{},ded:{}}; ['comp','caixa'].forEach(function(r){ d[r].cont=d[r].cont||{}; d[r].fisc=d[r].fisc||{}; d[r].ded=d[r].ded||{}; }); d.params=d.params||{}; return d; }
   function salvar(d){ try{ S.s(chave(),d); }catch(e){ console.error('Apuração presumido: não salvou',e); toast('Erro ao salvar: '+(e.message||e),'err'); } }
-  var mapKey=function(){ return 'apuracao_pres_balmap_'+ST.eid; };
+  var mapKey=function(){ return 'apuracao_pres_balmap_'+ST.eid+(ST.regime==='caixa'?'_caixa':''); };
   function mapa(){ try{ return S.g(mapKey())||{}; }catch(e){ return {}; } }
 
   // ── tela ──
@@ -82,7 +82,7 @@
     ref.parentElement.insertBefore(c,ref.nextSibling); return c;
   }
   function abrir(modo,eid,ano){
-    ST.modo=modo; ST.eid=String(eid||window._apuracaoEidAtual); ST.ano=ano||2026; ST.regime='comp'; ST.bloco='fisc'; ST.calcCom='fisc';
+    ST.modo=modo; ST.eid=String(eid||window._apuracaoEidAtual); ST.ano=ano||2026; ST.regime='comp'; ST.bloco='cont'; ST.calcCom='fisc';
     ['apuracaoTipoModal','apuracaoGerenciador','apuracaoFormAnual','parteBFormAnual'].forEach(function(id){ var e=document.getElementById(id); if(e) e.style.display='none'; });
     var c=container(); if(!c){ toast('Tela de apuração não encontrada','err'); return; }
     c.style.display='flex'; desenhar();
@@ -114,7 +114,7 @@
     h+='<div style="padding:16px 20px 24px 20px"><div style="margin-bottom:10px;padding:10px 12px;background:#f5f5f5;border-radius:4px;color:#333;font-size:12.5px;display:flex;flex-wrap:wrap;gap:14px;align-items:center">'
       +'<b>'+(ST.regime==='comp'?'Regime de COMPETÊNCIA (tela principal)':'Regime de CAIXA (tela secundária)')+' · '+blocoLbl+'</b>'
       +(ST.bloco==='fisc'?'<button class="btn bo bsm" onclick="ApPres.copiarContabil()">Copiar do Contábil para o Fiscal</button>':'')
-      +(ST.bloco==='cont'&&ST.regime==='comp'?'<span style="color:#555">⚙ em cada linha: de quais contas do Balancete o valor vem.</span>':'')
+      +(ST.bloco!=='div'?'<span style="color:#555">⚙ em cada linha: de quais contas ou grupos do Balancete o valor vem (preenche o Contábil).</span>':'')
       +(ST.bloco==='div'?'<span style="color:#555">Só leitura: Contábil menos Fiscal.</span>':'')
       +'<span style="margin-left:auto">Calcular com: '+btn('Fiscal','ApPres.set(\'calcCom\',\'fisc\')',ST.calcCom==='fisc','padding:3px 9px')+btn('Contábil','ApPres.set(\'calcCom\',\'cont\')',ST.calcCom==='cont','padding:3px 9px')+'</span></div>';
     h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
@@ -125,7 +125,7 @@
       g.itens.forEach(function(it){
         var id=it[0], editavel=(ST.bloco!=='div');
         var tem=(mapa()[id]||[]).length>0;
-        h+='<tr><td style="width:34px;text-align:center;border:none;padding:0">'+(ST.bloco==='cont'&&ST.regime==='comp'?'<button type="button" class="appres-eng" title="'+(tem?'Valor vem do Balancete — ver/alterar as contas':'Cadastrar de quais contas do Balancete vem esta linha')+'" onclick="ApPres.engrenagem(\''+id+'\')" style="background:none;border:none;cursor:pointer;padding:0;font-size:1.05rem;'+(tem?'':'opacity:.45')+'">⚙</button>':'')+'</td>'
+        h+='<tr><td style="width:34px;text-align:center;border:none;padding:0">'+(ST.bloco!=='div'?'<button type="button" class="appres-eng" title="'+(tem?'Valor vem do Balancete — ver/alterar as contas (preenche o Contábil'+(ST.regime==='caixa'?' do regime de caixa':'')+')':'Cadastrar de quais contas/grupos do Balancete vem esta linha (preenche o Contábil'+(ST.regime==='caixa'?' do regime de caixa':'')+')')+'" onclick="ApPres.engrenagem(\''+id+'\')" style="background:none;border:none;cursor:pointer;padding:0;font-size:1.05rem;'+(tem?'':'opacity:.45')+'">⚙</button>':'')+'</td>'
           +'<td style="padding:6px 12px;border:1px solid #ccc'+(it[2]?';color:#7f1d1d':'')+'">'+ESC(it[1])+'</td>';
         for(var i=0;i<N;i++){
           if(ST.bloco==='div'){ var dv=R2(NUM((R.cont[id]||[])[i])-NUM((R.fisc[id]||[])[i])); h+='<td style="'+TDI+';text-align:right;padding:4px 8px;'+(dv?'color:#b91c1c;font-weight:700':'color:#999')+'">'+FMT(dv)+'</td>'; }
@@ -192,7 +192,7 @@
       +'Adicional de 10% do IRPJ sobre o que passa de R$ 60.000 por trimestre (R$ 20.000 por mês). Acréscimo da LC 224/2025 sobre a parcela que passa do limite, proporcional ao percentual de cada atividade.</div>';
     tc.innerHTML=h;
   }
-  function set(k,v){ ST[k]=v; desenhar(); if(k==='regime') montarMapaBalancete().catch(function(){}); }
+  function set(k,v){ ST[k]=v; desenhar(); if(k==='regime'||k==='bloco') montarMapaBalancete().catch(function(){}); }
   function digitou(inp){
     var id=inp.getAttribute('data-id'), i=+inp.getAttribute('data-i'), D=dados(), R=D[ST.regime];
     var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value);
@@ -227,9 +227,8 @@
   }
   // ── Balancete (só leitura): preenche o Contábil por competência das linhas com contas cadastradas ──
   async function montarMapaBalancete(){
-    if(ST.regime!=='comp') return;
     var m=mapa(); if(!Object.keys(m).length) return;
-    var meses=await _apBalMeses(ST.eid,String(ST.ano)); var P=PER[per()], D=dados(), R=D.comp, mudou=false;
+    var meses=await _apBalMeses(ST.eid,String(ST.ano)); var P=PER[per()], D=dados(), R=D[ST.regime], mudou=false;
     ROWIDS.forEach(function(id){
       var itens=m[id]; if(!itens||!itens.length) return;
       var neg=false; GRUPOS.forEach(function(g){ g.itens.forEach(function(it){ if(it[0]===id&&it[2]) neg=true; }); });
@@ -240,7 +239,7 @@
         R.cont[id]=R.cont[id]||[]; if(R.cont[id][i]!==R2(tot)){ R.cont[id][i]=R2(tot); mudou=true; }
       }
     });
-    if(mudou){ salvar(D); if(ST.regime==='comp'&&document.getElementById('apuracaoFormPres')&&document.getElementById('apuracaoFormPres').style.display!=='none') desenhar(); }
+    if(mudou){ salvar(D); if(document.getElementById('apuracaoFormPres')&&document.getElementById('apuracaoFormPres').style.display!=='none') desenhar(); }
   }
   function engrenagem(id){
     var nome='', neg=false; GRUPOS.forEach(function(g){ g.itens.forEach(function(it){ if(it[0]===id){ nome=it[1]; neg=!!it[2]; } }); });
@@ -353,4 +352,50 @@ async function _apAdExAplicar(eid,ano){
     });
   });
   try{ for(var i=0;i<12;i++) calcularMesApuracao(i); }catch(e){}
+}
+
+/* ── "Adições e Exclusões Temporárias": relação anual por mês e saldo acumulado (pedido do usuário 12/11/2026) ──
+   Lê as linhas filhas das Adições/Exclusões TEMPORÁRIAS da própria apuração (CSLL e IRPJ). Saldo do mês = adições − exclusões; saldo acumulado = o que ainda falta excluir (ou adicionar) nos meses seguintes. */
+function abrirAdExTemporarias(){
+  var eid=window._currentApuracaoEid, ano=window._currentApuracaoAno||2026;
+  var cont=document.getElementById('apuracaoFormAnoConteudo'); if(!eid||!cont){ toast('Abra a apuração do Lucro Real primeiro','err'); return; }
+  var num=function(v){ v=String(v||'').trim(); if(!v) return 0; if(typeof desformatarNumero==='function') return desformatarNumero(v)||0; return parseFloat(v.replace(/\./g,'').replace(',','.'))||0; };
+  var fmt=function(v){ return (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+  var meses=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  var blocos=[{calc:'csll',tit:'CSLL — LACS (Parte A)',suf:''},{calc:'irpj',tit:'IRPJ — LALUR (Parte A)',suf:'_irpj'}];
+  var coletar=function(prefixo){
+    var linhas=[], re=new RegExp('^'+prefixo+'_(\\d+)_0$');
+    Array.from(cont.querySelectorAll('input[id^="'+prefixo+'_"]')).forEach(function(el){
+      var m=el.id.match(re); if(!m) return; var j=m[1], tr=el.closest('tr'); if(!tr) return;
+      var nome=(tr.cells[1]?tr.cells[1].textContent:'').replace(/ /g,' ').trim()||('Linha '+j);
+      var v=[]; for(var i=0;i<12;i++){ var e2=document.getElementById(prefixo+'_'+j+'_'+i); v.push(num(e2&&e2.value)); }
+      linhas.push({nome:nome,v:v});
+    });
+    return linhas;
+  };
+  var th='padding:6px 8px;background:#2D3447;color:#fff;border:1px solid #2D3447;text-align:center;white-space:nowrap';
+  var td='padding:4px 8px;border:1px solid #ccc;text-align:right;white-space:nowrap';
+  var html='';
+  blocos.forEach(function(b){
+    var ad=coletar('ad_temp'+b.suf), ex=coletar('excl_temp'+b.suf);
+    var totAd=[],totEx=[],i; for(i=0;i<12;i++){ totAd.push(ad.reduce(function(s,l){ return s+l.v[i]; },0)); totEx.push(ex.reduce(function(s,l){ return s+l.v[i]; },0)); }
+    var saldoMes=totAd.map(function(a,k){ return a-totEx[k]; }), acum=[],c=0; saldoMes.forEach(function(s){ c+=s; acum.push(c); });
+    html+='<div style="font-weight:700;color:#fff;background:#000;padding:8px 12px;margin-top:14px">'+b.tit+'</div><div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+';text-align:left;min-width:300px">DESCRIÇÃO</th>'+meses.map(function(m){ return '<th style="'+th+'">'+m+'</th>'; }).join('')+'<th style="'+th+'">TOTAL</th></tr></thead><tbody>';
+    var linha=function(rot,v,bg,neg){ var t=v.reduce(function(s,x){ return s+x; },0); return '<tr'+(bg?' style="background:'+bg+';font-weight:bold"':'')+'><td style="padding:5px 10px;border:1px solid #ccc'+(neg?';color:#7f1d1d':'')+'">'+rot+'</td>'+v.map(function(x){ return '<td style="'+td+(bg?';background:'+bg:'')+'">'+fmt(x)+'</td>'; }).join('')+'<td style="'+td+';background:'+(bg||'#fafafa')+'">'+fmt(t)+'</td></tr>'; };
+    html+='<tr><td colspan="14" style="padding:5px 10px;background:#f8d7da;font-weight:bold;color:#111">(+) ADIÇÕES TEMPORÁRIAS</td></tr>';
+    html+=ad.length?ad.map(function(l){ return linha('&nbsp;&nbsp;'+l.nome,l.v); }).join(''):'<tr><td colspan="14" style="padding:6px 12px;color:#888;border:1px solid #ccc">Nenhuma adição temporária lançada.</td></tr>';
+    html+=linha('Total das adições temporárias',totAd,'#f8d7da');
+    html+='<tr><td colspan="14" style="padding:5px 10px;background:#d1ecf1;font-weight:bold;color:#111">(-) EXCLUSÕES TEMPORÁRIAS</td></tr>';
+    html+=ex.length?ex.map(function(l){ return linha('&nbsp;&nbsp;'+l.nome,l.v,null,1); }).join(''):'<tr><td colspan="14" style="padding:6px 12px;color:#888;border:1px solid #ccc">Nenhuma exclusão temporária lançada.</td></tr>';
+    html+=linha('Total das exclusões temporárias',totEx,'#d1ecf1');
+    html+=linha('SALDO DO MÊS (adições − exclusões)',saldoMes,'#fef9c3');
+    html+=linha('SALDO ACUMULADO (ainda a excluir / adicionar)',acum,'#FFD700');
+    html+='</tbody></table></div>';
+  });
+  var velho=document.getElementById('apAdExTempModal'); if(velho) velho.remove();
+  var ov=document.createElement('div'); ov.id='apAdExTempModal'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99998;display:flex;align-items:center;justify-content:center;padding:14px';
+  ov.innerHTML='<div style="background:#fff;color:#111;border-radius:10px;width:min(1500px,100%);max-height:94vh;overflow:auto;padding:16px 18px;box-shadow:0 12px 40px rgba(0,0,0,.4)">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><b style="font-size:16px">➕➖ Adições e Exclusões Temporárias — '+ano+'</b><span style="display:flex;gap:8px"><button onclick="abrirAdicoesExclusoes()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer" title="Cadastro das contas usadas no botão +">Cadastro de contas</button><button onclick="document.getElementById(\'apAdExTempModal\').remove()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Fechar</button></span></div>'
+    +'<div style="font-size:12px;color:#555;margin:6px 0 4px">Relação anual das adições e exclusões TEMPORÁRIAS lançadas na apuração, mês a mês, com o saldo do mês e o saldo acumulado. Para lançar: botão <b>+</b> ou <b>⚙</b> nas linhas "Adições/Exclusões Temporárias".</div>'+html+'</div>';
+  document.body.appendChild(ov);
 }
