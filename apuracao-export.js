@@ -224,7 +224,7 @@
       linhas+=linha('real','Lucro Real (balanço de suspensão/redução)',r,tr_)+linha('rb','Receita Bruta (estimativa)',b,tb);
     }
     var corpo='<div style="font-size:12.5px;color:#555;margin:0 0 10px;padding:10px 12px;background:#f5f5f5;border-radius:4px">Valores mensais a recolher: <b>Lucro Real</b> (o que está na apuração anual) × <b>Receita Bruta</b> (apuração por estimativa). A linha <span style="background:#dcfce7;padding:0 6px">verde clara</span> é a de <b>menor valor</b> (ou zero) do mês. Marque <b>escolhi</b> na opção adotada: o saldo ao lado soma, mês a mês, só o que foi escolhido.</div>'
-      +'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+'">MÊS</th><th style="'+th+';text-align:left">OPÇÃO</th><th style="'+th+'">CSLL A RECOLHER</th><th style="'+th+'">IRPJ A RECOLHER</th><th style="'+th+'">TOTAL DO MÊS</th><th style="'+th+'">ESCOLHA</th><th style="'+th+'">SALDO CSLL ACUMULADO</th><th style="'+th+'">SALDO IRPJ ACUMULADO</th><th style="'+th+'">SALDO ESCOLHIDO ACUMULADO</th></tr></thead><tbody>'+linhas+'</tbody></table></div>';
+      +'<div style="overflow:visible"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+'">MÊS</th><th style="'+th+';text-align:left">OPÇÃO</th><th style="'+th+'">CSLL A RECOLHER</th><th style="'+th+'">IRPJ A RECOLHER</th><th style="'+th+'">TOTAL DO MÊS</th><th style="'+th+'">ESCOLHA</th><th style="'+th+'">SALDO CSLL ACUMULADO</th><th style="'+th+'">SALDO IRPJ ACUMULADO</th><th style="'+th+'">SALDO ESCOLHIDO ACUMULADO</th></tr></thead><tbody>'+linhas+'</tbody></table></div>';
     telaCheia('apuracaoFormMelhor','🏆','Melhor opção — Lucro Real Anual — '+M.ano,corpo,'<button class="btn bo bsm" onclick="_apMelhorMarcarMenor()">Marcar a menor em todos os meses</button><button class="btn bo bsm" onclick="_apMelhorLimpar()">Limpar escolhas</button>');
   };
   root.abrirMelhorOpcao=function(){
@@ -239,7 +239,7 @@
     var aberta=false;
     sec.linhas.forEach(function(l){
       var c0=l.cells[0], barra=(c0.span===13&&c0.bg==='#000000');
-      if(barra){ if(aberta) corpo+='</tbody></table></div>'; corpo+='<div style="font-weight:700;color:#fff;background:#000;padding:8px 12px;margin-top:14px">'+ESC(c0.v)+'</div><div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><tbody>'; aberta=true; return; }
+      if(barra){ if(aberta) corpo+='</tbody></table></div>'; corpo+='<div style="font-weight:700;color:#fff;background:#000;padding:8px 12px;margin-top:14px">'+ESC(c0.v)+'</div><div style="overflow:visible"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><tbody>'; aberta=true; return; }
       if(!aberta) return;
       corpo+='<tr>';
       l.cells.forEach(function(cl){ var st=[]; if(cl.bg) st.push('background:'+cl.bg); st.push('color:'+(cl.fg&&cl.bg?cl.fg:(cl.bg?'#111':(cl.fg||'#111')))); if(cl.b) st.push('font-weight:700'); st.push('text-align:'+(cl.al==='c'?'center':(cl.n?'right':'left')));

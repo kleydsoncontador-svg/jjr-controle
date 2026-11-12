@@ -119,7 +119,7 @@
       +(ST.bloco!=='div'?'<span style="color:#555">⚙ em cada linha: de quais contas ou grupos do Balancete o valor vem (preenche o Contábil).</span>':'')
       +(ST.bloco==='div'?'<span style="color:#555">Só leitura: Contábil menos Fiscal.</span>':'')
       +(ST.modo==='rb'?'':'<span style="margin-left:auto">Calcular com: '+btn('Fiscal','ApPres.set(\'calcCom\',\'fisc\')',ST.calcCom==='fisc','padding:3px 9px')+btn('Contábil','ApPres.set(\'calcCom\',\'cont\')',ST.calcCom==='cont','padding:3px 9px')+'</span>')+'</div>';
-    h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
+    h+='<div style="overflow:visible"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
     for(var i=0;i<N;i++) h+='<th style="'+TH+'">'+P.rot(i)+'<br><small style="font-size:10px;opacity:.8">'+(ST.ano)+'</small></th>';
     h+='<th style="'+TH+'">TOTAL</th></tr></thead><tbody>';
     GRUPOS.forEach(function(g){
@@ -162,7 +162,7 @@
     var barra=function(t,cor){ return '<tr style="background:'+cor+';color:white;font-weight:bold"><td colspan="'+(N+3)+'" style="padding:8px 12px;border:1px solid #ccc">'+t+'</td></tr>'; };
     var dedLinhas=function(ids,rotulo){ var s=''; DED.filter(function(d){ return ids.indexOf(d[0])>=0; }).forEach(function(d){ s+='<tr><td style="border:none;width:34px"></td><td style="padding:6px 12px;border:1px solid #ccc;background:white">'+ESC(d[1])+'</td>'; for(var i=0;i<N;i++) s+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-ded="'+d[0]+'" data-i="'+i+'" value="'+FMT(NUM(((R.ded||{})[d[0]]||[])[i]))+'" onfocus="this.select()" onchange="ApPres.digitouDed(this)" style="'+INP+'"></td>'; s+='<td style="'+TDI+';background:#fafafa"></td></tr>'; }); return s; };
     var h='<div style="font-weight:700;color:#1E3558;margin:0 0 6px;font-size:13px">CÁLCULO'+(usouAlt?' <span style="font-weight:400;color:#b45309">— o bloco escolhido está vazio; calculando com o '+(usouAlt==='cont'?'Contábil':'Fiscal')+'</span>':'')+'</div>'
-      +'<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
+      +'<div style="overflow:visible"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
     for(var k=0;k<N;k++) h+='<th style="'+TH+'">'+per0.rot(k)+'</th>'; h+='<th style="'+TH+'">TOTAL</th></tr></thead><tbody>';
     h+=barra('RECEITA BRUTA DAS ATIVIDADES (comércio / indústria + serviços) — base do limite da LC 224/2025','#2D3447');
     h+=linha('Comércio e indústria (vendas + revendas)',function(o){ return o.com; });
@@ -492,7 +492,7 @@ function _apMelhorDesenhar(){
     +'<button onclick="_apMelhorLimpar()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Limpar escolhas</button>'
     +'<button onclick="document.getElementById(\'apMelhorModal\').remove()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Fechar</button></span></div>'
     +'<div style="font-size:12px;color:#555;margin:6px 0 8px">Valores mensais a recolher: <b>Lucro Real</b> (o que está na apuração anual) × <b>Receita Bruta</b> (apuração por estimativa). A linha <span style="background:#dcfce7;padding:0 6px">verde clara</span> é a de <b>menor valor</b> (ou zero) do mês. Marque <b>escolhi</b> na opção adotada: o saldo ao lado soma, mês a mês, só o que foi escolhido.</div>'
-    +'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12.5px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+'">MÊS</th><th style="'+th+';text-align:left">OPÇÃO</th><th style="'+th+'">CSLL A RECOLHER</th><th style="'+th+'">IRPJ A RECOLHER</th><th style="'+th+'">TOTAL DO MÊS</th><th style="'+th+'">ESCOLHA</th><th style="'+th+'">SALDO CSLL ACUMULADO</th><th style="'+th+'">SALDO IRPJ ACUMULADO</th><th style="'+th+'">SALDO ESCOLHIDO ACUMULADO</th></tr></thead><tbody>'+linhas+'</tbody></table></div>';
+    +'<div style="overflow:visible"><table style="border-collapse:collapse;font-size:12.5px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+'">MÊS</th><th style="'+th+';text-align:left">OPÇÃO</th><th style="'+th+'">CSLL A RECOLHER</th><th style="'+th+'">IRPJ A RECOLHER</th><th style="'+th+'">TOTAL DO MÊS</th><th style="'+th+'">ESCOLHA</th><th style="'+th+'">SALDO CSLL ACUMULADO</th><th style="'+th+'">SALDO IRPJ ACUMULADO</th><th style="'+th+'">SALDO ESCOLHIDO ACUMULADO</th></tr></thead><tbody>'+linhas+'</tbody></table></div>';
   var ov=document.getElementById('apMelhorModal'), pos=0;
   if(!ov){ ov=document.createElement('div'); ov.id='apMelhorModal'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99998;display:flex;align-items:center;justify-content:center;padding:14px'; ov.innerHTML='<div id="apMelhorCorpo" style="background:#fff;color:#111;border-radius:10px;width:min(1200px,100%);max-height:94vh;overflow:auto;padding:16px 18px;box-shadow:0 12px 40px rgba(0,0,0,.4)"></div>'; document.body.appendChild(ov); }
   var corpo=document.getElementById('apMelhorCorpo'); pos=corpo.scrollTop; corpo.innerHTML=html; corpo.scrollTop=pos;
@@ -534,7 +534,7 @@ async function abrirResultadoMensal(){
     +'<div class="ptitle" style="position:sticky;top:52px;z-index:50;background:var(--white);border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;gap:12px;flex:1"><span style="font-size:1.6rem">📋</span><span>Resultado mensal — Lucro Real Anual — '+ano+'</span></div>'
     +'<div style="display:flex;gap:8px"><button class="btn bo bsm" onclick="fecharResultadoMensal()">← Voltar à apuração anual</button></div></div>'
     +'<div style="padding:16px 20px 24px 20px"><div style="font-size:12.5px;color:#555;margin-bottom:10px;padding:10px 12px;background:#f5f5f5;border-radius:4px">Só informativo, sem cálculo: o valor <b>do mês</b> (não acumulado) de cada linha ligada ao Balancete pelo ⚙, e o <b>total</b> dos meses. Na tela principal os valores são acumulados desde janeiro. As contas que você ligar nas Adições e Exclusões também entram aqui.</div>'
-    +'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+';text-align:left;min-width:380px">DESCRIÇÃO</th>'+nomes.map(function(n){ return '<th style="'+th+';min-width:104px">'+n+'</th>'; }).join('')+'<th style="'+th+';min-width:120px">TOTAL</th></tr></thead><tbody>'+corpo+'</tbody></table></div></div>';
+    +'<div style="overflow:visible"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+';text-align:left;min-width:380px">DESCRIÇÃO</th>'+nomes.map(function(n){ return '<th style="'+th+';min-width:104px">'+n+'</th>'; }).join('')+'<th style="'+th+';min-width:120px">TOTAL</th></tr></thead><tbody>'+corpo+'</tbody></table></div></div>';
   ['apuracaoTipoModal','apuracaoGerenciador','apuracaoFormAnual','parteBFormAnual','apuracaoFormPres'].forEach(function(id){ var e=document.getElementById(id); if(e) e.style.display='none'; });
   c.style.display='flex'; window.scrollTo(0,0);
 }
@@ -554,3 +554,14 @@ function _apMoverMesFiscal(){
   barra.insertBefore(wrap,barra.querySelector('button[onclick*="voltarApuracao"]')||null);
   var corpo=document.getElementById('apuracaoFormAnoConteudo'); var raiz=corpo&&corpo.firstElementChild; if(raiz) raiz.style.padding='6px 20px 20px 52px';
 }
+
+/* Cabeçalho (descrição + meses/datas) CONGELADO nas telas de apuração: fica fixo logo abaixo da barra de título enquanto a tabela rola (pedido do usuário 12/11/2026) */
+function _apAjustaTopo(){
+  var ids=['apuracaoFormAnual','apuracaoFormPres','apuracaoFormResMensal','apuracaoFormMelhor','apuracaoFormAdEx'], vis=null;
+  for(var i=0;i<ids.length;i++){ var e=document.getElementById(ids[i]); if(e&&e.style.display&&e.style.display!=='none'){ vis=e; break; } }
+  if(!vis) return;
+  var pt=vis.querySelector('.ptitle'), h=document.querySelector('header'), topo=(h?h.offsetHeight:52);
+  var alt=pt?pt.offsetHeight:0, v=(topo+alt)+'px';
+  if(document.documentElement.style.getPropertyValue('--ap-top')!==v) document.documentElement.style.setProperty('--ap-top',v);
+}
+setInterval(_apAjustaTopo,500);
