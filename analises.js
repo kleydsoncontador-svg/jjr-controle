@@ -218,7 +218,7 @@
         <button class="btn bo bsm" onclick="anSugerir('${eid}')" ${chart.length ? '' : 'disabled'} title="Procura no plano de contas do balancete importado as contas que faltam, pelo nome">✨ Sugerir pelo plano da empresa</button>
         ${cfg ? `<button class="btn bo bsm" onclick="anCancelarEdicao('${eid}')">Cancelar</button>` : ''}</div>`;
   }
-  function cartaoHtml(eid) {
+  function cartaoHtml(eid, soCorpo) {
     const e = emp(eid), cfg = cfgGet(eid), aberto = !!AN.aberto[eid], ed = AN.editando[eid] || !cfg;
     let corpo = '';
     if (aberto) {
@@ -234,6 +234,7 @@
           ${AN.resultado[eid] ? `<button class="action-btn action-btn-excel" onclick="anExcel('${eid}')">📊 Excel</button><button class="action-btn action-btn-pdf" onclick="anImprimir('${eid}')">🖨️ PDF</button>` : ''}</div>
           <div id="anMsg_${eid}" style="font-size:12px;margin:6px 0"></div><div id="anRes_${eid}">${AN.resultado[eid] ? resultadoHtml(eid) : ''}</div></div>`;
     }
+    if (soCorpo) return corpo;
     return `<div style="background:var(--white);border:1px solid var(--border);border-radius:8px;margin-bottom:12px;padding:12px 14px">
       <div style="display:flex;align-items:center;gap:10px;cursor:pointer" onclick="anToggle('${eid}')"><span style="color:var(--slate)">${aberto ? '▾' : '▸'}</span><b>#${E(eid)} - ${E(e ? e.nome : '')}</b><span style="font-family:monospace;color:var(--slate);font-size:12px">${E(e ? e.cnpj || '' : '')}</span>
         <span style="font-size:11px;border-radius:10px;padding:2px 8px;${cfg ? 'background:#16a34a22;color:#16a34a' : 'background:#d9770622;color:#d97706'}">${cfg ? 'Contas definidas' : 'Definir contas'}</span>
@@ -244,11 +245,44 @@
     return `<div style="font-size:12px;color:var(--slate);margin-bottom:6px">Balancete de <b>${E(compBr(res.periodo))}</b> — acumulado do exercício (${res.mes} mês(es)).</div>${res.avisos.length ? `<div style="font-size:11.5px;color:#d97706;margin-bottom:8px">${res.avisos.map(a => '⚠ ' + E(a)).join('<br>')}</div>` : ''}${listaHtml(res)}${origemHtml(res)}`;
   }
   window.renderAnalisesLista = function () {
+    // Mesma listagem em tabela, com filtro por coluna e Período finalizado, da tela de Empréstimos (pedido do usuário 12/11/2026)
     const cont = document.getElementById('analisesListaContainer'); if (!cont) return;
-    const adic = ensureMenuAdicionadasMigrado('analises'); const eids = Object.keys(adic).sort((a, b) => Number(a) - Number(b));
-    let lista = eids;
-    if (typeof _empresaGlobal !== 'undefined' && _empresaGlobal) lista = eids.filter(x => x === String(_empresaGlobal));
-    cont.innerHTML = lista.length ? lista.map(cartaoHtml).join('') : '<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma empresa na lista. Inclua uma empresa acima para começar: primeiro você define as contas contábeis, depois importa o balancete do mês.</div>';
+    const adic = ensureMenuAdicionadasMigrado('analises'); let eids = Object.keys(adic).sort((a, b) => Number(a) - Number(b));
+    if (typeof _empresaGlobal !== 'undefined' && _empresaGlobal) eids = eids.filter(x => x === String(_empresaGlobal));
+    if (!eids.length) { cont.innerHTML = '<div style="text-align:center;color:var(--slate);padding:40px 20px">Nenhuma empresa na lista. Inclua uma empresa acima para começar: primeiro você define as contas contábeis, depois importa o balancete do mês.</div>'; return; }
+    const emps = S.emps(), empDe = eid => emps.find(x => String(x.eid) === String(eid)) || {};
+    const f = _menuListaColF['analises'] = _menuListaColF['analises'] || { id: '', empresa: '', grupo: '', cnpj: '', resp: '', trib: '' };
+    const uniq = arr => [...new Set(arr.filter(Boolean))].sort((x, y) => String(x).localeCompare(String(y), 'pt-BR'));
+    const responsaveis = uniq(eids.map(eid => respEmpMes(empDe(eid)))), tribs = uniq(eids.map(eid => empDe(eid).reg)), grupos = uniq(eids.map(eid => empDe(eid).grupoNome));
+    if (f.id) eids = eids.filter(eid => String(eid).includes(f.id.trim()));
+    if (f.empresa) { const t = f.empresa.trim().toLowerCase(); eids = eids.filter(eid => (empDe(eid).nome || '').toLowerCase().includes(t)); }
+    if (f.cnpj) { const t = f.cnpj.replace(/\D/g, ''); eids = eids.filter(eid => (empDe(eid).cnpj || '').replace(/\D/g, '').includes(t)); }
+    if (f.resp) eids = eids.filter(eid => respEmpMes(empDe(eid)) === f.resp);
+    if (f.grupo) eids = eids.filter(eid => empDe(eid).grupoNome === f.grupo);
+    if (f.trib) eids = eids.filter(eid => empDe(eid).reg === f.trib);
+    const th = 'background:var(--ink2);color:#fff;white-space:nowrap';
+    let h = `<div class="tw" style="overflow-x:auto"><table class="data" style="width:100%"><thead style="position:sticky;top:0;z-index:20"><tr style="background:var(--ink2)">
+      <th style="${th};text-align:center;width:36px">ID</th><th style="${th}">Empresa</th><th style="${th}">Grupo</th><th style="${th};min-width:160px">CNPJ</th><th style="${th}">Resp.</th><th style="${th}">Tributação</th><th style="${th};text-align:center">Período finalizado</th><th style="${th}"></th>
+      </tr><tr id="analisesListaColFiltros"></tr></thead><tbody>`;
+    eids.forEach(eid => {
+      const e = empDe(eid); if (!e.eid) return;
+      const cfg = cfgGet(eid), aberto = !!AN.aberto[eid];
+      const valSalvo = getMenuFinalizado('analises', eid) || '', valExibicao = valSalvo ? valSalvo.split('-')[1] + '/' + valSalvo.split('-')[0] : '';
+      h += `<tr style="cursor:pointer" onclick="anToggle('${eid}')">
+        <td style="text-align:center"><span class="idtag">${E(e.eid)}</span></td>
+        <td><span style="color:var(--slate)">${aberto ? '▾' : '▸'}</span> <b style="color:#1E3558">${E(e.nome)}</b> <span style="font-size:11px;border-radius:10px;padding:2px 8px;${cfg ? 'background:#16a34a22;color:#16a34a' : 'background:#d9770622;color:#d97706'}">${cfg ? 'Contas definidas' : 'Definir contas'}</span></td>
+        <td style="font-size:12px;white-space:nowrap">${E(e.grupoNome || '—')}</td>
+        <td style="font-family:var(--mono);color:var(--slate)">${E(e.cnpj || '')}</td>
+        <td>${E(respEmpMes(e) || '—')}</td>
+        <td style="font-size:12px">${E(e.reg || '—')}</td>
+        <td style="text-align:center" onclick="event.stopPropagation()"><input type="text" value="${E(valExibicao)}" placeholder="MM/AAAA" maxlength="7" style="padding:4px 6px;font-size:11px;border:1px solid var(--border);border-radius:3px;width:75px;text-align:center" oninput="formatarMesAno(this)" onblur="onMesAnoFinalizadoBlur(this,'analises','${eid}')"></td>
+        <td style="text-align:center"><button class="icon-btn" onclick="event.stopPropagation();excluirEmpresaMenu('analises','${eid}')" title="Remover da lista" style="padding:6px;background:none;border:none;cursor:pointer;color:#dc2626">🗑️</button></td></tr>`;
+      if (aberto) h += `<tr><td colspan="8" style="padding:6px 16px 16px;background:var(--bg)">${cartaoHtml(eid, true)}</td></tr>`;
+    });
+    if (!eids.length) h += '<tr><td colspan="8" style="padding:20px;text-align:center;color:var(--slate)">Nenhuma empresa com esse filtro.</td></tr>';
+    h += '</tbody></table></div>';
+    cont.innerHTML = h;
+    _menuListaRenderColFiltros('analises', responsaveis, tribs, grupos);
   };
 
   // ───────────── ações ─────────────
