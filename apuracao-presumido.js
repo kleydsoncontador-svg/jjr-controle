@@ -498,9 +498,9 @@ function _apMelhorDesenhar(){
   var corpo=document.getElementById('apMelhorCorpo'); pos=corpo.scrollTop; corpo.innerHTML=html; corpo.scrollTop=pos;
 }
 function _apMelhorSalvar(){ var M=window._apMelhor; try{ S.s(_apMelhorChave(M.eid,M.ano),M.escolha); }catch(e){ toast('Erro ao salvar a escolha: '+(e.message||e),'err'); } }
-function _apMelhorEscolher(i,op,el){ var M=window._apMelhor; if(M.escolha[i]===op){ delete M.escolha[i]; } else M.escolha[i]=op; _apMelhorSalvar(); _apMelhorDesenhar(); }
-function _apMelhorMarcarMenor(){ var M=window._apMelhor; for(var i=0;i<12;i++){ var a=M.real[i].c+M.real[i].i, b=M.rb[i].c+M.rb[i].i; M.escolha[i]=(b<a-0.005)?'rb':'real'; } _apMelhorSalvar(); _apMelhorDesenhar(); }
-function _apMelhorLimpar(){ var M=window._apMelhor; if(!confirm('Limpar as escolhas de todos os meses?')) return; M.escolha={}; _apMelhorSalvar(); _apMelhorDesenhar(); }
+async function _apMelhorEscolher(i,op,el){ var M=window._apMelhor; if(M.escolha[i]===op){ delete M.escolha[i]; } else M.escolha[i]=op; _apMelhorSalvar(); await _apMelhorRecalcular(); _apMelhorDesenhar(); }
+async function _apMelhorMarcarMenor(){ var M=window._apMelhor; for(var i=0;i<12;i++){ var a=M.real[i].c+M.real[i].i, b=M.rb[i].c+M.rb[i].i; M.escolha[i]=(b<a-0.005)?'rb':'real'; } _apMelhorSalvar(); await _apMelhorRecalcular(); _apMelhorDesenhar(); }
+async function _apMelhorLimpar(){ var M=window._apMelhor; if(!confirm('Limpar as escolhas de todos os meses?')) return; M.escolha={}; _apMelhorSalvar(); await _apMelhorRecalcular(); _apMelhorDesenhar(); }
 
 /* ── Resultado mensal (Lucro Real Anual) — pedido do usuário 12/11/2026 ──
    Listagem só informativa: o valor MENSAL (não acumulado) de cada linha ligada ao Balancete, mês a mês, com a coluna TOTAL. Não calcula nada. */
@@ -565,3 +565,39 @@ function _apAjustaTopo(){
   if(document.documentElement.style.getPropertyValue('--ap-top')!==v) document.documentElement.style.setProperty('--ap-top',v);
 }
 setInterval(_apAjustaTopo,500);
+
+/* ── "CSLL Paga em Meses Anteriores" e "IRPJ Pago em Meses Anteriores" vindos da Melhor opção (pedido do usuário 12/11/2026) ──
+   Em cada mês, o campo traz a SOMA do que foi escolhido na Melhor opção nos meses anteriores (jan → o 0; fev → o escolhido de jan; mar → jan + fev ...). Escolher a opção errada em janeiro muda o que sobra a recolher dos meses seguintes.
+   O "a recolher" já nunca fica negativo (se a provisão menos as deduções der negativo, fica zero). Só mexe nesses campos quando existe ao menos uma escolha; sem escolha, ficam livres para digitar. */
+async function _apAplicarPagoAnteriores(eid,ano){
+  var esc={}; try{ esc=S.g('apuracao_melhor_'+eid+'_'+ano)||{}; }catch(e){}
+  var temEscolha=Object.keys(esc).some(function(k){ return esc[k]==='real'||esc[k]==='rb'; });
+  var fmt=function(v){ return (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+  var lerNum=function(id){ var e=document.getElementById(id), t=String(e?e.value:'').trim(); if(!t) return 0; return typeof desformatarNumero==='function'?(desformatarNumero(t)||0):parseFloat(t.replace(/\./g,'').replace(',','.'))||0; };
+  var espera=function(ms){ return new Promise(function(r){ setTimeout(r,ms); }); };
+  if(!document.getElementById('csll_paga_0')) return false;
+  var rb=(window.ApPres&&ApPres.resumoRB)?ApPres.resumoRB(eid,ano):[], accC=0, accI=0;
+  for(var i=0;i<12;i++){
+    var c=document.getElementById('csll_paga_'+i), p=document.getElementById('irpj_pago_'+i);
+    if(!c||!p) continue;
+    if(temEscolha){
+      c.value=fmt(accC); p.value=fmt(accI); c.readOnly=true; p.readOnly=true;
+      c.title=p.title='Calculado pela Melhor opção: soma do que foi escolhido nos meses anteriores';
+      try{ calcularTodosBCN(); }catch(e){}
+      await espera(170);
+      var op=esc[i], o=rb[i]||{};
+      if(op==='real'){ accC+=lerNum('csll_recolher_'+i); accI+=lerNum('irpj_recolher_'+i); }
+      else if(op==='rb'){ accC+=Number(o.cPagar)||0; accI+=Number(o.iPagar)||0; }
+    } else if(c.readOnly||p.readOnly){ c.readOnly=false; p.readOnly=false; c.title=p.title=''; }
+  }
+  try{ calcularTodosBCN(); }catch(e){}
+  try{ salvarApuracaoSupabase(); }catch(e){}
+  return true;
+}
+async function _apMelhorRecalcular(){
+  var M=window._apMelhor; if(!M) return;
+  await _apAplicarPagoAnteriores(M.eid,M.ano);
+  await new Promise(function(r){ setTimeout(r,250); });
+  var num=function(id){ var e=document.getElementById(id), t=String(e?e.value:'').trim(); if(!t) return 0; return typeof desformatarNumero==='function'?(desformatarNumero(t)||0):parseFloat(t.replace(/\./g,'').replace(',','.'))||0; };
+  for(var i=0;i<12;i++){ M.real[i]={c:Math.max(0,num('csll_recolher_'+i)),i:Math.max(0,num('irpj_recolher_'+i))}; }
+}
