@@ -394,6 +394,7 @@ async function _apAdExAplicar(eid,ano){
           var contas=meses[String(i+1).padStart(2,'0')]; if(!contas) continue;
           var inp=document.getElementById(pref+'_'+jj+'_'+i); if(!inp) continue;
           acum+=_apBalValor(contas,[it],it.nat||T.nat); var v=Math.round(acum*100)/100;
+          if(_apManualGet(eid,ano)[inp.id]) continue; // ajustado à mão: o Balancete não sobrescreve
           inp.value=v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
           inp.dispatchEvent(new Event('input',{bubbles:true})); inp.dispatchEvent(new Event('blur',{bubbles:true}));
         }
@@ -401,6 +402,7 @@ async function _apAdExAplicar(eid,ano){
     });
   });
   try{ for(var i=0;i<12;i++) calcularMesApuracao(i); }catch(e){}
+  try{ _apManualMarcar(eid,ano); }catch(e){}
   try{ setTimeout(function(){ if(typeof _apAplicarPagoAnteriores==='function') _apAplicarPagoAnteriores(eid,ano); },400); }catch(e){} // as linhas filhas mudaram a base: refaz o "pago em meses anteriores"
 }
 
@@ -613,3 +615,30 @@ async function _apMelhorRecalcular(){
   var num=function(id){ var e=document.getElementById(id), t=String(e?e.value:'').trim(); if(!t) return 0; return typeof desformatarNumero==='function'?(desformatarNumero(t)||0):parseFloat(t.replace(/\./g,'').replace(',','.'))||0; };
   for(var i=0;i<12;i++){ M.real[i]={c:Math.max(0,num('csll_recolher_'+i)),i:Math.max(0,num('irpj_recolher_'+i))}; }
 }
+
+/* ── Ajuste manual protegido (pedido do usuário 12/11/2026: "eu tinha ajustado a base de julho e você desfez") ──
+   As linhas ligadas ao Balancete (⚙) eram reescritas a cada abertura da tela, apagando o que o usuário digitou. Agora, o que for DIGITADO na mão numa dessas células fica marcado (contorno laranja) e o Balancete não sobrescreve mais.
+   Apagar o valor da célula (deixar vazia) devolve ela ao Balancete. Guardado em apuracao_manual_<eid>_<ano>. */
+function _apManualGet(eid,ano){ try{ return S.g('apuracao_manual_'+eid+'_'+ano)||{}; }catch(e){ return {}; } }
+function _apManualEhPreenchivel(eid,id){
+  if(/^(ad_perm|ad_temp|excl_perm|excl_temp)(_irpj)?_\d+_\d+$/.test(id)) return true;
+  var m=id.match(/^(.*)_(\d+)$/); if(!m) return false;
+  try{ return ((_apBalMapa(eid)||{})[m[1]]||[]).length>0; }catch(e){ return false; }
+}
+function _apManualMarcar(eid,ano){
+  var m=_apManualGet(eid,ano);
+  Object.keys(m).forEach(function(id){ var el=document.getElementById(id); if(!el) return; el.style.outline='2px solid #f59e0b'; el.style.outlineOffset='-2px'; el.title='Ajustado manualmente — o Balancete não sobrescreve. Apague o valor para voltar ao Balancete.'; });
+}
+(function(){
+  if(window.__apManualInit) return; window.__apManualInit=true;
+  document.addEventListener('change',function(e){
+    try{
+      var t=e.target; if(!e.isTrusted||!t||t.tagName!=='INPUT'||!t.id||t.readOnly) return;
+      var eid=window._currentApuracaoEid, ano=window._currentApuracaoAno||window._apuracaoAnoNovo; if(!eid||!ano||!t.closest('#apuracaoFormAnoConteudo')) return;
+      if(/_total_\d+$/.test(t.id)||!_apManualEhPreenchivel(eid,t.id)) return;
+      var m=Object.assign({},_apManualGet(eid,ano)), v=String(t.value||'').trim();
+      if(v===''){ delete m[t.id]; t.style.outline=''; t.title=''; } else m[t.id]=1;
+      S.s('apuracao_manual_'+eid+'_'+ano,m); _apManualMarcar(eid,ano);
+    }catch(err){ console.warn('Ajuste manual:',err); }
+  },true);
+})();
