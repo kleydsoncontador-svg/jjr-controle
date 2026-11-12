@@ -401,3 +401,58 @@ function abrirAdExTemporarias(){
     +'<div style="font-size:12px;color:#555;margin:6px 0 4px">Relação anual das adições e exclusões TEMPORÁRIAS lançadas na apuração, mês a mês, com o saldo do mês e o saldo acumulado. Para lançar: botão <b>+</b> ou <b>⚙</b> nas linhas "Adições/Exclusões Temporárias".</div>'+html+'</div>';
   document.body.appendChild(ov);
 }
+
+/* ── Melhor opção (Lucro Real Anual): compara, mês a mês, o que sai pelo Lucro Real × pela Receita Bruta (estimativa) — pedido do usuário 12/11/2026 ──
+   Duas linhas por mês (CSLL e IRPJ a recolher em cada opção). A linha de MENOR total (ou zero) fica verde claro; o usuário marca qual escolheu (flag) e a coluna de saldo soma, mês a mês, o que foi escolhido. */
+function _apMelhorChave(eid,ano){ return 'apuracao_melhor_'+eid+'_'+ano; }
+function abrirMelhorOpcao(){
+  var eid=window._currentApuracaoEid, ano=window._currentApuracaoAno||2026;
+  var cont=document.getElementById('apuracaoFormAnoConteudo'); if(!eid||!cont){ toast('Abra a apuração do Lucro Real primeiro','err'); return; }
+  var num=function(id){ var e=document.getElementById(id); var v=String(e?e.value:'').trim(); if(!v) return 0; if(typeof desformatarNumero==='function') return desformatarNumero(v)||0; return parseFloat(v.replace(/\./g,'').replace(',','.'))||0; };
+  var real=[], rb=(window.ApPres&&ApPres.resumoRB)?ApPres.resumoRB(eid,ano):[];
+  for(var i=0;i<12;i++){ real.push({c:Math.max(0,num('csll_recolher_'+i)),i:Math.max(0,num('irpj_recolher_'+i))}); }
+  var rbv=[]; for(i=0;i<12;i++){ var o=rb[i]||{}; rbv.push({c:Number(o.cPagar)||0,i:Number(o.iPagar)||0}); }
+  var escolha={}; try{ escolha=S.g(_apMelhorChave(eid,ano))||{}; }catch(e){}
+  window._apMelhor={eid:eid,ano:ano,real:real,rb:rbv,escolha:escolha};
+  _apMelhorDesenhar();
+}
+function _apMelhorDesenhar(){
+  var M=window._apMelhor; if(!M) return;
+  var fmt=function(v){ return (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+  var meses=['Janeiro','Fevereiro','Março','Abril','Maio','Junho','Julho','Agosto','Setembro','Outubro','Novembro','Dezembro'];
+  var th='padding:6px 8px;background:#2D3447;color:#fff;border:1px solid #2D3447;text-align:center;white-space:nowrap';
+  var td='padding:5px 10px;border:1px solid #ccc;text-align:right;white-space:nowrap';
+  var acC=0,acI=0,acT=0, linhas='';
+  for(var i=0;i<12;i++){
+    var r=M.real[i], b=M.rb[i], tr_=r.c+r.i, tb=b.c+b.i, esc=M.escolha[i]||'';
+    var menor=Math.abs(tr_-tb)<0.005?'ambos':(tr_<tb?'real':'rb');
+    var ac='';
+    if(esc==='real'){ acC+=r.c; acI+=r.i; acT+=tr_; } else if(esc==='rb'){ acC+=b.c; acI+=b.i; acT+=tb; }
+    var linha=function(op,rot,v,t){
+      var verde=(menor===op||menor==='ambos');
+      var bg=verde?'background:#dcfce7;':'';
+      var marcado=(esc===op);
+      return '<tr style="'+bg+'"'+(marcado?'':'')+'>'
+        +(op==='real'?'<td rowspan="2" style="'+td+';text-align:left;font-weight:700;background:#f0f4f8;vertical-align:middle">'+meses[i]+'</td>':'')
+        +'<td style="'+td+';text-align:left;'+bg+'">'+rot+(verde?' <span style="font-size:10.5px;color:#166534;font-weight:700">● menor valor</span>':'')+'</td>'
+        +'<td style="'+td+';'+bg+'">'+fmt(v.c)+'</td><td style="'+td+';'+bg+'">'+fmt(v.i)+'</td><td style="'+td+';font-weight:700;'+bg+'">'+fmt(t)+'</td>'
+        +'<td style="'+td+';text-align:center;'+bg+'"><label style="cursor:pointer"><input type="radio" name="apmel_'+i+'" '+(marcado?'checked':'')+' onclick="_apMelhorEscolher('+i+',\''+op+'\',this)"> escolhi</label></td>'
+        +(op==='real'?'<td rowspan="2" style="'+td+';font-weight:700;background:#fef9c3;vertical-align:middle" data-ac="'+i+'">'+(esc?fmt(acC)+'<div style="font-size:10.5px;font-weight:400;color:#555">CSLL</div>':'—')+'</td><td rowspan="2" style="'+td+';font-weight:700;background:#fef9c3;vertical-align:middle">'+(esc?fmt(acI)+'<div style="font-size:10.5px;font-weight:400;color:#555">IRPJ</div>':'—')+'</td><td rowspan="2" style="'+td+';font-weight:800;background:#FFD700;vertical-align:middle">'+(esc?fmt(acT):'—')+'</td>':'')
+        +'</tr>';
+    };
+    linhas+=linha('real','Lucro Real (balanço de suspensão/redução)',r,tr_)+linha('rb','Receita Bruta (estimativa)',b,tb);
+  }
+  var html='<div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap"><b style="font-size:16px">🏆 Melhor opção — '+M.ano+'</b><span style="display:flex;gap:8px">'
+    +'<button onclick="_apMelhorMarcarMenor()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer" title="Marca, em cada mês, a opção de menor valor (a de Lucro Real se empatar)">Marcar a menor em todos os meses</button>'
+    +'<button onclick="_apMelhorLimpar()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Limpar escolhas</button>'
+    +'<button onclick="document.getElementById(\'apMelhorModal\').remove()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Fechar</button></span></div>'
+    +'<div style="font-size:12px;color:#555;margin:6px 0 8px">Valores mensais a recolher: <b>Lucro Real</b> (o que está na apuração anual) × <b>Receita Bruta</b> (apuração por estimativa). A linha <span style="background:#dcfce7;padding:0 6px">verde clara</span> é a de <b>menor valor</b> (ou zero) do mês. Marque <b>escolhi</b> na opção adotada: o saldo ao lado soma, mês a mês, só o que foi escolhido.</div>'
+    +'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12.5px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+'">MÊS</th><th style="'+th+';text-align:left">OPÇÃO</th><th style="'+th+'">CSLL A RECOLHER</th><th style="'+th+'">IRPJ A RECOLHER</th><th style="'+th+'">TOTAL DO MÊS</th><th style="'+th+'">ESCOLHA</th><th style="'+th+'">SALDO CSLL ACUMULADO</th><th style="'+th+'">SALDO IRPJ ACUMULADO</th><th style="'+th+'">SALDO ESCOLHIDO ACUMULADO</th></tr></thead><tbody>'+linhas+'</tbody></table></div>';
+  var ov=document.getElementById('apMelhorModal'), pos=0;
+  if(!ov){ ov=document.createElement('div'); ov.id='apMelhorModal'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99998;display:flex;align-items:center;justify-content:center;padding:14px'; ov.innerHTML='<div id="apMelhorCorpo" style="background:#fff;color:#111;border-radius:10px;width:min(1200px,100%);max-height:94vh;overflow:auto;padding:16px 18px;box-shadow:0 12px 40px rgba(0,0,0,.4)"></div>'; document.body.appendChild(ov); }
+  var corpo=document.getElementById('apMelhorCorpo'); pos=corpo.scrollTop; corpo.innerHTML=html; corpo.scrollTop=pos;
+}
+function _apMelhorSalvar(){ var M=window._apMelhor; try{ S.s(_apMelhorChave(M.eid,M.ano),M.escolha); }catch(e){ toast('Erro ao salvar a escolha: '+(e.message||e),'err'); } }
+function _apMelhorEscolher(i,op,el){ var M=window._apMelhor; if(M.escolha[i]===op){ delete M.escolha[i]; } else M.escolha[i]=op; _apMelhorSalvar(); _apMelhorDesenhar(); }
+function _apMelhorMarcarMenor(){ var M=window._apMelhor; for(var i=0;i<12;i++){ var a=M.real[i].c+M.real[i].i, b=M.rb[i].c+M.rb[i].i; M.escolha[i]=(b<a-0.005)?'rb':'real'; } _apMelhorSalvar(); _apMelhorDesenhar(); }
+function _apMelhorLimpar(){ var M=window._apMelhor; if(!confirm('Limpar as escolhas de todos os meses?')) return; M.escolha={}; _apMelhorSalvar(); _apMelhorDesenhar(); }
