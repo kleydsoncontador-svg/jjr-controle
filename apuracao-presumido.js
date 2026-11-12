@@ -247,6 +247,7 @@
     var nome='', neg=false; GRUPOS.forEach(function(g){ g.itens.forEach(function(it){ if(it[0]===id){ nome=it[1]; neg=!!it[2]; } }); });
     var L={id:id,nome:nome,nat:neg?'D':'C'};
     _apBalAbrir(ST.eid,String(ST.ano),id,{
+      periodico:true,
       linha:L,
       getItens:function(){ return (mapa()[id]||[]).slice(); },
       salvar:function(itens){ var m=mapa(); if(itens.length) m[id]=itens; else delete m[id]; S.s(mapKey(),m); },
@@ -343,10 +344,11 @@ async function _apAdExAplicar(eid,ano){
           tr=i0.closest('tr'); tr.setAttribute('data-apadex',key); tr.setAttribute('data-apadex-j',String(j));
         }
         var jj=tr.getAttribute('data-apadex-j');
+        var acum=0; // acumulado desde janeiro, como as demais linhas da apuração anual
         for(var i=0;i<12;i++){
           var contas=meses[String(i+1).padStart(2,'0')]; if(!contas) continue;
           var inp=document.getElementById(pref+'_'+jj+'_'+i); if(!inp) continue;
-          var v=_apBalValor(contas,[it],it.nat||T.nat);
+          acum+=_apBalValor(contas,[it],it.nat||T.nat); var v=Math.round(acum*100)/100;
           inp.value=v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
           inp.dispatchEvent(new Event('input',{bubbles:true})); inp.dispatchEvent(new Event('blur',{bubbles:true}));
         }
@@ -456,3 +458,36 @@ function _apMelhorSalvar(){ var M=window._apMelhor; try{ S.s(_apMelhorChave(M.ei
 function _apMelhorEscolher(i,op,el){ var M=window._apMelhor; if(M.escolha[i]===op){ delete M.escolha[i]; } else M.escolha[i]=op; _apMelhorSalvar(); _apMelhorDesenhar(); }
 function _apMelhorMarcarMenor(){ var M=window._apMelhor; for(var i=0;i<12;i++){ var a=M.real[i].c+M.real[i].i, b=M.rb[i].c+M.rb[i].i; M.escolha[i]=(b<a-0.005)?'rb':'real'; } _apMelhorSalvar(); _apMelhorDesenhar(); }
 function _apMelhorLimpar(){ var M=window._apMelhor; if(!confirm('Limpar as escolhas de todos os meses?')) return; M.escolha={}; _apMelhorSalvar(); _apMelhorDesenhar(); }
+
+/* ── Resultado mensal (Lucro Real Anual) — pedido do usuário 12/11/2026 ──
+   Listagem só informativa: o valor MENSAL (não acumulado) de cada linha ligada ao Balancete, mês a mês, com a coluna TOTAL. Não calcula nada. */
+async function abrirResultadoMensal(){
+  var eid=window._currentApuracaoEid, ano=window._currentApuracaoAno||2026;
+  if(!eid){ toast('Abra a apuração do Lucro Real primeiro','err'); return; }
+  var fmt=function(v){ return (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); };
+  var meses=await _apBalMeses(eid,String(ano)), mp=_apBalMapa(eid), ax=_apAdExMapa(eid);
+  var linhas=[];
+  _AP_BAL_LINHAS.forEach(function(L){ linhas.push({rot:L.nome,itens:mp[L.id]||[],nat:L.nat,grupo:'RECEITAS E DESPESAS'}); });
+  Object.keys(_AP_ADEX_TIPOS).forEach(function(t){ (ax[t]||[]).forEach(function(it){ linhas.push({rot:_AP_ADEX_TIPOS[t].nome+' — '+it.nome+' ('+it.cls+')'+(it.aplica==='csll'?' · só CSLL':(it.aplica==='irpj'?' · só IRPJ':'')),itens:[it],nat:it.nat||_AP_ADEX_TIPOS[t].nat,grupo:'ADIÇÕES E EXCLUSÕES'}); }); });
+  var nomes=['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'];
+  var th='padding:6px 8px;background:#2D3447;color:#fff;border:1px solid #2D3447;text-align:center;white-space:nowrap';
+  var td='padding:4px 8px;border:1px solid #ccc;text-align:right;white-space:nowrap';
+  var corpo='', grupoAtual='';
+  linhas.forEach(function(l){
+    if(l.grupo!==grupoAtual){ grupoAtual=l.grupo; corpo+='<tr><td colspan="14" style="padding:5px 10px;background:#f0f4f8;font-weight:bold;color:#1E3558;border:1px solid #ccc">'+grupoAtual+'</td></tr>'; }
+    var tem=l.itens.length>0, tot=0, cel='';
+    for(var i=0;i<12;i++){
+      var c=meses[String(i+1).padStart(2,'0')];
+      if(!tem||!c){ cel+='<td style="'+td+';color:#999">'+(tem?'—':'')+'</td>'; continue; }
+      var v=_apBalValor(c,l.itens,l.nat); tot+=v; cel+='<td style="'+td+'">'+fmt(v)+'</td>';
+    }
+    corpo+='<tr><td style="padding:5px 10px;border:1px solid #ccc;'+(tem?'':'color:#999')+'">'+l.rot+(tem?'':' <span style="font-size:11px">(sem contas do Balancete ligadas — ⚙)</span>')+'</td>'+cel+'<td style="'+td+';font-weight:700;background:#fef9c3">'+(tem?fmt(tot):'')+'</td></tr>';
+  });
+  var velho=document.getElementById('apResMensalModal'); if(velho) velho.remove();
+  var ov=document.createElement('div'); ov.id='apResMensalModal'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99998;display:flex;align-items:center;justify-content:center;padding:14px';
+  ov.innerHTML='<div style="background:#fff;color:#111;border-radius:10px;width:min(1500px,100%);max-height:94vh;overflow:auto;padding:16px 18px;box-shadow:0 12px 40px rgba(0,0,0,.4)">'
+    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b style="font-size:16px">📋 Resultado mensal — '+ano+'</b><button onclick="document.getElementById(\'apResMensalModal\').remove()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Fechar</button></div>'
+    +'<div style="font-size:12px;color:#555;margin:6px 0 8px">Só informativo, sem cálculo: o valor <b>do mês</b> (não acumulado) de cada linha ligada ao Balancete pelo ⚙, e o <b>total</b> dos meses. Na tela principal os valores são acumulados desde janeiro.</div>'
+    +'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12.5px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+';text-align:left;min-width:340px">DESCRIÇÃO</th>'+nomes.map(function(n){ return '<th style="'+th+'">'+n+'</th>'; }).join('')+'<th style="'+th+'">TOTAL</th></tr></thead><tbody>'+corpo+'</tbody></table></div></div>';
+  document.body.appendChild(ov);
+}
