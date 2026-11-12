@@ -83,7 +83,7 @@
   }
   function abrir(modo,eid,ano){
     ST.modo=modo; ST.eid=String(eid||window._apuracaoEidAtual); ST.ano=ano||2026;
-    try{ if(typeof apuracaoRegistrarForma==='function') apuracaoRegistrarForma(ST.eid,modo,ST.ano); }catch(e){} ST.regime='comp'; ST.bloco='cont'; ST.calcCom='fisc';
+    try{ if(typeof apuracaoRegistrarForma==='function') apuracaoRegistrarForma(ST.eid,modo,ST.ano); }catch(e){} ST.regime='comp'; ST.bloco='cont'; ST.calcCom=(modo==='rb'?'cont':'fisc');
     ['apuracaoTipoModal','apuracaoGerenciador','apuracaoFormAnual','parteBFormAnual'].forEach(function(id){ var e=document.getElementById(id); if(e) e.style.display='none'; });
     var c=container(); if(!c){ toast('Tela de apuração não encontrada','err'); return; }
     c.style.display='flex'; desenhar();
@@ -106,19 +106,19 @@
     var h='<div class="ptitle" style="position:sticky;top:52px;z-index:50;background:var(--white);border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px">'
       +'<div style="display:flex;align-items:center;gap:12px;flex:1;min-width:280px"><span style="font-size:1.6rem">'+(ST.modo==='rb'?'📈':'💼')+'</span><span>'+ESC(titulo())+'</span></div>'
       +'<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">'
-      +btn('Por competência','ApPres.set(\'regime\',\'comp\')',ST.regime==='comp')+btn('Por caixa','ApPres.set(\'regime\',\'caixa\')',ST.regime==='caixa')
+      +(ST.modo==='rb'?'':(btn('Por competência','ApPres.set(\'regime\',\'comp\')',ST.regime==='comp')+btn('Por caixa','ApPres.set(\'regime\',\'caixa\')',ST.regime==='caixa')
       +'<span style="width:10px"></span>'
       +btn('Contábil','ApPres.set(\'bloco\',\'cont\')',ST.bloco==='cont')+btn('Fiscal','ApPres.set(\'bloco\',\'fisc\')',ST.bloco==='fisc')+btn('Divergências','ApPres.set(\'bloco\',\'div\')',ST.bloco==='div')
-      +'<span style="width:10px"></span>'
+      +'<span style="width:10px"></span>'))
       +'<button class="btn bo" onclick="ApPres.parametros()" style="padding:6px 12px">⚙ Parâmetros</button>'
       +'<button class="action-btn action-btn-excel" onclick="ApPres.excel()" style="padding:8px 14px;font-size:12.5px">📊 Gerar Excel</button>'
       +'<button class="btn bo bsm" onclick="ApPres.voltar()">← Voltar</button><span id="apPresStatus" style="font-size:12px;color:#666;margin-left:8px"></span></div></div>';
     h+='<div style="padding:16px 20px 24px 20px"><div style="margin-bottom:10px;padding:10px 12px;background:#f5f5f5;border-radius:4px;color:#333;font-size:12.5px;display:flex;flex-wrap:wrap;gap:14px;align-items:center">'
-      +'<b>'+(ST.regime==='comp'?'Regime de COMPETÊNCIA (tela principal)':'Regime de CAIXA (tela secundária)')+' · '+blocoLbl+'</b>'
-      +(ST.bloco==='fisc'?'<button class="btn bo bsm" onclick="ApPres.copiarContabil()">Copiar do Contábil para o Fiscal</button>':'')
+      +'<b>'+(ST.modo==='rb'?'Apuração única, por competência (estimativa mensal pela receita bruta)':((ST.regime==='comp'?'Regime de COMPETÊNCIA (tela principal)':'Regime de CAIXA (tela secundária)')+' · '+blocoLbl))+'</b>'
+      +(ST.modo!=='rb'&&ST.bloco==='fisc'?'<button class="btn bo bsm" onclick="ApPres.copiarContabil()">Copiar do Contábil para o Fiscal</button>':'')
       +(ST.bloco!=='div'?'<span style="color:#555">⚙ em cada linha: de quais contas ou grupos do Balancete o valor vem (preenche o Contábil).</span>':'')
       +(ST.bloco==='div'?'<span style="color:#555">Só leitura: Contábil menos Fiscal.</span>':'')
-      +'<span style="margin-left:auto">Calcular com: '+btn('Fiscal','ApPres.set(\'calcCom\',\'fisc\')',ST.calcCom==='fisc','padding:3px 9px')+btn('Contábil','ApPres.set(\'calcCom\',\'cont\')',ST.calcCom==='cont','padding:3px 9px')+'</span></div>';
+      +(ST.modo==='rb'?'':'<span style="margin-left:auto">Calcular com: '+btn('Fiscal','ApPres.set(\'calcCom\',\'fisc\')',ST.calcCom==='fisc','padding:3px 9px')+btn('Contábil','ApPres.set(\'calcCom\',\'cont\')',ST.calcCom==='cont','padding:3px 9px')+'</span>')+'</div>';
     h+='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
     for(var i=0;i<N;i++) h+='<th style="'+TH+'">'+P.rot(i)+'<br><small style="font-size:10px;opacity:.8">'+(ST.ano)+'</small></th>';
     h+='<th style="'+TH+'">TOTAL</th></tr></thead><tbody>';
