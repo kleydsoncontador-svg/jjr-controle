@@ -268,7 +268,48 @@
     L('Receita bruta das atividades','rb'); L('Receita bruta excedente (LC 224/2025)','exc'); L('CSLL — total base de cálculo','cBase'); L('CSLL — provisão 9%','cProv'); L('CSLL a recolher','cPagar'); L('IRPJ — total base de cálculo','iBase'); L('IRPJ 15%','i15'); L('Adicional IRPJ 10%','iAd'); L('IRPJ a recolher','iPagar');
     var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Apuração'); XLSX.writeFile(wb,'Apuracao_'+(ST.modo==='rb'?'ReceitaBruta':'LucroPresumido')+'_'+ST.eid+'_'+ST.ano+'.xlsx');
   }
-  root.ApPres={abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
+  // Seção em formato neutro (usada pelo Excel/PDF do Lucro Real Anual): lançamentos + cálculo da Apuração por Receita Bruta, com as mesmas cores da tela
+  function secao(modo,eid,ano){
+    var chv='apuracao_pres_'+modo+'_'+eid+'_'+ano, d=null; try{ d=S.g(chv); }catch(e){} d=d||{};
+    var comp=d.comp||{}, vals=comp.cont||{}, ded=comp.ded||{}, pr=d.params||{};
+    var pk=modo==='rb'?'M':'T', P=PER[pk], N=P.n;
+    var cc=calcular(vals,ded,pk,pr).rows;
+    var cab=['DESCRIÇÃO'].concat(Array.apply(null,{length:N}).map(function(_,i){ return P.rot(i); }),['TOTAL']);
+    var L=[{cells:cab.map(function(t){ return {v:t,b:1,fg:'#FFFFFF',bg:'#2D3447',al:'c'}; })}];
+    var linha=function(rot,arr,o){ o=o||{}; var t=0, cells=[{v:rot,b:o.b,bg:o.bg,fg:o.fg}]; arr.forEach(function(x){ t+=x; cells.push({v:R2(x),n:1,b:o.b,bg:o.bg,fg:o.fg}); }); cells.push({v:R2(t),n:1,b:1,bg:o.bg||'#FAFAFA',fg:o.fg}); L.push({cells:cells}); };
+    var barra=function(t,bg){ L.push({cells:[{v:t,b:1,bg:bg,fg:'#FFFFFF',span:N+2}]}); };
+    var grupo=function(t){ L.push({cells:[{v:t,b:1,bg:'#F0F4F8',fg:'#1E3558',span:N+2}]}); };
+    GRUPOS.forEach(function(g){
+      grupo(g.t);
+      g.itens.forEach(function(it){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((vals[it[0]]||[])[i])); linha(it[1],a,{fg:it[2]?'#7F1D1D':null}); });
+      var tt=[]; for(var j=0;j<N;j++) tt.push(cc[j][g.tot]); linha(g.totN,tt,{b:1,bg:'#FEF9C3'});
+    });
+    var F=function(k){ var a=[]; for(var i=0;i<N;i++) a.push(cc[i][k]); return a; };
+    barra('RECEITA BRUTA DAS ATIVIDADES — base do limite da LC 224/2025','#2D3447');
+    linha('Comércio e indústria (vendas + revendas)',F('com')); linha('Serviços',F('srv')); linha('Receita bruta das atividades',F('rb'),{b:1,bg:'#FEF9C3'});
+    linha('Receita bruta que excede o limite — LC 224/2025',F('exc'),{fg:'#7C2D12'});
+    barra('CÁLCULO DA CSLL — 9%','#000000');
+    linha('Base de Cálculo 12% (comércio e indústria)',F('c12')); linha('Base de Cálculo dos serviços',F('c32')); linha('Base de Cálculo 100% (financeiras, demais, ganho de capital, LALUP)',F('c100'));
+    linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('cLC'),{fg:'#7C2D12'});
+    linha('Total Base de Cálculo da CSLL',F('cBase'),{b:1,bg:'#FEF9C3'}); linha('PROVISÃO DA CSLL (9%)',F('cProv'),{b:1,bg:'#F8D7DA'});
+    DED.filter(function(x){ return DED_CSLL.indexOf(x[0])>=0; }).forEach(function(x){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((ded[x[0]]||[])[i])); linha('(-) '+x[1],a); });
+    linha('CSLL A RECOLHER',F('cPagar'),{b:1,bg:'#FFD700'});
+    barra('CÁLCULO DO IRPJ — 15% + adicional de 10%','#000000');
+    linha('Base de Cálculo 8% (comércio e indústria)',F('i8')); linha('Base de Cálculo dos serviços',F('i32')); linha('Base de Cálculo 100%',F('i100'));
+    linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('iLC'),{fg:'#7C2D12'});
+    linha('Total Base de Cálculo do IRPJ — 15%',F('iBase'),{b:1,bg:'#FEF9C3'}); linha('Base do Adicional — 10%',F('iAdBase')); linha('IRPJ — 15%',F('i15')); linha('ADICIONAL IRPJ — 10%',F('iAd'));
+    linha('PROVISÃO DO IRPJ',F('iProv'),{b:1,bg:'#F8D7DA'});
+    DED.filter(function(x){ return DED_IRPJ.indexOf(x[0])>=0; }).forEach(function(x){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((ded[x[0]]||[])[i])); linha('(-) '+x[1],a); });
+    linha('IRPJ A RECOLHER',F('iPagar'),{b:1,bg:'#FFD700'});
+    return {nome:modo==='rb'?'Receita Bruta':'Lucro Presumido',titulo:titulo(),linhas:L,largs:[58].concat(Array.apply(null,{length:N+1}).map(function(){ return 15; }))};
+  }
+  // resultado mensal da Apuração por Receita Bruta (CSLL e IRPJ a recolher) para a tela "Melhor opção"
+  function resumoRB(eid,ano){
+    var d=null; try{ d=S.g('apuracao_pres_rb_'+eid+'_'+ano); }catch(e){} d=d||{};
+    var comp=d.comp||{};
+    return calcular(comp.cont||{},comp.ded||{},'M',d.params||{}).rows;
+  }
+  root.ApPres={secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
 })(typeof window!=='undefined'?window:this);
 
 /* ── Lucro Real Anual: engrenagem nas linhas de Adições/Exclusões Permanentes e Temporárias (pedido do usuário 12/11/2026) ──
