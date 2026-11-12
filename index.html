@@ -39738,6 +39738,83 @@ function _lancctbEtapaBloqueio(id){
   }
   return '';
 }
+// ── Pagamento composto: amarra a NF de cada linha sozinho (pedido do usuário 12/11/2026) ──
+// Cada linha aberta pelo Fluxo já sabe o nº da NF (e a parcela) e o CNPJ do fornecedor. Aqui, pra cada linha AINDA SEM conta: procura a parcela PENDENTE dessa NF (mesmo CNPJ/raiz, valor da linha) e grava na linha a conta (10001 ou a
+// da Regra do fornecedor), o histórico "Pagamento a … - NF … - parcela …" e a parcela da NF. Linha sem NF/valor que bata fica EM ABERTO. Quando o Fluxo diz "parcela N" (N≥2) e a NF só tem UMA parcela do valor total, a NF é aberta em
+// parcelas de valor igual (a N = valor da linha; as outras ficam pendentes; sobra/falta de centavos vai na última). Roda no final do "Processar Fluxo".
+async function _lancctbPagCompostoAmarrarNfs(extratoId){
+  const eid=_lancctbEidAtual; let ligadas=0, divididas=0;
+  const { data: ex } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,historico_bancario,composicao_tributo,status_conciliacao').eq('id',extratoId).maybeSingle();
+  if(!ex||ex.status_conciliacao!=='pendente'||!(ex.valor_saida>0)||!/^\s*\[PAGAMENTO COMPOSTO:/.test(String(ex.historico_bancario||''))) return { ligadas:0, divididas:0 };
+  const comp=ex.composicao_tributo||[];
+  const numDe=c=>String((c.fx&&(c.fx.numero||c.fx.documento_numero))||'').trim().replace(/^0+/,'');
+  const alvos=comp.filter(c=>c&&c.fx&&!c.lado&&!c.conta_contabil_id&&!c.nf_parcela_id&&/^\d+$/.test(numDe(c))&&Number(c.valor)>0);
+  if(!alvos.length) return { ligadas:0, divididas:0 };
+  const nums=[...new Set(alvos.map(numDe))];
+  const { data: nfs } = await _supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).eq('direcao','compra').or(nums.map(n=>`numero.ilike.%${n}%`).join(',')).limit(600);
+  const nfIds=(nfs||[]).map(n=>n.id); if(!nfIds.length) return { ligadas:0, divididas:0 };
+  const SEL='id,nf_id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais(id,numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,empresa_eid,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)';
+  const { data: todasP } = await _lancctbFetchPorIds(()=>_supaClient.from('notas_fiscais_parcelas').select(SEL).eq('empresa_eid',eid),'nf_id',nfIds,()=>false);
+  const todas=todasP||[], pend=todas.filter(p=>p.status_conciliacao==='pendente');
+  const { data: fixas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['10001']);
+  const conta10001=(fixas||[])[0]; if(!conta10001) return { ligadas:0, divididas:0 };
+  const usadas=new Set(comp.map(c=>c&&c.nf_parcela_id).filter(Boolean)), cache={};
+  const contaDoForn=async cnpj=>{ const k=String(cnpj||''); if(k in cache) return cache[k]; const { data: rg } = await _supaClient.from('regras_matching').select('conta_contabil_id').eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','cliente_fornecedor').eq('cnpj_cpf_gatilho',k||'__nenhum__').maybeSingle(); return (cache[k]=rg?rg.conta_contabil_id:conta10001.id); };
+  const addDias=(d,n)=>{ const dt=new Date(String(d).slice(0,10)+'T12:00:00'); dt.setDate(dt.getDate()+n); return dt.toISOString().slice(0,10); };
+  const gravar=async(c,par)=>{
+    const nf=par.notas_fiscais, cnpj=nf.cnpj_emitente, nome=nf.nome_emitente;
+    c.conta_contabil_id=await contaDoForn(cnpj); c.nf_parcela_id=par.id; usadas.add(par.id);
+    const h=`Pagamento a ${nome||cnpj||''} - NF ${nf.numero||''} - parcela ${par.numero_parcela}`.trim(); c.historico=h; c.resumo=h.slice(0,120); c.denominacao=h; ligadas++;
+  };
+  for(const c of alvos){
+    let par=_lancctbAcharParcelaPeloFluxo(Object.assign({},c.fx,{valor_juros:0,valor_multa:0,valor_desconto:0}),pend,true,usadas,Number(c.valor),false);
+    if(par&&typeof _lancctbNfRegraMesAnteriorOk==='function'&&!_lancctbNfRegraMesAnteriorOk(eid,ex.data_pagamento,par.notas_fiscais)) par=null;
+    if(par){ await gravar(c,par); continue; }
+    // Fluxo diz "parcela N" mas a NF só tem 1 parcela (o total): abre a NF em parcelas iguais
+    const N=Number(c.fx.parcela)||0, v=Math.round(Number(c.valor)*100)/100; if(N<2) continue;
+    const doNum=todas.filter(p=>p.notas_fiscais&&_lancctbNumeroNfBate(p.notas_fiscais.numero,numDe(c))&&(!c.fx.cnpj_cpf||_lancctbCnpjMesmaRaiz(c.fx.cnpj_cpf,p.notas_fiscais.cnpj_emitente)));
+    if(new Set(doNum.map(p=>p.nf_id)).size!==1||doNum.length!==1) continue;
+    const p0=doNum[0]; if(p0.status_conciliacao!=='pendente'||usadas.has(p0.id)) continue;
+    const T=Math.round(Number(p0.valor_parcela)*100)/100, count=Math.round(T/v);
+    if(count<N||count<2||count>60||Math.abs(T-count*v)>0.02*count+0.01) continue;
+    const restoCada=Math.round((T-v)/(count-1)*100)/100, vals=[]; for(let k=1;k<=count;k++) vals.push(k===N?v:restoCada);
+    const soma=Math.round(vals.reduce((a,b)=>a+b,0)*100)/100, ajuste=Math.round((T-soma)*100)/100; // centavos que sobram/faltam vão na última parcela que não é a paga
+    const kAj=(N===count)?count-1:count; vals[kAj-1]=Math.round((vals[kAj-1]+ajuste)*100)/100;
+    const { data: cheia } = await _supaClient.from('notas_fiscais_parcelas').select('*').eq('id',p0.id).single(); if(!cheia) continue;
+    const { error: eUp } = await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:vals[0], numero_parcela:1 }).eq('id',p0.id); if(eUp) continue;
+    const novas=[]; let falhou=false;
+    for(let k=2;k<=count&&!falhou;k++){
+      const nl=Object.assign({},cheia); delete nl.id; delete nl.created_at; delete nl.updated_at;
+      Object.assign(nl,{ numero_parcela:k, valor_parcela:vals[k-1], data_vencimento:addDias(p0.data_vencimento||ex.data_pagamento,30*(k-1)), status_conciliacao:'pendente', lancamento_extrato_id:null });
+      const { data: ins, error: eIns } = await _supaClient.from('notas_fiscais_parcelas').insert(nl).select('id,numero_parcela').single();
+      if(eIns||!ins){ falhou=true; break; } novas.push(ins);
+    }
+    if(falhou){ if(novas.length) await _supaClient.from('notas_fiscais_parcelas').delete().in('id',novas.map(x=>x.id)); await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:cheia.valor_parcela, numero_parcela:cheia.numero_parcela }).eq('id',p0.id); continue; }
+    const pagaId=(novas.find(x=>x.numero_parcela===N)||{}).id; if(!pagaId) continue;
+    await gravar(c,{ id:pagaId, numero_parcela:N, notas_fiscais:p0.notas_fiscais }); divididas++;
+  }
+  if(ligadas){
+    const { error } = await _supaClient.from('lancamentos_extrato').update({ composicao_tributo:comp }).eq('id',extratoId);
+    if(error){ console.warn('Pagamento composto: não gravou as NFs:',error); return { ligadas:0, divididas:0 }; }
+    await _lancctbPagCompostoPostarSePronto(extratoId);
+  }
+  return { ligadas, divididas };
+}
+async function _lancctbPagCompostoAmarrarTodos(){
+  const eid=_lancctbEidAtual, contaId=_lancctbExtratoContaSel; if(!eid||!contaId) return { ligadas:0, divididas:0 };
+  const { data: exs } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt('valor_saida',0).ilike('historico_bancario','[PAGAMENTO COMPOSTO:%'),'data_pagamento').order('id',{ascending:true}));
+  let L=0, D=0;
+  for(const e of (exs||[])){ try{ const r=await _lancctbPagCompostoAmarrarNfs(e.id); L+=r.ligadas; D+=r.divididas; }catch(err){ console.warn('Amarrar NFs do pagamento composto:',err); } }
+  return { ligadas:L, divididas:D };
+}
+(function(){ // o "Processar Fluxo" termina amarrando as NFs das linhas dos pagamentos compostos
+  const o=window._lancctbProcessarFluxo; if(typeof o!=='function'||o.__nfComp) return;
+  const w=async function(){ const r=await o.apply(this,arguments);
+    try{ const x=await _lancctbPagCompostoAmarrarTodos(); if(x.ligadas) toast(`Pagamentos compostos: ${x.ligadas} linha(s) amarrada(s) à NF do Fluxo${x.divididas?` (${x.divididas} NF(s) aberta(s) em parcelas iguais)`:''}. As demais ficam em aberto.`,'ok'); }
+    catch(e){ console.warn('Amarrar NFs dos pagamentos compostos:',e); }
+    return r; };
+  w.__nfComp=true; window._lancctbProcessarFluxo=w;
+})();
 async function _lancctbRodarBotao(nome,args){
   const fn=window[nome];
   if(typeof fn!=='function') return;
