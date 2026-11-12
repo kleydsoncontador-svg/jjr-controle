@@ -474,7 +474,7 @@ async function abrirResultadoMensal(){
   var td='padding:4px 8px;border:1px solid #ccc;text-align:right;white-space:nowrap';
   var corpo='', grupoAtual='';
   linhas.forEach(function(l){
-    if(l.grupo!==grupoAtual){ grupoAtual=l.grupo; corpo+='<tr><td colspan="14" style="padding:5px 10px;background:#f0f4f8;font-weight:bold;color:#1E3558;border:1px solid #ccc">'+grupoAtual+'</td></tr>'; }
+    // sem linha de grupo ("RECEITAS E DESPESAS"): só a descrição de cada linha, como pediu o usuário
     var tem=l.itens.length>0, tot=0, cel='';
     for(var i=0;i<12;i++){
       var c=meses[String(i+1).padStart(2,'0')];
