@@ -542,3 +542,15 @@ function fecharResultadoMensal(){
   var c=document.getElementById('apuracaoFormResMensal'); if(c) c.style.display='none';
   var fa=document.getElementById('apuracaoFormAnual'); if(fa) fa.style.display='flex';
 }
+
+/* "Mês de Início do Exercício Fiscal" compacto, na barra de botões do topo (pedido do usuário 12/11/2026); a tabela sobe junto */
+function _apMoverMesFiscal(){
+  var sel=document.getElementById('mesFiscalInicio'); if(!sel) return;
+  var wrap=sel.parentElement, barra=document.querySelector('#apuracaoFormAnual > .ptitle > div:last-child'); if(!wrap||!barra) return;
+  if(wrap.parentElement===barra) return;
+  wrap.style.cssText='display:flex;align-items:center;gap:6px;margin:0;padding:0;background:transparent;border-radius:0;white-space:nowrap';
+  var lb=wrap.querySelector('label'); if(lb) lb.style.cssText='font-weight:600;font-size:12px;margin:0;color:inherit';
+  sel.style.cssText='padding:3px 6px;font-size:12px;border:1px solid #ccc;border-radius:4px';
+  barra.insertBefore(wrap,barra.querySelector('button[onclick*="voltarApuracao"]')||null);
+  var corpo=document.getElementById('apuracaoFormAnoConteudo'); var raiz=corpo&&corpo.firstElementChild; if(raiz) raiz.style.padding='6px 20px 20px 52px';
+}
