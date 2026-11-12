@@ -25572,8 +25572,22 @@ function _lancctbParsearNFSeSpXml(xml){
     parcelas:[{numero_parcela:1,data_vencimento:dataEmissao,valor_parcela:valorTotal}],
   };
 }
-async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice,chavesConhecidas}={}){
+// ── Cache de arquivos já importados (pedido do usuário 12/11/2026) ──
+// "Importar mês" lia e abria TODOS os XMLs de novo (milhares de NFS-e/Portal) só pra descobrir que já estavam salvos. Agora cada arquivo importado (ou já existente) guarda a "impressão digital" (pasta+nome+tamanho+data do arquivo) + a chave da nota
+// neste navegador (IndexedDB, por empresa). Na próxima rodada, se a impressão bate E a chave ainda existe no banco, o arquivo nem é aberto. Se a nota foi apagada do banco, a chave some e o arquivo é lido e importado de novo (nada se perde).
+function _lancctbImpCacheDb(){ return new Promise((res,rej)=>{ const rq=indexedDB.open('jjr_import_xml_cache',1); rq.onupgradeneeded=()=>{ rq.result.createObjectStore('c'); }; rq.onsuccess=()=>res(rq.result); rq.onerror=()=>rej(rq.error); }); }
+async function _lancctbImpCacheCarregar(eid){
+  try{ const db=await _lancctbImpCacheDb(); const v=await new Promise((res,rej)=>{ const t=db.transaction('c').objectStore('c').get(String(eid)); t.onsuccess=()=>res(t.result); t.onerror=()=>rej(t.error); }); db.close(); return new Map(Object.entries(v||{})); }
+  catch(e){ return new Map(); }
+}
+async function _lancctbImpCacheSalvar(eid,mapa){
+  try{ const db=await _lancctbImpCacheDb(); await new Promise((res,rej)=>{ const t=db.transaction('c','readwrite'); t.objectStore('c').put(Object.fromEntries(mapa),String(eid)); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); }); db.close(); }
+  catch(e){ console.warn('Cache de importação não salvou:',e); }
+}
+async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice,chavesConhecidas,impCache}={}){
   try{
+    const _fp=impCache?((direcaoConhecida||'')+'|'+file.name+'|'+file.size+'|'+file.lastModified):null;
+    if(impCache&&chavesConhecidas){ const _e=impCache.get(_fp); if(_e&&_e.split('|').some(k=>k&&chavesConhecidas.has(k))) return 'jaExistente'; } // já importado e a nota ainda está no banco: nem abre o arquivo
     const xml=await file.text();
     const caminho=file.webkitRelativePath||file.name;
     const direcao=direcaoConhecida||_lancctbDirecaoDoCaminho(caminho);
@@ -25600,6 +25614,7 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
         if(nf.cod_servico) await _q().update({cod_servico:nf.cod_servico}).eq('empresa_eid',eid).eq('tipo','nfse').eq('cnpj_emitente',nf.cnpj_emitente).eq('numero',nf.numero).is('cod_servico',null);
         if(nf.desc_servico) await _q().update({desc_servico:nf.desc_servico}).eq('empresa_eid',eid).eq('tipo','nfse').eq('cnpj_emitente',nf.cnpj_emitente).eq('numero',nf.numero).is('desc_servico',null);
       }catch(e){} }
+      if(impCache) impCache.set(_fp,(nf.chave_acesso||'')+'|'+(chaveNum||''));
       return 'jaExistente';
     }
 
@@ -25638,6 +25653,7 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
     // A SIEG grava a MESMA nota 2x na pasta (ex.: "542.xml" e "54202480785000172.xml"): depois de salvar, a chave entra no conjunto de conhecidas —
     // a 2ª cópia vira "já existente" (não regrava nem conta como salva de novo). Só não duplicar, nunca pular o mês (pedido do usuário 14/10/2026).
     if(chavesConhecidas){ if(nf.chave_acesso) chavesConhecidas.add(nf.chave_acesso); if(chaveNum) chavesConhecidas.add(chaveNum); }
+    if(impCache) impCache.set(_fp,(nf.chave_acesso||'')+'|'+(chaveNum||''));
     return 'importada';
   } catch(e){ return 'erro'; }
 }
@@ -28800,6 +28816,7 @@ async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onSt
   // atalho (o nome do arquivo na pasta da SIEG não é a chave), só NF-e.
   if(onStatus) onStatus('Carregando chaves já importadas…');
   const chavesConhecidas=await _lancctbChavesConhecidas(eid);
+  const impCache=await _lancctbImpCacheCarregar(eid), _impTam0=impCache.size;
   const pastasNfse=_lancctbPastasNfsePortalGet(eid);
 
   let puladasPorNome=0;
@@ -28917,12 +28934,14 @@ async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onSt
     const contagemMes={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
     for(let i=0;i<arquivos.length;i++){
       if(onStatus) onStatus(`${emp.nome} — ${mesNome}/${ano} — processando ${i+1}/${arquivos.length}… (${contagemMes.importada} salvas)`);
-      const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas});
+      const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas,impCache});
       contagemMes[resultado]++;
       contagemTotal[resultado]++;
+      if(i>0&&i%1500===0&&impCache.size!==_impTam0) await _lancctbImpCacheSalvar(eid,impCache); // guarda o progresso de tempos em tempos (se fechar a aba no meio, não perde)
     }
     resumoPorMes.push(`${mesNome}/${ano}: ${contagemMes.importada} salva(s)`);
   }
+  if(impCache.size!==_impTam0) await _lancctbImpCacheSalvar(eid,impCache);
   return { contagemTotal, resumoPorMes, puladasPorNome };
 }
 async function confirmarLancctbImportarMes(){
