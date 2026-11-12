@@ -96,8 +96,10 @@
     var fa=document.getElementById('apuracaoFormAnual'); if(ST.modo==='rb'&&fa){ if(g) g.style.display='none'; fa.style.display='flex'; }
   }
   function titulo(){ return ST.modo==='rb'?('Apuração por Receita Bruta — Lucro Real — '+ST.ano+' (mensal)'):('Lucro Presumido — '+ST.ano+' (trimestral)'); }
-  var TH='padding:8px;border:1px solid #2D3447;background:#2D3447;color:#fff;font-weight:700;text-align:center;min-width:110px';
+  var TH='padding:8px;border:1px solid #2D3447;background:#2D3447;color:#fff;font-weight:700;text-align:center';
   var TDI='padding:3px;border:1px solid #ccc';
+  // As duas tabelas da tela (linhas de entrada e CÁLCULO) usam a MESMA grade: layout fixo + mesmas colunas, então cada mês cai na mesma vertical nas duas (a descrição quebra de linha se for longa) — pedido do usuário 12/11/2026.
+  function GRADE(N){ return {tab:'table-layout:fixed;width:100%;min-width:'+(34+380+N*108+120)+'px;', cols:'<colgroup><col style="width:34px"><col style="width:380px">'+new Array(N+1).join('<col>')+'<col style="width:120px"></colgroup>'}; }
   var INP='width:100%;border:none;padding:4px;text-align:right;background:transparent';
   function btn(txt,on,ativo,extra){ return '<button class="btn '+(ativo?'bp':'bo')+'" onclick="'+on+'" style="padding:6px 12px;'+(extra||'')+'">'+txt+'</button>'; }
   function desenhar(){
@@ -119,7 +121,7 @@
       +(ST.bloco!=='div'?'<span style="color:#555">⚙ em cada linha: de quais contas ou grupos do Balancete o valor vem (preenche o Contábil).</span>':'')
       +(ST.bloco==='div'?'<span style="color:#555">Só leitura: Contábil menos Fiscal.</span>':'')
       +(ST.modo==='rb'?'':'<span style="margin-left:auto">Calcular com: '+btn('Fiscal','ApPres.set(\'calcCom\',\'fisc\')',ST.calcCom==='fisc','padding:3px 9px')+btn('Contábil','ApPres.set(\'calcCom\',\'cont\')',ST.calcCom==='cont','padding:3px 9px')+'</span>')+'</div>';
-    h+='<div style="overflow:visible"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
+    h+='<div style="overflow:visible"><table style="'+GRADE(N).tab+'border-collapse:collapse;font-size:12px;background:white;color:#111">'+GRADE(N).cols+'<thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left">DESCRIÇÃO</th>';
     for(var i=0;i<N;i++) h+='<th style="'+TH+'">'+P.rot(i)+'<br><small style="font-size:10px;opacity:.8">'+(ST.ano)+'</small></th>';
     h+='<th style="'+TH+'">TOTAL</th></tr></thead><tbody>';
     GRUPOS.forEach(function(g){
@@ -162,7 +164,7 @@
     var barra=function(t,cor){ return '<tr style="background:'+cor+';color:white;font-weight:bold"><td colspan="'+(N+3)+'" style="padding:8px 12px;border:1px solid #ccc">'+t+'</td></tr>'; };
     var dedLinhas=function(ids,rotulo){ var s=''; DED.filter(function(d){ return ids.indexOf(d[0])>=0; }).forEach(function(d){ s+='<tr><td style="border:none;width:34px"></td><td style="padding:6px 12px;border:1px solid #ccc;background:white">'+ESC(d[1])+'</td>'; for(var i=0;i<N;i++) s+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-ded="'+d[0]+'" data-i="'+i+'" value="'+FMT(NUM(((R.ded||{})[d[0]]||[])[i]))+'" onfocus="this.select()" onchange="ApPres.digitouDed(this)" style="'+INP+'"></td>'; s+='<td style="'+TDI+';background:#fafafa"></td></tr>'; }); return s; };
     var h='<div style="font-weight:700;color:#1E3558;margin:0 0 6px;font-size:13px">CÁLCULO'+(usouAlt?' <span style="font-weight:400;color:#b45309">— o bloco escolhido está vazio; calculando com o '+(usouAlt==='cont'?'Contábil':'Fiscal')+'</span>':'')+'</div>'
-      +'<div style="overflow:visible"><table style="width:100%;border-collapse:collapse;font-size:12px;background:white;color:#111"><thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left;min-width:360px">DESCRIÇÃO</th>';
+      +'<div style="overflow:visible"><table style="'+GRADE(N).tab+'border-collapse:collapse;font-size:12px;background:white;color:#111">'+GRADE(N).cols+'<thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left">DESCRIÇÃO</th>';
     for(var k=0;k<N;k++) h+='<th style="'+TH+'">'+per0.rot(k)+'</th>'; h+='<th style="'+TH+'">TOTAL</th></tr></thead><tbody>';
     h+=barra('RECEITA BRUTA DAS ATIVIDADES (comércio / indústria + serviços) — base do limite da LC 224/2025','#2D3447');
     h+=linha('Comércio e indústria (vendas + revendas)',function(o){ return o.com; });
