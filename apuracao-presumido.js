@@ -112,7 +112,7 @@
       +'<span style="width:10px"></span>'))
       +'<button class="btn bo" onclick="ApPres.parametros()" style="padding:6px 12px">⚙ Parâmetros</button>'
       +'<button class="action-btn action-btn-excel" onclick="ApPres.excel()" style="padding:8px 14px;font-size:12.5px">📊 Gerar Excel</button>'
-      +'<button class="btn bo bsm" onclick="ApPres.voltar()">← Voltar</button><span id="apPresStatus" style="font-size:12px;color:#666;margin-left:8px"></span></div></div>';
+      +'<button class="btn bo bsm" onclick="ApPres.voltar()">← Voltar</button><button class="btn bo bsm" onclick="apuracaoVoltarEmpresas()">← Empresas</button><span id="apPresStatus" style="font-size:12px;color:#666;margin-left:8px"></span></div></div>';
     h+='<div style="padding:16px 20px 24px 20px"><div style="margin-bottom:10px;padding:10px 12px;background:#f5f5f5;border-radius:4px;color:#333;font-size:12.5px;display:flex;flex-wrap:wrap;gap:14px;align-items:center">'
       +'<b>'+(ST.modo==='rb'?'Apuração única, por competência (estimativa mensal pela receita bruta)':((ST.regime==='comp'?'Regime de COMPETÊNCIA (tela principal)':'Regime de CAIXA (tela secundária)')+' · '+blocoLbl))+'</b>'
       +(ST.modo!=='rb'&&ST.bloco==='fisc'?'<button class="btn bo bsm" onclick="ApPres.copiarContabil()">Copiar do Contábil para o Fiscal</button>':'')
