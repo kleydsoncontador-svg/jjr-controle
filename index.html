@@ -32678,6 +32678,7 @@ async function _lancctbAssociarNfsMultiplas(){
   if(!r){ toast('Lançamento de origem não encontrado — feche e reabra o modal.','err'); return; }
   const ids=[..._lancctbNfMultiSel.keys()];
   if(ids.length<2){ toast('Marque 2 ou mais parcelas.','err'); return; }
+  if(_lancctbRegraParteIdx!=null&&String(_lancctbRegraParteExtratoId)===String(r.id)){ toast('Esta é uma linha de pagamento composto: cada linha usa UMA parcela de NF ("Usar esta"). Para várias NFs de uma vez, use o botão de Regra do lançamento inteiro.','err'); return; }
   const btn=document.getElementById('lancctbNfMultiBtn'); if(btn){ btn.disabled=true; btn.textContent='Associando…'; }
   try{
     const eid=_lancctbEidAtual, ehSaida=r.valor_saida>0, valor=r.valor_saida||r.valor_entrada;
@@ -32881,6 +32882,22 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     // convenção definida, não arrisca — avisa e não concilia sozinho.
     const valorNf=Math.round(Number(_lancctbNfValorParaMatching(parcela,valor))*100)/100;
     const diferenca=Math.round((valor-valorNf)*100)/100;
+    // Linha de um PAGAMENTO COMPOSTO (pedido do usuário 12/11/2026): amarrar a NF vale SÓ pra essa linha — as outras continuam em aberto. Antes gravava o extrato INTEIRO com o valor da 1ª linha e fechava as demais.
+    // Aqui só a conta (10001 ou a da Regra do fornecedor), o histórico e a parcela da NF ficam gravados NA LINHA; o lote (1 crédito + N débitos) só é lançado quando TODAS as linhas tiverem conta.
+    if(_lancctbRegraParteIdx!=null&&String(_lancctbRegraParteExtratoId)===String(r.id)){
+      const { data: exP } = await _supaClient.from('lancamentos_extrato').select('id,composicao_tributo').eq('id',r.id).single();
+      const compP=(exP&&exP.composicao_tributo)||[], cP=compP[_lancctbRegraParteIdx];
+      if(!cP){ toast('Linha não encontrada — atualize a tela.','err'); return; }
+      cP.conta_contabil_id=contaContrapartidaId; cP.historico=historicoUtilizado; cP.resumo=historicoUtilizado.slice(0,120); cP.nf_parcela_id=parcelaId;
+      const { error: eP } = await _supaClient.from('lancamentos_extrato').update({ composicao_tributo:compP }).eq('id',r.id);
+      if(eP){ toast('Erro ao gravar a linha: '+eP.message,'err'); return; }
+      const postou=await _lancctbPagCompostoPostarSePronto(r.id);
+      const faltam=compP.filter(c=>!c.conta_contabil_id).length;
+      closeModal('mLancctbRegra'); _lancctbRegraExtratoAlvo=null; _lancctbRegraParteIdx=null; _lancctbRegraParteExtratoId=null; _lancctbFluxoAssociandoFluxoId=null; _lancctbFluxoAssociandoExtrato=null;
+      toast(postou?'Última linha definida — pagamento lançado.':('Linha amarrada à NF '+(nf?.numero||'')+' parcela '+parcela.numero_parcela+'. Faltam '+faltam+' linha(s) em aberto.')+(Math.abs(diferenca)>0.02?' (atenção: a parcela da NF difere R$ '+_fmt(Math.abs(diferenca))+' do valor desta linha)':''),'ok');
+      try{ renderLancctbRegistroContabil(); }catch(e){}
+      return;
+    }
     const linhas=[
       { empresa_eid:eid, data:r.data_pagamento, classificacao:contaBancoInfo.plano_contas.classificacao, conta_contabil_id:contaBancoInfo.conta_contabil_id, tipo:bancoTipo, valor, historico:historicoUtilizado, cliente_fornecedor_nome:nomeTerceiro||null, cnpj_cpf:cnpjTerceiro||null, lancamento_extrato_id:r.id, origem_match:'manual' },
       // nf_parcela_id: mesma correção do matching automático — sem isso as
@@ -33357,11 +33374,12 @@ async function _lancctbPagCompostoPostarSePronto(extratoId){
     const fx0=(comp.find(c=>c&&c.fx)||{}).fx||null;
     const terc=c=>{ const f=(c&&c.fx)||fx0; return { cliente_fornecedor_nome:(f&&f.cliente_fornecedor_nome)||(cpV&&cpV.cliente_fornecedor_nome)||null, cnpj_cpf:(f&&f.cnpj_cpf)||(cpV&&cpV.cnpj_cpf)||null, comprovante_id:(ehSaida&&cpV)?cpV.id:null }; };
     const linhas=[Object.assign({ empresa_eid:eid, data:ex.data_pagamento, classificacao:ag.plano_contas.classificacao, conta_contabil_id:ag.conta_contabil_id, tipo:ehSaida?'C':'D', valor:vExt, historico:hBanco, lancamento_extrato_id:ex.id, regra_matching_id:comp[0].regra_id||null, origem_match:'regra' },terc(comp[0]))];
-    comp.forEach(c=>{ linhas.push(Object.assign({ empresa_eid:eid, data:ex.data_pagamento, classificacao:cm.get(String(c.conta_contabil_id)).classificacao, conta_contabil_id:c.conta_contabil_id, tipo:c.lado==='inverso'?(dcL==='D'?'C':'D'):dcL, valor:c.valor, historico:c.historico, lancamento_extrato_id:ex.id, regra_matching_id:c.regra_id||null, origem_match:'regra' },terc(c))); });
+    comp.forEach(c=>{ linhas.push(Object.assign({ empresa_eid:eid, data:ex.data_pagamento, classificacao:cm.get(String(c.conta_contabil_id)).classificacao, conta_contabil_id:c.conta_contabil_id, tipo:c.lado==='inverso'?(dcL==='D'?'C':'D'):dcL, valor:c.valor, historico:c.historico, lancamento_extrato_id:ex.id, regra_matching_id:c.regra_id||null, nf_parcela_id:c.nf_parcela_id||null, origem_match:c.nf_parcela_id?'manual':'regra' },terc(c))); });
     const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
     if(error){ console.warn('Pagamento composto: lote não gravou:',error); return false; }
     await _supaClient.from('lancamentos_extrato').update({ status_conciliacao:'conciliado' }).eq('id',ex.id);
     if(cpV) await _supaClient.from(tabCp).update({ status_conciliacao:'conciliado' }).eq('id',cpV.id);
+    const idsNfP=comp.map(c=>c.nf_parcela_id).filter(Boolean); if(idsNfP.length) await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:ex.id}).in('id',idsNfP);
     return true;
   }catch(e){ console.warn('Pagamento composto:',e); return false; }
 }
