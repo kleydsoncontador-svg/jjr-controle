@@ -483,11 +483,19 @@ async function abrirResultadoMensal(){
     }
     corpo+='<tr><td style="padding:5px 10px;border:1px solid #ccc;'+(tem?'':'color:#999')+'">'+l.rot+(tem?'':' <span style="font-size:11px">(sem contas do Balancete ligadas — ⚙)</span>')+'</td>'+cel+'<td style="'+td+';font-weight:700;background:#fef9c3">'+(tem?fmt(tot):'')+'</td></tr>';
   });
-  var velho=document.getElementById('apResMensalModal'); if(velho) velho.remove();
-  var ov=document.createElement('div'); ov.id='apResMensalModal'; ov.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99998;display:flex;align-items:center;justify-content:center;padding:14px';
-  ov.innerHTML='<div style="background:#fff;color:#111;border-radius:10px;width:min(1500px,100%);max-height:94vh;overflow:auto;padding:16px 18px;box-shadow:0 12px 40px rgba(0,0,0,.4)">'
-    +'<div style="display:flex;justify-content:space-between;align-items:center;gap:10px"><b style="font-size:16px">📋 Resultado mensal — '+ano+'</b><button onclick="document.getElementById(\'apResMensalModal\').remove()" style="padding:6px 12px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Fechar</button></div>'
-    +'<div style="font-size:12px;color:#555;margin:6px 0 8px">Só informativo, sem cálculo: o valor <b>do mês</b> (não acumulado) de cada linha ligada ao Balancete pelo ⚙, e o <b>total</b> dos meses. Na tela principal os valores são acumulados desde janeiro.</div>'
-    +'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:12.5px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+';text-align:left;min-width:340px">DESCRIÇÃO</th>'+nomes.map(function(n){ return '<th style="'+th+'">'+n+'</th>'; }).join('')+'<th style="'+th+'">TOTAL</th></tr></thead><tbody>'+corpo+'</tbody></table></div></div>';
-  document.body.appendChild(ov);
+  // Tela nova (não janelinha): esconde a apuração anual e mostra a listagem em tela cheia; "Voltar" devolve a apuração anual como estava
+  var ref=document.getElementById('apuracaoFormAnual'); if(!ref) return;
+  var c=document.getElementById('apuracaoFormResMensal');
+  if(!c){ c=document.createElement('div'); c.id='apuracaoFormResMensal'; c.style.cssText='display:none;flex-direction:column'; ref.parentElement.insertBefore(c,ref.nextSibling); }
+  c.innerHTML='<div style="padding:0 0 8px 4px"><button class="btn bo bsm" onclick="apuracaoVoltarEmpresas()">← Voltar às empresas</button></div>'
+    +'<div class="ptitle" style="position:sticky;top:52px;z-index:50;background:var(--white);border-bottom:1px solid var(--border)"><div style="display:flex;align-items:center;gap:12px;flex:1"><span style="font-size:1.6rem">📋</span><span>Resultado mensal — Lucro Real Anual — '+ano+'</span></div>'
+    +'<div style="display:flex;gap:8px"><button class="btn bo bsm" onclick="fecharResultadoMensal()">← Voltar à apuração anual</button></div></div>'
+    +'<div style="padding:16px 20px 24px 20px"><div style="font-size:12.5px;color:#555;margin-bottom:10px;padding:10px 12px;background:#f5f5f5;border-radius:4px">Só informativo, sem cálculo: o valor <b>do mês</b> (não acumulado) de cada linha ligada ao Balancete pelo ⚙, e o <b>total</b> dos meses. Na tela principal os valores são acumulados desde janeiro. As contas que você ligar nas Adições e Exclusões também entram aqui.</div>'
+    +'<div style="overflow-x:auto"><table style="border-collapse:collapse;font-size:13px;width:100%;background:#fff;color:#111"><thead><tr><th style="'+th+';text-align:left;min-width:380px">DESCRIÇÃO</th>'+nomes.map(function(n){ return '<th style="'+th+';min-width:104px">'+n+'</th>'; }).join('')+'<th style="'+th+';min-width:120px">TOTAL</th></tr></thead><tbody>'+corpo+'</tbody></table></div></div>';
+  ['apuracaoTipoModal','apuracaoGerenciador','apuracaoFormAnual','parteBFormAnual','apuracaoFormPres'].forEach(function(id){ var e=document.getElementById(id); if(e) e.style.display='none'; });
+  c.style.display='flex'; window.scrollTo(0,0);
+}
+function fecharResultadoMensal(){
+  var c=document.getElementById('apuracaoFormResMensal'); if(c) c.style.display='none';
+  var fa=document.getElementById('apuracaoFormAnual'); if(fa) fa.style.display='flex';
 }
