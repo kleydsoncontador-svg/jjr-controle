@@ -17,8 +17,8 @@
     [].slice.call(pai.children).forEach(function(c){ if(ehBuscaGrande(c)||(c.querySelector&&ehBuscaGrande(c.querySelector('input')))) c.style.display='none'; });
     pai.style.display='flex'; pai.style.flexWrap='wrap'; pai.style.alignItems='center'; pai.style.gap='10px'; pai.style.marginBottom='0';
     label.style.flexBasis='100%'; label.style.margin='0 0 2px 0';
-    var busca=sel.previousElementSibling; if(busca&&busca.tagName==='INPUT'&&!ehBuscaGrande(busca)){ busca.style.width='280px'; busca.style.minWidth='220px'; busca.style.maxWidth='320px'; busca.style.margin='0'; }
-    sel.style.width='auto'; sel.style.minWidth='260px'; sel.style.flex='0 1 340px'; sel.style.margin='0';
+    var busca=sel.previousElementSibling; if(busca&&busca.tagName==='INPUT'&&!ehBuscaGrande(busca)){ busca.style.width='auto'; busca.style.flex='1 1 190px'; busca.style.minWidth='150px'; busca.style.maxWidth='300px'; busca.style.margin='0'; }
+    sel.style.width='auto'; sel.style.minWidth='170px'; sel.style.flex='1 1 220px'; sel.style.maxWidth='360px'; sel.style.margin='0';
     if(botao.parentElement!==pai) pai.appendChild(botao);
     botao.style.margin='0';
   }
