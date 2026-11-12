@@ -218,7 +218,7 @@
         var verde=(menor===op||menor==='ambos'), bg=verde?'background:#dcfce7;':'', marcado=(esc===op);
         var BD='2px solid #3B5B8C', topo=(op==='real')?';border-top:'+BD:'', base=(op==='rb')?';border-bottom:'+BD:'';
         var ladoE=';border-left:'+BD, ladoD=';border-right:'+BD, doisLados=topo+';border-bottom:'+BD;
-        return '<tr style="'+bg+'">'+(op==='real'?'<td rowspan="2" style="'+td+';text-align:left;font-weight:700;background:#f0f4f8;vertical-align:middle'+doisLados+ladoE+'">'+MESES[i]+'</td>':'')
+        return '<tr style="'+bg+'">'+(op==='real'?'<td rowspan="2" class="apmel-mes" style="'+td+';text-align:left;font-weight:700;background:#f0f4f8;vertical-align:middle'+doisLados+ladoE+'">'+MESES[i]+'</td>':'')
           +'<td style="'+td+';text-align:left;'+bg+topo+base+'">'+rot+(verde?' <span style="font-size:10.5px;color:#166534;font-weight:700">● menor valor</span>':'')+'</td>'
           +'<td style="'+td+';'+bg+topo+base+'">'+FMT(v.c)+'</td><td style="'+td+';'+bg+topo+base+'">'+FMT(v.i)+'</td><td style="'+td+';font-weight:700;'+bg+topo+base+'">'+FMT(t)+'</td>'
           +'<td style="'+td+';text-align:center;'+bg+topo+base+'"><label style="cursor:pointer"><input type="radio" name="apmel_'+i+'" '+(marcado?'checked':'')+' onclick="_apMelhorEscolher('+i+',\''+op+'\',this)"> escolhi</label></td>'
