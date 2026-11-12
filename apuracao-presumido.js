@@ -251,7 +251,9 @@
       linha:L,
       getItens:function(){ return (mapa()[id]||[]).slice(); },
       salvar:function(itens){ var m=mapa(); if(itens.length) m[id]=itens; else delete m[id]; S.s(mapKey(),m); },
-      depois:async function(itens){ if(typeof _apBalCache!=='undefined') _apBalCache={}; await montarMapaBalancete(); desenhar(); toast(itens.length?'Valores puxados do Balancete.':'Linha liberada para preenchimento manual.','ok'); }
+      depois:async function(itens,tinhaAntes){
+        if(!itens.length&&tinhaAntes){ var Dz=dados(), Rz=Dz[ST.regime]; Rz.cont[id]=[]; salvar(Dz); desenhar(); toast('Contas retiradas: o saldo desta linha foi zerado.','ok'); return; } // sem conta ligada, sem saldo
+        if(typeof _apBalCache!=='undefined') _apBalCache={}; await montarMapaBalancete(); desenhar(); toast(itens.length?'Valores puxados do Balancete.':'Linha liberada para preenchimento manual.','ok'); }
     });
   }
   function excel(){
