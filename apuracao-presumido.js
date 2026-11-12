@@ -401,6 +401,7 @@ async function _apAdExAplicar(eid,ano){
     });
   });
   try{ for(var i=0;i<12;i++) calcularMesApuracao(i); }catch(e){}
+  try{ setTimeout(function(){ if(typeof _apAplicarPagoAnteriores==='function') _apAplicarPagoAnteriores(eid,ano); },400); }catch(e){} // as linhas filhas mudaram a base: refaz o "pago em meses anteriores"
 }
 
 /* ── "Adições e Exclusões Temporárias": relação anual por mês e saldo acumulado (pedido do usuário 12/11/2026) ──
@@ -571,7 +572,16 @@ setInterval(_apAjustaTopo,500);
 /* ── "CSLL Paga em Meses Anteriores" e "IRPJ Pago em Meses Anteriores" vindos da Melhor opção (pedido do usuário 12/11/2026) ──
    Em cada mês, o campo traz a SOMA do que foi escolhido na Melhor opção nos meses anteriores (jan → o 0; fev → o escolhido de jan; mar → jan + fev ...). Escolher a opção errada em janeiro muda o que sobra a recolher dos meses seguintes.
    O "a recolher" já nunca fica negativo (se a provisão menos as deduções der negativo, fica zero). Só mexe nesses campos quando existe ao menos uma escolha; sem escolha, ficam livres para digitar. */
+// Fila: só uma rodada por vez; se pedirem outra enquanto roda (ex.: as Adições/Exclusões do Balancete terminaram de entrar), roda de novo ao terminar — assim o valor nunca fica com a base de um momento anterior (12/11/2026).
+var _apPagoRodando=false, _apPagoPendente=false;
 async function _apAplicarPagoAnteriores(eid,ano){
+  if(_apPagoRodando){ _apPagoPendente=true; return false; }
+  _apPagoRodando=true; var ok=false;
+  try{ do{ _apPagoPendente=false; ok=await _apAplicarPagoAnterioresCore(eid,ano); }while(_apPagoPendente); }
+  finally{ _apPagoRodando=false; }
+  return ok;
+}
+async function _apAplicarPagoAnterioresCore(eid,ano){
   var esc={}; try{ esc=S.g('apuracao_melhor_'+eid+'_'+ano)||{}; }catch(e){}
   var temEscolha=Object.keys(esc).some(function(k){ return esc[k]==='real'||esc[k]==='rb'; });
   var fmt=function(v){ return (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); };
