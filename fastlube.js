@@ -107,6 +107,7 @@
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
+      + '<button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="_flAbrirExcluidos()" title="Linhas que você excluiu do Registro (a partir de agora): quem, quando e como. Dá para restaurar (volta como pendente).">🗑 Excluídos</button>'
             + '<button class="btn bo" style="background:rgba(250,204,21,.25);border-color:#eab308" onclick="_flAbrirImpedidos()" title="Textos de histórico que você mandou NUNCA fazerem parte do saldo nem do TXT (ignorados para sempre). Lá dá para clicar em Permitir e escolher a partir de qual competência volta.">⛔ Impedidos</button>'
 + '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
       + '<button class="btn bo" onclick="_flExcelRelatorio(\'todos\')" title="Gera um Excel para o cliente com 5 abas: Ajustes e conciliações, Datas alteradas, Valores alterados, Ignorados e Fluxo × extrato por dia. Mostra o que foi preciso fazer para chegar ao saldo do extrato.">📊 Excel p/ cliente</button>'
@@ -1267,6 +1268,7 @@
   };
   root._flExcluirAjuste = async function (id) {
     if (!confirm('Excluir este ajuste manual?')) return;
+    await snapshotExcluidos([id], 'ajuste');
     for (const t of ['comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios', 'notas_fiscais_parcelas']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).eq('lancamento_extrato_id', id);
     await _supaClient.from('lancamentos_contabeis').delete().eq('lancamento_extrato_id', id);
     const r = await _supaClient.from('lancamentos_extrato').delete().eq('id', id).eq('fonte', 'ajuste_manual');
@@ -1566,6 +1568,73 @@
     const ok = el.querySelector('#flFormOk'); if (ok) ok.textContent = 'Permitir';
   };
 
+  // ───────── EXCLUÍDOS (pedido do usuário 13/11/2026) ─────────
+  // "Excluir" apaga a linha do Registro de verdade. Daqui em diante, antes de apagar, o site guarda uma cópia da linha (e o vínculo com o Fluxo) neste registro: aparece na tela 🗑 Excluídos, com quem excluiu, quando e como,
+  // e dá para RESTAURAR (volta como pendente). O que foi excluído ANTES desta data não está aqui.
+  const EXK = () => 'fl_excluidos_' + EID();
+  const lerEx = () => { try { return S.g(EXK()) || []; } catch (e) { return []; } };
+  const gravarEx = l => { try { S.s(EXK(), l.slice(0, 4000)); } catch (e) { console.warn('Registro de excluídos não gravou:', e); } };
+  async function snapshotExcluidos(ids, via) {
+    try {
+      ids = [...new Set(ids)]; if (!ids.length) return 0;
+      const rows = (await _lancctbFetchPorIds(() => _supaClient.from('lancamentos_extrato').select('*').eq('empresa_eid', EID()), 'id', ids, () => false)).data || [];
+      const lig = (await _lancctbFetchPorIds(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id').eq('empresa_eid', EID()), 'lancamento_extrato_id', ids, () => false)).data || [];
+      const fxPor = {}; lig.forEach(f => { (fxPor[f.lancamento_extrato_id] = fxPor[f.lancamento_extrato_id] || []).push(f.id); });
+      const em = new Date().toISOString(), por = quemFez();
+      const novos = rows.map(x => ({ eid: x.id, em, por, via, conta: x.conta_bancaria_id, data: x.data_pagamento, vs: x.valor_saida || 0, ve: x.valor_entrada || 0, h: x.historico_bancario || '', doc: x.documento || null, inf: x.informacao || null, origem: x.origem_importacao || 'excel', hash: x.hash_dedup || null, fonte: x.fonte || '', status: x.status_conciliacao || '', fluxo: fxPor[x.id] || [] }));
+      gravarEx(novos.concat(lerEx()));
+      return novos.length;
+    } catch (e) { console.warn('Cópia das linhas excluídas:', e); return 0; }
+  }
+  root.__flEx = root.__flEx || { f: { banco: '', origem: '', texto: '', restauradas: false }, sel: new Set() };
+  root._flAbrirExcluidos = function () {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    const g = root.__flEx, lista = lerEx().filter(x => g.f.restauradas ? true : !x.restaurada);
+    const t = norm(g.f.texto), filtradas = lista.filter(x => (!g.f.banco || String(x.conta) === g.f.banco) && (!g.f.origem || x.fonte === g.f.origem) && (!t || norm(x.h).indexOf(t) >= 0));
+    const mostra = filtradas.slice(0, 400), dt = d => { try { return new Date(d).toLocaleString('pt-BR'); } catch (e) { return ''; } };
+    const est = 'padding:4px 6px;font-size:12px;border:1px solid var(--border);border-radius:6px;background:var(--white);color:var(--ink)';
+    const nomeBancoL = c => (typeof BANCOS !== 'undefined' && BANCOS[String(c)]) || nomeBanco(c);
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">🗑 Excluídos — Fast Lube</div></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:1000px">Linhas que você excluiu do Registro <b>a partir de agora</b> (o que foi excluído antes desta tela existir não aparece aqui). Cada linha guarda quem excluiu, quando e como. <b>Restaurar</b> traz a linha de volta como <b>pendente</b> (a classificação contábil é refeita). Linhas que vieram do Fluxo voltam também a ligar com a linha do Fluxo, se ela ainda existir.</div>'
+      + '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><select style="' + est + '" onchange="__flEx.f.banco=this.value;_flAbrirExcluidos()"><option value="">Todos os bancos</option>' + Object.keys(NOMES).map(k => '<option value="' + k + '"' + (g.f.banco === k ? ' selected' : '') + '>' + NOMES[k] + '</option>').join('') + '</select>'
+      + '<select style="' + est + '" onchange="__flEx.f.origem=this.value;_flAbrirExcluidos()"><option value="">Todas as origens</option>' + Object.keys(ORIGENS).map(k => '<option value="' + k + '"' + (g.f.origem === k ? ' selected' : '') + '>' + ORIGENS[k] + '</option>').join('') + '</select>'
+      + '<input id="flExTxt" style="' + est + ';width:240px" placeholder="🔎 texto do histórico" value="' + E(g.f.texto) + '" oninput="__flEx.f.texto=this.value;clearTimeout(window.__flExT);window.__flExT=setTimeout(()=>{_flAbrirExcluidos();const i=document.getElementById(\'flExTxt\');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length)}},350)">'
+      + '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" ' + (g.f.restauradas ? 'checked' : '') + ' onchange="__flEx.f.restauradas=this.checked;_flAbrirExcluidos()"> mostrar também as já restauradas</label>'
+      + '<button class="btn bp bsm" onclick="_flRestaurarExcluidos()" ' + (g.sel.size ? '' : 'disabled') + '>↩ Restaurar selecionadas (' + g.sel.size + ')</button></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:4px">' + filtradas.length + ' linha(s)' + (filtradas.length > mostra.length ? ' — mostrando as primeiras ' + mostra.length : '') + '</div>'
+      + '<div style="overflow:auto;max-height:calc(100vh - 360px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="padding:6px 8px"></th><th style="padding:6px 8px;text-align:left">Excluída em</th><th style="padding:6px 8px;text-align:left">Por</th><th style="padding:6px 8px;text-align:left">Banco</th><th style="padding:6px 8px;text-align:left">Data</th><th style="padding:6px 8px;text-align:left">Origem</th><th style="padding:6px 8px;text-align:right">Valor</th><th style="padding:6px 8px;text-align:left">Histórico</th><th style="padding:6px 8px;text-align:left">Como</th><th style="padding:6px 8px"></th></tr></thead><tbody>'
+      + (mostra.length ? mostra.map(x => { const v = x.ve > 0 ? x.ve : -x.vs, k = x.em + '|' + x.eid; return '<tr style="border-bottom:1px solid var(--border)' + (x.restaurada ? ';opacity:.5' : '') + '"><td style="padding:5px 8px">' + (x.restaurada ? '' : '<input type="checkbox" ' + (g.sel.has(k) ? 'checked' : '') + ' onchange="_flExSel(\'' + k + '\',this.checked)">') + '</td><td style="padding:5px 8px;white-space:nowrap;font-size:11.5px">' + dt(x.em) + '</td><td style="padding:5px 8px;font-size:11.5px">' + E(x.por || '—') + '</td><td style="padding:5px 8px;white-space:nowrap">' + E(nomeBancoL(x.conta)) + '</td><td style="padding:5px 8px;white-space:nowrap">' + brData(x.data) + '</td><td style="padding:5px 8px;white-space:nowrap;font-size:11.5px">' + E(ORIGENS[x.fonte] || '—') + '</td><td style="padding:5px 8px;text-align:right;white-space:nowrap;color:' + (v >= 0 ? 'var(--teal)' : '#dc2626') + '">' + (v >= 0 ? '+' : '−') + ' R$ ' + fmt(Math.abs(v)) + '</td><td style="padding:5px 8px;font-size:11.5px;line-height:1.3;max-width:560px">' + E(x.h) + '</td><td style="padding:5px 8px;font-size:11.5px">' + E({ linha: 'uma linha', filtradas: 'excluir filtradas', ajuste: 'ajuste manual' }[x.via] || x.via || '') + (x.status === 'conciliado' ? ' <span title="Estava classificada: a classificação contábil foi desfeita ao excluir" style="color:#b45309">(estava classificada)</span>' : '') + '</td><td style="padding:5px 8px;text-align:right">' + (x.restaurada ? '<span style="font-size:11px;color:var(--teal)">restaurada ' + dt(x.restaurada) + '</span>' : '<button class="btn bo bsm" onclick="_flRestaurarExcluidos(\'' + k + '\')">↩ Restaurar</button>') + '</td></tr>'; }).join('') : '<tr><td colspan="10" style="padding:20px;text-align:center;color:var(--slate)">Nada excluído registrado ainda. As linhas que você excluir a partir de agora aparecem aqui.</td></tr>')
+      + '</tbody></table></div>';
+  };
+  root._flExSel = function (k, on) { const s0 = root.__flEx.sel; if (on) s0.add(k); else s0.delete(k); root._flAbrirExcluidos(); };
+  root._flRestaurarExcluidos = async function (chaveUnica) {
+    const g = root.__flEx, lista = lerEx(), chaves = chaveUnica ? [chaveUnica] : [...g.sel];
+    const alvo = lista.filter(x => !x.restaurada && chaves.indexOf(x.em + '|' + x.eid) >= 0);
+    if (!alvo.length) { toast('Escolha ao menos uma linha.', 'err'); return; }
+    if (!confirm('Restaurar ' + alvo.length + ' linha(s) no Registro? Elas voltam como PENDENTES (a classificação contábil precisa ser refeita).')) return;
+    let feitas = 0, jaExistia = 0, semFluxo = 0; const ex = getExcl(); let mudouEx = false;
+    for (const x of alvo) {
+      try {
+        const nova = { empresa_eid: EID(), conta_bancaria_id: Number(x.conta), data_pagamento: x.data, valor_saida: x.vs || 0, valor_entrada: x.ve || 0, historico_bancario: x.h || null, documento: x.doc || null, informacao: x.inf || null, origem_importacao: x.origem || 'excel', hash_dedup: x.hash || ('flrest' + Date.now() + Math.random().toString(36).slice(2, 7)), fonte: x.fonte || null, status_conciliacao: 'pendente' };
+        const r = await _supaClient.from('lancamentos_extrato').upsert([nova], { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true }).select('id');
+        if (r.error) { toast('Erro ao restaurar: ' + r.error.message, 'err'); continue; }
+        const novoId = r.data && r.data[0] && r.data[0].id;
+        if (!novoId) { jaExistia++; x.restaurada = new Date().toISOString(); continue; } // a linha já voltou por outro caminho (ex.: nova importação do Fluxo)
+        (x.fluxo || []).forEach(i => { if (ex.delete(String(i))) mudouEx = true; });
+        if ((x.fluxo || []).length) {
+          const u = await _supaClient.from('fluxo_caixa_lancamentos').update({ lancamento_extrato_id: novoId, status_associado: 'associado', conta_bancaria_id: Number(x.conta) }).in('id', x.fluxo).select('id');
+          if (!u.error && (u.data || []).length < x.fluxo.length) semFluxo++;
+          try { marcarManuais(x.fluxo); } catch (e) {}
+        }
+        x.restaurada = new Date().toISOString(); feitas++;
+      } catch (e) { console.warn('Restaurar excluída:', e); }
+    }
+    if (mudouEx) setExcl(ex);
+    gravarEx(lista); g.sel = new Set();
+    toast(feitas + ' linha(s) restaurada(s) como pendente' + (jaExistia ? ' · ' + jaExistia + ' já estava(m) no Registro' : '') + (semFluxo ? ' · ' + semFluxo + ' sem a linha do Fluxo (suba o Fluxo de novo)' : '') + '.', 'ok');
+    root._flAbrirExcluidos();
+  };
+
   // ── 5) excluir tudo que está filtrado ──
   // ───────── BUSCAR EM OUTRO BANCO (pedido 11/11/2026): tributo (ICMS partilhado / ICMS-ST) que o cliente pagou por um banco mas o Fluxo lançou no outro ─────────
   // Pega as linhas PENDENTES de saída da conta aberta (ex.: "Sispag Tributos" do Itaú) e procura, nas OUTRAS contas, uma linha de tributo ICMS na MESMA data e com o MESMO valor (centavo exato).
@@ -1635,6 +1704,7 @@
     const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle(); if (!x) { toast('Linha não encontrada.', 'err'); return; }
     const v = Number(x.valor_entrada) > 0 ? '+ R$ ' + fmt(x.valor_entrada) : '− R$ ' + fmt(x.valor_saida);
     if (!confirm('Excluir esta linha do Registro?\n\n' + brData(x.data_pagamento) + ' · ' + v + '\n' + String(x.historico_bancario || '').slice(0, 140) + '\n\n' + (x.fonte === 'fluxo' ? 'Ela veio do Fluxo: o lançamento do Fluxo é mantido, mas não volta para o Registro.' : 'Se rodar "Trazer … do extrato" de novo, ela pode ser trazida outra vez (para impedir, use Ignorar).') + (x.status_conciliacao === 'conciliado' || x.status_conciliacao === 'parcial' ? '\nEla está classificada: a classificação também é desfeita.' : ''))) return;
+    await snapshotExcluidos([id], 'linha'); // guarda a cópia (tela 🗑 Excluídos) antes de apagar
     for (const t of ['notas_fiscais_parcelas', 'comprovantes_bancarios', 'comprovantes_recebimento', 'comprovantes_salarios']) await _supaClient.from(t).update({ lancamento_extrato_id: null, status_conciliacao: 'pendente' }).eq('lancamento_extrato_id', id);
     await _supaClient.from('aplicacoes_financeiras_movimentos').update({ lancamento_extrato_id: null }).eq('lancamento_extrato_id', id);
     const lig = await _supaClient.from('fluxo_caixa_lancamentos').select('id').eq('lancamento_extrato_id', id);
@@ -1653,6 +1723,7 @@
     if (!confirm('Excluir do Registro as ' + n + ' linha(s) que estão filtradas (todas as páginas)?\n\nVale para linhas que vieram do Fluxo ou do extrato. Se alguma já estava classificada, a classificação também é desfeita.\nAs linhas do Fluxo ligadas a elas também são apagadas do sistema (o arquivo do Fluxo continua com você, para subir de novo).')) return;
     const dig = prompt('Para confirmar, digite a quantidade de linhas que serão excluídas (' + n + '):'); if (String(dig || '').trim() !== String(n)) { toast('Número não confere — nada foi excluído.', 'err'); return; }
     toast('Excluindo ' + n + ' linha(s)…', 'info');
+    await snapshotExcluidos(ids, 'filtradas'); // guarda a cópia (tela 🗑 Excluídos) antes de apagar
     const lotes = (fn) => _lancctbEmLotesDb(ids, 200, fn);
     // linhas do Fluxo ligadas: guarda que foram excluídas (não voltam) e desliga
     const lig = await _lancctbFetchPorIds(() => _supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id').eq('empresa_eid', EID()), 'lancamento_extrato_id', ids, () => false);
