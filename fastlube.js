@@ -701,7 +701,8 @@
         Object.keys(fluxoDia).filter(d => d < p.de).forEach(d => { const L = livres(d); if (L.length) outros[d] = (outros[d] || []).concat(L); });
       }
       Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).forEach(d => { const L = livres(d); if (L.length) outros[d] = L; });
-      const cand = Object.keys(outros).filter(d => !extDia[d] && !diasFechados.has(d)).sort(), comExt = new Set();
+      // SÓ os dias do período escolhido (pedido do usuário 13/11/2026: "trouxe pagamentos do dia 4 e mexeu no dia 3 / no mês anterior — não deve"): antes esta etapa também gerava Conciliação em dias ANTERIORES ao período (e de meses anteriores) que tinham Fluxo sem par.
+      const cand = Object.keys(outros).filter(d => !extDia[d] && !diasFechados.has(d) && (!p.de || d >= p.de) && (!p.ate || d <= p.ate)).sort(), comExt = new Set();
       for (let k = 0; k < cand.length; k += 100) { const r = await _supaClient.from('lancamentos_extrato').select('data_pagamento').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('status_conciliacao', 'referencia').gt('valor_saida', 0).in('data_pagamento', cand.slice(k, k + 100)); (r.data || []).forEach(x => comExt.add(x.data_pagamento)); }
       cand.forEach(d => {
         const R = outros[d], Rs = R.reduce((a, x) => a + x.c, 0); if (!Rs) return;
