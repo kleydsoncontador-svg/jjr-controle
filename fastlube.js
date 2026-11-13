@@ -168,7 +168,7 @@
     const ag = (_lancctbRegistroAgenciasCache || []).find(a => String(a.id) === contaAtual());
     const banco = ag ? (_lancctbNomeBancoExibicao(ag.banco_nome) + (ag.conta_corrente ? ' Cc ' + ag.conta_corrente : '')) : 'conta ' + contaAtual();
     let per;
-    if (_lancctbRegistroDataExata) per = 'o dia ' + brData(_lancctbRegistroDataExata);
+    if (_lancctbRegistroDataExata) per = (_lancctbRegistroDataExataAte && _lancctbRegistroDataExataAte !== _lancctbRegistroDataExata) ? 'de ' + brData(_lancctbRegistroDataExata) + ' até ' + brData(_lancctbRegistroDataExataAte) : 'o dia ' + brData(_lancctbRegistroDataExata);
     else if (_lancctbRegistroDataDe || _lancctbRegistroDataAte) per = 'de ' + (_lancctbRegistroDataDe ? brData(_lancctbRegistroDataDe) : 'o início') + ' até ' + (_lancctbRegistroDataAte ? brData(_lancctbRegistroDataAte) : 'o fim');
     else per = 'TODO o período (sem filtro de data)';
     const rot = String(nome || '').replace('_lancctbProcessar', '').replace(/FonteRegistro/, 'Pagamentos/Recebimentos');
@@ -1399,7 +1399,7 @@
   let diaBusy = false, diaCache = { k: '', ts: 0, h: '' };
   async function injetarSaldoDia() {
     const slot = document.getElementById('lancctbSaldoRegSlot'); if (!slot) return;
-    const dia = _lancctbRegistroDataExata || ((_lancctbRegistroDataDe && _lancctbRegistroDataDe === _lancctbRegistroDataAte) ? _lancctbRegistroDataDe : '');
+    const dia = _lancctbRegistroDataExataAte || _lancctbRegistroDataExata || ((_lancctbRegistroDataDe && _lancctbRegistroDataDe === _lancctbRegistroDataAte) ? _lancctbRegistroDataDe : ''); // intervalo: saldo no fim do último dia
     let box = document.getElementById('flSaldoDia');
     if (!dia) { if (box) box.remove(); return; }
     const conta = contaAtual(), k = conta + '|' + dia;
