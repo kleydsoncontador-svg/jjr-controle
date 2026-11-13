@@ -1475,43 +1475,49 @@
   };
 
   // ───────── IMPEDIR (pedido do usuário 13/11/2026) ─────────
-  // Regra eterna "impedir": escolhe-se UMA PARTE do histórico de uma linha do Fluxo (ex.: "F17-DARFS SERV"). Toda linha do Fluxo com esse texto no histórico — as de hoje e as das próximas importações — fica IGNORADA para sempre:
-  // aparece no Registro riscada, fora do saldo e do TXT (é o mesmo "ignorado", só que automático). A lista fica em ⛔ Impedidos; lá o botão "Permitir" pergunta a partir de qual competência a regra deixa de valer
-  // (as linhas dessa competência em diante voltam a pendente; as anteriores continuam ignoradas). Nada é apagado.
+  // Regra eterna "impedir": escolhe-se UMA OU MAIS PARTES do histórico de uma linha do Fluxo (ex.: fornecedor + conta "F17-DARFS SERV"). Toda linha do Fluxo que tenha TODAS as partes escolhidas no histórico — as de hoje e as das próximas
+  // importações — fica IGNORADA para sempre: aparece no Registro riscada, fora do saldo e do TXT (é o mesmo "ignorado", só que automático). A lista fica em ⛔ Impedidos; lá o botão "Permitir" pergunta a partir de qual competência
+  // a regra deixa de valer (as linhas dessa competência em diante voltam a pendente; as anteriores continuam ignoradas). Nada é apagado.
   const IMPK = () => 'fl_impedidos_' + EID();
+  const partesDe = r => (Array.isArray(r && r.partes) && r.partes.length) ? r.partes : (r && r.texto ? [r.texto] : []);
+  const rotuloRegra = r => partesDe(r).join('  +  ');
   const lerImp = () => { try { return S.g(IMPK()) || []; } catch (e) { return []; } };
   const gravarImp = l => { try { S.s(IMPK(), l); } catch (e) {} };
-  const regraImpAtiva = (r, data) => !!(r && r.texto && (!r.desde || String(data || '') < r.desde + '-01'));
-  root._flImpedidoPorRegra = (hist, data) => { if (!ativo()) return false; const h = norm(hist); return lerImp().some(r => regraImpAtiva(r, data) && h.indexOf(norm(r.texto)) >= 0); };
+  const regraImpAtiva = (r, data) => !!(r && partesDe(r).length && (!r.desde || String(data || '') < r.desde + '-01'));
+  const casaRegra = (r, histNorm) => partesDe(r).every(p => histNorm.indexOf(norm(p)) >= 0);
+  root._flImpedidoPorRegra = (hist, data) => { if (!ativo()) return false; const h = norm(hist); return lerImp().some(r => regraImpAtiva(r, data) && casaRegra(r, h)); };
   const likeSeguro = t => String(t || '').replace(/[%_,()]/g, ' ').trim();
-  async function idsDaRegra(texto, status, desdeData) {
-    const t = likeSeguro(texto); if (t.length < 3) return [];
+  async function idsDaRegra(partes, status, desdeData) {
+    const ps = (Array.isArray(partes) ? partes : [partes]).filter(Boolean), maior = likeSeguro(ps.slice().sort((a, b) => b.length - a.length)[0]);
+    if (maior.length < 3) return [];
     const r = await todosPorId(() => {
-      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,historico_bancario').eq('empresa_eid', EID()).eq('fonte', 'fluxo').eq('status_conciliacao', status).ilike('historico_bancario', '%' + t + '%');
+      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,historico_bancario').eq('empresa_eid', EID()).eq('fonte', 'fluxo').eq('status_conciliacao', status).ilike('historico_bancario', '%' + maior + '%');
       if (desdeData) q = q.gte('data_pagamento', desdeData);
       return q;
     });
-    const n = norm(texto); return (r.data || []).filter(x => norm(x.historico_bancario).indexOf(n) >= 0);
+    return (r.data || []).filter(x => { const h = norm(x.historico_bancario); return ps.every(p => h.indexOf(norm(p)) >= 0); });
   }
   const faixa = l => { const ds = l.map(x => x.data_pagamento).sort(); return ds.length ? brData(ds[0]) + (ds[ds.length - 1] !== ds[0] ? ' a ' + brData(ds[ds.length - 1]) : '') : ''; };
   root._flImpedirLinha = async function (id) {
     const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,historico_bancario,fonte').eq('id', id).maybeSingle();
     if (!x) { toast('Linha não encontrada — atualize a tela.', 'err'); return; }
     const segs = String(x.historico_bancario || '').split(' | ').map(s => s.trim()).filter(Boolean);
-    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Escolha <b>qual parte do histórico</b> deve ser impedida. Toda linha do Fluxo com esse texto (as de hoje e as das próximas importações) fica <b>ignorada para sempre</b>: aparece no Registro riscada, fora do saldo e do TXT, até você clicar em <b>Permitir</b> na lista ⛔ Impedidos.</div>'
-      + segs.map(s => '<label style="display:flex;gap:8px;align-items:flex-start;padding:5px 7px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer"><input type="radio" name="flImpSeg" value="' + E(s) + '" onchange="document.getElementById(\'flImpTxt\').value=this.value"> <span style="font-size:12.5px">' + E(s) + '</span></label>').join('')
-      + '<div style="margin:8px 0 3px;font-size:12px;color:var(--slate)">Texto que será impedido (dá para ajustar):</div><input id="flImpTxt" style="' + ESTI + '" placeholder="escolha uma parte acima ou digite">';
-    const el = dialogoForm('⛔ Impedir — parte do histórico', corpo, async (box) => {
-      const texto = (box.querySelector('#flImpTxt').value || '').trim();
-      if (texto.length < 4) { toast('Escolha ou digite um trecho com pelo menos 4 letras/números.', 'err'); return false; }
-      const alvo = await idsDaRegra(texto, 'pendente');
-      const lista = lerImp(), antiga = lista.find(r => norm(r.texto) === norm(texto));
-      if (antiga && !antiga.desde) { toast('Esse texto já está impedido (veja ⛔ Impedidos).', 'info'); return false; }
-      if (!confirm('Impedir "' + texto + '"?\n\n' + alvo.length + ' linha(s) pendente(s) do Fluxo com esse texto' + (alvo.length ? ' (' + faixa(alvo) + ')' : '') + ' ficam ignoradas agora, e as próximas importações do Fluxo com esse texto também. Linhas já classificadas não são mexidas.\n\nDá para desfazer em ⛔ Impedidos > Permitir.')) return false;
+    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Marque <b>uma ou mais partes</b> do histórico (por exemplo, o fornecedor <b>e</b> a conta). A regra só vale para a linha do Fluxo que tiver <b>todas</b> as partes marcadas. Quem casar fica <b>ignorada para sempre</b>: aparece no Registro riscada, fora do saldo e do TXT, até você clicar em <b>Permitir</b> na lista ⛔ Impedidos.</div>'
+      + segs.map((s, i) => '<label style="display:flex;gap:8px;align-items:flex-start;padding:5px 7px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer"><input type="checkbox" class="flImpSeg" value="' + E(s) + '"> <span style="font-size:12.5px">' + E(s) + '</span></label>').join('')
+      + '<div style="margin:8px 0 3px;font-size:12px;color:var(--slate)">Outro trecho (opcional — também entra como parte obrigatória):</div><input id="flImpTxt" style="' + ESTI + '" placeholder="digite se quiser acrescentar um trecho">';
+    const el = dialogoForm('⛔ Impedir — partes do histórico', corpo, async (box) => {
+      const partes = [...box.querySelectorAll('.flImpSeg:checked')].map(c => c.value.trim()).filter(Boolean);
+      const extra = (box.querySelector('#flImpTxt').value || '').trim(); if (extra) partes.push(extra);
+      if (!partes.length || partes.join('').length < 4) { toast('Marque ao menos uma parte (ou digite um trecho) com pelo menos 4 letras/números.', 'err'); return false; }
+      const chave = ps => ps.map(norm).sort().join('\u0001');
+      const alvo = await idsDaRegra(partes, 'pendente');
+      const lista = lerImp(), antiga = lista.find(r => chave(partesDe(r)) === chave(partes));
+      if (antiga && !antiga.desde) { toast('Essa combinação já está impedida (veja ⛔ Impedidos).', 'info'); return false; }
+      if (!confirm('Impedir "' + partes.join('  +  ') + '"?\n\n' + alvo.length + ' linha(s) pendente(s) do Fluxo com ' + (partes.length > 1 ? 'TODAS essas partes' : 'esse texto') + (alvo.length ? ' (' + faixa(alvo) + ')' : '') + ' ficam ignoradas agora, e as próximas importações do Fluxo também. Linhas já classificadas não são mexidas.\n\nDá para desfazer em ⛔ Impedidos > Permitir.')) return false;
       if (alvo.length && !(await marcarIgnorado(alvo.map(a => a.id), true))) return false;
-      if (antiga) { antiga.desde = ''; antiga.reativada = new Date().toISOString(); } else lista.unshift({ id: Date.now(), texto, criada: new Date().toISOString(), por: quemFez(), desde: '' });
+      if (antiga) { antiga.desde = ''; antiga.reativada = new Date().toISOString(); } else lista.unshift({ id: Date.now(), partes, texto: partes.join(' + '), criada: new Date().toISOString(), por: quemFez(), desde: '' });
       gravarImp(lista);
-      toast('Impedido: "' + texto + '" — ' + alvo.length + ' linha(s) ignorada(s) agora; as próximas importações também.', 'ok'); renderLancctbRegistroContabil();
+      toast('Impedido: "' + partes.join(' + ') + '" — ' + alvo.length + ' linha(s) ignorada(s) agora; as próximas importações também.', 'ok'); renderLancctbRegistroContabil();
     });
     const ok = el.querySelector('#flFormOk'); if (ok) ok.textContent = '⛔ Impedir';
   };
@@ -1520,22 +1526,23 @@
     const lista = lerImp(), dt = d => { try { return new Date(d).toLocaleDateString('pt-BR'); } catch (e) { return ''; } };
     el.innerHTML = '<div style="padding:20px;color:var(--slate)">Carregando…</div>';
     const cont = {};
-    for (const r of lista) { try { cont[r.id] = (await idsDaRegra(r.texto, 'ignorado')).length; } catch (e) { cont[r.id] = '?'; } }
+    for (const r of lista) { try { cont[r.id] = (await idsDaRegra(partesDe(r), 'ignorado')).length; } catch (e) { cont[r.id] = '?'; } }
     const est = 'padding:5px 8px;border-bottom:1px solid var(--border)';
+    const chips = r => partesDe(r).map(p => '<span style="display:inline-block;margin:1px 3px 1px 0;padding:1px 7px;border-radius:10px;border:1px solid #eab308;background:rgba(250,204,21,.22)">' + E(p) + '</span>').join('<span style="color:var(--slate)"> + </span>');
     el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">⛔ Impedidos — Fast Lube</div></div>'
-      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:1000px">Textos de histórico que você mandou <b>nunca fazerem parte do saldo nem do TXT</b>. As linhas do Fluxo com esse texto entram sempre como ignoradas (aparecem riscadas no Registro). Para voltar a considerar, clique em <b>Permitir</b>: o site pergunta a partir de qual competência.</div>'
-      + '<div style="overflow:auto;border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="background:var(--ink2);color:#fff"><tr><th style="padding:6px 8px;text-align:left">Texto impedido</th><th style="padding:6px 8px;text-align:left">Criada</th><th style="padding:6px 8px;text-align:right">Linhas ignoradas por ela</th><th style="padding:6px 8px;text-align:left">Situação</th><th style="padding:6px 8px"></th></tr></thead><tbody>'
-      + (lista.length ? lista.map(r => '<tr><td style="' + est + ';font-weight:600">' + E(r.texto) + '</td><td style="' + est + ';white-space:nowrap">' + dt(r.criada) + (r.por ? ' · ' + E(r.por) : '') + '</td><td style="' + est + ';text-align:right">' + cont[r.id] + '</td><td style="' + est + '">' + (r.desde ? '<span style="color:var(--teal)">Liberada a partir de ' + r.desde.slice(5, 7) + '/' + r.desde.slice(0, 4) + '</span> <span style="color:var(--slate)">(antes disso continua impedida)</span>' : '<span style="color:#b45309;font-weight:700">⛔ Impedida</span>') + '</td><td style="' + est + ';text-align:right">' + (r.desde ? '' : '<button class="btn bo bsm" onclick="_flPermitir(' + r.id + ')">Permitir…</button>') + '</td></tr>').join('') : '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--slate)">Nada impedido ainda. Use o botão "Impedir" ao lado de "Ignorar" em uma linha do Fluxo.</td></tr>')
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:1000px">Combinações de histórico que você mandou <b>nunca fazerem parte do saldo nem do TXT</b>. A linha do Fluxo que tiver <b>todas</b> as partes da regra entra sempre como ignorada (aparece riscada no Registro). Para voltar a considerar, clique em <b>Permitir</b>: o site pergunta a partir de qual competência.</div>'
+      + '<div style="overflow:auto;border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="background:var(--ink2);color:#fff"><tr><th style="padding:6px 8px;text-align:left">Partes do histórico impedidas</th><th style="padding:6px 8px;text-align:left">Criada</th><th style="padding:6px 8px;text-align:right">Linhas ignoradas por ela</th><th style="padding:6px 8px;text-align:left">Situação</th><th style="padding:6px 8px"></th></tr></thead><tbody>'
+      + (lista.length ? lista.map(r => '<tr><td style="' + est + '">' + chips(r) + '</td><td style="' + est + ';white-space:nowrap">' + dt(r.criada) + (r.por ? ' · ' + E(r.por) : '') + '</td><td style="' + est + ';text-align:right">' + cont[r.id] + '</td><td style="' + est + '">' + (r.desde ? '<span style="color:var(--teal)">Liberada a partir de ' + r.desde.slice(5, 7) + '/' + r.desde.slice(0, 4) + '</span> <span style="color:var(--slate)">(antes disso continua impedida)</span>' : '<span style="color:#ca8a04;font-weight:700">⛔ Impedida</span>') + '</td><td style="' + est + ';text-align:right">' + (r.desde ? '' : '<button class="btn bo bsm" onclick="_flPermitir(' + r.id + ')">Permitir…</button>') + '</td></tr>').join('') : '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--slate)">Nada impedido ainda. Use o botão "Impedir" ao lado de "Ignorar" em uma linha do Fluxo.</td></tr>')
       + '</tbody></table></div>';
   };
   root._flPermitir = function (rid) {
     const r = lerImp().find(x => x.id === rid); if (!r) return;
     const mes0 = (/^\d{4}-\d{2}$/.test(_lancctbRegistroMes || '') ? _lancctbRegistroMes : new Date().toISOString().slice(0, 7));
-    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Permitir de novo <b>"' + E(r.texto) + '"</b>. A partir de qual competência (mês) as linhas com esse texto voltam a fazer parte do saldo e do TXT?<br><span style="color:var(--slate)">As linhas dessa competência em diante que estão ignoradas voltam a pendente. As anteriores continuam ignoradas.</span></div><input id="flPermMes" type="month" value="' + mes0 + '" style="' + ESTI + ';max-width:200px">';
+    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Permitir de novo <b>"' + E(rotuloRegra(r)) + '"</b>. A partir de qual competência (mês) as linhas com isso voltam a fazer parte do saldo e do TXT?<br><span style="color:var(--slate)">As linhas dessa competência em diante que estão ignoradas voltam a pendente. As anteriores continuam ignoradas.</span></div><input id="flPermMes" type="month" value="' + mes0 + '" style="' + ESTI + ';max-width:200px">';
     const el = dialogoForm('Permitir — a partir de qual competência?', corpo, async (box) => {
       const mes = box.querySelector('#flPermMes').value; if (!/^\d{4}-\d{2}$/.test(mes)) { toast('Escolha a competência.', 'err'); return false; }
-      const alvo = await idsDaRegra(r.texto, 'ignorado', mes + '-01');
-      if (!confirm('Permitir "' + r.texto + '" a partir de ' + mes.slice(5, 7) + '/' + mes.slice(0, 4) + '?\n\n' + alvo.length + ' linha(s) ignorada(s) com esse texto' + (alvo.length ? ' (' + faixa(alvo) + ')' : '') + ' voltam a pendente. As anteriores a essa competência continuam ignoradas.')) return false;
+      const alvo = await idsDaRegra(partesDe(r), 'ignorado', mes + '-01');
+      if (!confirm('Permitir "' + rotuloRegra(r) + '" a partir de ' + mes.slice(5, 7) + '/' + mes.slice(0, 4) + '?\n\n' + alvo.length + ' linha(s) ignorada(s) com isso' + (alvo.length ? ' (' + faixa(alvo) + ')' : '') + ' voltam a pendente. As anteriores a essa competência continuam ignoradas.')) return false;
       if (alvo.length && !(await marcarIgnorado(alvo.map(a => a.id), false))) return false;
       const lista = lerImp(), x = lista.find(y => y.id === rid); if (x) { x.desde = mes; x.liberada = new Date().toISOString(); x.liberadaPor = quemFez(); }
       gravarImp(lista); toast('Permitido a partir de ' + mes.slice(5, 7) + '/' + mes.slice(0, 4) + ' — ' + alvo.length + ' linha(s) voltaram a pendente.', 'ok'); root._flAbrirImpedidos();
