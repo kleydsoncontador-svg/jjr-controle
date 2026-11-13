@@ -682,6 +682,18 @@
       if (dif > 0) {
         const cand = extDia[d].filter(l => /^(dia|soma dia|soma de|soma p\/ 1|grupo)/.test(l.via || '')), selX = cand.length ? exatoSubset(cand, dif) : null;
         if (selX) { selX.forEach(k => { const l = cand[k]; if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); l.via = 'trazida (valor exato)'; }); return; }
+        // (13/11/2026, Fast Lube 17/08: Sispag Tributos 85.342,80 + 165,00 + 631,08 viraram uma "Conciliação" de 86.057,40) A diferença = pagamentos do extrato que o Fluxo só tinha em OUTRO dia MENOS linhas do Fluxo DESTE dia
+        // que não têm pagamento igual no extrato (as "sobras"). Quando essa conta fecha EXATA, traz cada pagamento do extrato como ele é (valor exato, histórico do Sispag) e as sobras do Fluxo viram uma Conciliação de ENTRADA só do valor delas, explicada.
+        const sobrasDia = livres(d), somaSobras = sobrasDia.reduce((a2, x) => a2 + x.c, 0);
+        const sel2 = (cand.length && sobrasDia.length && sobrasDia.length <= 12 && !rejeitadas.has('flkk' + d + '|' + (-somaSobras))) ? exatoSubset(cand, dif + somaSobras) : null;
+        if (sel2) {
+          sel2.forEach(k => { const l = cand[k]; if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); l.via = 'trazida (valor exato)'; });
+          const hS = 'Conciliação do dia ' + brData(d) + ': o Fluxo lançou neste dia, sem pagamento igual no extrato: ' + sobrasDia.slice(0, 30).map(x => x.nome + ' ' + fmt(x.c / 100)).join(' + ') + (sobrasDia.length > 30 ? ' + … (+' + (sobrasDia.length - 30) + ')' : '') + '. Os pagamentos de ' + listaValores(sel2.map(k => cand[k].c), 60) + ' estão no extrato deste dia (o Fluxo tinha em outro dia) e foram trazidos como eles são.';
+          novas.push({ r: { id: 'k' + d + '|' + (-somaSobras), data_pagamento: d, valor_saida: 0, valor_entrada: somaSobras / 100, historico_bancario: hS, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
+          rel.conciliacoes.push({ dia: d, dif: -somaSobras, ls: A, rs: regF + regN, hist: hS }); ent.conc = { dif: -somaSobras, ls: A, rs: regF + regN, hist: hS, sisp: [], fluxo: sobrasDia.map(x => ({ v: x.c, n: x.nome })) }; ent.excesso = [];
+          sobrasDia.forEach(x => { rel.marcasDif = rel.marcasDif || {}; rel.marcasDif[x.id] = d; });
+          return;
+        }
       }
       if (rejeitadas.has('flkk' + d + '|' + dif)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; }
       const outros = (ent.outroDia || []), sobras = livres(d);
