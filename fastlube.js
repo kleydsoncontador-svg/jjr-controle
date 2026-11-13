@@ -107,7 +107,8 @@
       + '<button class="btn bo" onclick="_flNovoAjuste()" title="Inclui uma linha de ajuste (histórico: Ajuste incluído para acerto do saldo diário). Fica em amarelo, com origem Ajuste manual; você pode editar ou excluir.">➕ Adicionar ajuste</button>'
       + '<button class="btn bo" onclick="_flAlterarDataFiltradas()" title="Muda a data de todas as linhas filtradas (só as não classificadas).">📅 Alterar data das filtradas (' + n + ')</button>'
       + '<button class="btn bo" onclick="_flAbrirIgnorados()" title="Linhas que você ignorou (do Fluxo ou do extrato). Dá para resgatar para o mesmo banco, para o outro banco, ou mudar a data.">🚫 Ignorados</button>'
-      + '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
+            + '<button class="btn bo" style="background:rgba(250,204,21,.25);border-color:#eab308" onclick="_flAbrirImpedidos()" title="Textos de histórico que você mandou NUNCA fazerem parte do saldo nem do TXT (ignorados para sempre). Lá dá para clicar em Permitir e escolher a partir de qual competência volta.">⛔ Impedidos</button>'
++ '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
       + '<button class="btn bo" onclick="_flExcelRelatorio(\'todos\')" title="Gera um Excel para o cliente com 5 abas: Ajustes e conciliações, Datas alteradas, Valores alterados, Ignorados e Fluxo × extrato por dia. Mostra o que foi preciso fazer para chegar ao saldo do extrato.">📊 Excel p/ cliente</button>'
       + '<button class="btn bo" onclick="_flAbrirDatas()" title="Lançamentos cuja data foi alterada em relação à data de origem (Fluxo ou extrato): quando, quem, data original e nova. Dá para voltar à data original.">📆 Datas alteradas</button>'
       + '<button class="btn bo" onclick="_flAbrirRelatorios()" title="Relatórios gerados pelos botões de recebimentos e pagamentos do extrato (o que foi trazido, diferenças, avisos).">📑 Relatórios</button>'
@@ -366,7 +367,7 @@
     let criadas = 0;
     for (let i = 0; i < itens.length; i += 300) {
       const lote = itens.slice(i, i + 300);
-      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID(), conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: histFluxo(f), documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo', status_conciliacao: ignoraAuto(f) ? 'ignorado' : 'pendente' }));
+      const rows = lote.map(({ f, c }) => ({ empresa_eid: EID(), conta_bancaria_id: c, data_pagamento: f.data, valor_saida: f.valor_saida || 0, valor_entrada: f.valor_entrada || 0, historico_bancario: histFluxo(f), documento: f.documento_numero || null, informacao: f.cliente_fornecedor_nome || null, origem_importacao: 'excel', hash_dedup: 'flx' + f.id, fonte: 'fluxo', status_conciliacao: (ignoraAuto(f) || root._flImpedidoPorRegra(histFluxo(f), f.data)) ? 'ignorado' : 'pendente' }));
       const up = await _supaClient.from('lancamentos_extrato').upsert(rows, { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true });
       if (up.error) { toast(NOME() + ': erro ao criar linhas do Registro: ' + up.error.message, 'err'); return null; }
       const hs = rows.map(r => r.hash_dedup);
@@ -1351,8 +1352,9 @@
       const bt = 'padding:1px 7px;font-size:10.5px;line-height:1.5;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer;white-space:nowrap';
       const ehAj = rid && fontePorId.get(String(rid)) === 'ajuste_manual';
       td.innerHTML = '<div>' + (v != null ? 'R$ ' + fmt(v) : (eIgn ? '<i style="font-size:11px">ignorada</i>' : '')) + '</div>'
-        + (rid ? '<div style="display:flex;gap:4px;justify-content:flex-end;margin-top:3px">'
+        + (rid ? '<div style="display:flex;gap:4px;justify-content:flex-end;flex-wrap:wrap;margin-top:3px">'
           + '<button style="' + bt + ';color:var(--slate)" title="' + (eIgn ? 'Voltar a considerar esta linha (volta como pendente)' : 'Ignorar esta linha: fica apagada, fora do saldo e do TXT') + '" onclick="event.stopPropagation();_flIgnorarLinha(' + rid + ',' + (eIgn ? 'false' : 'true') + ')">' + (eIgn ? 'Voltar' : 'Ignorar') + '</button>'
+          + (fontePorId.get(String(rid)) === 'fluxo' ? '<button style="' + bt + ';padding:1px 5px;color:var(--ink);border-color:#eab308;background:rgba(250,204,21,.30);font-weight:600" title="Impedir para sempre: escolha uma parte do histórico; toda linha do Fluxo com esse texto fica ignorada (riscada, fora do saldo e do TXT) até você clicar em Permitir na lista ⛔ Impedidos" onclick="event.stopPropagation();_flImpedirLinha(' + rid + ')">Impedir</button>' : '')
           + '<button style="' + bt + ';color:#dc2626;border-color:#dc2626" title="' + (ehAj ? 'Excluir este ajuste' : 'Excluir esta linha do Registro (pede confirmação)') + '" onclick="event.stopPropagation();' + (ehAj ? '_flExcluirAjuste(' : '_flExcluirLinha(') + rid + ')">Excluir</button></div>' : '');
       { const dc = tr.children[1]; if (rid && dc && !dc.querySelector('.fl-ed')) dc.insertAdjacentHTML('beforeend', ' <button class="icon-btn fl-ed" style="padding:0 3px;float:right" title="Editar a data desta linha' + (fontePorId.get(String(rid)) === 'ajuste_manual' ? ' (e valor/histórico do ajuste)' : '') + '" onclick="event.stopPropagation();_flEditarLinha(' + rid + ')">✏️</button>'); } // lápis ao lado da data
       if (rid && fontePorId.get(String(rid)) === 'ajuste_manual') { tr.style.setProperty('background', 'rgba(250,204,21,.30)', 'important'); [...tr.children].forEach(c => { c.style.background = 'transparent'; }); tr.title = 'Ajuste manual (incluído para acerto do saldo diário)'; }
@@ -1470,6 +1472,75 @@
     if (!confirm('Ignorar as ' + ids.length + ' linha(s) filtradas? Elas ficam apagadas, fora do saldo e do TXT (dá para voltar uma a uma).')) return;
     if (!(await marcarIgnorado(ids, true))) return;
     toast(ids.length + ' linha(s) ignorada(s) ✓', 'ok'); renderLancctbRegistroContabil();
+  };
+
+  // ───────── IMPEDIR (pedido do usuário 13/11/2026) ─────────
+  // Regra eterna "impedir": escolhe-se UMA PARTE do histórico de uma linha do Fluxo (ex.: "F17-DARFS SERV"). Toda linha do Fluxo com esse texto no histórico — as de hoje e as das próximas importações — fica IGNORADA para sempre:
+  // aparece no Registro riscada, fora do saldo e do TXT (é o mesmo "ignorado", só que automático). A lista fica em ⛔ Impedidos; lá o botão "Permitir" pergunta a partir de qual competência a regra deixa de valer
+  // (as linhas dessa competência em diante voltam a pendente; as anteriores continuam ignoradas). Nada é apagado.
+  const IMPK = () => 'fl_impedidos_' + EID();
+  const lerImp = () => { try { return S.g(IMPK()) || []; } catch (e) { return []; } };
+  const gravarImp = l => { try { S.s(IMPK(), l); } catch (e) {} };
+  const regraImpAtiva = (r, data) => !!(r && r.texto && (!r.desde || String(data || '') < r.desde + '-01'));
+  root._flImpedidoPorRegra = (hist, data) => { if (!ativo()) return false; const h = norm(hist); return lerImp().some(r => regraImpAtiva(r, data) && h.indexOf(norm(r.texto)) >= 0); };
+  const likeSeguro = t => String(t || '').replace(/[%_,()]/g, ' ').trim();
+  async function idsDaRegra(texto, status, desdeData) {
+    const t = likeSeguro(texto); if (t.length < 3) return [];
+    const r = await todosPorId(() => {
+      let q = _supaClient.from('lancamentos_extrato').select('id,data_pagamento,historico_bancario').eq('empresa_eid', EID()).eq('fonte', 'fluxo').eq('status_conciliacao', status).ilike('historico_bancario', '%' + t + '%');
+      if (desdeData) q = q.gte('data_pagamento', desdeData);
+      return q;
+    });
+    const n = norm(texto); return (r.data || []).filter(x => norm(x.historico_bancario).indexOf(n) >= 0);
+  }
+  const faixa = l => { const ds = l.map(x => x.data_pagamento).sort(); return ds.length ? brData(ds[0]) + (ds[ds.length - 1] !== ds[0] ? ' a ' + brData(ds[ds.length - 1]) : '') : ''; };
+  root._flImpedirLinha = async function (id) {
+    const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,historico_bancario,fonte').eq('id', id).maybeSingle();
+    if (!x) { toast('Linha não encontrada — atualize a tela.', 'err'); return; }
+    const segs = String(x.historico_bancario || '').split(' | ').map(s => s.trim()).filter(Boolean);
+    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Escolha <b>qual parte do histórico</b> deve ser impedida. Toda linha do Fluxo com esse texto (as de hoje e as das próximas importações) fica <b>ignorada para sempre</b>: aparece no Registro riscada, fora do saldo e do TXT, até você clicar em <b>Permitir</b> na lista ⛔ Impedidos.</div>'
+      + segs.map(s => '<label style="display:flex;gap:8px;align-items:flex-start;padding:5px 7px;border:1px solid var(--border);border-radius:6px;margin-bottom:4px;cursor:pointer"><input type="radio" name="flImpSeg" value="' + E(s) + '" onchange="document.getElementById(\'flImpTxt\').value=this.value"> <span style="font-size:12.5px">' + E(s) + '</span></label>').join('')
+      + '<div style="margin:8px 0 3px;font-size:12px;color:var(--slate)">Texto que será impedido (dá para ajustar):</div><input id="flImpTxt" style="' + ESTI + '" placeholder="escolha uma parte acima ou digite">';
+    const el = dialogoForm('⛔ Impedir — parte do histórico', corpo, async (box) => {
+      const texto = (box.querySelector('#flImpTxt').value || '').trim();
+      if (texto.length < 4) { toast('Escolha ou digite um trecho com pelo menos 4 letras/números.', 'err'); return false; }
+      const alvo = await idsDaRegra(texto, 'pendente');
+      const lista = lerImp(), antiga = lista.find(r => norm(r.texto) === norm(texto));
+      if (antiga && !antiga.desde) { toast('Esse texto já está impedido (veja ⛔ Impedidos).', 'info'); return false; }
+      if (!confirm('Impedir "' + texto + '"?\n\n' + alvo.length + ' linha(s) pendente(s) do Fluxo com esse texto' + (alvo.length ? ' (' + faixa(alvo) + ')' : '') + ' ficam ignoradas agora, e as próximas importações do Fluxo com esse texto também. Linhas já classificadas não são mexidas.\n\nDá para desfazer em ⛔ Impedidos > Permitir.')) return false;
+      if (alvo.length && !(await marcarIgnorado(alvo.map(a => a.id), true))) return false;
+      if (antiga) { antiga.desde = ''; antiga.reativada = new Date().toISOString(); } else lista.unshift({ id: Date.now(), texto, criada: new Date().toISOString(), por: quemFez(), desde: '' });
+      gravarImp(lista);
+      toast('Impedido: "' + texto + '" — ' + alvo.length + ' linha(s) ignorada(s) agora; as próximas importações também.', 'ok'); renderLancctbRegistroContabil();
+    });
+    const ok = el.querySelector('#flFormOk'); if (ok) ok.textContent = '⛔ Impedir';
+  };
+  root._flAbrirImpedidos = async function () {
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    const lista = lerImp(), dt = d => { try { return new Date(d).toLocaleDateString('pt-BR'); } catch (e) { return ''; } };
+    el.innerHTML = '<div style="padding:20px;color:var(--slate)">Carregando…</div>';
+    const cont = {};
+    for (const r of lista) { try { cont[r.id] = (await idsDaRegra(r.texto, 'ignorado')).length; } catch (e) { cont[r.id] = '?'; } }
+    const est = 'padding:5px 8px;border-bottom:1px solid var(--border)';
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">⛔ Impedidos — Fast Lube</div></div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:1000px">Textos de histórico que você mandou <b>nunca fazerem parte do saldo nem do TXT</b>. As linhas do Fluxo com esse texto entram sempre como ignoradas (aparecem riscadas no Registro). Para voltar a considerar, clique em <b>Permitir</b>: o site pergunta a partir de qual competência.</div>'
+      + '<div style="overflow:auto;border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="background:var(--ink2);color:#fff"><tr><th style="padding:6px 8px;text-align:left">Texto impedido</th><th style="padding:6px 8px;text-align:left">Criada</th><th style="padding:6px 8px;text-align:right">Linhas ignoradas por ela</th><th style="padding:6px 8px;text-align:left">Situação</th><th style="padding:6px 8px"></th></tr></thead><tbody>'
+      + (lista.length ? lista.map(r => '<tr><td style="' + est + ';font-weight:600">' + E(r.texto) + '</td><td style="' + est + ';white-space:nowrap">' + dt(r.criada) + (r.por ? ' · ' + E(r.por) : '') + '</td><td style="' + est + ';text-align:right">' + cont[r.id] + '</td><td style="' + est + '">' + (r.desde ? '<span style="color:var(--teal)">Liberada a partir de ' + r.desde.slice(5, 7) + '/' + r.desde.slice(0, 4) + '</span> <span style="color:var(--slate)">(antes disso continua impedida)</span>' : '<span style="color:#b45309;font-weight:700">⛔ Impedida</span>') + '</td><td style="' + est + ';text-align:right">' + (r.desde ? '' : '<button class="btn bo bsm" onclick="_flPermitir(' + r.id + ')">Permitir…</button>') + '</td></tr>').join('') : '<tr><td colspan="5" style="padding:20px;text-align:center;color:var(--slate)">Nada impedido ainda. Use o botão "Impedir" ao lado de "Ignorar" em uma linha do Fluxo.</td></tr>')
+      + '</tbody></table></div>';
+  };
+  root._flPermitir = function (rid) {
+    const r = lerImp().find(x => x.id === rid); if (!r) return;
+    const mes0 = (/^\d{4}-\d{2}$/.test(_lancctbRegistroMes || '') ? _lancctbRegistroMes : new Date().toISOString().slice(0, 7));
+    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Permitir de novo <b>"' + E(r.texto) + '"</b>. A partir de qual competência (mês) as linhas com esse texto voltam a fazer parte do saldo e do TXT?<br><span style="color:var(--slate)">As linhas dessa competência em diante que estão ignoradas voltam a pendente. As anteriores continuam ignoradas.</span></div><input id="flPermMes" type="month" value="' + mes0 + '" style="' + ESTI + ';max-width:200px">';
+    const el = dialogoForm('Permitir — a partir de qual competência?', corpo, async (box) => {
+      const mes = box.querySelector('#flPermMes').value; if (!/^\d{4}-\d{2}$/.test(mes)) { toast('Escolha a competência.', 'err'); return false; }
+      const alvo = await idsDaRegra(r.texto, 'ignorado', mes + '-01');
+      if (!confirm('Permitir "' + r.texto + '" a partir de ' + mes.slice(5, 7) + '/' + mes.slice(0, 4) + '?\n\n' + alvo.length + ' linha(s) ignorada(s) com esse texto' + (alvo.length ? ' (' + faixa(alvo) + ')' : '') + ' voltam a pendente. As anteriores a essa competência continuam ignoradas.')) return false;
+      if (alvo.length && !(await marcarIgnorado(alvo.map(a => a.id), false))) return false;
+      const lista = lerImp(), x = lista.find(y => y.id === rid); if (x) { x.desde = mes; x.liberada = new Date().toISOString(); x.liberadaPor = quemFez(); }
+      gravarImp(lista); toast('Permitido a partir de ' + mes.slice(5, 7) + '/' + mes.slice(0, 4) + ' — ' + alvo.length + ' linha(s) voltaram a pendente.', 'ok'); root._flAbrirImpedidos();
+    });
+    const ok = el.querySelector('#flFormOk'); if (ok) ok.textContent = 'Permitir';
   };
 
   // ── 5) excluir tudo que está filtrado ──
