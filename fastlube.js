@@ -659,7 +659,7 @@
           const selP = exatoSubset(pend, Rs);                                        // existe um subconjunto do extrato pendente que fecha com TODO o Fluxo sem par?
           if (selP) { R.forEach(x => { x.usado = true; }); const us = new Set(selP); pend.forEach((l, i) => { if (us.has(i)) { l.explicada = true; l.via = 'grupo'; } else adiciona(l); }); }
           else {
-            const hist = nomeCat(pend) + ' (extrato: ' + listaValores(pend.map(l => l.c), 8) + '; soma do Fluxo de Caixa: ' + listaValores(R.map(x => x.c), 10) + '; diferença ' + fmt(dif / 100) + ')';
+            const hist = nomeCat(pend) + ' (extrato: ' + listaValores(pend.map(l => l.c), 60) + '; soma do Fluxo de Caixa: ' + listaValores(R.map(x => x.c), 60) + '; diferença ' + fmt(dif / 100) + ')';
             if (rejeitadas.has('flkk' + d + '|' + dif)) ent.ignoradas = (ent.ignoradas || 0) + 1;
             else {
               novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif / 100, valor_entrada: 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
@@ -685,8 +685,8 @@
       if (rejeitadas.has('flkk' + d + '|' + dif)) { ent.ignoradas = (ent.ignoradas || 0) + 1; return; }
       const outros = (ent.outroDia || []), sobras = livres(d);
       const hist = 'Conciliação do dia ' + brData(d) + ': o extrato pagou R$ ' + fmt(A / 100) + ' e o Registro tinha R$ ' + fmt((regF + regN) / 100) + ' (diferença ' + fmt(Math.abs(dif) / 100) + ').'
-        + (outros.length ? ' Pagos neste dia no extrato, mas lançados no Fluxo em outro dia: ' + listaValores(outros.map(o => cents(o.v / 100)), 6) + '.' : '')
-        + (sobras.length ? ' Lançados no Fluxo sem pagamento igual no extrato deste dia: ' + sobras.slice(0, 6).map(x => x.nome + ' ' + fmt(x.c / 100)).join(' + ') + (sobras.length > 6 ? ' + …' : '') + '.' : '');
+        + (outros.length ? ' Pagos neste dia no extrato, mas lançados no Fluxo em outro dia: ' + listaValores(outros.map(o => cents(o.v / 100)), 60) + '.' : '')
+        + (sobras.length ? ' Lançados no Fluxo sem pagamento igual no extrato deste dia: ' + sobras.slice(0, 30).map(x => x.nome + ' ' + fmt(x.c / 100)).join(' + ') + (sobras.length > 30 ? ' + … (+' + (sobras.length - 30) + ')' : '') + '.' : '');
       novas.push({ r: { id: 'k' + d + '|' + dif, data_pagamento: d, valor_saida: dif > 0 ? dif / 100 : 0, valor_entrada: dif < 0 ? -dif / 100 : 0, historico_bancario: hist, documento: null, informacao: null }, fonte: 'conciliacao', pref: 'flk' }); rel.linhasAdicionadas++;
       rel.conciliacoes.push({ dia: d, dif, ls: A, rs: regF + regN, hist }); ent.conc = { dif, ls: A, rs: regF + regN, hist, sisp: [], fluxo: sobras.map(x => ({ v: x.c, n: x.nome })) };
       ent.excesso = [];
