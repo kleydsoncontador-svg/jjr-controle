@@ -38327,8 +38327,9 @@ function _lancctbBuscarIcmsProLancamento(){
 function _lancctbIcmsManualToggle(i,on){ const x=_lancctbIcmsManualLista[i]; if(!x) return; if(on) _lancctbIcmsManualSel.set(x.id,x); else _lancctbIcmsManualSel.delete(x.id); _lancctbIcmsManualBarra(); }
 function _lancctbIcmsManualBarra(){
   const el=document.getElementById('lancctbIcmsManualBarra'), r=_lancctbRegraExtratoAlvo; if(!el||!r) return;
-  const alvo=Number(r.valor_saida)||0, sel=[..._lancctbIcmsManualSel.values()], soma=Math.round(sel.reduce((a,x)=>a+Math.round(x.valor*100),0))/100, fecha=sel.length>0&&Math.abs(soma-alvo)<=0.02;
-  el.innerHTML='<div style="position:sticky;bottom:0;display:flex;gap:8px;align-items:center;justify-content:space-between;padding:8px;background:var(--bg2,#0f172a);font-size:12px">Marcadas: <b>'+sel.length+'</b> — soma <b style="color:'+(fecha?'var(--teal)':'var(--red)')+'">R$ '+_fmt(soma)+'</b> de R$ '+_fmt(alvo)+'<button class="btn bp bsm" type="button" '+(fecha?'':'disabled')+' onclick="_lancctbIcmsManualAssociar(this)">✓ Associar marcadas'+(fecha?'':' (a soma precisa fechar)')+'</button></div>';
+  const alvo=Number(r.valor_saida)||0, sel=[..._lancctbIcmsManualSel.values()], soma=Math.round(sel.reduce((a,x)=>a+Math.round(x.valor*100),0))/100, fecha=sel.length>0&&Math.abs(soma-alvo)<=0.02, dif=Math.round((alvo-soma)*100)/100;
+  const aviso=sel.length&&!fecha?'<div style="flex-basis:100%;color:var(--amber,#f59e0b);font-size:11.5px">Diferença de R$ '+_fmt(Math.abs(dif))+': '+(dif<0?'o pagamento é MENOR que as NFs — associa como <b>pagamento em partes</b> (o saldo da NF continua pendente).':'o pagamento é MAIOR que as NFs — a diferença vai para <b>Despesas com juros</b> (conta padrão).')+'</div>':'';
+  el.innerHTML='<div style="position:sticky;bottom:0;display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between;padding:8px;background:var(--bg2,#0f172a);font-size:12px">Marcadas: <b>'+sel.length+'</b> — soma <b style="color:'+(fecha?'var(--teal)':'var(--red)')+'">R$ '+_fmt(soma)+'</b> de R$ '+_fmt(alvo)+'<button class="btn bp bsm" type="button" '+(sel.length?'':'disabled')+' onclick="_lancctbIcmsManualAssociar(this)">✓ Associar marcadas'+(sel.length&&!fecha?' (com diferença)':(sel.length?'':' (marque 1 ou mais)'))+'</button>'+aviso+'</div>';
 }
 async function _lancctbIcmsManualAssociar(btn){
   const l=_lancctbRegraExtratoAlvo; if(!l){ toast('Lançamento de origem não encontrado — feche e reabra o modal.','err'); return; }
@@ -38342,16 +38343,17 @@ async function _lancctbIcmsManualAssociar(btn){
     const rows=sel.map(x=>(ctx.rows[x.mes]||[]).find(y=>y.id===x.id));
     if(rows.some(x=>!x||x.ext)){ toast('Alguma NF marcada já foi associada a outro pagamento — refaça a busca.','err'); return; }
     const soma=Math.round(rows.reduce((a,x)=>a+Math.round(x.valor*100),0))/100;
-    if(Math.abs(soma-(Number(l.valor_saida)||0))>0.02){ toast('A soma das NFs não fecha com o lançamento.','err'); return; }
+    const pagoC=Math.round((Number(l.valor_saida)||0)*100), somaC=Math.round(soma*100), difC=pagoC-somaC, comDif=Math.abs(difC)>2;
+    if(comDif&&difC>0){ const cpj=(S.g('lancctb_contas_padrao_'+eid)||{}).juros_pagos; if(!cpj){ toast('O pagamento é maior que as NFs: a diferença vai para Despesas com juros. Cadastre antes a conta padrão "Despesas com juros" (Contas padrão) desta empresa.','err'); return; } }
     const tipos=[...new Set(rows.map(x=>x.tipo))];
-    if(!confirm('Associar '+rows.length+' NF(s) do ICMS (UF '+rows[0].uf+', unidade '+rows[0].unidade+', soma R$ '+_fmt(soma)+') a este pagamento de R$ '+_fmt(l.valor_saida)+'?')) return;
+    if(!confirm('Associar '+rows.length+' NF(s) do ICMS (UF '+rows[0].uf+', unidade '+rows[0].unidade+', soma R$ '+_fmt(soma)+') a este pagamento de R$ '+_fmt(l.valor_saida)+'?'+(comDif?'\n\nDIFERENÇA de R$ '+_fmt(Math.abs(difC)/100)+': '+(difC<0?'pagamento MENOR que as NFs — fica como pagamento em partes e o saldo continua pendente nas NFs.':'pagamento MAIOR que as NFs — a diferença é lançada em Despesas com juros.'):''))) return;
     const { data: regras } = await _lancctbFetchTudo(()=>_supaClient.from('regras_matching')
       .select('id,descricao,historico_fixo,tipo_regra,historico_gatilho,dc,conta_contabil_id,agencia_bancaria_id,plano_contas(classificacao)')
       .eq('empresa_eid',eid).eq('ativo',true).eq('tipo_regra','historico').is('fluxo_historico_gatilho',null).is('fluxo_cliente_gatilho',null).is('fluxo_numero_gatilho',null).is('fluxo_descconta_gatilho',null).is('fluxo_unidade_gatilho',null));
     const { data: contaBancoInfo } = await _supaClient.from('agencias_bancarias').select('conta_contabil_id,plano_contas(classificacao)').eq('id',contaId).single();
     if(!contaBancoInfo||!contaBancoInfo.conta_contabil_id){ toast('Conta bancária sem Conta Contábil vinculada — cadastre em "Agência Bancária".','err'); return; }
     const composicoesParaAbrir=[];
-    const res=await _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir,forcado:{rows,multiTipo:tipos.length>1}});
+    const res=await _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir,forcado:{rows,multiTipo:tipos.length>1,parcial:comDif&&difC<0,total:somaC,juros:comDif&&difC>0?difC:0}});
     if(!res){ toast('Não consegui gravar a associação — nada foi alterado.','err'); return; }
     ctx.mesesTocados.forEach(m=>_lancctbIcmsSalvar(eid,m,ctx.rows[m]));
     _lancctbIcmsManualSel=new Map();
@@ -38363,7 +38365,7 @@ async function _lancctbIcmsManualAssociar(btn){
 }
 async function _lancctbIcmsAplicar({l,regras,contaBancoInfo,contaId,eid,ctx,composicoesParaAbrir,forcado}){
   if(!forcado){ const fc=await _lancctbIcmsFcpExtra({l,contaBancoInfo,eid,ctx}); if(fc) return fc; }
-  const r=forcado?{rows:forcado.rows,multiTipo:!!forcado.multiTipo}:_lancctbIcmsAcharPagamento(l,ctx);
+  const r=forcado?{rows:forcado.rows,multiTipo:!!forcado.multiTipo,parcial:!!forcado.parcial,total:forcado.total,juros:forcado.juros||0}:_lancctbIcmsAcharPagamento(l,ctx);
   if(!r) return null; if(r.ambiguo) return 'ambiguo';
   const rows=r.rows, r0=rows[0], tipo=r0.tipo;
   const rotulo=rows.length===1?`${tipo} ref. ${r0.compet} NF ${r0.doc} UF ${r0.uf} UN ${r0.unidade}`:`${tipo} ref. ${r0.compet} UF ${r0.uf} UN ${r0.unidade} (${rows.length} NFs)`;
