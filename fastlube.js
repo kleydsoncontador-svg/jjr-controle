@@ -634,13 +634,26 @@
     // passada C: dia próximo (±3): valor igual, depois soma de linhas de UM mesmo dia
     let outroDia = 0;
     root.__flEtapa = 'procurando pagamentos de dias vizinhos'; await new Promise(r => setTimeout(r, 0));
-    dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const f = livres(sh(d, dd)).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'dia ' + (dd > 0 ? '+' : '') + dd; outroDia++; return; } } }));
+    dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const f = livres(sh(d, dd)).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'dia ' + (dd > 0 ? '+' : '') + dd; if (Math.abs(dd) === 1) { l.fx = f; l.fxDia = sh(d, dd); } outroDia++; return; } } }));
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).forEach(l => { for (const dd of [-1, 1, -2, 2, -3, 3]) { const it = livres(sh(d, dd)); if (!it.length) continue; const sel = exatoSubset(it, l.c); if (sel) { sel.forEach(k => { it[k].usado = true; }); l.explicada = true; l.via = 'soma dia ' + dd; outroDia++; return; } } }));
+    // passada D (pedido do usuário 17/11/2026, Fast Lube BB 22/09: GNRE de R$ 13,42 — o banco pagou no dia 22 e o Fluxo lançou no dia 23, e o botão trouxe a linha do extrato no dia 22, ficando repetida):
+    // quando o MESMO valor exato está no Fluxo 1 dia antes/depois e aquele outro dia NÃO precisa dele (a linha ficou sem par lá), a data da linha do Fluxo passa para o dia do banco — em vez de trazer uma linha repetida.
+    // Só linha do Fluxo ainda NÃO classificada, só em dia que está entre os escolhidos e não conciliado; fica registrado em 📅 Datas alteradas. Se não puder mexer, cai no comportamento de antes (traz do extrato).
+    const movidas = [];
+    for (const d of dias) for (const l of extDia[d]) {
+      if (!l.fx || !l.explicada || !/^dia [+-]1$/.test(l.via || '')) continue;
+      const f = l.fx, d0 = l.fxDia;
+      if (f.cls || diasFechados.has(d0) || (diasSel && !diasSel.has(d0)) || (p.de && d0 < p.de) || (p.ate && d0 > p.ate)) continue;
+      if (!simular) { const u = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: d }).eq('id', f.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').select('id'); if (u.error || !(u.data || []).length) continue; }
+      fluxoDia[d0] = (fluxoDia[d0] || []).filter(x => x !== f); (fluxoDia[d] = fluxoDia[d] || []).push(f);
+      l.via = 'data do Fluxo corrigida'; movidas.push({ id: f.id, v: f.c, h: f.h, n: f.nome, de: d0, para: d });
+    }
+    if (!simular && movidas.length) { try { gravarLogData(movidas.map(m => ({ id: m.id, em: new Date().toISOString(), por: quemFez(), conta, fonte: 'fluxo', v: -m.v / 100, h: String(m.h || '').slice(0, 200), de: m.de, para: m.para, via: 'Trazer pagamentos: o banco pagou neste dia (valor exato)' }))); } catch (e) {} }
     // 3) o que sobra
     const rel = { linhasAdicionadas: 0, conciliacoes: [], excessos: [], explicadas: 0, outroDia, dias: dias.length, fechados: [...diasFechados].length, detalhe: [] };
     dias.forEach(d => {
       const ls = extDia[d];
-      const ent = { dia: d, total: ls.length, cobertas: 0, add: [], conc: null, excesso: [], grupos: gruposDia[d] || [] }; rel.detalhe.push(ent);
+      const ent = { dia: d, total: ls.length, cobertas: 0, add: [], conc: null, excesso: [], grupos: gruposDia[d] || [], movidas: movidas.filter(m => m.para === d) }; rel.detalhe.push(ent);
       const sobra = ls.filter(l => !l.explicada), diretas = sobra.filter(l => !casavel(l)), pend = sobra.filter(l => casavel(l)), R = livres(d);
       const adiciona = l => { if (rejeitadas.has('flc' + l.r.id)) { ent.ignoradas = (ent.ignoradas || 0) + 1; ent.ignV = (ent.ignV || 0) + l.c; return; } novas.push({ r: l.r, fonte: 'extrato_compl', pref: 'flc' }); rel.linhasAdicionadas++; ent.add.push({ v: l.c, h: String(l.r.historico_bancario || '') }); };
       diretas.forEach(adiciona);                                  // aplicações, tarifas, IOF, impostos do banco: só existem no extrato
@@ -979,17 +992,18 @@
     const r = x.rel, v$ = c => 'R$ ' + fmt(c / 100), li = t => '<div style="margin:2px 0 2px 14px">• ' + t + '</div>';
     if (!r) return '<div style="font-size:13px">Trouxe <b>' + x.trouxe + '</b> recebimento(s) do extrato para o Registro' + (x.valor ? ', somando <b>R$ ' + fmt(x.valor) + '</b>' : '') + '.</div>';
     const det = r.detalhe || [];
-    let h = '<div style="font-size:13px;margin-bottom:8px">' + (r.linhasAdicionadas ? 'Trouxe <b>' + r.linhasAdicionadas + '</b> linha(s) do extrato para o Registro' : 'Não precisei trazer nada do extrato') + '. Nenhuma linha do Fluxo de Caixa foi tirada ou alterada.</div>';
+    let h = '<div style="font-size:13px;margin-bottom:8px">' + (r.linhasAdicionadas ? 'Trouxe <b>' + r.linhasAdicionadas + '</b> linha(s) do extrato para o Registro' : 'Não precisei trazer nada do extrato') + '. Nenhuma linha do Fluxo de Caixa foi tirada' + (det.some(x => x.movidas && x.movidas.length) ? ' (só a data de ' + det.reduce((a, x) => a + ((x.movidas || []).length), 0) + ' linha(s) foi corrigida, veja abaixo).' : ' ou alterada.') + '</div>';
     if (r.ajustesCent && r.ajustesCent.length) h += '<div style="font-size:12.5px;margin:6px 0;padding:6px 8px;border:1px solid var(--border);border-radius:6px"><b>Tributos com diferença de centavos</b> (' + (r.ajustesAplicados != null ? 'valor corrigido pelo extrato' : 'simulação') + '):' + r.ajustesCent.map(a => li(brData(a.dia) + ' · ' + E(a.nome) + ': Fluxo ' + v$(a.de) + ' → extrato ' + v$(a.para))).join('') + '</div>';
     if (!det.length) return h + '<div style="font-size:12.5px;color:var(--slate)">Não havia saída no extrato neste período.</div>';
     det.forEach(d => {
-      const alerta = d.excesso && d.excesso.length, temAdd = d.add && d.add.length || d.conc;
+      const alerta = d.excesso && d.excesso.length, temAdd = d.add && d.add.length || d.conc || (d.movidas && d.movidas.length);
       const chip = alerta ? '<span style="color:#b45309;font-weight:700">⚠ precisa da sua atenção</span>' : (temAdd ? '<span style="color:var(--teal);font-weight:700">➕ trouxe linhas do extrato</span>' : '<span style="color:var(--teal);font-weight:700">✔ nada a trazer</span>');
       h += '<div style="border:1px solid var(--border);border-radius:8px;padding:8px 10px;margin-bottom:8px"><div style="font-weight:700;margin-bottom:4px">Dia ' + brData(d.dia) + ' — ' + chip + '</div><div style="font-size:12.5px;line-height:1.45">';
       if (d.total) h += 'O extrato tem <b>' + d.total + '</b> saída(s) neste dia. <b>' + d.cobertas + '</b> já estavam no Fluxo de Caixa (por isso não trouxe de novo, para não contar duas vezes).<br>';
       if (d.grupos && d.grupos.length) h += 'Alguns pagamentos do Fluxo aparecem no extrato <b>divididos em várias saídas Sispag</b> (a soma fecha exatamente), por isso não trouxe de novo:' + d.grupos.map(g => li(v$(g.v) + (g.n ? ' — ' + E(g.n) : '') + ' = ' + g.qtd + ' saídas do extrato')).join('') + '<br>';
       if (d.add && d.add.length) h += 'Estas saídas estavam <b>só no extrato</b> (o Fluxo não tem), então trouxe para o Registro:' + d.add.map(a => li(v$(a.v) + ' — ' + E(a.h))).join('') ;
       if (d.outroDia && d.outroDia.length) h += '<div style="margin-top:4px">Estas saídas do extrato só bateram com pagamentos do Fluxo de <b>outro dia</b> (até 3 dias de diferença):' + d.outroDia.map(o => li(v$(o.v) + ' — ' + E(o.h) + ' (' + E(o.via) + ')')).join('') + '</div>';
+      if (d.movidas && d.movidas.length) h += '<div style="margin-top:4px">O banco pagou estas saídas <b>neste dia</b> e o Fluxo tinha o mesmo valor exato em <b>outro dia</b> (1 dia de diferença) que não precisava dele. Em vez de trazer uma linha repetida, <b>corrigi a data da linha do Fluxo</b> para o dia do banco (fica em 📅 Datas alteradas):' + d.movidas.map(o => li(v$(o.v) + ' — ' + E(o.n || o.h) + ' (de ' + brData(o.de) + ' para ' + brData(o.para) + ')')).join('') + '</div>';
       if (d.ignoradas) h += '<div style="margin-top:4px;color:var(--slate)">Você tinha ignorado ' + d.ignoradas + ' linha(s) do extrato deste dia — não trouxe de novo.</div>';
       if (d.conc) h += '<div style="margin-top:4px">As saídas do extrato neste dia (' + v$(d.conc.ls) + ') não fecharam exatamente com o que o Registro tem (' + v$(d.conc.rs) + '). Para o saldo do dia bater, incluí <b>uma linha de Conciliação de ' + v$(Math.abs(d.conc.dif)) + (d.conc.dif < 0 ? ' como ENTRADA (o Fluxo tinha saída a mais)' : ' como saída') + '</b> (a diferença). O histórico dela explica o motivo.</div>';
       if (alerta) h += '<div style="margin-top:4px;color:#b45309"><b>O Fluxo tem pagamento(s) neste dia que NÃO aparece(m) no extrato do banco</b> (total ' + v$(d.excesso.reduce((a, e) => a + e.v, 0)) + '):' + d.excesso.slice(0, 12).map(e => li(v$(e.v) + (e.n ? ' — ' + E(e.n) : ''))).join('') + (d.excesso.length > 12 ? li('… e mais ' + (d.excesso.length - 12)) : '') + '<span style="color:var(--slate)">Pode ter sido pago em outro dia ou por outro banco. Se NÃO saiu deste banco, clique em 🚫 nessa linha (ela sai do saldo) — ou em ✏️ para mudar a data — e traga os pagamentos de novo.</span></div>';
