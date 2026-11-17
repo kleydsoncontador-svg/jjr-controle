@@ -43833,12 +43833,57 @@ function _itauHashComprovante(tipo, r){
   return tipo.toLowerCase()+'_'+(h>>>0).toString(36);
 }
 
+// ── Banco do Brasil (SISBB) — comprovantes de autoatendimento (pedido do usuário 17/11/2026, Fast Lube 163) ──
+// Três modelos no mesmo PDF: "COMPROVANTE DE PAGAMENTO" com "Convenio <nome> - <UF>" (tributos/GNRE/concessionárias: o nome do convênio, com a UF, vira o Cliente/Fornecedor),
+// "Comprovante Pix" (PAGO PARA: nome + CNPJ/CPF) e "COMPROVANTE DE PAGAMENTO DE TITULOS" (boleto). Sem IA: só texto.
+function _bbEhComprovante(texto){ return /SISBB|BANCO DO BRASIL/i.test(texto) && /CLIENTE\s*:/i.test(texto) && /AGENCIA\s*:/i.test(texto); }
+function _bbParsearComprovante(texto){
+  var t=String(texto||'').replace(/\r/g,''), plano=t.replace(/\s+/g,' ');
+  var r=_itauRegistroVazio(), w=r.warnings;
+  var mDoc=plano.match(/DOCUMENTO\s*:\s*(\d+)/i); if(mDoc) r.ctrl=mDoc[1];
+  var mAut=plano.match(/AUTENTICACAO(?: SISBB)?\s*:\s*([0-9A-F.]+)/i)||plano.match(/NR\.\s*AUTENTICACAO\s*([0-9A-F.]+)/i);
+  if(/Comprovante Pix/i.test(plano)){
+    r._tipo=/QR CODE/i.test(plano)?'PIX_QR_CODE':'PIX_TRANSFERENCIA';
+    var mV=plano.match(/VALOR\s*:\s*R\$\s*([\d.]+,\d{2})/i), mD=plano.match(/DATA\s*:\s*(\d{2}\/\d{2}\/\d{4})/i), mI=plano.match(/\bID\s*:\s*(E\w{20,})/);
+    var mP=plano.match(/PAGO PARA\s*:\s*(.+?)\s+(?:CNPJ|CPF)\s*:\s*([\d.*\/-]+)/i)||plano.match(/PAGO PARA\s*:\s*(.+?)\s+(?:CHAVE PIX|INSTITUICAO)\s*:/i);
+    r.data_pagamento=mD?_itauParseDataBR(mD[1]):null; r.valor_pago=mV?_itauParseValorBR(mV[1]):null; r.transaction_id=mI?mI[1]:null;
+    r.cliente_fornecedor_nome=mP?mP[1].trim():null; r.beneficiary_name=r.cliente_fornecedor_nome; r.cnpj_cpf=mP&&mP[2]?mP[2]:null; r.beneficiary_document=r.cnpj_cpf;
+    if(/Comprovante Pix Rejeitado|PIX REJEITADO/i.test(plano)){ r.valor_pago=null; w.push('PIX_REJEITADO'); }
+    if(!r.valor_pago&&w.indexOf('PIX_REJEITADO')<0) w.push('VALUE_NOT_FOUND');
+  } else if(/PAGAMENTO DE TITULOS/i.test(plano)){
+    r._tipo='BOLETO_NOVO';
+    var mL=plano.match(/\b(\d{47,48})\b/); r.documento_numero=mL?mL[1]:null; r.barcode_normalized=r.documento_numero;
+    var mB=plano.match(/BENEFICIARIO\s*:\s*(.+?)\s+(?:NOME FANTASIA|CNPJ|CPF|BENEFICIARIO FINAL|PAGADOR)\s*:/i), mF=plano.match(/BENEFICIARIO FINAL\s*:\s*(.+?)\s+(?:CNPJ|CPF)\s*:\s*([\d.\/-]+)/i);
+    r.beneficiary_name=mB?mB[1].trim():null; if(mF){ r.final_beneficiary_name=mF[1].trim(); r.final_beneficiary_document=mF[2]; }
+    r.cliente_fornecedor_nome=r.final_beneficiary_name||r.beneficiary_name;
+    var mCd=plano.match(/BENEFICIARIO\s*:.*?CNPJ\s*:\s*([\d.\/-]+)/i); r.cnpj_cpf=r.final_beneficiary_document||(mCd?mCd[1]:null); r.beneficiary_document=mCd?mCd[1]:null;
+    var mDp=plano.match(/DATA DO PAGAMENTO\s*(\d{2}\/\d{2}\/\d{4})/i), mVc=plano.match(/DATA DE VENCIMENTO\s*(\d{2}\/\d{2}\/\d{4})/i), mVl=plano.match(/VALOR COBRADO\s*([\d.]+,\d{2})/i)||plano.match(/VALOR DO DOCUMENTO\s*([\d.]+,\d{2})/i);
+    r.data_pagamento=mDp?_itauParseDataBR(mDp[1]):null; r.data_vencimento=mVc?_itauParseDataBR(mVc[1]):null; r.valor_pago=mVl?_itauParseValorBR(mVl[1]):null;
+    if(!r.valor_pago) w.push('VALUE_NOT_FOUND');
+  } else {
+    // "Convenio GNRE ONLINE - MT  Codigo de Barras 8585... Data do pagamento 01/10/2026  Valor Total 4,41"
+    var mC=plano.match(/Convenio\s+(.+?)\s+Codigo de Barras/i), mBr=plano.match(/Codigo de Barras\s+([\d\s-]+?)\s+Data do pagamento/i);
+    var mDt=plano.match(/Data do pagamento\s*(\d{2}\/\d{2}\/\d{4})/i), mVt=plano.match(/Valor Total\s*([\d.]+,\d{2})/i);
+    r.cliente_fornecedor_nome=mC?mC[1].trim():null; r.beneficiary_name=r.cliente_fornecedor_nome;
+    r.barcode=mBr?mBr[1].trim():null; r.barcode_normalized=r.barcode?r.barcode.replace(/\D/g,''):null; r.documento_numero=r.barcode;
+    r.data_pagamento=mDt?_itauParseDataBR(mDt[1]):null; r.valor_pago=mVt?_itauParseValorBR(mVt[1]):null;
+    r._tipo=/GNRE|DARE|DARF|SEFAZ|ICMS|IPVA|FGTS|GPS|INSS|TRIBUT|IMPOSTO|PREFEITURA|MUNICIP/i.test(r.cliente_fornecedor_nome||'')?'TRIBUTO_ESTADUAL':'CONCESSIONARIA';
+    if(!r.valor_pago) w.push('VALUE_NOT_FOUND');
+    if(!r.cliente_fornecedor_nome) w.push('CLIENTE_FORNECEDOR_NOT_FOUND');
+  }
+  if(!r.data_pagamento) w.push('PAYMENT_DATE_NOT_FOUND');
+  r.payment_reference=mAut?mAut[1]:null;
+  return r;
+}
 // Nunca retorna null — toda página vira 1 registro, mesmo sem reconhecer nada.
 function _itauParsearPaginaComprovante(linhas, texto, numeroPagina, sispag){
   texto=String(texto||'').replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\uFFFE\uFFFF]/g,''); // NUL e afins: o Postgres recusa ('unsupported Unicode escape sequence') ao salvar o texto bruto
-  var tipoNovo=sispag?'SISPAG_COLUNAS':_itauDetectarTipoPagamento(texto);
+  var bbOk=!sispag&&_bbEhComprovante(texto);
+  var tipoNovo=bbOk?'BB':(sispag?'SISPAG_COLUNAS':_itauDetectarTipoPagamento(texto));
   var tipo, extraido;
-  if(tipoNovo==='SISPAG_COLUNAS'){
+  if(tipoNovo==='BB'){
+    extraido=_bbParsearComprovante(texto); tipo=extraido._tipo;
+  } else if(tipoNovo==='SISPAG_COLUNAS'){
     extraido=sispag.geral?_itauParsearColunasGeral(sispag.pares,texto,sispag.titulo):_itauParsearSispagColunas(sispag.pares,texto,sispag.titulo); tipo=extraido._tipo;
   } else if(tipoNovo){
     tipo=tipoNovo;
@@ -43871,7 +43916,7 @@ function _itauParsearPaginaComprovante(linhas, texto, numeroPagina, sispag){
   if(!extraido.warnings) extraido.warnings=[];
 
   var temConfirmacao=/(?:opera[çc][ãa]o|pagamento|transa[çc][ãa]o|transfer[êe]ncia)\s+(?:efetuad[oa]|realizad[oa])/i.test(texto)||/(?:^|\n)\s*efetuad[oa]\s+em\s+\d{2}\/\d{2}\/\d{4}/i.test(texto);
-  var status=(temConfirmacao&&extraido.valor_pago>0)?'PAGO':'VERIFICAR';
+  var status=((temConfirmacao||(tipoNovo==='BB'&&extraido.data_pagamento))&&extraido.valor_pago>0)?'PAGO':'VERIFICAR';
   if(status==='VERIFICAR'&&extraido.warnings.indexOf('STATUS_NAO_CONFIRMADO')<0) extraido.warnings.push('STATUS_NAO_CONFIRMADO');
 
   return {
