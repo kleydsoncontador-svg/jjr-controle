@@ -13,6 +13,8 @@
   };
   const EID = () => { const e = String(_lancctbEidAtual); return CFG[e] ? e : '163'; };
   const cfg = () => CFG[EID()];
+  // Pedido do usuário 18/11/2026: as melhorias novas da Fast Lube valem só de OUTUBRO/2026 em diante (setembro já está fechado) — nunca mexer em meses anteriores.
+  const DESDE_ALT = () => (({ '163': '2026-10-01' })[EID()]) || '';
   const NOME = () => cfg().nome;
   const desde = () => cfg().desde || '';
   const NOMES = new Proxy({}, { get: (t, k) => cfg().nomes[k], ownKeys: () => Object.keys(cfg().nomes), getOwnPropertyDescriptor: (t, k) => (k in cfg().nomes ? { enumerable: true, configurable: true, value: cfg().nomes[k] } : undefined), has: (t, k) => k in cfg().nomes });
@@ -644,7 +646,7 @@
     for (const d of dias) for (const l of extDia[d]) {
       if (!l.fx || !l.explicada || !/^dia [+-]1$/.test(l.via || '')) continue;
       const f = l.fx, d0 = l.fxDia;
-      if (f.cls || diasFechados.has(d0) || (diasSel && !diasSel.has(d0)) || (p.de && d0 < p.de) || (p.ate && d0 > p.ate)) continue;
+      if (f.cls || diasFechados.has(d0) || (diasSel && !diasSel.has(d0)) || (p.de && d0 < p.de) || (p.ate && d0 > p.ate) || (DESDE_ALT() && (d0 < DESDE_ALT() || d < DESDE_ALT()))) continue;
       if (!simular) { const u = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: d }).eq('id', f.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').select('id'); if (u.error || !(u.data || []).length) continue; }
       fluxoDia[d0] = (fluxoDia[d0] || []).filter(x => x !== f); (fluxoDia[d] = fluxoDia[d] || []).push(f);
       l.via = 'data do Fluxo corrigida'; movidas.push({ id: f.id, v: f.c, h: f.h, n: f.nome, de: d0, para: d });
@@ -652,12 +654,12 @@
     if (!simular && movidas.length) { try { gravarLogData(movidas.map(m => ({ id: m.id, em: new Date().toISOString(), por: quemFez(), conta, fonte: 'fluxo', v: -m.v / 100, h: String(m.h || '').slice(0, 200), de: m.de, para: m.para, via: 'Trazer pagamentos: o banco pagou neste dia (valor exato)' }))); } catch (e) {} }
     // passada E (pedido do usuário 18/11/2026, Fast Lube Itaú × BB: Pix de R$ 39,87 lançado no Itaú, mas o extrato do Banco do Brasil é que mostra a saída; o botão incluiu uma "Conciliação" de entrada para justificar):
     // ANTES de justificar uma sobra do Fluxo, olha o extrato dos OUTROS bancos da empresa: saída de mesmo dia e valor exato que o outro banco ainda não explica = a linha é daquele banco, e ela é mandada para lá (fica em 🏦 Bancos alterados).
-    // Só linha do Fluxo pendente (não classificada), em dia escolhido e não fechado; se o outro banco já tem o valor coberto por linha dele, nada muda.
+    // Linha pendente OU já classificada (a conta do banco na classificação é trocada junto), em dia escolhido, não fechado/conciliado e de outubro/2026 em diante; se o outro banco já tem o valor coberto por linha dele, nada muda.
     const trocas = [];
     try {
       const outras = ctIds().filter(o => String(o) !== String(conta));
       const cand = [];
-      Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d)) && !diasFechados.has(d)).forEach(d => livres(d).forEach(x => { if (!x.cls && !icmsOk.has(x.id)) cand.push({ x, d }); }));
+      Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d)) && !diasFechados.has(d) && (!DESDE_ALT() || d >= DESDE_ALT())).forEach(d => livres(d).forEach(x => { if (!icmsOk.has(x.id)) cand.push({ x, d }); }));
       if (cand.length && outras.length) {
         const dmin = cand.reduce((a, k) => (k.d < a ? k.d : a), cand[0].d), dmax = cand.reduce((a, k) => (k.d > a ? k.d : a), cand[0].d), cap = {};
         for (const o of outras) {
@@ -1053,13 +1055,27 @@
   const lerLogBanco = () => { try { return S.g(LOGBANCO()) || []; } catch (e) { return []; } };
   const gravarLogBanco = es => { if (!es.length) return; try { S.s(LOGBANCO(), es.concat(lerLogBanco()).slice(0, 3000)); } catch (e) {} };
   // muda a linha do Fluxo (só pendente) para outro banco da empresa; devolve as que mudaram. O banco também é trocado no cadastro do Fluxo de Caixa.
+  let MOTIVO_TROCA = '';
+  async function diaFechadoNoBanco(conta, dia) {
+    const r = await _supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid', EID()).eq('conta_bancaria_id', Number(conta)).eq('data_pagamento', dia).in('fonte', ['extrato_compl', 'conciliacao']).in('status_conciliacao', ['conciliado', 'parcial']).limit(1);
+    return !!(r.data && r.data.length);
+  }
   async function trocarBancoLinhas(rows, para, via) {
-    const feitas = [];
+    const feitas = []; MOTIVO_TROCA = '';
+    const ag = ((await _supaClient.from('agencias_bancarias').select('id,conta_contabil_id').eq('empresa_eid', EID())).data) || [], ccDe = {}; ag.forEach(a => { ccDe[a.id] = a.conta_contabil_id; });
+    const pcIds = [...new Set(Object.values(ccDe).filter(Boolean))], clas = {};
+    if (pcIds.length) (((await _supaClient.from('plano_contas').select('id,classificacao').in('id', pcIds)).data) || []).forEach(c => { clas[c.id] = c.classificacao; });
     for (const r of rows) {
-      const u = await _supaClient.from('lancamentos_extrato').update({ conta_bancaria_id: Number(para) }).eq('id', r.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').select('id');
-      if (u.error || !(u.data || []).length) continue;
+      if (DESDE_ALT() && String(r.data_pagamento) < DESDE_ALT()) { MOTIVO_TROCA = 'Meses anteriores a ' + brData(DESDE_ALT()) + ' não são mexidos (já fechados).'; continue; }
+      if (await diaFechadoNoBanco(r.conta_bancaria_id, r.data_pagamento) || await diaFechadoNoBanco(para, r.data_pagamento)) { MOTIVO_TROCA = 'O dia ' + brData(r.data_pagamento) + ' já está conciliado (fechado) em um dos dois bancos — o site não tira nem põe lançamento em dia conciliado.'; continue; }
+      const u = await _supaClient.from('lancamentos_extrato').update({ conta_bancaria_id: Number(para) }).eq('id', r.id).eq('fonte', 'fluxo').in('status_conciliacao', ['pendente', 'conciliado', 'parcial']).select('id');
+      if (u.error || !(u.data || []).length) { MOTIVO_TROCA = MOTIVO_TROCA || 'A linha mudou de situação (ignorada/excluída) ou já existe uma igual no outro banco.'; continue; }
       try { await _supaClient.from('fluxo_caixa_lancamentos').update({ conta_bancaria_id: Number(para) }).eq('lancamento_extrato_id', r.id); } catch (e) {}
-      feitas.push({ id: r.id, em: new Date().toISOString(), por: quemFez(), de: Number(r.conta_bancaria_id), para: Number(para), dia: r.data_pagamento, v: Number(r.valor_entrada) > 0 ? Number(r.valor_entrada) : -Number(r.valor_saida || 0), h: String(r.historico_bancario || '').slice(0, 200), via });
+      // linha já classificada: a perna do banco (crédito na saída, débito na entrada) passa para a conta contábil do outro banco
+      let cl = 0;
+      const ccVelho = ccDe[Number(r.conta_bancaria_id)], ccNovo = ccDe[Number(para)];
+      if (ccVelho && ccNovo && ccVelho !== ccNovo) { try { const up = await _supaClient.from('lancamentos_contabeis').update({ conta_contabil_id: ccNovo, classificacao: clas[ccNovo] || null }).eq('lancamento_extrato_id', r.id).eq('conta_contabil_id', ccVelho).select('id'); cl = (up.data || []).length; } catch (e) {} }
+      feitas.push({ id: r.id, em: new Date().toISOString(), por: quemFez(), de: Number(r.conta_bancaria_id), para: Number(para), dia: r.data_pagamento, v: Number(r.valor_entrada) > 0 ? Number(r.valor_entrada) : -Number(r.valor_saida || 0), h: String(r.historico_bancario || '').slice(0, 200), via: via + (cl ? ' · classificação ajustada (' + cl + ' perna)' : '') });
     }
     gravarLogBanco(feitas);
     return feitas;
@@ -1068,28 +1084,29 @@
     const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle();
     if (!x) { toast('Linha não encontrada — atualize a tela.', 'err'); return; }
     if (x.fonte !== 'fluxo') { toast('Só linha do Fluxo de Caixa muda de banco (o extrato de cada banco é a referência dele).', 'err'); return; }
-    if (x.status_conciliacao !== 'pendente') { toast('Essa linha já foi classificada, conciliada ou ignorada: o site não mexe no que já foi tratado. Desclassifique antes.', 'err'); return; }
+    if (!['pendente', 'conciliado', 'parcial'].includes(x.status_conciliacao)) { toast('Essa linha está ignorada/excluída: não dá para mudar de banco.', 'err'); return; }
+    if (DESDE_ALT() && String(x.data_pagamento) < DESDE_ALT()) { toast('Meses anteriores a ' + brData(DESDE_ALT()) + ' já estão fechados: o site não mexe neles.', 'err'); return; }
     const outras = ctIds().filter(o => o !== Number(x.conta_bancaria_id));
     if (!outras.length) { toast('Não há outro banco cadastrado para esta empresa.', 'err'); return; }
     const v = Number(x.valor_entrada) > 0 ? Number(x.valor_entrada) : Number(x.valor_saida || 0);
-    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Esta linha do Fluxo está no <b>' + E(NOMES[String(x.conta_bancaria_id)] || x.conta_bancaria_id) + '</b>. Mande para o banco que de fato pagou/recebeu (ela passa a contar no saldo e na conciliação dele; o dia e o valor ficam como estão).</div>'
+    const corpo = '<div style="font-size:12.5px;margin-bottom:8px">Esta linha do Fluxo está no <b>' + E(NOMES[String(x.conta_bancaria_id)] || x.conta_bancaria_id) + '</b>. Mande para o banco que de fato pagou/recebeu (ela passa a contar no saldo e na conciliação dele; o dia e o valor ficam como estão). Se a linha já estiver classificada, a conta do banco na classificação é trocada junto.</div>'
       + '<div style="font-size:12px;margin-bottom:8px;padding:6px 8px;border:1px solid var(--border);border-radius:6px">' + brData(x.data_pagamento) + ' · R$ ' + fmt(v) + (Number(x.valor_entrada) > 0 ? ' (entrada)' : ' (saída)') + '<br>' + E(String(x.historico_bancario || '').slice(0, 220)) + '</div>'
       + '<label style="font-size:12px">Banco certo:</label><select id="flBcoNovo" style="' + ESTI + '">' + outras.map(o => '<option value="' + o + '">' + E(NOMES[String(o)] || o) + '</option>').join('') + '</select>'
       + '<div style="font-size:11.5px;color:var(--slate);margin-top:8px">Fica registrado em 🏦 Bancos alterados, de onde você pode voltar ao banco original.</div>';
     const el = dialogoForm('🏦 Alterar banco', corpo, async (box) => {
       const para = Number(box.querySelector('#flBcoNovo').value);
       const r = await trocarBancoLinhas([x], para, 'manual (botão Banco)');
-      if (!r.length) { toast('Não consegui mudar o banco (a linha mudou de situação ou já existe igual no outro banco). Atualize a tela.', 'err'); return false; }
+      if (!r.length) { toast('Não mudei o banco. ' + (MOTIVO_TROCA || 'Atualize a tela e tente de novo.'), 'err'); return false; }
       toast('Linha enviada para o ' + (NOMES[String(para)] || para) + ' ✓', 'ok'); renderLancctbRegistroContabil();
     });
     const ok = el.querySelector('#flFormOk'); if (ok) ok.textContent = '🏦 Alterar banco';
   };
   root._flVoltarBanco = async function (id, de) {
     const { data: x } = await _supaClient.from('lancamentos_extrato').select('id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao').eq('id', id).maybeSingle();
-    if (!x || x.fonte !== 'fluxo' || x.status_conciliacao !== 'pendente') { toast('Não dá para voltar: a linha mudou de situação (classificada/conciliada) ou não existe mais.', 'err'); return; }
+    if (!x || x.fonte !== 'fluxo' || !['pendente', 'conciliado', 'parcial'].includes(x.status_conciliacao)) { toast('Não dá para voltar: a linha foi ignorada/excluída ou não existe mais.', 'err'); return; }
     if (!confirm('Voltar esta linha para o ' + (NOMES[String(de)] || de) + '?')) return;
     const r = await trocarBancoLinhas([x], de, 'voltou ao banco original');
-    if (!r.length) { toast('Não consegui voltar o banco.', 'err'); return; }
+    if (!r.length) { toast('Não voltei o banco. ' + (MOTIVO_TROCA || ''), 'err'); return; }
     toast('Linha voltou para o ' + (NOMES[String(de)] || de) + ' ✓', 'ok'); root._flAbrirBancos();
   };
   root._flAbrirBancos = async function () {
@@ -1098,7 +1115,7 @@
     el.innerHTML = '<div style="padding:20px;color:var(--slate)">Carregando os bancos alterados…</div>';
     const bm = await bancosDosValores(lista);
     el.innerHTML = '<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:10px"><button class="btn bo bsm" onclick="renderLancctbRegistroContabil()">← Voltar ao Registro Contábil</button><div style="font-size:1.15rem;font-weight:700">🏦 Bancos alterados — ' + E(NOME()) + '</div></div>'
-      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:980px">Linhas do Fluxo que estavam em um banco, mas o <b>extrato de outro banco</b> mostra o pagamento (mesmo dia e valor exato). Em vez de justificar com uma Conciliação, a linha foi mandada para o banco certo — automaticamente (ao trazer pagamentos do extrato) ou por você (botão <b>Banco</b> na coluna Saldo). Dá para voltar ao banco original enquanto a linha estiver pendente.</div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px;max-width:980px">Linhas do Fluxo que estavam em um banco, mas o <b>extrato de outro banco</b> mostra o pagamento (mesmo dia e valor exato). Em vez de justificar com uma Conciliação, a linha foi mandada para o banco certo — automaticamente (ao trazer pagamentos do extrato) ou por você (botão <b>Banco</b> na coluna Saldo). Dá para voltar ao banco original (se o dia não estiver conciliado). Vale de outubro/2026 em diante.</div>'
       + '<div style="overflow:auto;max-height:calc(100vh - 260px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="' + c + ';text-align:left">Quando</th><th style="' + c + ';text-align:left">Quem</th><th style="' + c + ';text-align:left">Dia</th><th style="' + c + ';text-align:right">Valor</th><th style="' + c + ';text-align:left">Estava no</th><th style="' + c + ';text-align:left">Foi para o</th><th style="' + c + ';text-align:left">Como</th><th style="' + c + ';text-align:left">Histórico</th><th style="' + c + '"></th></tr></thead><tbody>'
       + (lista.length ? lista.map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="' + c + ';white-space:nowrap">' + E(dtBr(x.em)) + '</td><td style="' + c + '">' + E(x.por || 'automático') + '</td><td style="' + c + ';white-space:nowrap">' + brData(x.dia) + '</td><td style="' + c + ';text-align:right;white-space:nowrap">R$ ' + fmt(x.v) + '</td><td style="' + c + '"><b>' + E(NOMES[String(x.de)] || x.de) + '</b></td><td style="' + c + '"><b>' + E(NOMES[String(x.para)] || x.para) + '</b></td><td style="' + c + ';font-size:11.5px">' + E(x.via || '') + '</td><td style="' + c + ';font-size:11.5px;line-height:1.35;max-width:420px">' + E(x.h || '') + '</td><td style="' + c + ';white-space:nowrap">' + (String(bm.get(x.id)) === String(x.para) ? '<button class="btn bo bsm" onclick="_flVoltarBanco(' + x.id + ',' + x.de + ')">↩ Voltar ao ' + E(NOMES[String(x.de)] || '') + '</button>' : '<span style="font-size:11px;color:var(--slate)">já voltou / mudou</span>') + '</td></tr>').join('') : '<tr><td colspan="9" style="padding:18px;color:var(--slate);text-align:center">Nenhuma linha mudou de banco ainda.</td></tr>')
       + '</tbody></table></div>';
