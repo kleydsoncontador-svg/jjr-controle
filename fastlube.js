@@ -555,6 +555,19 @@
   })();
   async function conciliarPagamentos(conta, p, ref, novas, simular, diasSel) {
     const sh = (d, n) => { const x = new Date(d + 'T12:00:00'); x.setDate(x.getDate() + n); return x.toISOString().slice(0, 10); };
+    const noPerImp = d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d));
+    // IMPEDIDOS valem sozinhos (pedido do usuário 18/11/2026): linha do Fluxo ainda PENDENTE que casa com uma regra de ⛔ Impedidos vai direto para a tela de Impedidos (ignorada), sem esperar o usuário apertar Impedir de novo. Só de out/2026 em diante e só de dias selecionados; classificada não é mexida.
+    if (!simular) {
+      try {
+        const alvoImp = [];
+        for (const r of lerImp()) {
+          if (!partesDe(r).length || r.desde) continue;
+          const ini = [r.inicio ? r.inicio + '-01' : '', DESDE_ALT() || ''].sort().pop();
+          (await idsDaRegra(partesDe(r), 'pendente', ini)).forEach(x => { if (noPerImp(x.data_pagamento)) alvoImp.push(x.id); });
+        }
+        if (alvoImp.length) await marcarIgnorado([...new Set(alvoImp)], true);
+      } catch (e) { console.warn('Impedidos automáticos:', e); }
+    }
     // 1) refaz do zero o que este botão já gerou e ainda está pendente (o já classificado fica e o dia correspondente não é mexido)
     const ant = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,status_conciliacao,fonte,hash_dedup,valor_saida,valor_entrada').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).in('fonte', ['extrato_compl', 'conciliacao']));
     const noPer = x => (!p.de || x.data_pagamento >= p.de) && (!p.ate || x.data_pagamento <= p.ate) && (!diasSel || diasSel.has(x.data_pagamento));
