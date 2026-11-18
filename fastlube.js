@@ -616,7 +616,7 @@
     root.__flEtapa = 'casando somas de várias linhas'; await new Promise(r => setTimeout(r, 0));
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       let melhor = null;
-      livres(d).forEach(x => { if (x.cls) return; const dif = Math.abs(x.c - l.c); if (dif === 0 || dif > 100) return; if (!(TRIB.test(x.h) || tolMem[chavePag(x.h)])) return; if (!melhor || dif < melhor.dif) melhor = { x, dif }; });
+      livres(d).forEach(x => { if (x.cls) return; const dif = Math.abs(x.c - l.c); if (dif === 0 || dif > 100) return; if (typeof _lancctbUfConflita === 'function' && _lancctbUfConflita(l.r.historico_bancario, x.h)) return; /* trava por estado: GNRE de um estado não ajusta centavos de outro */ if (!(TRIB.test(x.h) || tolMem[chavePag(x.h)])) return; if (!melhor || dif < melhor.dif) melhor = { x, dif }; });
       if (melhor) { melhor.x.usado = true; l.explicada = true; l.via = 'tributo (centavos)'; if (!icmsOk.has(melhor.x.id)) ajustesCent.push({ id: melhor.x.id, dia: d, de: melhor.x.c, para: l.c, nome: melhor.x.nome, chave: chavePag(melhor.x.h), h: melhor.x.h }); }
     }));
     // passada B: mesmo dia, a saída do extrato = SOMA exata de linhas do Fluxo (qualquer tipo, menos aplicação/tarifa)
