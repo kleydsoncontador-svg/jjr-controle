@@ -651,31 +651,50 @@
       l.via = 'data do Fluxo corrigida'; movidas.push({ id: f.id, v: f.c, h: f.h, n: f.nome, de: d0, para: d });
     }
     if (!simular && movidas.length) { try { gravarLogData(movidas.map(m => ({ id: m.id, em: new Date().toISOString(), por: quemFez(), conta, fonte: 'fluxo', v: -m.v / 100, h: String(m.h || '').slice(0, 200), de: m.de, para: m.para, via: 'Trazer pagamentos: o banco pagou neste dia (valor exato)' }))); } catch (e) {} }
-    // passada E (pedido do usuário 18/11/2026, Fast Lube Itaú × BB: Pix de R$ 39,87 lançado no Itaú, mas o extrato do Banco do Brasil é que mostra a saída; o botão incluiu uma "Conciliação" de entrada para justificar):
-    // ANTES de justificar uma sobra do Fluxo, olha o extrato dos OUTROS bancos da empresa: saída de mesmo dia e valor exato que o outro banco ainda não explica = a linha é daquele banco, e ela é mandada para lá (fica em 🏦 Bancos alterados).
-    // Linha pendente OU já classificada (a conta do banco na classificação é trocada junto), em dia escolhido, não fechado/conciliado e de outubro/2026 em diante; se o outro banco já tem o valor coberto por linha dele, nada muda.
+    // passada E (pedidos do usuário 18/11/2026, Fast Lube Itaú × BB; vale por dia ou pelo mês inteiro): ANTES de justificar uma sobra do Fluxo, procura onde o pagamento realmente está no extrato:
+    //  1º o mesmo dia no OUTRO banco; 2º dias vizinhos (±1, ±2, ±3) no PRÓPRIO banco; 3º dias vizinhos no OUTRO banco. Só vale se aquele dia/banco AINDA FAZ FALTA do valor exato (o extrato tem a saída e nenhuma linha do Registro a cobre).
+    // Mesmo banco = corrige a DATA da linha (só linha não classificada); outro banco = manda a linha para lá (classificada também; a conta do banco na classificação vai junto) e acerta a data se for outro dia.
+    // Nunca mexe em dia conciliado/fechado, nem em mês anterior a out/2026. Tudo fica em 🏦 Bancos alterados / 📅 Datas alteradas.
     const trocas = [];
     try {
-      const outras = ctIds().filter(o => String(o) !== String(conta));
+      const bancos = ctIds(), outras = bancos.filter(o => String(o) !== String(conta));
       const cand = [];
       Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d)) && !diasFechados.has(d) && (!DESDE_ALT() || d >= DESDE_ALT())).forEach(d => livres(d).forEach(x => { if (!icmsOk.has(x.id)) cand.push({ x, d }); }));
-      if (cand.length && outras.length) {
-        const dmin = cand.reduce((a, k) => (k.d < a ? k.d : a), cand[0].d), dmax = cand.reduce((a, k) => (k.d > a ? k.d : a), cand[0].d), cap = {};
-        for (const o of outras) {
-          const r = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,fonte,status_conciliacao').eq('empresa_eid', EID()).eq('conta_bancaria_id', o).gt('valor_saida', 0).gte('data_pagamento', dmin).lte('data_pagamento', dmax));
-          (r.data || []).forEach(z => { const k = o + '|' + z.data_pagamento + '|' + cents(z.valor_saida); if (z.status_conciliacao === 'referencia') cap[k] = (cap[k] || 0) + 1; else if (['fluxo', 'extrato_compl'].includes(z.fonte) && !['ignorado', 'reabsorvido'].includes(z.status_conciliacao)) cap[k] = (cap[k] || 0) - 1; });
+      if (cand.length) {
+        const dmin = cand.reduce((a2, k) => (k.d < a2 ? k.d : a2), cand[0].d), dmax = cand.reduce((a2, k) => (k.d > a2 ? k.d : a2), cand[0].d), cap = {};
+        for (const o of bancos) {
+          const r = await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,fonte,status_conciliacao').eq('empresa_eid', EID()).eq('conta_bancaria_id', o).gt('valor_saida', 0).gte('data_pagamento', sh(dmin, -3)).lte('data_pagamento', sh(dmax, 3)));
+          (r.data || []).forEach(z => {
+            if (String(o) === String(conta) && (!diasSel || diasSel.has(z.data_pagamento))) return;   // dias que este botão está processando já foram tratados nas passadas acima
+            const k = o + '|' + z.data_pagamento + '|' + cents(z.valor_saida);
+            if (z.status_conciliacao === 'referencia') cap[k] = (cap[k] || 0) + 1; else if (['fluxo', 'extrato_compl'].includes(z.fonte) && !['ignorado', 'reabsorvido'].includes(z.status_conciliacao)) cap[k] = (cap[k] || 0) - 1;
+          });
         }
-        const rowsMover = [];
-        cand.sort((a, b) => b.x.c - a.x.c).forEach(({ x, d }) => {
-          const o = outras.find(o2 => (cap[o2 + '|' + d + '|' + x.c] || 0) > 0); if (o === undefined) return;
-          cap[o + '|' + d + '|' + x.c]--; rowsMover.push({ x, d, o });
+        const ordemDias = [-1, 1, -2, 2, -3, 3], opcoes = d => [].concat(outras.map(o => [o, d]), ordemDias.map(k => [conta, sh(d, k)]), ...outras.map(o => ordemDias.map(k => [o, sh(d, k)])));
+        const planos = [];
+        cand.sort((a2, b2) => b2.x.c - a2.x.c).forEach(({ x, d }) => {
+          for (const [bk, dia] of opcoes(d)) {
+            if (DESDE_ALT() && dia < DESDE_ALT()) continue;
+            if (String(bk) === String(conta) && x.cls) continue;                       // trocar só a data de linha já classificada mexeria na contabilização: não
+            const k = bk + '|' + dia + '|' + x.c; if ((cap[k] || 0) <= 0) continue;
+            cap[k]--; planos.push({ x, d, bk, dia }); return;
+          }
         });
-        for (const { x, d, o } of rowsMover) {
-          if (!simular) { const f = await trocarBancoLinhas([{ id: x.id, conta_bancaria_id: conta, data_pagamento: d, valor_saida: x.c / 100, valor_entrada: 0, historico_bancario: x.h }], o, 'automático (Trazer pagamentos: o extrato do outro banco mostra esta saída)'); if (!f.length) continue; }
-          x.usado = true; trocas.push({ id: x.id, v: x.c, n: x.nome, h: x.h, dia: d, de: conta, para: o });
+        for (const { x, d, bk, dia } of planos) {
+          const mesmoBanco = String(bk) === String(conta), linha = { id: x.id, conta_bancaria_id: conta, data_pagamento: d, valor_saida: x.c / 100, valor_entrada: 0, historico_bancario: x.h };
+          if (!simular) {
+            if (await diaFechadoNoBanco(bk, dia)) continue;
+            if (mesmoBanco) {
+              const u = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: dia }).eq('id', x.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').select('id'); if (u.error || !(u.data || []).length) continue;
+              try { gravarLogData([{ id: x.id, em: new Date().toISOString(), por: quemFez(), conta, fonte: 'fluxo', v: -x.c / 100, h: String(x.h || '').slice(0, 200), de: d, para: dia, via: 'Trazer pagamentos: o extrato mostra este pagamento em outro dia (valor exato)' }]); } catch (e) {}
+            } else {
+              const f = await trocarBancoLinhas([linha], bk, 'automático (Trazer pagamentos: o extrato do outro banco mostra esta saída)', dia !== d ? dia : ''); if (!f.length) continue;
+            }
+          }
+          x.usado = true; trocas.push({ id: x.id, v: x.c, n: x.nome, h: x.h, dia: d, diaNovo: dia, de: conta, para: bk });
         }
       }
-    } catch (e) { console.warn('Passada E (banco):', e); }
+    } catch (e) { console.warn('Passada E (banco/dia vizinho):', e); }
     // 3) o que sobra
     const rel = { linhasAdicionadas: 0, conciliacoes: [], excessos: [], explicadas: 0, outroDia, dias: dias.length, fechados: [...diasFechados].length, detalhe: [] };
     dias.forEach(d => {
@@ -1030,7 +1049,7 @@
       if (d.grupos && d.grupos.length) h += 'Alguns pagamentos do Fluxo aparecem no extrato <b>divididos em várias saídas Sispag</b> (a soma fecha exatamente), por isso não trouxe de novo:' + d.grupos.map(g => li(v$(g.v) + (g.n ? ' — ' + E(g.n) : '') + ' = ' + g.qtd + ' saídas do extrato')).join('') + '<br>';
       if (d.add && d.add.length) h += 'Estas saídas estavam <b>só no extrato</b> (o Fluxo não tem), então trouxe para o Registro:' + d.add.map(a => li(v$(a.v) + ' — ' + E(a.h))).join('') ;
       if (d.outroDia && d.outroDia.length) h += '<div style="margin-top:4px">Estas saídas do extrato só bateram com pagamentos do Fluxo de <b>outro dia</b> (até 3 dias de diferença):' + d.outroDia.map(o => li(v$(o.v) + ' — ' + E(o.h) + ' (' + E(o.via) + ')')).join('') + '</div>';
-      if (d.trocas && d.trocas.length) h += '<div style="margin-top:4px">O Fluxo tinha estas saídas neste banco, mas o <b>extrato de outro banco</b> mostra o pagamento no mesmo dia e valor. Em vez de justificar com uma Conciliação, <b>mandei a linha para o banco certo</b> (fica em 🏦 Bancos alterados):' + d.trocas.map(o => li(v$(o.v) + ' — ' + E(o.n || o.h) + ' (' + E(NOMES[String(o.de)] || o.de) + ' → <b>' + E(NOMES[String(o.para)] || o.para) + '</b>)')).join('') + '</div>';
+      if (d.trocas && d.trocas.length) h += '<div style="margin-top:4px">O Fluxo tinha estas saídas aqui, mas o extrato mostra o pagamento (valor exato) em <b>outro banco</b> ou em <b>outro dia</b> que ainda faz falta dele. Em vez de justificar com uma Conciliação, <b>mandei a linha para o banco/dia certo</b> (fica em 🏦 Bancos alterados / 📅 Datas alteradas):' + d.trocas.map(o => li(v$(o.v) + ' — ' + E(o.n || o.h) + ' (' + (String(o.de) !== String(o.para) ? E(NOMES[String(o.de)] || o.de) + ' → <b>' + E(NOMES[String(o.para)] || o.para) + '</b>' : 'mesmo banco') + (o.diaNovo && o.diaNovo !== o.dia ? ', dia ' + brData(o.dia) + ' → <b>' + brData(o.diaNovo) + '</b>' : '') + ')')).join('') + '</div>';
       if (d.movidas && d.movidas.length) h += '<div style="margin-top:4px">O banco pagou estas saídas <b>neste dia</b> e o Fluxo tinha o mesmo valor exato em <b>outro dia</b> (1 dia de diferença) que não precisava dele. Em vez de trazer uma linha repetida, <b>corrigi a data da linha do Fluxo</b> para o dia do banco (fica em 📅 Datas alteradas):' + d.movidas.map(o => li(v$(o.v) + ' — ' + E(o.n || o.h) + ' (de ' + brData(o.de) + ' para ' + brData(o.para) + ')')).join('') + '</div>';
       if (d.ignoradas) h += '<div style="margin-top:4px;color:var(--slate)">Você tinha ignorado ' + d.ignoradas + ' linha(s) do extrato deste dia — não trouxe de novo.</div>';
       if (d.conc) h += '<div style="margin-top:4px">As saídas do extrato neste dia (' + v$(d.conc.ls) + ') não fecharam exatamente com o que o Registro tem (' + v$(d.conc.rs) + '). Para o saldo do dia bater, incluí <b>uma linha de Conciliação de ' + v$(Math.abs(d.conc.dif)) + (d.conc.dif < 0 ? ' como ENTRADA (o Fluxo tinha saída a mais)' : ' como saída') + '</b> (a diferença). O histórico dela explica o motivo.</div>';
@@ -1059,22 +1078,24 @@
     const r = await _supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid', EID()).eq('conta_bancaria_id', Number(conta)).eq('data_pagamento', dia).in('fonte', ['extrato_compl', 'conciliacao']).in('status_conciliacao', ['conciliado', 'parcial']).limit(1);
     return !!(r.data && r.data.length);
   }
-  async function trocarBancoLinhas(rows, para, via) {
+  async function trocarBancoLinhas(rows, para, via, novaData) {
     const feitas = []; MOTIVO_TROCA = '';
     const ag = ((await _supaClient.from('agencias_bancarias').select('id,conta_contabil_id').eq('empresa_eid', EID())).data) || [], ccDe = {}; ag.forEach(a => { ccDe[a.id] = a.conta_contabil_id; });
     const pcIds = [...new Set(Object.values(ccDe).filter(Boolean))], clas = {};
     if (pcIds.length) (((await _supaClient.from('plano_contas').select('id,classificacao').in('id', pcIds)).data) || []).forEach(c => { clas[c.id] = c.classificacao; });
     for (const r of rows) {
       if (DESDE_ALT() && String(r.data_pagamento) < DESDE_ALT()) { MOTIVO_TROCA = 'Meses anteriores a ' + brData(DESDE_ALT()) + ' não são mexidos (já fechados).'; continue; }
-      if (await diaFechadoNoBanco(r.conta_bancaria_id, r.data_pagamento) || await diaFechadoNoBanco(para, r.data_pagamento)) { MOTIVO_TROCA = 'O dia ' + brData(r.data_pagamento) + ' já está conciliado (fechado) em um dos dois bancos — o site não tira nem põe lançamento em dia conciliado.'; continue; }
-      const u = await _supaClient.from('lancamentos_extrato').update({ conta_bancaria_id: Number(para) }).eq('id', r.id).eq('fonte', 'fluxo').in('status_conciliacao', ['pendente', 'conciliado', 'parcial']).select('id');
+      const diaDest = novaData || r.data_pagamento;
+      if (DESDE_ALT() && String(diaDest) < DESDE_ALT()) { MOTIVO_TROCA = 'Meses anteriores a ' + brData(DESDE_ALT()) + ' não são mexidos (já fechados).'; continue; }
+      if (await diaFechadoNoBanco(r.conta_bancaria_id, r.data_pagamento) || await diaFechadoNoBanco(para, diaDest)) { MOTIVO_TROCA = 'O dia ' + brData(r.data_pagamento) + (diaDest !== r.data_pagamento ? ' ou ' + brData(diaDest) : '') + ' já está conciliado (fechado) em um dos dois bancos — o site não tira nem põe lançamento em dia conciliado.'; continue; }
+      const u = await _supaClient.from('lancamentos_extrato').update(Object.assign({ conta_bancaria_id: Number(para) }, novaData ? { data_pagamento: novaData } : {})).eq('id', r.id).eq('fonte', 'fluxo').in('status_conciliacao', ['pendente', 'conciliado', 'parcial']).select('id');
       if (u.error || !(u.data || []).length) { MOTIVO_TROCA = MOTIVO_TROCA || 'A linha mudou de situação (ignorada/excluída) ou já existe uma igual no outro banco.'; continue; }
       try { await _supaClient.from('fluxo_caixa_lancamentos').update({ conta_bancaria_id: Number(para) }).eq('lancamento_extrato_id', r.id); } catch (e) {}
       // linha já classificada: a perna do banco (crédito na saída, débito na entrada) passa para a conta contábil do outro banco
       let cl = 0;
       const ccVelho = ccDe[Number(r.conta_bancaria_id)], ccNovo = ccDe[Number(para)];
       if (ccVelho && ccNovo && ccVelho !== ccNovo) { try { const up = await _supaClient.from('lancamentos_contabeis').update({ conta_contabil_id: ccNovo, classificacao: clas[ccNovo] || null }).eq('lancamento_extrato_id', r.id).eq('conta_contabil_id', ccVelho).select('id'); cl = (up.data || []).length; } catch (e) {} }
-      feitas.push({ id: r.id, em: new Date().toISOString(), por: quemFez(), de: Number(r.conta_bancaria_id), para: Number(para), dia: r.data_pagamento, v: Number(r.valor_entrada) > 0 ? Number(r.valor_entrada) : -Number(r.valor_saida || 0), h: String(r.historico_bancario || '').slice(0, 200), via: via + (cl ? ' · classificação ajustada (' + cl + ' perna)' : '') });
+      feitas.push({ id: r.id, em: new Date().toISOString(), por: quemFez(), de: Number(r.conta_bancaria_id), para: Number(para), dia: diaDest, v: Number(r.valor_entrada) > 0 ? Number(r.valor_entrada) : -Number(r.valor_saida || 0), h: String(r.historico_bancario || '').slice(0, 200), via: via + (novaData && novaData !== r.data_pagamento ? ' · data ' + brData(r.data_pagamento) + ' → ' + brData(novaData) : '') + (cl ? ' · classificação ajustada (' + cl + ' perna)' : '') });
     }
     gravarLogBanco(feitas);
     return feitas;
