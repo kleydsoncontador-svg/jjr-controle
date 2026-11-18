@@ -1251,9 +1251,12 @@
   root._flIgnSelTodos = function (on) { const s0 = root.__flIgn.sel; ignFiltradas().slice(0, 400).forEach(x => { if (on) s0.add(x.id); else s0.delete(x.id); }); desenharIgnorados(); };
   root._flResgatar = async function (idUnico) {
     const g = root.__flIgn, ids = idUnico ? [idUnico] : [...g.sel]; if (!ids.length) { toast('Marque as linhas que quer resgatar.', 'err'); return; }
-    const banco = idUnico ? '' : (document.getElementById('flIgnBanco') || {}).value || '', data = idUnico ? '' : (document.getElementById('flIgnData') || {}).value || '';
+    const banco = (document.getElementById('flIgnBanco') || {}).value || '', data = (document.getElementById('flIgnData') || {}).value || '';
     const rot = (banco ? ' para o ' + BANCOS[banco] : ' no mesmo banco') + (data ? ', com a data ' + brData(data) : ', mantendo a data');
-    if (!confirm('Resgatar ' + ids.length + ' linha(s)' + rot + '? Elas voltam como pendentes e entram no saldo.')) return;
+    if (DESDE_ALT() && (data && data < DESDE_ALT())) { toast('A data nova precisa ser de ' + brData(DESDE_ALT()) + ' em diante (meses anteriores estão fechados).', 'err'); return; }
+    const mapa0 = new Map(g.rows.map(x => [x.id, x])), idsAntigos = ids.filter(i => DESDE_ALT() && mapa0.get(i) && String(mapa0.get(i).data_pagamento) < DESDE_ALT());
+    if (idsAntigos.length) { ids.splice(0, ids.length, ...ids.filter(i => idsAntigos.indexOf(i) < 0)); if (!ids.length) { toast('As linhas marcadas são de meses anteriores a ' + brData(DESDE_ALT()) + ' (já fechados): o site não mexe nelas.', 'err'); return; } }
+    if (!confirm('Resgatar ' + ids.length + ' linha(s)' + rot + '? Elas voltam como pendentes e entram no saldo.' + (idsAntigos.length ? '\n\n(' + idsAntigos.length + ' de meses anteriores a ' + brData(DESDE_ALT()) + ' ficam como estão.)' : ''))) return;
     let feitas = 0;
     for (let i = 0; i < ids.length; i += 200) {
       const lote = ids.slice(i, i + 200), up = { status_conciliacao: 'pendente' }; if (banco) up.conta_bancaria_id = Number(banco); if (data) up.data_pagamento = data;
@@ -1261,7 +1264,7 @@
       if (r.error) { toast('Erro ao resgatar: ' + r.error.message, 'err'); return; }
       feitas += (r.data || []).length;
       if (data) { const mapa = new Map(g.rows.map(x => [x.id, x])); gravarLogData((r.data || []).map(row => mapa.get(row.id)).filter(a => a && a.data_pagamento !== data).map(a => entLog(a, data, 'resgate (🚫 Ignorados)'))); }
-      if (banco) await _supaClient.from('fluxo_caixa_lancamentos').update({ conta_bancaria_id: Number(banco) }).in('lancamento_extrato_id', lote);
+      if (banco) { await _supaClient.from('fluxo_caixa_lancamentos').update({ conta_bancaria_id: Number(banco) }).in('lancamento_extrato_id', lote); const mp = new Map(g.rows.map(x => [x.id, x])); gravarLogBanco((r.data || []).map(row => mp.get(row.id)).filter(a => a && String(a.conta_bancaria_id) !== String(banco)).map(a => ({ id: a.id, em: new Date().toISOString(), por: quemFez(), de: Number(a.conta_bancaria_id), para: Number(banco), dia: data || a.data_pagamento, v: Number(a.valor_entrada) > 0 ? Number(a.valor_entrada) : -Number(a.valor_saida || 0), h: String(a.historico_bancario || '').slice(0, 200), via: 'resgate (🚫 Ignorados)' }))); }
     }
     logIgnorados(ids, 'resgatou (página Ignorados)');
     toast(feitas + ' linha(s) resgatada(s)' + rot + ' ✓', 'ok');
@@ -1674,6 +1677,22 @@
     toast(ignorar ? 'Linha ignorada: fora do saldo e do TXT. Rode "Trazer recebimentos e pagamentos do extrato" de novo se quiser que o extrato assuma o lugar dela.' : 'Linha voltou a ser considerada (pendente).', 'ok');
     renderLancctbRegistroContabil();
   };
+  // Pedido do usuário 18/11/2026: botão para ver SÓ as ignoradas (depois de Limpar filtros) e "Desfazer ignorar" das linhas marcadas (ao lado do Classificar/Desclassificar em lote).
+  root._flBtnSoIgnoradas = () => (ativo() ? '<button class="btn bo" onclick="_flSoIgnoradas()" title="Mostra só as linhas ignoradas deste banco/mês (clique de novo para voltar a todas). Marque as que quiser e use ↩ Desfazer ignorar, ao lado do Classificar em lote.">' + (_lancctbRegistroStatus === 'ignorado' ? '👁 Mostrar todas' : '🚫 Só ignoradas') + '</button>' : '');
+  root._flSoIgnoradas = function () { _lancctbRegistroStatus = _lancctbRegistroStatus === 'ignorado' ? '' : 'ignorado'; _lancctbRegistroPagina = 0; try { _lancctbRegistroSelecionados.clear(); } catch (e) {} renderLancctbRegistroContabil(); };
+  root._flBtnDesfazerIgnorar = n => (ativo() ? '<button class="btn bo bsm" ' + (n ? '' : 'disabled') + ' onclick="_flDesfazerIgnorarSel()" title="Volta a considerar (pendente) as linhas IGNORADAS que estão marcadas. Dica: use 🚫 Só ignoradas, marque todas ou só algumas e clique aqui.">↩ Desfazer ignorar' + (n ? ' (' + n + ')' : '') + '</button>' : '');
+  root._flDesfazerIgnorarSel = async function () {
+    const marc = [..._lancctbRegistroSelecionados.keys()]; if (!marc.length) { toast('Marque as linhas ignoradas que quer desfazer.', 'err'); return; }
+    let ign = [];
+    for (let i = 0; i < marc.length; i += 200) { const r = await _supaClient.from('lancamentos_extrato').select('id,data_pagamento').in('id', marc.slice(i, i + 200)).eq('status_conciliacao', 'ignorado'); ign = ign.concat(r.data || []); }
+    if (!ign.length) { toast('Nenhuma das linhas marcadas está ignorada.', 'err'); return; }
+    const antigas = ign.filter(x => DESDE_ALT() && String(x.data_pagamento) < DESDE_ALT()), ok = ign.filter(x => !antigas.includes(x));
+    if (!ok.length) { toast('As linhas marcadas são de meses anteriores a ' + brData(DESDE_ALT()) + ' (já fechados): o site não mexe nelas.', 'err'); return; }
+    if (!confirm('Desfazer o ignorar de ' + ok.length + ' linha(s)? Elas voltam como pendentes e entram no saldo.' + (antigas.length ? '\n\n(' + antigas.length + ' de meses anteriores a ' + brData(DESDE_ALT()) + ' ficam como estão.)' : ''))) return;
+    if (!(await marcarIgnorado(ok.map(x => x.id), false))) return;
+    _lancctbRegistroSelecionados.clear();
+    toast(ok.length + ' linha(s) voltaram a ser consideradas ✓', 'ok'); renderLancctbRegistroContabil();
+  };
   root._flIgnorarFiltradas = async function () {
     const ids = (root.__regIdsFiltrados || []).slice(); if (!ids.length) { toast('Nenhuma linha filtrada.', 'err'); return; }
     if (!confirm('Ignorar as ' + ids.length + ' linha(s) filtradas? Elas ficam apagadas, fora do saldo e do TXT (dá para voltar uma a uma).')) return;
@@ -1793,6 +1812,7 @@
       + '<select style="' + est + '" onchange="__flEx.f.origem=this.value;_flAbrirExcluidos()"><option value="">Todas as origens</option>' + Object.keys(ORIGENS).map(k => '<option value="' + k + '"' + (g.f.origem === k ? ' selected' : '') + '>' + ORIGENS[k] + '</option>').join('') + '</select>'
       + '<input id="flExTxt" style="' + est + ';width:240px" placeholder="🔎 texto do histórico" value="' + E(g.f.texto) + '" oninput="__flEx.f.texto=this.value;clearTimeout(window.__flExT);window.__flExT=setTimeout(()=>{_flAbrirExcluidos();const i=document.getElementById(\'flExTxt\');if(i){i.focus();i.setSelectionRange(i.value.length,i.value.length)}},350)">'
       + '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" ' + (g.f.restauradas ? 'checked' : '') + ' onchange="__flEx.f.restauradas=this.checked;_flAbrirExcluidos()"> mostrar também as já restauradas</label>'
+      + '<span style="font-size:12px">Restaurar no</span><select style="' + est + '" onchange="__flEx.rb=this.value"><option value="">mesmo banco</option>' + Object.keys(NOMES).map(k => '<option value="' + k + '"' + (g.rb === k ? ' selected' : '') + '>' + NOMES[k] + '</option>').join('') + '</select><span style="font-size:12px">na data</span><input type="date" style="' + est + '" value="' + E(g.rd || '') + '" onchange="__flEx.rd=this.value" title="Em branco = mantém a data original">'
       + '<button class="btn bp bsm" onclick="_flRestaurarExcluidos()" ' + (g.sel.size ? '' : 'disabled') + '>↩ Restaurar selecionadas (' + g.sel.size + ')</button></div>'
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:4px">' + filtradas.length + ' linha(s)' + (filtradas.length > mostra.length ? ' — mostrando as primeiras ' + mostra.length : '') + '</div>'
       + '<div style="overflow:auto;max-height:calc(100vh - 360px);border:1px solid var(--border);border-radius:6px"><table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;background:var(--ink2);color:#fff"><tr><th style="padding:6px 8px"></th><th style="padding:6px 8px;text-align:left">Excluída em</th><th style="padding:6px 8px;text-align:left">Por</th><th style="padding:6px 8px;text-align:left">Banco</th><th style="padding:6px 8px;text-align:left">Data</th><th style="padding:6px 8px;text-align:left">Origem</th><th style="padding:6px 8px;text-align:right">Valor</th><th style="padding:6px 8px;text-align:left">Histórico</th><th style="padding:6px 8px;text-align:left">Como</th><th style="padding:6px 8px"></th></tr></thead><tbody>'
@@ -1804,22 +1824,29 @@
     const g = root.__flEx, lista = lerEx(), chaves = chaveUnica ? [chaveUnica] : [...g.sel];
     const alvo = lista.filter(x => !x.restaurada && chaves.indexOf(x.em + '|' + x.eid) >= 0);
     if (!alvo.length) { toast('Escolha ao menos uma linha.', 'err'); return; }
-    if (!confirm('Restaurar ' + alvo.length + ' linha(s) no Registro? Elas voltam como PENDENTES (a classificação contábil precisa ser refeita).')) return;
+    const bcoNovo = g.rb || '', dtNova = g.rd || '';
+    if (DESDE_ALT() && dtNova && dtNova < DESDE_ALT()) { toast('A data nova precisa ser de ' + brData(DESDE_ALT()) + ' em diante (meses anteriores estão fechados).', 'err'); return; }
+    const antigasEx = alvo.filter(x => DESDE_ALT() && String(x.data) < DESDE_ALT());
+    if (antigasEx.length) { antigasEx.forEach(x => alvo.splice(alvo.indexOf(x), 1)); if (!alvo.length) { toast('As linhas escolhidas são de meses anteriores a ' + brData(DESDE_ALT()) + ' (já fechados): o site não mexe nelas.', 'err'); return; } }
+    if (!confirm('Restaurar ' + alvo.length + ' linha(s) no Registro' + (bcoNovo ? ' no ' + (NOMES[bcoNovo] || bcoNovo) : '') + (dtNova ? ', na data ' + brData(dtNova) : '') + '? Elas voltam como PENDENTES (a classificação contábil precisa ser refeita).' + (antigasEx.length ? '\n\n(' + antigasEx.length + ' de meses anteriores a ' + brData(DESDE_ALT()) + ' ficam como estão.)' : ''))) return;
     let feitas = 0, jaExistia = 0, semFluxo = 0; const ex = getExcl(); let mudouEx = false;
     for (const x of alvo) {
       try {
-        const nova = { empresa_eid: EID(), conta_bancaria_id: Number(x.conta), data_pagamento: x.data, valor_saida: x.vs || 0, valor_entrada: x.ve || 0, historico_bancario: x.h || null, documento: x.doc || null, informacao: x.inf || null, origem_importacao: x.origem || 'excel', hash_dedup: x.hash || ('flrest' + Date.now() + Math.random().toString(36).slice(2, 7)), fonte: x.fonte || null, status_conciliacao: 'pendente' };
+        const contaF = bcoNovo ? Number(bcoNovo) : Number(x.conta), dataF = dtNova || x.data, nova = { empresa_eid: EID(), conta_bancaria_id: contaF, data_pagamento: dataF, valor_saida: x.vs || 0, valor_entrada: x.ve || 0, historico_bancario: x.h || null, documento: x.doc || null, informacao: x.inf || null, origem_importacao: x.origem || 'excel', hash_dedup: x.hash || ('flrest' + Date.now() + Math.random().toString(36).slice(2, 7)), fonte: x.fonte || null, status_conciliacao: 'pendente' };
         const r = await _supaClient.from('lancamentos_extrato').upsert([nova], { onConflict: 'conta_bancaria_id,hash_dedup', ignoreDuplicates: true }).select('id');
         if (r.error) { toast('Erro ao restaurar: ' + r.error.message, 'err'); continue; }
         const novoId = r.data && r.data[0] && r.data[0].id;
         if (!novoId) { jaExistia++; x.restaurada = new Date().toISOString(); continue; } // a linha já voltou por outro caminho (ex.: nova importação do Fluxo)
         (x.fluxo || []).forEach(i => { if (ex.delete(String(i))) mudouEx = true; });
         if ((x.fluxo || []).length) {
-          const u = await _supaClient.from('fluxo_caixa_lancamentos').update({ lancamento_extrato_id: novoId, status_associado: 'associado', conta_bancaria_id: Number(x.conta) }).in('id', x.fluxo).select('id');
+          const u = await _supaClient.from('fluxo_caixa_lancamentos').update({ lancamento_extrato_id: novoId, status_associado: 'associado', conta_bancaria_id: contaF }).in('id', x.fluxo).select('id');
           if (!u.error && (u.data || []).length < x.fluxo.length) semFluxo++;
           try { marcarManuais(x.fluxo); } catch (e) {}
         }
         x.restaurada = new Date().toISOString(); feitas++;
+        const vv = x.ve > 0 ? x.ve : -(x.vs || 0), hh = String(x.h || '').slice(0, 200);
+        if (contaF !== Number(x.conta)) gravarLogBanco([{ id: novoId, em: new Date().toISOString(), por: quemFez(), de: Number(x.conta), para: contaF, dia: dataF, v: vv, h: hh, via: 'restaurada (🗑 Excluídos)' }]);
+        if (dataF !== x.data) gravarLogData([{ id: novoId, em: new Date().toISOString(), por: quemFez(), conta: contaF, fonte: x.fonte || '', v: vv, h: hh, de: x.data, para: dataF, via: 'restaurada (🗑 Excluídos)' }]);
       } catch (e) { console.warn('Restaurar excluída:', e); }
     }
     if (mudouEx) setExcl(ex);
