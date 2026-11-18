@@ -607,6 +607,38 @@
     // passada A: mesmo dia, mesmo valor
     root.__flEtapa = 'casando por valor igual, dia a dia'; await new Promise(r => setTimeout(r, 0));
     dias.forEach(d => extDia[d].slice().sort((a, b) => b.c - a.c).forEach(l => { if (!casavel(l) && l.cat !== 'banco' && !(l.cat === 'aplic' && cfg().fluxoLancamento)) return; /* Rufato: o Fluxo já traz a aplicação (ex.: 'CDB FACIL BRADESCO / APLICACAO CDB') — mesma data e valor = mesma saída, não traz de novo */ /* imposto/tarifa do banco também casa quando o valor é IGUAL ao de uma linha do Fluxo no mesmo dia (ex.: 'Contr Imp' = pagamento de importação já lançado no Fluxo) */ const f = livres(d).find(x => x.c === l.c); if (f) { f.usado = true; l.explicada = true; l.via = 'mesmo valor'; } }));
+    // passada G — GNRE/ICMS PARTILHADO POR ESTADO, EM SOMA (pedido do usuário 18/11/2026): vários estados (Maranhão, Piauí...) juntam várias notas numa guia só, com juros; o valor de cada nota NÃO é mexido.
+    // 1º) pagamento cujo convênio diz o estado (MT, MS, TO, AC): bate com a SOMA do Fluxo daquele estado no dia. 2º) pagamento sem estado ("ON LINE"): descobre por eliminação entre os estados que sobraram — só vale se existir UMA única distribuição que feche.
+    // A diferença (juros/desconto) fica no fechamento do dia (Conciliação explicada); nada é gravado aqui, só marca o que já está coberto. Só dias ≥ out/2026, não fechados.
+    const gnreEstados = [];
+    try {
+      const UFV = ' AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO ';
+      const ufFx = h => { const m = String(h || '').toUpperCase().match(/\/([A-Z]{2}) - /); if (m && UFV.indexOf(' ' + m[1] + ' ') >= 0) return m[1]; return typeof _lancctbUfDoTexto === 'function' ? _lancctbUfDoTexto(h) : ''; };
+      const ufPg = h => typeof _lancctbUfDoTexto === 'function' ? _lancctbUfDoTexto(h) : '';
+      const tolDe = sf => Math.max(150, Math.round(sf * 0.04));
+      dias.filter(d => !diasFechados.has(d) && (!DESDE_ALT() || d >= DESDE_ALT())).forEach(d => {
+        const P = extDia[d].filter(l => !l.explicada && casavel(l) && /GNRE/i.test(l.r.historico_bancario || ''));
+        const F = livres(d).filter(x => /GNRE|PARTILHAD/i.test(x.h || '')); if (!P.length || !F.length) return;
+        const grp = {}; F.forEach(x => { const u = ufFx(x.h); if (u) (grp[u] = grp[u] || []).push(x); });
+        const soma = a => a.reduce((t, x) => t + x.c, 0), feitos = new Set();
+        const fecha = (u, pags) => { const sf = soma(grp[u]), sp = soma(pags); pags.forEach(l => { l.explicada = true; l.via = 'GNRE ' + u + ' (soma do estado)'; }); grp[u].forEach(x => { x.usado = true; }); feitos.add(u); gnreEstados.push({ dia: d, uf: u, pags: pags.map(l => l.c), fluxo: grp[u].length, fluxoSoma: sf, dif: sp - sf }); };
+        // 1º: pagamentos que dizem o estado
+        const porUf = {}; P.forEach(l => { const u = ufPg(l.r.historico_bancario); if (u) (porUf[u] = porUf[u] || []).push(l); });
+        Object.keys(porUf).forEach(u => { if (!grp[u]) return; const sp = soma(porUf[u]), sf = soma(grp[u]); if (Math.abs(sp - sf) <= tolDe(sf)) fecha(u, porUf[u]); });
+        // 2º: pagamentos sem estado × estados que sobraram
+        const U = P.filter(l => !l.explicada && !ufPg(l.r.historico_bancario)).sort((a, b) => b.c - a.c), G = Object.keys(grp).filter(u => !feitos.has(u));
+        if (!U.length || !G.length || U.length > 14 || G.length > 14) return;
+        const alvo = G.map(u => soma(grp[u])), tol = alvo.map(tolDe), acc = G.map(() => 0), qtd = G.map(() => 0), atual = [], sols = []; let nos = 0;
+        const rec = i => {
+          if (sols.length > 400 || ++nos > 300000) return;
+          if (i === U.length) { for (let g = 0; g < G.length; g++) if (qtd[g] && Math.abs(acc[g] - alvo[g]) > tol[g]) return; let cost = 0; for (let g = 0; g < G.length; g++) if (qtd[g]) cost += Math.abs(acc[g] - alvo[g]); sols.push({ a: atual.slice(), cost }); return; }
+          for (let g = 0; g < G.length; g++) { if (acc[g] + U[i].c > alvo[g] + tol[g]) continue; acc[g] += U[i].c; qtd[g]++; atual[i] = g; rec(i + 1); acc[g] -= U[i].c; qtd[g]--; }
+        };
+        rec(0);
+        if (!sols.length || sols.length > 400 || nos > 300000) return; sols.sort((x, y) => x.cost - y.cost); if (sols.length > 1 && !(sols[1].cost - sols[0].cost >= 30 && sols[1].cost >= sols[0].cost * 1.5)) return;   /* só vale a distribuição que fecha claramente melhor que qualquer outra */
+        G.forEach((u, g) => { const pags = U.filter((l, i) => sols[0].a[i] === g); if (pags.length) fecha(u, pags); });
+      });
+    } catch (e) { console.warn('Passada G (GNRE por estado):', e); }
     // passada A2 (tributos): o cliente erra centavos (até R$ 1,00) em IPTU/ICMS/IRPJ/CSLL/PIS/COFINS/FGTS...: a saída do extrato casa com a linha do Fluxo de imposto de valor MUITO próximo.
     // O pagador que já teve esse ajuste fica na memória (fl_tol_pagadores_163) e passa a valer mesmo sem a palavra do imposto no nome.
     const TRIB = /IPTU|PREFEITURA|ICMS|IRPJ|CSLL|\bPIS\b|COFINS|FGTS|\bGPS\b|DARF|GNRE|\bINSS\b|\bISS\b|IMPOSTO|TRIBUT|\bDAS\b|\bGP\d/i;
@@ -816,6 +848,7 @@
       for (const a of ajustesIcms) { const r = await _supaClient.from('lancamentos_extrato').update({ valor_saida: a.para / 100 }).eq('id', a.id).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente'); if (!r.error) logI.push({ id: a.id, em: new Date().toISOString(), por: quemFez(), dia: a.dia, nome: a.nome, de: a.de / 100, para: a.para / 100, via: 'ICMS Partilhado: valor confirmado na aba ICMS (NF ' + a.nf + (a.linhas > 1 ? ', ' + a.linhas + ' linhas na aba: ' + a.tipo : '') + ')' }); }
       gravarLogValor(logI);
     }
+    rel.gnreEstados = gnreEstados;
     rel.ajustesCent = ajustesCent;
     if (!simular && ajustesCent.length) {
       const log = []; let ok = 0;
@@ -1039,6 +1072,7 @@
     if (!r) return '<div style="font-size:13px">Trouxe <b>' + x.trouxe + '</b> recebimento(s) do extrato para o Registro' + (x.valor ? ', somando <b>R$ ' + fmt(x.valor) + '</b>' : '') + '.</div>';
     const det = r.detalhe || [];
     let h = '<div style="font-size:13px;margin-bottom:8px">' + (r.linhasAdicionadas ? 'Trouxe <b>' + r.linhasAdicionadas + '</b> linha(s) do extrato para o Registro' : 'Não precisei trazer nada do extrato') + '. Nenhuma linha do Fluxo de Caixa foi tirada' + (det.some(x => x.movidas && x.movidas.length) ? ' (só a data de ' + det.reduce((a, x) => a + ((x.movidas || []).length), 0) + ' linha(s) foi corrigida, veja abaixo).' : ' ou alterada.') + '</div>';
+    if (r.gnreEstados && r.gnreEstados.length) h += '<div style="font-size:12.5px;margin:6px 0;padding:6px 8px;border:1px solid var(--border);border-radius:6px"><b>GNRE por estado (soma)</b> — notas do mesmo estado pagas juntas; o valor de cada nota não foi mexido, a diferença (juros/desconto) fica na Conciliação do dia:' + r.gnreEstados.map(a => li(brData(a.dia) + ' · ' + E(a.uf) + ': ' + a.fluxo + ' nota(s) no Fluxo = ' + v$(a.fluxoSoma / 100) + ' · pago no extrato ' + v$(a.pags.reduce((t, x) => t + x, 0) / 100) + ' (diferença ' + v$(a.dif / 100) + ')')).join('') + '</div>';
     if (r.ajustesCent && r.ajustesCent.length) h += '<div style="font-size:12.5px;margin:6px 0;padding:6px 8px;border:1px solid var(--border);border-radius:6px"><b>Tributos com diferença de centavos</b> (' + (r.ajustesAplicados != null ? 'valor corrigido pelo extrato' : 'simulação') + '):' + r.ajustesCent.map(a => li(brData(a.dia) + ' · ' + E(a.nome) + ': Fluxo ' + v$(a.de) + ' → extrato ' + v$(a.para))).join('') + '</div>';
     if (!det.length) return h + '<div style="font-size:12.5px;color:var(--slate)">Não havia saída no extrato neste período.</div>';
     det.forEach(d => {
