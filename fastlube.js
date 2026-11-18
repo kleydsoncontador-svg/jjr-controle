@@ -590,10 +590,10 @@
       Object.keys(fluxoDia).filter(d => (!p.de || d >= p.de) && (!p.ate || d <= p.ate) && (!diasSel || diasSel.has(d))).forEach(d => fluxoDia[d].forEach(x => {
         if (x.cls || !/PARTILHAD/i.test(x.h)) return; const m = x.h.match(/N[úu]mero\s+(\d+)/); if (!m) return;
         const mes = d.slice(0, 7), ant = new Date(d.slice(0, 4), +d.slice(5, 7) - 2, 1), mesAnt = ant.getFullYear() + '-' + String(ant.getMonth() + 1).padStart(2, '0');
-        if (!porNf[m[1]]) { porNf[m[1]] = []; [mes, mesAnt].forEach(k => lerIcms(k).forEach(z => { if (String(z.doc).replace(/\D/g, '') === m[1] && !porNf[m[1]].some(y => y.id === z.id)) porNf[m[1]].push({ id: z.id, tipo: z.tipo, v: cents(z.valor), usada: false }); })); }
-        itens.push({ x, d, nf: m[1] });
+        if (!porNf[m[1]]) { porNf[m[1]] = []; [mes, mesAnt].forEach(k => lerIcms(k).forEach(z => { if (String(z.doc).replace(/\D/g, '') === m[1] && !porNf[m[1]].some(y => y.id === z.id)) porNf[m[1]].push({ id: z.id, tipo: z.tipo, uf: String(z.uf || '').toUpperCase(), v: cents(z.valor), usada: false }); })); }
+        itens.push({ x, d, nf: m[1], uf: (x.h.match(/PARTILHAD[^|\/]*\/([A-Z]{2})\b/) || [])[1] || '' });
       }));
-      const casa = (it, exato) => { const L = (porNf[it.nf] || []).filter(r => !r.usada && r.v); let best = null; L.forEach(r => { const dif = Math.abs(r.v - it.x.c); if (exato ? dif === 0 : dif <= 100) if (!best || dif < best.dif) best = { r, dif }; }); return best; };
+      const casa = (it, exato) => { const L = (porNf[it.nf] || []).filter(r => !r.usada && r.v && !(it.uf && r.uf && r.uf !== it.uf));   /* trava por estado: a linha da aba ICMS precisa ser da mesma UF do Fluxo */ let best = null; L.forEach(r => { const dif = Math.abs(r.v - it.x.c); if (exato ? dif === 0 : dif <= 100) if (!best || dif < best.dif) best = { r, dif }; }); return best; };
       itens.forEach(it => { const b = casa(it, true); if (b) { b.r.usada = true; it.fim = b.r; icmsOk.add(it.x.id); } });                // 1º: quem já tem o valor exato de uma linha da aba
       // O extrato manda: se o banco mostra uma saída de valor EXATAMENTE igual ao da linha do Fluxo naquele dia, o valor do Fluxo está certo e NÃO sobe para o da aba ICMS (pedido 11/11/2026: DUA SEFAZ ES 12,04 virou 12,18)
       const extExato = {}; ref.filter(r => Number(r.valor_saida) > 0 && !trazidas.has('flc' + r.id)).forEach(r => { const k = r.data_pagamento + '|' + cents(r.valor_saida); extExato[k] = (extExato[k] || 0) + 1; });
