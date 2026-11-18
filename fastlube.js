@@ -628,7 +628,7 @@
           // mesma quantidade de pagamentos e de notas do estado: casa NOTA A NOTA na ordem do valor (pedido do usuário 18/11/2026: 4,91↔4,80, 16,06↔15,72, 20,84↔20,40 do ES). O pago é igual ou maior (juros); o valor da nota sobe para o pago e o Processar Tributos separa a diferença em Juros.
           const pgs = porUf[u].slice().sort((a, b) => a.c - b.c), fls = grp[u].slice().sort((a, b) => a.c - b.c);
           if (pgs.length === fls.length && pgs.every((l, i) => { const dd = l.c - fls[i].c; return dd >= 0 && dd <= Math.max(100, Math.round(fls[i].c * 0.1)); })) {
-            pgs.forEach((l, i) => { l.explicada = true; l.via = 'GNRE ' + u + ' (nota a nota)'; fls[i].usado = true; if (l.c !== fls[i].c && !icmsOk.has(fls[i].id)) gnreAjustes.push({ x: fls[i], d, para: l.c }); });
+            pgs.forEach((l, i) => { l.explicada = true; l.via = 'GNRE ' + u + ' (nota a nota)'; fls[i].usado = true; if (l.c !== fls[i].c) gnreAjustes.push({ x: fls[i], d, para: l.c }); });
             feitos.add(u); gnreEstados.push({ dia: d, uf: u, pags: pgs.map(l => l.c), fluxo: fls.length, fluxoSoma: soma(fls), dif: soma(pgs) - soma(fls) }); return;
           }
           const sp = soma(porUf[u]), sf = soma(grp[u]); if (Math.abs(sp - sf) <= tolDe(sf)) fecha(u, porUf[u]); });
