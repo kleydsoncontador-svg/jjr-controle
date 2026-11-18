@@ -112,7 +112,6 @@
       + '<button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="_flAbrirExcluidos()" title="Linhas que você excluiu do Registro (a partir de agora): quem, quando e como. Dá para restaurar (volta como pendente).">🗑 Excluídos</button>'
             + '<button class="btn bo" style="background:rgba(250,204,21,.25);border-color:#eab308" onclick="_flAbrirImpedidos()" title="Textos de histórico que você mandou NUNCA fazerem parte do saldo nem do TXT (ignorados para sempre). Lá dá para clicar em Permitir e escolher a partir de qual competência volta.">⛔ Impedidos</button>'
 + '<button class="btn bo" onclick="_flAbrirValores()" title="Valores que foram corrigidos (✏️ ao lado do valor, ou ajuste automático de centavos em tributos): original, novo, quem e quando.">💲 Valores alterados</button>'
-      + '<button class="btn bo" onclick="_flExcelRelatorio(\'todos\')" title="Gera um Excel para o cliente com 5 abas: Ajustes e conciliações, Datas alteradas, Valores alterados, Ignorados e Fluxo × extrato por dia. Mostra o que foi preciso fazer para chegar ao saldo do extrato.">📊 Excel p/ cliente</button>'
       + '<button class="btn bo" onclick="_flAbrirBancos()" title="Linhas do Fluxo que foram mandadas para outro banco porque o extrato do outro banco é que mostra o pagamento: de qual banco para qual, quando e quem. Dá para voltar ao banco original.">🏦 Bancos alterados</button>'
       + '<button class="btn bo" onclick="_flAbrirDatas()" title="Lançamentos cuja data foi alterada em relação à data de origem (Fluxo ou extrato): quando, quem, data original e nova. Dá para voltar à data original.">📆 Datas alteradas</button>'
       + '<button class="btn bo" onclick="_flAbrirRelatorios()" title="Relatórios gerados pelos botões de recebimentos e pagamentos do extrato (o que foi trazido, diferenças, avisos).">📑 Relatórios</button>'
@@ -1269,41 +1268,100 @@
       + (lista.length ? lista.map(x => '<tr style="border-bottom:1px solid var(--border)"><td style="' + c + ';white-space:nowrap">' + E(dtBr(x.em)) + '</td><td style="' + c + '">' + E(x.por || '') + '</td><td style="' + c + ';white-space:nowrap">' + E(bco(x)) + '</td><td style="' + c + ';white-space:nowrap">' + brData(x.dia) + '</td><td style="' + c + ';font-size:11.5px;line-height:1.3;max-width:620px">' + E(hbc(x)) + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.de) + '</td><td style="' + c + ';text-align:right">R$ ' + fmt(x.para) + '</td><td style="' + c + ';text-align:right;color:' + (x.para - x.de < 0 ? '#dc2626' : 'var(--teal)') + '">' + fmt(x.para - x.de) + '</td><td style="' + c + ';font-weight:600;color:' + (tipoValor(x) === 'Automático' ? '#d97706' : 'var(--ink)') + '">' + tipoValor(x) + '</td><td style="' + c + ';font-size:11.5px">' + E(x.via || '') + '</td></tr>').join('') : '<tr><td colspan="10" style="padding:20px;text-align:center;color:var(--slate)">Nenhum valor foi alterado até agora.</td></tr>')
       + '</tbody></table></div>';
   };
-  root._flExcelRelatorio = async function (qual) {
+  root._flExcelClienteBtnHtml = () => (ativo() ? '<button class="btn bo btn-excel-fl" onclick="_flExcelCliente()" title="Gera um Excel para o cliente, do MÊS que você escolher, com uma aba para cada tela: Ajustes e conciliações, Datas alteradas, Valores alterados, Bancos alterados, Ignorados, Excluídos, Impedidos e Fluxo × extrato por dia.">📊 Excel p/ cliente</button>' : '');
+  root._flExcelCliente = function () {
+    const m0 = (/^\d{4}-\d{2}$/.test(_lancctbRegistroMes || '') ? _lancctbRegistroMes : new Date().toISOString().slice(0, 7));
+    const el = dialogoForm('📊 Excel p/ cliente — escolha o mês', '<div style="font-size:12.5px;margin-bottom:8px">O Excel traz <b>uma aba para cada tela</b> (ajustes e conciliações, datas alteradas, valores alterados, bancos alterados, ignorados, excluídos e impedidos) e o Fluxo × extrato por dia, <b>só do mês escolhido</b>.</div><label style="font-size:12px">Mês:</label> <input id="flExMes" type="month" min="2026-01" max="2026-12" value="' + E(m0) + '" style="' + ESTI + ';max-width:200px">', async (box) => {
+      const mes = (box.querySelector('#flExMes').value || '').trim(); if (!/^\d{4}-\d{2}$/.test(mes)) { toast('Escolha o mês.', 'err'); return false; }
+      await root._flExcelRelatorio('todos', mes);
+    });
+    const ok = el.querySelector('#flFormOk'); if (ok) ok.textContent = '📊 Gerar Excel';
+  };
+  root._flExcelRelatorio = async function (qual, mes) {
     if (typeof XLSX === 'undefined') { toast('Biblioteca de Excel não carregada.', 'err'); return; }
     toast('Montando o Excel…', 'info');
+    const noMes = d => !mes || String(d || '').slice(0, 7) === mes;
     const B = NOMES, ROT = { fluxo: 'Fluxo de Caixa', extrato_receb: 'Extrato · recebimento', extrato_compl: 'Extrato · pagamento', conciliacao: 'Conciliação', ajuste_manual: 'Ajuste manual' };
     const dBr = d => d ? brData(d) : '';
     const wb = XLSX.utils.book_new(), add = (nome, cab, linhas, larg) => { const ws = XLSX.utils.aoa_to_sheet([cab].concat(linhas.length ? linhas : [['(nada a informar)']])); ws['!cols'] = (larg || cab.map(() => 18)).map(w => ({ wch: w })); XLSX.utils.book_append_sheet(wb, ws, nome); };
     const sel = 'id,conta_bancaria_id,data_pagamento,valor_entrada,valor_saida,historico_bancario,fonte,status_conciliacao';
     if (qual === 'todos' || qual === 'ajustes') {
       const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID()).in('conta_bancaria_id', ctIds()).in('fonte', ['ajuste_manual', 'conciliacao']).neq('status_conciliacao', 'ignorado'))).data || [];
-      add('Ajustes e conciliações', ['Banco', 'Data', 'Tipo', 'Entrada', 'Saída', 'Histórico'], r.sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 16, 14, 14, 110]);
+      add('Ajustes e conciliações', ['Banco', 'Data', 'Tipo', 'Entrada', 'Saída', 'Histórico'], r.filter(x => noMes(x.data_pagamento)).sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 16, 14, 14, 110]);
     }
     if (qual === 'todos' || qual === 'datas') {
       const d = await carregarDatasAlteradas();
-      add('Datas alteradas', ['Banco', 'Data original', 'Data nova', 'Valor', 'Lançamento', 'Quando', 'Quem', 'Como'], d.map(x => [B[String(x.conta)] || x.conta, dBr(x.de), dBr(x.para), x.v, String(x.h || ''), dtBr(x.em), x.por || '', x.via || '']), [16, 14, 12, 14, 80, 18, 18, 30]);
+      add('Datas alteradas', ['Banco', 'Data original', 'Data nova', 'Valor', 'Lançamento', 'Quando', 'Quem', 'Como'], d.filter(x => noMes(x.para) || noMes(x.de)).map(x => [B[String(x.conta)] || x.conta, dBr(x.de), dBr(x.para), x.v, String(x.h || ''), dtBr(x.em), x.por || '', x.via || '']), [16, 14, 12, 14, 80, 18, 18, 30]);
     }
     if (qual === 'todos' || qual === 'valores') {
       const v = S.g('fl_valores_alterados_' + EID()) || [], bm = await bancosDosValores(v);
-      add('Valores alterados', ['Banco', 'Dia', 'Histórico bancário', 'Valor no Fluxo', 'Valor correto', 'Diferença', 'Tipo', 'Quando', 'Quem', 'Como'], v.map(x => [NOME_BANCO[String(x.conta || bm.get(x.id))] || '', dBr(x.dia), String(bm.get('h' + x.id) || x.nome || ''), x.de, x.para, Math.round((x.para - x.de) * 100) / 100, tipoValor(x), dtBr(x.em), x.por || '', x.via || '']), [16, 12, 120, 16, 16, 12, 14, 18, 18, 50]);
+      add('Valores alterados', ['Banco', 'Dia', 'Histórico bancário', 'Valor no Fluxo', 'Valor correto', 'Diferença', 'Tipo', 'Quando', 'Quem', 'Como'], v.filter(x => noMes(x.dia)).map(x => [NOME_BANCO[String(x.conta || bm.get(x.id))] || '', dBr(x.dia), String(bm.get('h' + x.id) || x.nome || ''), x.de, x.para, Math.round((x.para - x.de) * 100) / 100, tipoValor(x), dtBr(x.em), x.por || '', x.via || '']), [16, 12, 120, 16, 16, 12, 14, 18, 18, 50]);
     }
     if (qual === 'todos' || qual === 'ignorados') {
       const r = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select(sel).eq('empresa_eid', EID()).in('conta_bancaria_id', ctIds()).eq('status_conciliacao', 'ignorado'))).data || [];
-      add('Ignorados', ['Banco', 'Data', 'Origem', 'Entrada', 'Saída', 'Histórico'], r.sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 22, 14, 14, 110]);
+      add('Ignorados', ['Banco', 'Data', 'Origem', 'Entrada', 'Saída', 'Histórico'], r.filter(x => noMes(x.data_pagamento)).sort(porDataId).map(x => [B[String(x.conta_bancaria_id)] || x.conta_bancaria_id, dBr(x.data_pagamento), ROT[x.fonte] || x.fonte, Number(x.valor_entrada) || '', Number(x.valor_saida) || '', String(x.historico_bancario || '')]), [16, 12, 22, 14, 14, 110]);
+    }
+    if (qual === 'todos' || qual === 'bancos') {
+      add('Bancos alterados', ['Dia', 'Valor', 'Estava no', 'Foi para o', 'Histórico', 'Quando', 'Quem', 'Como'], lerLogBanco().filter(x => noMes(x.dia)).map(x => [dBr(x.dia), x.v, B[String(x.de)] || x.de, B[String(x.para)] || x.para, String(x.h || ''), dtBr(x.em), x.por || 'automático', x.via || '']), [12, 14, 16, 16, 90, 18, 18, 50]);
+    }
+    if (qual === 'todos' || qual === 'excluidos') {
+      add('Excluídos', ['Banco', 'Data', 'Origem', 'Entrada', 'Saída', 'Histórico', 'Excluída em', 'Por', 'Como', 'Restaurada'], lerEx().filter(x => noMes(x.data)).map(x => [B[String(x.conta)] || x.conta, dBr(x.data), ROT[x.fonte] || x.fonte, Number(x.ve) || '', Number(x.vs) || '', String(x.h || ''), dtBr(x.em), x.por || '', x.via || '', x.restaurada ? 'sim' : '']), [16, 12, 22, 14, 14, 100, 18, 18, 40, 10]);
+    }
+    if (qual === 'todos' || qual === 'impedidos') {
+      add('Impedidos', ['Partes do histórico impedidas', 'Vale desde', 'Criada em', 'Por', 'Liberada a partir de'], lerImp().filter(r => !mes || !r.inicio || r.inicio <= mes).map(r => [partesDe(r).join(' + '), r.inicio ? r.inicio.slice(5, 7) + '/' + r.inicio.slice(0, 4) : '', r.criada ? new Date(r.criada).toLocaleDateString('pt-BR') : '', r.por || '', r.desde ? r.desde.slice(5, 7) + '/' + r.desde.slice(0, 4) : '']), [80, 14, 14, 18, 20]);
     }
     if (qual === 'todos') {
       // Fluxo × extrato por dia, no mês filtrado na tela: onde o Fluxo do cliente não bate com o extrato
-      const conta = contaAtual(), p = { de: _lancctbRegistroDataDe || '', ate: _lancctbRegistroDataAte || '' };
+      const conta = contaAtual(), p = mes ? { de: mes + '-01', ate: mes + '-' + String(new Date(+mes.slice(0, 4), +mes.slice(5, 7), 0).getDate()).padStart(2, '0') } : { de: _lancctbRegistroDataDe || '', ate: _lancctbRegistroDataAte || '' };
       const ref = await carregarRef(conta, p), reg = await carregarRegistro(conta, p.de, p.ate);
       const dias = {}; const ac = (d, k, v) => { (dias[d] = dias[d] || { re: 0, rs: 0, ge: 0, gs: 0 })[k] += v; };
       ref.forEach(x => { ac(x.data_pagamento, 're', cents(x.valor_entrada)); ac(x.data_pagamento, 'rs', cents(x.valor_saida)); });
       reg.filter(x => x.fonte === 'fluxo').forEach(x => { ac(x.data_pagamento, 'ge', cents(x.valor_entrada)); ac(x.data_pagamento, 'gs', cents(x.valor_saida)); });
       add('Fluxo x extrato por dia', ['Banco', 'Dia', 'Entradas extrato', 'Entradas Fluxo', 'Diferença entradas', 'Saídas extrato', 'Saídas Fluxo', 'Diferença saídas'], Object.keys(dias).sort().map(d => { const x = dias[d]; return [nomeBanco(conta), dBr(d), x.re / 100, x.ge / 100, (x.re - x.ge) / 100, x.rs / 100, x.gs / 100, (x.rs - x.gs) / 100]; }), [16, 12, 18, 18, 18, 18, 18, 18]);
     }
-    XLSX.writeFile(wb, NOME() + ' - ' + (qual === 'todos' ? 'ajustes para o cliente' : qual) + ' - ' + new Date().toISOString().slice(0, 10) + '.xlsx');
+    XLSX.writeFile(wb, NOME() + ' - ' + (qual === 'todos' ? 'ajustes para o cliente' : qual) + (mes ? ' - ' + mes : '') + ' - ' + new Date().toISOString().slice(0, 10) + '.xlsx');
     toast('Excel gerado ✓', 'ok');
   };
+
+
+  // ───────── as 6 telas de acompanhamento (Ignorados, Excluídos, Impedidos, Valores alterados, Bancos alterados, Datas alteradas) ─────────
+  // Pedido do usuário 18/11/2026: todas com FILTRO por coluna e botão de EXCEL. Entra por cima do que a tela já desenha (e de novo a cada redesenho), sem mexer no resto.
+  const TELAS_FL = [['Ignorados', 'Ignorados'], ['Excluídos', 'Excluídos'], ['Impedidos', 'Impedidos'], ['Valores alterados', 'Valores alterados'], ['Bancos alterados', 'Bancos alterados'], ['Datas alteradas', 'Datas alteradas']];
+  const FILT_FL = {};
+  function melhorarTelaFL() {
+    const aba = document.getElementById('lancctbConteudoAba'); if (!aba) return;
+    const tit = [...aba.querySelectorAll('div')].find(d => /font-size:1\.15rem/.test(d.getAttribute('style') || '') && TELAS_FL.some(t => String(d.textContent || '').indexOf(t[0]) >= 0 && /—/.test(d.textContent || ''))); if (!tit) return;
+    const tela = TELAS_FL.find(t => String(tit.textContent).indexOf(t[0]) >= 0)[1];
+    const tbls = [...aba.querySelectorAll('table')].filter(t => !t.getAttribute('data-flf')); if (!tbls.length) return;
+    const tbl = tbls.sort((a, b) => b.rows.length - a.rows.length)[0], thead = tbl.tHead; if (!thead || !thead.rows[0]) return;
+    tbl.setAttribute('data-flf', tela);
+    const cols = [...thead.rows[0].cells], est = 'width:100%;min-width:54px;padding:2px 4px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--white);color:var(--ink)';
+    const fr = document.createElement('tr'); fr.setAttribute('data-flf-linha', '1');
+    cols.forEach((th, i) => { const c = document.createElement('th'); c.style.cssText = 'padding:3px 4px;background:var(--ink2)'; if (String(th.textContent || '').trim()) { const inp = document.createElement('input'); inp.style.cssText = est; inp.placeholder = 'filtrar'; inp.value = (FILT_FL[tela] || [])[i] || ''; inp.oninput = () => { (FILT_FL[tela] = FILT_FL[tela] || [])[i] = inp.value; aplicarFiltroFL(tbl, tela); }; c.appendChild(inp); } fr.appendChild(c); });
+    thead.appendChild(fr);
+    const info = document.createElement('div'); info.id = 'flfConta'; info.style.cssText = 'font-size:12px;color:var(--slate);margin:4px 0'; tbl.parentElement.parentElement.insertBefore(info, tbl.parentElement);
+    const barra = tit.parentElement; if (barra && !/Excel/i.test(barra.textContent || '')) { const b = document.createElement('button'); b.className = 'btn bo bsm btn-excel-fl'; b.innerHTML = '📊 Gerar Excel'; b.title = 'Gera o Excel do que está aparecendo (com os filtros aplicados)'; b.onclick = () => root._flExcelTela(); barra.appendChild(b); }
+    aplicarFiltroFL(tbl, tela);
+  }
+  function aplicarFiltroFL(tbl, tela) {
+    const fs = (FILT_FL[tela] || []).map(v => norm(v)); let tot = 0, ok = 0;
+    [...tbl.tBodies].forEach(tb => [...tb.rows].forEach(tr => {
+      if (tr.cells.length < 2) return; tot++;
+      const bate = fs.every((f, i) => !f || (tr.cells[i] && norm(tr.cells[i].textContent).indexOf(f) >= 0));
+      tr.style.display = bate ? '' : 'none'; if (bate) ok++;
+    }));
+    const info = document.getElementById('flfConta'); if (info) info.textContent = ok + ' de ' + tot + ' linha(s) na tela' + (fs.some(Boolean) ? ' (filtradas)' : '');
+  }
+  root._flExcelTela = function () {
+    if (typeof XLSX === 'undefined') { toast('Biblioteca de Excel não carregada.', 'err'); return; }
+    const tbl = document.querySelector('#lancctbConteudoAba table[data-flf]'); if (!tbl) { toast('Nada para exportar.', 'err'); return; }
+    const tela = tbl.getAttribute('data-flf'), cab = [...tbl.tHead.rows[0].cells], idx = cab.map((c, i) => i).filter(i => String(cab[i].textContent || '').trim());
+    const linhas = []; [...tbl.tBodies].forEach(tb => [...tb.rows].forEach(tr => { if (tr.style.display === 'none' || tr.cells.length < 2) return; linhas.push(idx.map(i => String((tr.cells[i] && tr.cells[i].textContent) || '').replace(/\s+/g, ' ').trim())); }));
+    const ws = XLSX.utils.aoa_to_sheet([idx.map(i => String(cab[i].textContent).trim())].concat(linhas.length ? linhas : [['(nada a informar)']])); ws['!cols'] = idx.map(() => ({ wch: 22 }));
+    const wb = XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb, ws, tela.slice(0, 31));
+    XLSX.writeFile(wb, NOME() + ' - ' + tela + ' - ' + new Date().toISOString().slice(0, 10) + '.xlsx'); toast('Excel gerado ✓ (' + linhas.length + ' linha(s))', 'ok');
+  };
+  { let t0 = null; try { new MutationObserver(() => { clearTimeout(t0); t0 = setTimeout(() => { try { melhorarTelaFL(); } catch (e) {} }, 70); }).observe(document.body, { childList: true, subtree: true }); } catch (e) {} }
 
   // ───────── ajuste manual, editar data, excluir ajuste ─────────
   function dialogoForm(titulo, corpo, aoSalvar, comSemAprender) {
