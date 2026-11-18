@@ -610,21 +610,28 @@
     // passada G — GNRE/ICMS PARTILHADO POR ESTADO, EM SOMA (pedido do usuário 18/11/2026): vários estados (Maranhão, Piauí...) juntam várias notas numa guia só, com juros; o valor de cada nota NÃO é mexido.
     // 1º) pagamento cujo convênio diz o estado (MT, MS, TO, AC): bate com a SOMA do Fluxo daquele estado no dia. 2º) pagamento sem estado ("ON LINE"): descobre por eliminação entre os estados que sobraram — só vale se existir UMA única distribuição que feche.
     // A diferença (juros/desconto) fica no fechamento do dia (Conciliação explicada); nada é gravado aqui, só marca o que já está coberto. Só dias ≥ out/2026, não fechados.
-    const gnreEstados = [];
+    const gnreEstados = [], gnreAjustes = [];
     try {
       const UFV = ' AC AL AP AM BA CE DF ES GO MA MT MS MG PA PB PR PE PI RJ RN RS RO RR SC SP SE TO ';
       const ufFx = h => { const m = String(h || '').toUpperCase().match(/\/([A-Z]{2}) - /); if (m && UFV.indexOf(' ' + m[1] + ' ') >= 0) return m[1]; return typeof _lancctbUfDoTexto === 'function' ? _lancctbUfDoTexto(h) : ''; };
       const ufPg = h => typeof _lancctbUfDoTexto === 'function' ? _lancctbUfDoTexto(h) : '';
       const tolDe = sf => Math.max(150, Math.round(sf * 0.04));
       dias.filter(d => !diasFechados.has(d) && (!DESDE_ALT() || d >= DESDE_ALT())).forEach(d => {
-        const P = extDia[d].filter(l => !l.explicada && casavel(l) && /GNRE/i.test(l.r.historico_bancario || ''));
+        const P = extDia[d].filter(l => !l.explicada && casavel(l) && /GNRE|DUA |SEFAZ/i.test(l.r.historico_bancario || ''));
         const F = livres(d).filter(x => /GNRE|PARTILHAD/i.test(x.h || '')); if (!P.length || !F.length) return;
         const grp = {}; F.forEach(x => { const u = ufFx(x.h); if (u) (grp[u] = grp[u] || []).push(x); });
         const soma = a => a.reduce((t, x) => t + x.c, 0), feitos = new Set();
         const fecha = (u, pags) => { const sf = soma(grp[u]), sp = soma(pags); pags.forEach(l => { l.explicada = true; l.via = 'GNRE ' + u + ' (soma do estado)'; }); grp[u].forEach(x => { x.usado = true; }); feitos.add(u); gnreEstados.push({ dia: d, uf: u, pags: pags.map(l => l.c), fluxo: grp[u].length, fluxoSoma: sf, dif: sp - sf }); };
         // 1º: pagamentos que dizem o estado
         const porUf = {}; P.forEach(l => { const u = ufPg(l.r.historico_bancario); if (u) (porUf[u] = porUf[u] || []).push(l); });
-        Object.keys(porUf).forEach(u => { if (!grp[u]) return; const sp = soma(porUf[u]), sf = soma(grp[u]); if (Math.abs(sp - sf) <= tolDe(sf)) fecha(u, porUf[u]); });
+        Object.keys(porUf).forEach(u => { if (!grp[u]) return;
+          // mesma quantidade de pagamentos e de notas do estado: casa NOTA A NOTA na ordem do valor (pedido do usuário 18/11/2026: 4,91↔4,80, 16,06↔15,72, 20,84↔20,40 do ES). O pago é igual ou maior (juros); o valor da nota sobe para o pago e o Processar Tributos separa a diferença em Juros.
+          const pgs = porUf[u].slice().sort((a, b) => a.c - b.c), fls = grp[u].slice().sort((a, b) => a.c - b.c);
+          if (pgs.length === fls.length && pgs.every((l, i) => { const dd = l.c - fls[i].c; return dd >= 0 && dd <= Math.max(100, Math.round(fls[i].c * 0.1)); })) {
+            pgs.forEach((l, i) => { l.explicada = true; l.via = 'GNRE ' + u + ' (nota a nota)'; fls[i].usado = true; if (l.c !== fls[i].c && !icmsOk.has(fls[i].id)) gnreAjustes.push({ x: fls[i], d, para: l.c }); });
+            feitos.add(u); gnreEstados.push({ dia: d, uf: u, pags: pgs.map(l => l.c), fluxo: fls.length, fluxoSoma: soma(fls), dif: soma(pgs) - soma(fls) }); return;
+          }
+          const sp = soma(porUf[u]), sf = soma(grp[u]); if (Math.abs(sp - sf) <= tolDe(sf)) fecha(u, porUf[u]); });
         // 2º: pagamentos sem estado × estados que sobraram
         const U = P.filter(l => !l.explicada && !ufPg(l.r.historico_bancario)).sort((a, b) => b.c - a.c), G = Object.keys(grp).filter(u => !feitos.has(u));
         if (!U.length || !G.length || U.length > 14 || G.length > 14) return;
@@ -645,6 +652,7 @@
     const chavePag = h => String(h || '').split(' | ')[0].toUpperCase().replace(/[0-9]+/g, '').replace(/[^A-Z ]/g, ' ').replace(/\s+/g, ' ').trim();
     let tolMem = {}; try { tolMem = S.g('fl_tol_pagadores_' + EID()) || {}; } catch (e) {}
     const ajustesCent = [];
+    gnreAjustes.forEach(a => ajustesCent.push({ id: a.x.id, dia: a.d, de: a.x.c, para: a.para, nome: a.x.nome, chave: chavePag(a.x.h), h: a.x.h }));   // passada G (nota a nota): o valor sobe para o pago; a diferença é juros
     root.__flEtapa = 'casando somas de várias linhas'; await new Promise(r => setTimeout(r, 0));
     dias.forEach(d => extDia[d].filter(l => !l.explicada && casavel(l)).sort((a, b) => b.c - a.c).forEach(l => {
       let melhor = null;
