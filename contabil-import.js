@@ -183,6 +183,9 @@
     var contas=P.contas.map(function(c){ return {empresa_eid:eid, period_start:ps, period_end:pe, competence:d.competencia, code:c.codigo, classification:c.classificacao, description:c.descricao,
       is_analytic:c.analitica, level:c.nivel, prev_balance:num(c.ant.cents), prev_side:c.ant.lado, debit:num(c.deb), credit:num(c.cred), balance:num(c.atu.cents), balance_side:c.atu.lado, import_id:imp.id}; });
     await enviar('trial_balance_accounts',contas,{onConflict:'empresa_eid,period_start,period_end,classification,code'});
+    // Reimportação (versão nova do Balancete do mesmo período): contas da versão ANTIGA que não existem mais na nova ficavam no banco e se misturavam à versão nova (Peixoto 10/2026: 6 linhas velhas, 226 contas em vez de 220). Agora a versão nova SUBSTITUI a anterior do período (a DRE já fazia isso).
+    var rv=await _supaClient.from('trial_balance_accounts').delete().eq('empresa_eid',eid).eq('period_start',ps).eq('period_end',pe).neq('import_id',imp.id);
+    if(rv.error) throw rv.error;
     var resumoJson=P.resumo.map(function(x){ return {chave:x.chave, rotulo:x.rotulo, ant:x.ant, deb:x.deb, cred:x.cred, atu:x.atu}; });
     var m=R.mes, e=R.exercicio;
     var sum={empresa_eid:eid, period_start:ps, period_end:pe, competence:d.competencia, sections:resumoJson, import_id:imp.id,
