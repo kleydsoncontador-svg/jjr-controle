@@ -31,6 +31,7 @@
   // ── cálculo (puro: recebe os valores e devolve tudo por período) ──
   function calcular(vals,ded,per,params){
     var P=PER[per], N=P.n, pr=Object.assign({},PARAM_PADRAO,params||{}), out={rows:{},ded:{}};
+    if(per==='M') pr.lc224=false; // LC 224/2025 só vale no Lucro Presumido (não na Apuração por Receita Bruta do Lucro Real)
     var G=function(id,i){ var a=vals[id]; return NUM(a&&a[i]); };
     var acum=0, acumAnt=0;
     for(var i=0;i<N;i++){
@@ -170,16 +171,17 @@
     var h='<div style="font-weight:700;color:#1E3558;margin:0 0 6px;font-size:13px">CÁLCULO'+(usouAlt?' <span style="font-weight:400;color:#b45309">— o bloco escolhido está vazio; calculando com o '+(usouAlt==='cont'?'Contábil':'Fiscal')+'</span>':'')+'</div>'
       +'<div style="overflow:visible"><table style="'+GRADE(N).tab+'border-collapse:collapse;font-size:12px;background:white;color:#111">'+GRADE(N).cols+'<thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left">DESCRIÇÃO</th>';
     for(var k=0;k<N;k++) h+='<th style="'+TH+'">'+per0.rot(k)+'</th>'; h+='<th style="'+TH+'">TOTAL</th></tr></thead><tbody>';
-    h+=barra('RECEITA BRUTA DAS ATIVIDADES (comércio / indústria + serviços) — base do limite da LC 224/2025','#2D3447');
+    var lc=(per()==='T');
+    h+=barra('RECEITA BRUTA DAS ATIVIDADES (comércio / indústria + serviços)'+(lc?' — base do limite da LC 224/2025':''),'#2D3447');
     h+=linha('Comércio e indústria (vendas + revendas)',function(o){ return o.com; });
     h+=linha('Serviços',function(o){ return o.srv; });
     h+=linha('Receita bruta das atividades',function(o){ return o.rb; },{bg:'#fef9c3'});
-    h+=linha('Receita bruta que excede o limite ('+(per()==='T'?'R$ 1.250.000 por trimestre':'acumulado acima de R$ '+FMT(NUM((D.params||{}).limiteAno||PARAM_PADRAO.limiteAno))+' no ano')+') — LC 224/2025',function(o){ return o.exc; },{cor:'#7c2d12'});
+    if(lc) h+=linha('Receita bruta que excede o limite ('+(per()==='T'?'R$ 1.250.000 por trimestre':'acumulado acima de R$ '+FMT(NUM((D.params||{}).limiteAno||PARAM_PADRAO.limiteAno))+' no ano')+') — LC 224/2025',function(o){ return o.exc; },{cor:'#7c2d12'});
     h+=barra('CÁLCULO DA CSLL — 9%','#000');
     h+=linha('Base de Cálculo 12% (comércio e indústria)',function(o){ return o.c12; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servCsll||PARAM_PADRAO.servCsll)*100)+'% (serviços)',function(o){ return o.c32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.c100; });
-    h+=linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025'+(per()==='T'?' (CSLL a partir do 2º trimestre de 2026)':''),function(o){ return o.cLC; },{cor:'#7c2d12'});
+    if(lc) h+=linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025'+(per()==='T'?' (CSLL a partir do 2º trimestre de 2026)':''),function(o){ return o.cLC; },{cor:'#7c2d12'});
     h+=linha('Total Base de Cálculo da CSLL',function(o){ return o.cBase; },{bg:'#fef9c3'});
     h+=linha('PROVISÃO DA CSLL (9%)',function(o){ return o.cProv; },{bg:'#f8d7da'});
     h+='<tr><td colspan="'+(N+3)+'" style="padding:4px 12px;border:1px solid #ccc;background:#f0f4f8;font-weight:bold;color:#1E3558">(-) DEDUÇÕES</td></tr>'+dedLinhas(DED_CSLL);
@@ -189,7 +191,7 @@
     h+=linha('Base de Cálculo 8% (comércio e indústria)',function(o){ return o.i8; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servIrpj||PARAM_PADRAO.servIrpj)*100)+'% (serviços)',function(o){ return o.i32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.i100; });
-    h+=linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',function(o){ return o.iLC; },{cor:'#7c2d12'});
+    if(lc) h+=linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',function(o){ return o.iLC; },{cor:'#7c2d12'});
     h+=linha('Total Base de Cálculo do IRPJ — 15%',function(o){ return o.iBase; },{bg:'#fef9c3'});
     h+=linha('Base do Adicional — 10% (o que passa de R$ '+FMT(lim)+(per()==='T'?' no trimestre':' no mês')+')',function(o){ return o.iAdBase; });
     h+=linha('IRPJ — 15%',function(o){ return o.i15; });
@@ -198,7 +200,7 @@
     h+='<tr><td colspan="'+(N+3)+'" style="padding:4px 12px;border:1px solid #ccc;background:#f0f4f8;font-weight:bold;color:#1E3558">(-) DEDUÇÕES</td></tr>'+dedLinhas(DED_IRPJ);
     h+=linha('IRPJ A RECOLHER'+(ST.modo==='rb'?' (estimativa mensal — DARF 2362 ou 5993)':' (DARF 2089)'),function(o){ return o.iPagar; },{bg:'#FFD700'});
     h+='</tbody></table></div><div style="font-size:11.5px;color:#666;margin-top:8px;line-height:1.5">Linhas "(-)" entram positivas e são subtraídas. Percentuais: comércio/indústria 8% (IRPJ) e 12% (CSLL); serviços e demais conforme <b>Parâmetros</b>. '
-      +'Adicional de 10% do IRPJ sobre o que passa de R$ 60.000 por trimestre (R$ 20.000 por mês). Acréscimo da LC 224/2025 sobre a parcela que passa do limite, proporcional ao percentual de cada atividade.</div>';
+      +'Adicional de 10% do IRPJ sobre o que passa de R$ 60.000 por trimestre (R$ 20.000 por mês). '+(lc?'Acréscimo da LC 224/2025 sobre a parcela que passa do limite, proporcional ao percentual de cada atividade.':'')+'</div>';
     tc.innerHTML=h;
   }
   function set(k,v){ ST[k]=v; desenhar(); if(k==='regime'||k==='bloco') montarMapaBalancete().catch(function(){}); }
@@ -224,13 +226,13 @@
       +'<div style="display:grid;gap:10px;margin:12px 0;font-size:13px">'
       +'<label>Percentual de presunção do IRPJ nos serviços <select id="apPmServI" style="padding:4px"><option value="0.32"'+(p.servIrpj===0.32?' selected':'')+'>32% (serviços em geral)</option><option value="0.16"'+(p.servIrpj===0.16?' selected':'')+'>16% (transporte de passageiros, receita até R$ 120 mil/ano)</option><option value="0.08"'+(p.servIrpj===0.08?' selected':'')+'>8% (serviços hospitalares, transporte de cargas)</option></select></label>'
       +'<label>Percentual de presunção da CSLL nos serviços <select id="apPmServC" style="padding:4px"><option value="0.32"'+(p.servCsll===0.32?' selected':'')+'>32%</option><option value="0.12"'+(p.servCsll===0.12?' selected':'')+'>12% (serviços hospitalares)</option></select></label>'
-      +'<label><input type="checkbox" id="apPmLc"'+(p.lc224?' checked':'')+'> Aplicar o acréscimo de 10% da LC 224/2025 sobre a presunção</label>'
-      +'<label>Limite anual da receita bruta (R$) <input id="apPmLim" value="'+FMT(p.limiteAno)+'" style="padding:4px;width:140px;text-align:right"> <span style="color:#777">(trimestral: R$ 1.250.000)</span></label>'
-      +'<label>CSLL: acréscimo vale a partir do mês <select id="apPmCsll" style="padding:4px">'+[1,2,3,4,5,6,7].map(function(m){ return '<option value="'+m+'"'+(p.csllDesdeMes===m?' selected':'')+'>'+m+'</option>'; }).join('')+'</select> <span style="color:#777">(4 = abril/2026, anterioridade de 90 dias — confira na IN da Receita)</span></label>'
+      +(ST.modo==='rb'?'':'<label><input type="checkbox" id="apPmLc"'+(p.lc224?' checked':'')+'> Aplicar o acréscimo de 10% da LC 224/2025 sobre a presunção</label>')
+      +(ST.modo==='rb'?'':'<label>Limite anual da receita bruta (R$) <input id="apPmLim" value="'+FMT(p.limiteAno)+'" style="padding:4px;width:140px;text-align:right"> <span style="color:#777">(trimestral: R$ 1.250.000)</span></label>')
+      +(ST.modo==='rb'?'':'<label>CSLL: acréscimo vale a partir do mês <select id="apPmCsll" style="padding:4px">'+[1,2,3,4,5,6,7].map(function(m){ return '<option value="'+m+'"'+(p.csllDesdeMes===m?' selected':'')+'>'+m+'</option>'; }).join('')+'</select> <span style="color:#777">(4 = abril/2026, anterioridade de 90 dias — confira na IN da Receita)</span></label>')
       +'</div><div style="display:flex;gap:8px;justify-content:flex-end"><button onclick="document.getElementById(\'apPresParam\').remove()" style="padding:7px 14px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Cancelar</button><button id="apPmOk" style="padding:7px 16px;border:none;background:#166534;color:#fff;border-radius:6px;cursor:pointer;font-weight:700">Salvar</button></div></div>';
     document.body.appendChild(ov);
     document.getElementById('apPmOk').onclick=function(){
-      var d=dados(); d.params={ servIrpj:parseFloat(document.getElementById('apPmServI').value), servCsll:parseFloat(document.getElementById('apPmServC').value), lc224:document.getElementById('apPmLc').checked, limiteAno:(typeof _parseInput==='function'?_parseInput(document.getElementById('apPmLim').value):NUM(document.getElementById('apPmLim').value))||5000000, csllDesdeMes:parseInt(document.getElementById('apPmCsll').value,10)||4, exclIrpj:(D.params||{}).exclIrpj };
+      var d=dados(); d.params={ servIrpj:parseFloat(document.getElementById('apPmServI').value), servCsll:parseFloat(document.getElementById('apPmServC').value), lc224:(document.getElementById('apPmLc')?document.getElementById('apPmLc').checked:p.lc224), limiteAno:(document.getElementById('apPmLim')?((typeof _parseInput==='function'?_parseInput(document.getElementById('apPmLim').value):NUM(document.getElementById('apPmLim').value))||5000000):p.limiteAno), csllDesdeMes:(document.getElementById('apPmCsll')?(parseInt(document.getElementById('apPmCsll').value,10)||4):p.csllDesdeMes), exclIrpj:(D.params||{}).exclIrpj };
       salvar(d); ov.remove(); atualizar();
     };
   }
@@ -274,7 +276,7 @@
     var vals=D[ST.regime][ST.calcCom]||{}, cc=calcular(vals,D[ST.regime].ded,per(),D.params).rows;
     var L=function(rot,k){ var r=[rot],t=0; for(var i=0;i<N;i++){ r.push(cc[i][k]); t+=cc[i][k]; } r.push(R2(t)); aoa.push(r); };
     aoa.push(['CÁLCULO'].concat(Array.apply(null,{length:N}).map(function(_,i){ return P.rot(i); }),['TOTAL']));
-    L('Receita bruta das atividades','rb'); L('Receita bruta excedente (LC 224/2025)','exc'); L('CSLL — total base de cálculo','cBase'); L('CSLL — provisão 9%','cProv'); L('CSLL a recolher','cPagar'); L('IRPJ — total base de cálculo','iBase'); L('IRPJ 15%','i15'); L('Adicional IRPJ 10%','iAd'); L('IRPJ a recolher','iPagar');
+    L('Receita bruta das atividades','rb'); if(ST.modo!=='rb') L('Receita bruta excedente (LC 224/2025)','exc'); L('CSLL — total base de cálculo','cBase'); L('CSLL — provisão 9%','cProv'); L('CSLL a recolher','cPagar'); L('IRPJ — total base de cálculo','iBase'); L('IRPJ 15%','i15'); L('Adicional IRPJ 10%','iAd'); L('IRPJ a recolher','iPagar');
     var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Apuração'); XLSX.writeFile(wb,'Apuracao_'+(ST.modo==='rb'?'ReceitaBruta':'LucroPresumido')+'_'+ST.eid+'_'+ST.ano+'.xlsx');
   }
   function parRuf(eid,modo,ano,pr){ pr=Object.assign({},pr||{}); if(String(eid)==='4'&&modo==='rb'&&Number(ano)===2026&&!pr.exclIrpj) pr.exclIrpj={1:912957}; return pr; }
@@ -295,18 +297,19 @@
       var tt=[]; for(var j=0;j<N;j++) tt.push(cc[j][g.tot]); linha(g.totN,tt,{b:1,bg:'#FEF9C3'});
     });
     var F=function(k){ var a=[]; for(var i=0;i<N;i++) a.push(cc[i][k]); return a; };
-    barra('RECEITA BRUTA DAS ATIVIDADES — base do limite da LC 224/2025','#2D3447');
+    var lc=(modo!=='rb');
+    barra('RECEITA BRUTA DAS ATIVIDADES'+(lc?' — base do limite da LC 224/2025':''),'#2D3447');
     linha('Comércio e indústria (vendas + revendas)',F('com')); linha('Serviços',F('srv')); linha('Receita bruta das atividades',F('rb'),{b:1,bg:'#FEF9C3'});
-    linha('Receita bruta que excede o limite — LC 224/2025',F('exc'),{fg:'#7C2D12'});
+    if(lc) linha('Receita bruta que excede o limite — LC 224/2025',F('exc'),{fg:'#7C2D12'});
     barra('CÁLCULO DA CSLL — 9%','#000000');
     linha('Base de Cálculo 12% (comércio e indústria)',F('c12')); linha('Base de Cálculo dos serviços',F('c32')); linha('Base de Cálculo 100% (financeiras, demais, ganho de capital, LALUP)',F('c100'));
-    linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('cLC'),{fg:'#7C2D12'});
+    if(lc) linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('cLC'),{fg:'#7C2D12'});
     linha('Total Base de Cálculo da CSLL',F('cBase'),{b:1,bg:'#FEF9C3'}); linha('PROVISÃO DA CSLL (9%)',F('cProv'),{b:1,bg:'#F8D7DA'});
     DED.filter(function(x){ return DED_CSLL.indexOf(x[0])>=0; }).forEach(function(x){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((ded[x[0]]||[])[i])); linha('(-) '+x[1],a); });
     linha('CSLL A RECOLHER',F('cPagar'),{b:1,bg:'#FFD700'});
     barra('CÁLCULO DO IRPJ — 15% + adicional de 10%','#000000');
     linha('Base de Cálculo 8% (comércio e indústria)',F('i8')); linha('Base de Cálculo dos serviços',F('i32')); linha('Base de Cálculo 100%',F('i100'));
-    linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('iLC'),{fg:'#7C2D12'});
+    if(lc) linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('iLC'),{fg:'#7C2D12'});
     linha('Total Base de Cálculo do IRPJ — 15%',F('iBase'),{b:1,bg:'#FEF9C3'}); linha('Base do Adicional — 10%',F('iAdBase')); linha('IRPJ — 15%',F('i15')); linha('ADICIONAL IRPJ — 10%',F('iAd'));
     linha('PROVISÃO DO IRPJ',F('iProv'),{b:1,bg:'#F8D7DA'});
     DED.filter(function(x){ return DED_IRPJ.indexOf(x[0])>=0; }).forEach(function(x){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((ded[x[0]]||[])[i])); linha('(-) '+x[1],a); });
