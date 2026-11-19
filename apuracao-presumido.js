@@ -14,7 +14,7 @@
   // ── linhas do modelo (n = nome; neg = linha "(-)": entra positiva e é SUBTRAÍDA) ──
   var GRUPOS=[
     {id:'vendas',   t:'VENDAS DE PRODUTOS (indústria)', tot:'tot_vendas',   totN:'TOTAL — Vendas de Produtos', itens:[['v_prod','Vendas de Produtos'],['v_ext','Vendas de Produtos ao Exterior'],['v_desc','(-) Descontos Incondicionais',1],['v_canc','(-) Vendas Canceladas',1]]},
-    {id:'revendas', t:'REVENDAS DE MERCADORIAS (comércio)', tot:'tot_revendas', totN:'TOTAL — Revendas de Mercadorias', itens:[['r_merc','Revendas de Mercadorias'],['r_ext','Revendas de Mercadorias ao Exterior'],['r_ipi','(-) Deduções de IPI',1],['r_st','(-) Deduções de ICMS-ST',1],['r_desc','(-) Descontos Incondicionais',1],['r_canc','(-) Revendas Canceladas',1]]},
+    {id:'revendas', t:'REVENDAS DE MERCADORIAS (comércio)', tot:'tot_revendas', totN:'TOTAL — Revendas de Mercadorias', itens:[['r_merc','Revendas de Mercadorias'],['r_ext','Revendas de Mercadorias ao Exterior'],['r_ipi','(-) Deduções de IPI',1],['r_st','(-) Deduções de ICMS-ST',1],['r_desc','(-) Descontos Incondicionais',1],['r_canc','(-) Revendas Canceladas',1],['r_aj','Ajuste',0,1]]},
     {id:'servicos', t:'SERVIÇOS PRESTADOS', tot:'tot_serv', totN:'TOTAL — Serviços Prestados', itens:[['s_prest','Serviços Prestados'],['s_ext','Serviços Prestados ao Exterior'],['s_desc','(-) Descontos Incondicionais',1],['s_canc','(-) Serviços Cancelados',1]]},
     {id:'fin',      t:'RECEITAS FINANCEIRAS', tot:'tot_fin', totN:'TOTAL — Receitas Financeiras', itens:[['f_vca','Variação Cambial Ativa'],['f_vcac','Variação Cambial Ativa - Regime de Caixa'],['f_vme','Variação Monetária s/ Empréstimos'],['f_avp','Juros - Ajuste a Valor Presente'],['f_mpr','Juros s/ Mútuo Partes Relacionadas'],['f_mut','Juros s/ Mútuo'],['f_mora','Juros de Mora'],['f_selic','Juros Selic'],['f_cli','Juros Recebidos de Clientes'],['f_mul','Multas Financeiras'],['f_rf','Receita de Aplicação Financeira - Renda Fixa'],['f_rv','Receita de Aplicação Financeira - Renda Variável'],['f_dfo','Descontos Financeiros Obtidos'],['f_vmc','Variação Monetária s/ Consórcios'],['f_mpre','Juros s/ Mútuo Partes Relacionadas no Exterior'],['f_mute','Juros s/ Mútuo no Exterior']]},
     {id:'demais',   t:'DEMAIS RECEITAS', tot:'tot_demais', totN:'TOTAL — Demais Receitas', itens:[['d_esticms','Estorno de Débito do ICMS'],['d_estdifal','Estorno de Débito do ICMS-DIFAL'],['d_outorg','ICMS Crédito Outorgado'],['d_alugi','Receita de Aluguel de Bens Imóveis'],['d_alugm','Receita de Aluguel de Bens Móveis'],['d_imp','Reversão das Perdas Estimadas Decorrentes Impairment'],['d_prov','Reversão dos Saldos das Provisões'],['d_jcp','Receitas de Juros sobre o Capital Próprio'],['d_nfat','Receita não Faturada'],['d_resc','Multas e Outras Vantagens por Rescisão Contratual']]},
@@ -42,7 +42,9 @@
       var exc=0; acumAnt=acum; acum+=o.rb;
       if(pr.lc224){ if(per==='T') exc=Math.max(0,o.rb-PER.T.limRB); else exc=Math.max(0,acum-pr.limiteAno)-Math.max(0,acumAnt-pr.limiteAno); }
       o.exc=R2(exc);
-      var pI=o.rb>0?(com*0.08+srv*pr.servIrpj)/o.rb:0, pC=o.rb>0?(com*0.12+srv*pr.servCsll)/o.rb:0;
+      // Exceção Rufato (eid 4) 2026: valor excluído SÓ da base do IRPJ (a CSLL segue com a receita cheia)
+      var ex=NUM(pr.exclIrpj&&pr.exclIrpj[i]); o.exI=R2(ex); var comI=com-ex, rbI=o.rb-ex;
+      var pI=rbI>0?(comI*0.08+srv*pr.servIrpj)/rbI:0, pC=o.rb>0?(com*0.12+srv*pr.servCsll)/o.rb:0;
       var ult=P.meses(i)[P.meses(i).length-1], primeiro=P.meses(i)[0];
       o.csllAtiva=(primeiro>=pr.csllDesdeMes)||(ult>=pr.csllDesdeMes&&per==='T'&&false);
       // CSLL
@@ -53,7 +55,7 @@
       var dc=0; DED_CSLL.forEach(function(k){ dc+=NUM(ded[k]&&ded[k][i]); }); o.cDed=R2(dc);
       o.cPagar=R2(Math.max(0,o.cProv-o.cDed));
       // IRPJ
-      o.i8=R2(com*0.08); o.i32=R2(srv*pr.servIrpj); o.i100=b100;
+      o.i8=R2(comI*0.08); o.i32=R2(srv*pr.servIrpj); o.i100=b100;
       o.iLC=pr.lc224?R2(exc*pI*0.10):0;
       o.iBase=R2(o.i8+o.i32+o.i100+o.iLC);
       o.iAdBase=R2(Math.max(0,o.iBase-P.lim));
@@ -67,9 +69,10 @@
 
   // ── estado ──
   var ST={eid:null,modo:'presumido',ano:2026,regime:'comp',bloco:'fisc',calcCom:'fisc'};
+  var excecaoRufato=function(){ return String(ST.eid)==='4'&&ST.modo==='rb'&&Number(ST.ano)===2026; };
   var chave=function(){ return 'apuracao_pres_'+ST.modo+'_'+ST.eid+'_'+ST.ano; };
   var per=function(){ return ST.modo==='rb'?'M':'T'; };
-  function dados(){ var d=null; try{ d=S.g(chave()); }catch(e){} d=d||{}; d.comp=d.comp||{cont:{},fisc:{},ded:{}}; d.caixa=d.caixa||{cont:{},fisc:{},ded:{}}; ['comp','caixa'].forEach(function(r){ d[r].cont=d[r].cont||{}; d[r].fisc=d[r].fisc||{}; d[r].ded=d[r].ded||{}; }); d.params=d.params||{}; return d; }
+  function dados(){ var d=null; try{ d=S.g(chave()); }catch(e){} d=d||{}; d.comp=d.comp||{cont:{},fisc:{},ded:{}}; d.caixa=d.caixa||{cont:{},fisc:{},ded:{}}; ['comp','caixa'].forEach(function(r){ d[r].cont=d[r].cont||{}; d[r].fisc=d[r].fisc||{}; d[r].ded=d[r].ded||{}; }); d.params=d.params||{}; if(excecaoRufato()&&!d.params.exclIrpj) d.params.exclIrpj={1:912957}; return d; }
   function salvar(d){ try{ S.s(chave(),d); }catch(e){ console.error('Apuração presumido: não salvou',e); toast('Erro ao salvar: '+(e.message||e),'err'); } }
   var mapKey=function(){ return 'apuracao_pres_balmap_'+ST.eid+(ST.regime==='caixa'?'_caixa':''); };
   function mapa(){ try{ return S.g(mapKey())||{}; }catch(e){ return {}; } }
@@ -127,6 +130,7 @@
     GRUPOS.forEach(function(g){
       h+='<tr style="background:#f0f4f8"><td colspan="'+(N+3)+'" style="padding:8px 12px;border:1px solid #ccc;font-weight:bold;color:#1E3558">'+g.t+'</td></tr>';
       g.itens.forEach(function(it){
+        if(it[3]&&!excecaoRufato()) return; // linha exclusiva da Rufato/2026
         var id=it[0], editavel=(ST.bloco!=='div');
         var tem=(mapa()[id]||[]).length>0;
         h+='<tr><td style="width:34px;text-align:center;border:none;padding:0">'+(ST.bloco!=='div'?'<button type="button" class="appres-eng" title="'+(tem?'Valor vem do Balancete — ver/alterar as contas (preenche o Contábil'+(ST.regime==='caixa'?' do regime de caixa':'')+')':'Cadastrar de quais contas/grupos do Balancete vem esta linha (preenche o Contábil'+(ST.regime==='caixa'?' do regime de caixa':'')+')')+'" onclick="ApPres.engrenagem(\''+id+'\')" style="background:none;border:none;cursor:pointer;padding:0;font-size:1.05rem;'+(tem?'':'opacity:.45')+'">⚙</button>':'')+'</td>'
@@ -181,6 +185,7 @@
     h+='<tr><td colspan="'+(N+3)+'" style="padding:4px 12px;border:1px solid #ccc;background:#f0f4f8;font-weight:bold;color:#1E3558">(-) DEDUÇÕES</td></tr>'+dedLinhas(DED_CSLL);
     h+=linha('CSLL A RECOLHER'+(ST.modo==='rb'?' (estimativa mensal — DARF 2484 ou 6012)':' (DARF 2372)'),function(o){ return o.cPagar; },{bg:'#FFD700'});
     h+=barra('CÁLCULO DO IRPJ — 15% + adicional de 10%','#000');
+    if(excecaoRufato()) h+=linha('(-) Receita excluída só da base do IRPJ (exceção: fev/2026 não foi somada na apuração real)',function(o){ return o.exI; },{cor:'#7c2d12'});
     h+=linha('Base de Cálculo 8% (comércio e indústria)',function(o){ return o.i8; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servIrpj||PARAM_PADRAO.servIrpj)*100)+'% (serviços)',function(o){ return o.i32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.i100; });
@@ -225,7 +230,7 @@
       +'</div><div style="display:flex;gap:8px;justify-content:flex-end"><button onclick="document.getElementById(\'apPresParam\').remove()" style="padding:7px 14px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Cancelar</button><button id="apPmOk" style="padding:7px 16px;border:none;background:#166534;color:#fff;border-radius:6px;cursor:pointer;font-weight:700">Salvar</button></div></div>';
     document.body.appendChild(ov);
     document.getElementById('apPmOk').onclick=function(){
-      var d=dados(); d.params={ servIrpj:parseFloat(document.getElementById('apPmServI').value), servCsll:parseFloat(document.getElementById('apPmServC').value), lc224:document.getElementById('apPmLc').checked, limiteAno:(typeof _parseInput==='function'?_parseInput(document.getElementById('apPmLim').value):NUM(document.getElementById('apPmLim').value))||5000000, csllDesdeMes:parseInt(document.getElementById('apPmCsll').value,10)||4 };
+      var d=dados(); d.params={ servIrpj:parseFloat(document.getElementById('apPmServI').value), servCsll:parseFloat(document.getElementById('apPmServC').value), lc224:document.getElementById('apPmLc').checked, limiteAno:(typeof _parseInput==='function'?_parseInput(document.getElementById('apPmLim').value):NUM(document.getElementById('apPmLim').value))||5000000, csllDesdeMes:parseInt(document.getElementById('apPmCsll').value,10)||4, exclIrpj:(D.params||{}).exclIrpj };
       salvar(d); ov.remove(); atualizar();
     };
   }
@@ -272,10 +277,11 @@
     L('Receita bruta das atividades','rb'); L('Receita bruta excedente (LC 224/2025)','exc'); L('CSLL — total base de cálculo','cBase'); L('CSLL — provisão 9%','cProv'); L('CSLL a recolher','cPagar'); L('IRPJ — total base de cálculo','iBase'); L('IRPJ 15%','i15'); L('Adicional IRPJ 10%','iAd'); L('IRPJ a recolher','iPagar');
     var wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(aoa),'Apuração'); XLSX.writeFile(wb,'Apuracao_'+(ST.modo==='rb'?'ReceitaBruta':'LucroPresumido')+'_'+ST.eid+'_'+ST.ano+'.xlsx');
   }
+  function parRuf(eid,modo,ano,pr){ pr=Object.assign({},pr||{}); if(String(eid)==='4'&&modo==='rb'&&Number(ano)===2026&&!pr.exclIrpj) pr.exclIrpj={1:912957}; return pr; }
   // Seção em formato neutro (usada pelo Excel/PDF do Lucro Real Anual): lançamentos + cálculo da Apuração por Receita Bruta, com as mesmas cores da tela
   function secao(modo,eid,ano){
     var chv='apuracao_pres_'+modo+'_'+eid+'_'+ano, d=null; try{ d=S.g(chv); }catch(e){} d=d||{};
-    var comp=d.comp||{}, vals=comp.cont||{}, ded=comp.ded||{}, pr=d.params||{};
+    var comp=d.comp||{}, vals=comp.cont||{}, ded=comp.ded||{}, pr=parRuf(eid,modo,ano,d.params);
     var pk=modo==='rb'?'M':'T', P=PER[pk], N=P.n;
     var cc=calcular(vals,ded,pk,pr).rows;
     var cab=['DESCRIÇÃO'].concat(Array.apply(null,{length:N}).map(function(_,i){ return P.rot(i); }),['TOTAL']);
@@ -285,7 +291,7 @@
     var grupo=function(t){ L.push({cells:[{v:t,b:1,bg:'#F0F4F8',fg:'#1E3558',span:N+2}]}); };
     GRUPOS.forEach(function(g){
       grupo(g.t);
-      g.itens.forEach(function(it){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((vals[it[0]]||[])[i])); linha(it[1],a,{fg:it[2]?'#7F1D1D':null}); });
+      g.itens.forEach(function(it){ if(it[3]&&!(String(eid)==='4'&&modo==='rb'&&Number(ano)===2026)) return; var a=[]; for(var i=0;i<N;i++) a.push(NUM((vals[it[0]]||[])[i])); linha(it[1],a,{fg:it[2]?'#7F1D1D':null}); });
       var tt=[]; for(var j=0;j<N;j++) tt.push(cc[j][g.tot]); linha(g.totN,tt,{b:1,bg:'#FEF9C3'});
     });
     var F=function(k){ var a=[]; for(var i=0;i<N;i++) a.push(cc[i][k]); return a; };
@@ -311,7 +317,7 @@
   function resumoRB(eid,ano){
     var d=null; try{ d=S.g('apuracao_pres_rb_'+eid+'_'+ano); }catch(e){} d=d||{};
     var comp=d.comp||{};
-    return calcular(comp.cont||{},comp.ded||{},'M',d.params||{}).rows;
+    return calcular(comp.cont||{},comp.ded||{},'M',parRuf(eid,'rb',ano,d.params)).rows;
   }
   root.ApPres={secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
 })(typeof window!=='undefined'?window:this);
