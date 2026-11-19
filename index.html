@@ -63329,7 +63329,7 @@ function lucRenderMesTable(eid, ano, mes, isJan, concluido){
     +'<th style="'+thStyle+';min-width:150px;white-space:nowrap" title="Vem do Percentual de Participação — para mudar, altere lá">Conta Contábil</th>'
     +'<th style="'+thStyleR+'">% Mês</th>'
     +'<th style="'+thStyleR+'">'+(isJan?'Saldo Ant. <small style="font-weight:400">(manual)</small>':'Saldo Ant.')+'</th>'
-    +'<th style="'+thStyleR+'">Pagamento no Mês</th>'
+    +'<th style="'+thStyleR+'">Pagamento no Mês <button class="btn bo bsm" style="padding:0 6px;font-size:10px;margin-left:4px" onclick="lucTxtPagClick(\''+eid+'\',\''+mes+'\',event)" title="Gerar TXT dos pagamentos do mês (débito = conta do sócio)">TXT</button><button class="btn bo bsm" style="padding:0 5px;font-size:10px" onclick="lucTxtPagConfig(\''+eid+'\',\''+mes+'\',event)" title="Contas crédito (banco) de cada sócio">⚙</button></th>'
     +'<th style="'+thStyleR+'">Lançamento a Crédito (Passivo)</th>'
     +'<th style="'+thStyleR+'">Saldo p/ Próx. Mês</th>'
     +'</tr></thead><tbody>';
@@ -63876,6 +63876,48 @@ async function lucTxtGerar(eid,mes){
   if(!linhas.length){ if(!falta.length) toast('Nenhum sócio com crédito neste mês.','err'); return; }
   var ok=await baixarTxtMisterContador(emp.cnpj,linhas,'Distribuicao de Lucros '+(emp.nome||eid)+' '+ano+'-'+mes+'.txt');
   toast('TXT gerado ('+linhas.length+' lançamentos)'+(ok?' na pasta padrão de TXT.':'.'),'ok');
+}
+// ── TXT dos pagamentos do mês: débito = conta contábil do sócio (passivo), crédito = conta de cada sócio (banco), gravada na 1ª vez.
+function _lucTxtPagCfg(eid){ return S.g('luc_txt_pag_'+eid)||{}; }
+function _lucTxtPagSocios(eid,ano,mes){ return lucSocGet(eid).filter(function(s){ return (parseFloat(lucGetMesRow(eid,ano,mes,s.id).baixas)||0)>0.004; }); }
+function lucTxtPagClick(eid,mes,ev){
+  if(ev) ev.stopPropagation();
+  var ano=lucCurrentAno||'2026', cfg=_lucTxtPagCfg(eid), soc=_lucTxtPagSocios(eid,ano,mes);
+  if(!soc.length){ toast('Nenhum pagamento neste mês.','err'); return; }
+  if(soc.some(function(s){ return !cfg[_lucTxtChaveSoc(s)]; })) return lucTxtPagConfig(eid,mes,null,true);
+  lucTxtPagGerar(eid,mes);
+}
+function lucTxtPagConfig(eid,mes,ev,gerar){
+  if(ev) ev.stopPropagation();
+  var el=document.getElementById('mLucTxt');
+  if(!el){ el=document.createElement('div'); el.className='mb'; el.id='mLucTxt'; el.innerHTML='<div class="modal" style="max-width:560px;width:96%"></div>'; document.body.appendChild(el); }
+  var ano=lucCurrentAno||'2026', cfg=_lucTxtPagCfg(eid);
+  var socios=lucSocGet(eid).filter(function(s){ return !/tesouraria/i.test(String(s.nome||'')); });
+  var lista=socios.map(function(s){ var k=_lucTxtChaveSoc(s), v=parseFloat(lucGetMesRow(eid,ano,mes,s.id).baixas)||0; return '<div style="display:flex;gap:8px;align-items:center;margin-bottom:5px"><div style="flex:1;font-size:12px">'+esc(s.nome)+'<div style="font-size:10.5px;color:var(--slate)">'+esc(s.doc||'sem CPF/CNPJ')+' · pago no mês: '+lucFmtBRL(v)+'</div></div><input class="fi lucTxtPagSoc" data-k="'+esc(k)+'" value="'+esc(cfg[k]||'')+'" placeholder="conta crédito" style="width:120px"></div>'; }).join('');
+  el.firstChild.innerHTML='<div class="mt">TXT dos pagamentos de lucros</div>'
+    +'<div style="font-size:12.5px;margin-bottom:8px">Débito = conta contábil do sócio. Informe a conta de <b>crédito</b> (a saída do dinheiro) de cada sócio; fica gravada.</div>'
+    +'<div style="max-height:340px;overflow:auto">'+lista+'</div>'
+    +'<div class="ma"><button class="btn bo" onclick="closeModal(\'mLucTxt\')">Cancelar</button><button class="btn bp" onclick="lucTxtPagSalvar(\''+eid+'\',\''+mes+'\')">Salvar e gerar TXT</button></div>';
+  openModal('mLucTxt');
+}
+function lucTxtPagSalvar(eid,mes){
+  var cfg={}; document.querySelectorAll('.lucTxtPagSoc').forEach(function(i){ var v=i.value.trim(); if(v) cfg[i.dataset.k]=v; });
+  S.s('luc_txt_pag_'+eid,cfg); closeModal('mLucTxt'); lucTxtPagGerar(eid,mes);
+}
+async function lucTxtPagGerar(eid,mes){
+  var ano=lucCurrentAno||'2026', cfg=_lucTxtPagCfg(eid), emp=S.emps().find(function(e){return String(e.eid)===String(eid);})||{};
+  var ult=new Date(parseInt(ano,10),parseInt(mes,10),0).getDate(), data=String(ult).padStart(2,'0')+'/'+mes+'/'+ano;
+  var linhas=[], falta=[];
+  _lucTxtPagSocios(eid,ano,mes).forEach(function(s){
+    var cred=cfg[_lucTxtChaveSoc(s)];
+    if(!cred||!s.conta){ falta.push(s.nome+(!cred?' (sem conta crédito)':' (sem conta contábil)')); return; }
+    var d=String(s.doc||'').replace(/\D/g,'');
+    linhas.push({data:data,debito:s.conta,credito:cred,valor:parseFloat(lucGetMesRow(eid,ano,mes,s.id).baixas)||0,historico:'PAGAMENTO DE LUCRO A '+s.nome+' REF. '+mes+'/'+ano+(d.length===14?' CNPJ '+fmtDoc(s.doc):(d.length===11?' CPF '+fmtDoc(s.doc):''))});
+  });
+  if(falta.length) toast('Faltam contas: '+falta.join('; ')+'. Clique em ⚙ para ajustar.','err');
+  if(!linhas.length) return;
+  var ok=await baixarTxtMisterContador(emp.cnpj,linhas,'Pagamento de Lucros '+(emp.nome||eid)+' '+ano+'-'+mes+'.txt');
+  toast('TXT gerado ('+linhas.length+' pagamentos)'+(ok?' na pasta padrão de TXT.':'.'),'ok');
 }
 function lucPeriodoTipoMudou(){
   var t=document.getElementById('lucPerTipo').value;
