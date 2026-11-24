@@ -1002,12 +1002,12 @@
   };
   // devolve o conjunto de ids de `itens` ({id,data,c}) que têm entrada correspondente (1 para 1) no Fluxo da conta: mesmo valor em centavos, mesmo dia primeiro, depois até 3 dias
   async function pareiaEntradasComFluxo(conta, itens) {
-    const out = new Set(); out.diasFluxo = new Set(); if (!itens.length) return out;
+    const out = new Set(); out.diasFluxo = new Set(); out.pares = new Map(); if (!itens.length) return out;
     const fl = (await todosPorId(() => _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada').eq('empresa_eid', EID()).eq('conta_bancaria_id', conta).eq('fonte', 'fluxo').gt('valor_entrada', 0).not('status_conciliacao', 'in', '(ignorado,reabsorvido,referencia)'))).data || [];
     out.diasFluxo = new Set(fl.map(x => x.data_pagamento));
     const usado = new Set(), dd = (a, b) => Math.abs((new Date(a + 'T12:00:00') - new Date(b + 'T12:00:00')) / 864e5);
     const livres = f => fl.filter(x => !usado.has(x.id) && cents(x.valor_entrada) === f.c);
-    for (const lim of [0, 3]) itens.forEach(it => { if (out.has(it.id)) return; const m = livres(it).filter(x => dd(x.data_pagamento, it.data) <= lim).sort((a, b) => dd(a.data_pagamento, it.data) - dd(b.data_pagamento, it.data))[0]; if (m) { usado.add(m.id); out.add(it.id); } });
+    for (const lim of [0, 3]) itens.forEach(it => { if (out.has(it.id)) return; const m = livres(it).filter(x => dd(x.data_pagamento, it.data) <= lim).sort((a, b) => dd(a.data_pagamento, it.data) - dd(b.data_pagamento, it.data))[0]; if (m) { usado.add(m.id); out.add(it.id); out.pares.set(it.id, { fid: m.id, fdata: m.data_pagamento }); } });
     return out;
   }
   // tira (ignora — nada é apagado) as entradas "Extrato · recebimento" ainda pendentes que o Fluxo já cobre
@@ -1057,6 +1057,19 @@
       const jaNoFluxo = (cfg().fluxoLancamento || cfg().pareiaEntradas) ? await pareiaEntradasComFluxo(conta, entR.map(r => ({ id: r.id, data: r.data_pagamento, c: cents(r.valor_entrada) }))) : new Set();
       // 'LIQUIDACAO DE COBRANCA' no extrato é o TOTAL do dia dos boletos; o Fluxo traz cada boleto. Se o Fluxo tem entradas no dia, o total já está coberto (trazer dobrava o recebimento)
       const cobrCoberta = r => (cfg().fluxoLancamento || cfg().pareiaEntradas) && /LIQUIDACAO DE COBRANCA/i.test(String(r.historico_bancario || '')) && jaNoFluxo.diasFluxo && jaNoFluxo.diasFluxo.has(r.data_pagamento);
+      // Nasa Truck (pedido 24/11/2026): entrada que o Fluxo lançou em OUTRO dia (1 a 3 dias) — a data da linha do Fluxo passa para o dia que o banco mostra (só linha ainda pendente, em dia não conciliado); fica em 📅 Datas alteradas.
+      if (cfg().pareiaEntradas && jaNoFluxo.pares && jaNoFluxo.pares.size) {
+        const movs = [];
+        for (const r of entR) {
+          const pr = jaNoFluxo.pares.get(r.id); if (!pr || pr.fdata === r.data_pagamento) continue;
+          if (desde() && (pr.fdata < desde() || r.data_pagamento < desde())) continue;
+          if (await diaFechadoNoBanco(conta, pr.fdata) || await diaFechadoNoBanco(conta, r.data_pagamento)) continue;
+          const u = await _supaClient.from('lancamentos_extrato').update({ data_pagamento: r.data_pagamento }).eq('id', pr.fid).eq('fonte', 'fluxo').eq('status_conciliacao', 'pendente').select('id,historico_bancario'); if (u.error || !(u.data || []).length) continue;
+          try { await _supaClient.from('fluxo_caixa_lancamentos').update({ data: r.data_pagamento }).eq('lancamento_extrato_id', pr.fid); } catch (e) {}
+          movs.push({ id: pr.fid, em: new Date().toISOString(), por: quemFez(), conta, fonte: 'fluxo', v: Number(r.valor_entrada), h: String((u.data[0] || {}).historico_bancario || '').slice(0, 200), de: pr.fdata, para: r.data_pagamento, via: 'Trazer recebimentos: o banco recebeu neste dia (valor exato)' });
+        }
+        if (movs.length) { try { gravarLogData(movs); } catch (e) {} toast(movs.length + ' recebimento(s) do Fluxo tiveram a data corrigida para o dia do banco (veja 📅 Datas alteradas).', 'ok'); }
+      }
       entR.forEach(r => { if (jaNoFluxo.has(r.id) || cobrCoberta(r)) { explicadas++; return; } novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; });
     }
     let relatorio = null;
