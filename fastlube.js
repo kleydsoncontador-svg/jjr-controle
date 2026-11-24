@@ -9,7 +9,9 @@
   // Empresas no modelo "Registro Contábil pelo Fluxo". desde = início do modelo (antes disso nada é tocado). port = portador do Fluxo → conta bancária.
   const CFG = {
     '163': { nome: 'Fast Lube', nomes: { '1': 'Itaú', '4': 'Banco do Brasil' }, port: [[/ITAU/, 1], [/BANCO DO BRASIL|^BB\b/, 4]], semFluxo: [], desde: '', corrigeSentido: false },
-    '4': { nome: 'Rufato', nomes: { '23': 'Bradesco', '25': 'Itaú', '26': 'Banco do Brasil', '28': 'Mercado Pago ...4235' }, port: [[/BRADESCO/, 23], [/ITAU/, 25], [/BANCO DO BRASIL|^BB\b/, 26], [/MERCADO\s*PAGO|\bMP\b/, 28]], semFluxo: ['93543986564'], desde: '2026-10-01', corrigeSentido: true, fluxoLancamento: true }
+    '4': { nome: 'Rufato', nomes: { '23': 'Bradesco', '25': 'Itaú', '26': 'Banco do Brasil', '28': 'Mercado Pago ...4235' }, port: [[/BRADESCO/, 23], [/ITAU/, 25], [/BANCO DO BRASIL|^BB\b/, 26], [/MERCADO\s*PAGO|\bMP\b/, 28]], semFluxo: ['93543986564'], desde: '2026-10-01', corrigeSentido: true, fluxoLancamento: true },
+    // Nasa Truck (250): modelo da Fast Lube — Fluxo sobe pelo Registro Contábil (Excel com 1 aba por banco; portador = nome do banco), extrato vira referência. Início 01/07/2026.
+    '250': { nome: 'Nasa Truck', nomes: { '73': 'Sicoob', '74': 'Mercado Pago', '65': 'Bradesco', '66': 'Itaú', '67': 'Inter' }, port: [[/SICOOB/, 73], [/MERCADO\s*PAGO/, 74], [/BRADESCO/, 65], [/ITAU/, 66], [/\bINTER\b/, 67]], semFluxo: [], desde: '2026-07-01', corrigeSentido: false }
   };
   const EID = () => { const e = String(_lancctbEidAtual); return CFG[e] ? e : '163'; };
   const cfg = () => CFG[EID()];
