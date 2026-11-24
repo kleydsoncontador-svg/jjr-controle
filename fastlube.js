@@ -11,7 +11,7 @@
     '163': { nome: 'Fast Lube', nomes: { '1': 'Itaú', '4': 'Banco do Brasil' }, port: [[/ITAU/, 1], [/BANCO DO BRASIL|^BB\b/, 4]], semFluxo: [], desde: '', corrigeSentido: false },
     '4': { nome: 'Rufato', nomes: { '23': 'Bradesco', '25': 'Itaú', '26': 'Banco do Brasil', '28': 'Mercado Pago ...4235' }, port: [[/BRADESCO/, 23], [/ITAU/, 25], [/BANCO DO BRASIL|^BB\b/, 26], [/MERCADO\s*PAGO|\bMP\b/, 28]], semFluxo: ['93543986564'], desde: '2026-10-01', corrigeSentido: true, fluxoLancamento: true },
     // Nasa Truck (250): modelo da Fast Lube — Fluxo sobe pelo Registro Contábil (Excel com 1 aba por banco; portador = nome do banco), extrato vira referência. Início 01/07/2026.
-    '250': { nome: 'Nasa Truck', nomes: { '73': 'Sicoob', '74': 'Mercado Pago', '65': 'Bradesco', '66': 'Itaú', '67': 'Inter' }, port: [[/SICOOB/, 73], [/MERCADO\s*PAGO/, 74], [/BRADESCO/, 65], [/ITAU/, 66], [/\bINTER\b/, 67]], semFluxo: [], desde: '2026-07-01', corrigeSentido: false }
+    '250': { nome: 'Nasa Truck', nomes: { '73': 'Sicoob', '74': 'Mercado Pago', '65': 'Bradesco', '66': 'Itaú', '67': 'Inter' }, port: [[/SICOOB/, 73], [/MERCADO\s*PAGO/, 74], [/BRADESCO/, 65], [/ITAU/, 66], [/\bINTER\b/, 67]], semFluxo: [], desde: '2026-07-01', corrigeSentido: false, pareiaEntradas: true }
   };
   const EID = () => { const e = String(_lancctbEidAtual); return CFG[e] ? e : '163'; };
   const cfg = () => CFG[EID()];
@@ -1054,9 +1054,9 @@
     if (comRecebimentos) {
       const entR = ref.filter(r => Number(r.valor_entrada) > 0 && !(Number(r.valor_saida) > 0));
       // Rufato (Registro pelo Fluxo): entrada que o Fluxo já tem (mesmo valor, até 3 dias) NÃO é trazida de novo — antes duplicava transferências entre contas e rendimentos
-      const jaNoFluxo = cfg().fluxoLancamento ? await pareiaEntradasComFluxo(conta, entR.map(r => ({ id: r.id, data: r.data_pagamento, c: cents(r.valor_entrada) }))) : new Set();
+      const jaNoFluxo = (cfg().fluxoLancamento || cfg().pareiaEntradas) ? await pareiaEntradasComFluxo(conta, entR.map(r => ({ id: r.id, data: r.data_pagamento, c: cents(r.valor_entrada) }))) : new Set();
       // 'LIQUIDACAO DE COBRANCA' no extrato é o TOTAL do dia dos boletos; o Fluxo traz cada boleto. Se o Fluxo tem entradas no dia, o total já está coberto (trazer dobrava o recebimento)
-      const cobrCoberta = r => cfg().fluxoLancamento && /LIQUIDACAO DE COBRANCA/i.test(String(r.historico_bancario || '')) && jaNoFluxo.diasFluxo && jaNoFluxo.diasFluxo.has(r.data_pagamento);
+      const cobrCoberta = r => (cfg().fluxoLancamento || cfg().pareiaEntradas) && /LIQUIDACAO DE COBRANCA/i.test(String(r.historico_bancario || '')) && jaNoFluxo.diasFluxo && jaNoFluxo.diasFluxo.has(r.data_pagamento);
       entR.forEach(r => { if (jaNoFluxo.has(r.id) || cobrCoberta(r)) { explicadas++; return; } novas.push({ r, fonte: 'extrato_receb', pref: 'flr' }); nEnt++; });
     }
     let relatorio = null;
