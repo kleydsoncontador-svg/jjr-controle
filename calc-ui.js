@@ -586,7 +586,7 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
       const num = s => { s = String(s || '').replace(/[^\d,.-]/g, ''); return parseFloat(s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s) || 0; };
       const fmt = n => n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
       const alvo = num(v[campo]);
-      const liq = b => { const t = Object.assign({}, v); t[campo] = fmt(b); const rr = C.calcular(est.key, t); const o = (rr && rr.resultado) || {}; return est.key === 'irrf_pf' ? b - (Number(o.irrf) || 0) : (Number(o.liquido) || 0); };
+      const liq = b => { const t = Object.assign({}, v); t[campo] = fmt(b); const rr = C.calcular(est.key, t); const o = (rr && rr.resultado) || {}; return est.key === 'irrf_pf' ? b - (Number(o.irrf) || 0) / 100 : (Number(o.liquido) || 0) / 100; }; /* o motor devolve em centavos */
       if (alvo > 0) {
         let lo = alvo, hi = alvo * 2 + 10000; let it = 0; while (liq(hi) < alvo && it++ < 20) hi *= 2;
         for (let k = 0; k < 80; k++) { const m = (lo + hi) / 2; if (liq(m) < alvo) lo = m; else hi = m; }
