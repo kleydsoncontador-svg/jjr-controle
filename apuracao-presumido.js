@@ -56,9 +56,9 @@
       var dc=0; DED_CSLL.forEach(function(k){ dc+=NUM(ded[k]&&ded[k][i]); }); o.cDed=R2(dc);
       o.cPagar=R2(Math.max(0,o.cProv-o.cDed));
       // IRPJ
-      o.i8=R2(comI*0.08); o.i32=R2(srv*pr.servIrpj); o.i100=b100;
+      o.i8=R2(com*0.08); // 25/11/2026: a exclusão sai direto da base total (abaixo), não da receita de vendas o.i32=R2(srv*pr.servIrpj); o.i100=b100;
       o.iLC=pr.lc224?R2(exc*pI*0.10):0;
-      o.iBase=R2(o.i8+o.i32+o.i100+o.iLC);
+      o.iBase=R2(o.i8+o.i32+o.i100+o.iLC-o.exI);
       o.iAdBase=R2(Math.max(0,o.iBase-P.lim));
       o.i15=R2(o.iBase*0.15); o.iAd=R2(o.iAdBase*0.10); o.iProv=R2(o.i15+o.iAd);
       var di=0; DED_IRPJ.forEach(function(k){ di+=NUM(ded[k]&&ded[k][i]); }); o.iDed=R2(di);
