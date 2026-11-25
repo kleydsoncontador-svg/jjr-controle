@@ -29798,7 +29798,7 @@ async function renderLancctbNotas(aba){
         <td style="padding:7px 10px;text-align:right">${nf.irrf_valor?'R$ '+_fmt(nf.irrf_valor):'—'}</td>
         <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(_lancctbNfValorLiquido(nf))} <button type="button" class="btn bo bsm" style="font-size:10px;padding:1px 5px" title="Desconsiderar retenções (ISS/PIS/COFINS/CSLL) deste fornecedor/cliente" onclick="abrirLancctbRetIgn('${esc(String(cnpjTerc||''))}')">⚙</button></td>`; })():`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
-        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px">${esc(p.status_conciliacao||'')}</span></td>
+        <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px${p.status_conciliacao==='conciliado'?';cursor:pointer;text-decoration:underline dotted':''}"${p.status_conciliacao==='conciliado'?` onclick="_lancctbVerAmarracaoNf(${p.id})" title="Clique para ver a qual lançamento esta parcela foi amarrada"`:''}>${esc(p.status_conciliacao||'')}</span></td>
         <td style="padding:7px 10px;text-align:center"><button class="btn bo bsm" style="font-size:10.5px;padding:3px 6px" title="Editar/dividir a(s) parcela(s) desta NF — use quando o XML veio sem abertura de parcela mas o pagamento real foi parcelado" onclick="abrirLancctbDividirParcelaModal(${p.nf_id})">✂️ Parcela</button></td>
       </tr>`;
     });
@@ -35639,6 +35639,21 @@ function _lancctbBarraProc(txt){ const el=document.getElementById('lancctbRegist
 // automaticamente. Só age quando acha UMA NF de venda com esse número; valor maior que todas as parcelas pendentes, NF ambígua ou sem parcela pendente = não mexe (fica pendente p/ o usuário).
 // ── #250 NASA TRUCK (pedido do usuário 25/11/2026): a linha do Fluxo traz "Número 458 e 150 | ..." = nº da(s) NF(s). Recebimento → NF de venda; pagamento → NF de compra (número repetido entre fornecedores: desempata pelo nome no histórico).
 // Várias NFs = 1 lançamento com vários créditos/débitos. Valor menor que a parcela: a parcela vale o pago e o saldo vira parcela no mês seguinte. Valor maior que todas as parcelas pendentes, NF não achada ou ambígua = não mexe.
+// 25/11/2026: na lista de NFs, clicar em "conciliado" mostra a qual lançamento do banco a parcela foi amarrada
+async function _lancctbVerAmarracaoNf(parcId){
+  const { data: p } = await _supaClient.from('notas_fiscais_parcelas').select('id,numero_parcela,valor_parcela,lancamento_extrato_id,notas_fiscais(numero)').eq('id',parcId).maybeSingle();
+  const { data: ctb } = await _supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id,data,historico,valor,tipo,classificacao').eq('nf_parcela_id',parcId);
+  const ids=[...new Set([p&&p.lancamento_extrato_id,...(ctb||[]).map(c=>c.lancamento_extrato_id)].filter(Boolean))];
+  let ext=[]; if(ids.length){ const r=await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,status_conciliacao,agencias_bancarias(banco_nome,agencia,conta_corrente)').in('id',ids); ext=r.data||[]; }
+  const fd=d=>d?String(d).split('-').reverse().join('/'):'';
+  let h='<div style="font-size:15px;font-weight:700;margin-bottom:10px">NF '+esc(p&&p.notas_fiscais?p.notas_fiscais.numero:'')+' · parcela '+esc(p?p.numero_parcela:'')+' (R$ '+_fmt(p?p.valor_parcela:0)+')</div>';
+  if(!ext.length) h+='<div style="color:var(--amber)">Não achei o lançamento do banco ligado a esta parcela.</div>';
+  ext.forEach(e=>{ const ag=e.agencias_bancarias||{}; h+='<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12.5px"><b>'+fd(e.data_pagamento)+'</b> · '+(Number(e.valor_entrada)>0?'Entrada R$ '+_fmt(e.valor_entrada):'Saída R$ '+_fmt(e.valor_saida))+' · '+esc(e.status_conciliacao||'')+'<br>Banco: '+esc(ag.banco_nome||'')+(ag.conta_corrente?' (Ag '+esc(ag.agencia||'')+' Cc '+esc(ag.conta_corrente)+')':'')+'<br>Histórico: '+esc(e.historico_bancario||'')+'<br><span style="color:var(--slate)">ID do lançamento: '+e.id+'</span></div>'; });
+  const mine=(ctb||[]); if(mine.length) h+='<div style="font-size:12px;color:var(--slate);margin-top:6px">Contábil desta parcela: '+mine.map(c=>fd(c.data)+' '+c.tipo+' '+esc(c.classificacao||'')+' R$ '+_fmt(c.valor)+' — '+esc(c.historico||'')).join('<br>')+'</div>';
+  const d=document.createElement('div'); d.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  d.innerHTML='<div style="background:var(--white);color:var(--ink);border-radius:10px;padding:18px;max-width:620px;width:92%;max-height:80vh;overflow:auto">'+h+'<div style="text-align:right;margin-top:10px"><button class="btn bo bsm" onclick="this.closest(\'div[style*=fixed]\').remove()">Fechar</button></div></div>';
+  d.onclick=ev=>{ if(ev.target===d) d.remove(); }; document.body.appendChild(d);
+}
 async function _lancctbPassadaNasaNumeroHist(eid,contaId,log,restringirPeriodo,lado){
   const out={ conciliadas:0, saldos:0, ignoradas:[] };
   if(String(eid)!=='250') return out;
