@@ -92,7 +92,7 @@
     var c=container(); if(!c){ toast('Tela de apuração não encontrada','err'); return; }
     c.style.display='flex'; desenhar();
     // 25/11/2026: retenções da engrenagem (mesmas contas do Lucro Real Anual) = débito de janeiro; depois débito do mês + saldo anterior
-    if(ST.modo==='rb'&&typeof _apBalRetencoes==='function') _apBalRetencoes(ST.eid,ST.ano).then(function(r){ var mapa={csll_retida:'csll_ret',irrf:'irrf',irrf_ap_fin:'irrf_af'}, D=dados(), mud=false; ['comp','caixa'].forEach(function(rg){ Object.keys(mapa).forEach(function(k){ if(!r[k]) return; var dk=mapa[k]; D[rg].ded[dk]=D[rg].ded[dk]||[]; r[k].forEach(function(v,i){ if(v==null) return; var mk=rg+'|ded|'+dk+'|'+i; if(D.manual&&D.manual[mk]){ if(D.manual[mk].orig!==v){ D.manual[mk].orig=v; mud=true; } return; } if(NUM(D[rg].ded[dk][i])!==v){ D[rg].ded[dk][i]=v; mud=true; } }); }); }); if(mud){ salvar(D); atualizar(); } }).catch(function(e){ console.warn('Retenções RB:',e); });
+    if(ST.modo==='rb') aplicarRetencoes();
     montarMapaBalancete().catch(function(e){ console.warn('Apuração × Balancete:',e); });
   }
   function voltar(){
@@ -169,7 +169,7 @@
     var per0=PER[per()], lim=per0.lim;
     var linha=function(rot,fn,cfg){ cfg=cfg||{}; var s='<tr'+(cfg.bg?' style="background:'+cfg.bg+';font-weight:bold"':'')+'><td style="border:none;width:34px;background:'+(cfg.bg||'transparent')+'"></td><td style="padding:6px 12px;border:1px solid #ccc;'+(cfg.bg?'background:'+cfg.bg+';':'background:white;')+(cfg.cor?'color:'+cfg.cor+';':'')+'">'+rot+'</td>'; var tt=0; for(var i=0;i<N;i++){ var v=fn(rows[i],i); tt+=v; s+='<td style="'+TDI+';text-align:right;padding:4px 8px;'+(cfg.bg?'background:'+cfg.bg+';':'background:white;')+'">'+FMT(v)+'</td>'; } s+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:'+(cfg.bg||'#fafafa')+'">'+(cfg.semTotal?'':FMT(R2(tt)))+'</td></tr>'; return s; };
     var barra=function(t,cor){ return '<tr style="background:'+cor+';color:white;font-weight:bold"><td colspan="'+(N+3)+'" style="padding:8px 12px;border:1px solid #ccc">'+t+'</td></tr>'; };
-    var dedLinhas=function(ids,rotulo){ var s=''; DED.filter(function(d){ return ids.indexOf(d[0])>=0; }).forEach(function(d){ s+='<tr><td style="border:none;width:34px"></td><td style="padding:6px 12px;border:1px solid #ccc;background:white">'+ESC(d[1])+'</td>'; for(var i=0;i<N;i++) s+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-ded="'+d[0]+'" data-i="'+i+'" value="'+FMT(NUM(((R.ded||{})[d[0]]||[])[i]))+'" onfocus="this.select()" onchange="ApPres.digitouDed(this)" style="'+INP+'"></td>'; s+='<td style="'+TDI+';background:#fafafa"></td></tr>'; }); return s; };
+    var dedLinhas=function(ids,rotulo){ var s=''; DED.filter(function(d){ return ids.indexOf(d[0])>=0; }).forEach(function(d){ var temC=((_apBalMapa(ST.eid)||{})[DED_MAP[d[0]]]||[]).length>0; s+='<tr><td style="border:none;width:34px;text-align:center;padding:0">'+(DED_MAP[d[0]]?'<button type="button" onclick="ApPres.engDed(\''+d[0]+'\')" title="'+(temC?'Valor vem do Balancete (total a débito) — ver/alterar as contas':'Informar as contas do Balancete desta dedução')+'" style="border:none;background:none;cursor:pointer;font-size:14px;opacity:'+(temC?'1':'.45')+'">⚙</button>':'')+'</td><td style="padding:6px 12px;border:1px solid #ccc;background:white">'+ESC(d[1])+'</td>'; for(var i=0;i<N;i++) s+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-ded="'+d[0]+'" data-i="'+i+'" value="'+FMT(NUM(((R.ded||{})[d[0]]||[])[i]))+'" onfocus="this.select()" onchange="ApPres.digitouDed(this)" style="'+INP+'"></td>'; s+='<td style="'+TDI+';background:#fafafa"></td></tr>'; }); return s; };
     var h='<div style="font-weight:700;color:#1E3558;margin:0 0 6px;font-size:13px">CÁLCULO'+(usouAlt?' <span style="font-weight:400;color:#b45309">— o bloco escolhido está vazio; calculando com o '+(usouAlt==='cont'?'Contábil':'Fiscal')+'</span>':'')+'</div>'
       +'<div style="overflow:visible"><table style="'+GRADE(N).tab+'border-collapse:collapse;font-size:12px;background:white;color:#111">'+GRADE(N).cols+'<thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left">DESCRIÇÃO</th>';
     for(var k=0;k<N;k++) h+='<th style="'+TH+'">'+per0.rot(k)+'</th>'; h+='<th style="'+TH+'">TOTAL</th></tr></thead><tbody>';
@@ -227,6 +227,24 @@
   }
   function desfazerDed(id,i){ var D=dados(), R=D[ST.regime], mk=ST.regime+'|ded|'+id+'|'+i, o=(D.manual||{})[mk]; if(!o) return; R.ded[id]=R.ded[id]||[]; R.ded[id][i]=o.orig; delete D.manual[mk]; salvar(D); atualizar(); toast('Edição desfeita: voltou '+FMT(o.orig)+'.','ok'); }
   function set(k,v){ ST[k]=v; desenhar(); if(k==='regime'||k==='bloco') montarMapaBalancete().catch(function(){}); }
+  // 25/11/2026: deduções com engrenagem (contas do Balancete). Valor = total a DÉBITO: janeiro = débito de janeiro; depois débito do mês + saldo anterior.
+  // CSLL retida, IRRF e IRRF s/ aplicações usam as MESMAS contas do Lucro Real Anual; incentivos e benefícios fiscais têm contas próprias.
+  var DED_MAP={csll_ret:'csll_retida',irrf:'irrf',irrf_af:'irrf_ap_fin',inc_fisc:'rb_inc_fisc',ben_fisc:'rb_ben_fisc'};
+  function aplicarRetencoes(){
+    if(typeof _apBalRetencoes!=='function') return Promise.resolve();
+    var ids=Object.keys(DED_MAP).map(function(k){ return DED_MAP[k]; });
+    return _apBalRetencoes(ST.eid,ST.ano,ids).then(function(r){ var D=dados(), mud=false;
+      ['comp','caixa'].forEach(function(rg){ Object.keys(DED_MAP).forEach(function(dk){ var k=DED_MAP[dk]; if(!r[k]) return; D[rg].ded[dk]=D[rg].ded[dk]||[];
+        r[k].forEach(function(v,i){ if(v==null) return; var mk=rg+'|ded|'+dk+'|'+i; if(D.manual&&D.manual[mk]){ if(D.manual[mk].orig!==v){ D.manual[mk].orig=v; mud=true; } return; } if(NUM(D[rg].ded[dk][i])!==v){ D[rg].ded[dk][i]=v; mud=true; } }); }); });
+      if(mud){ salvar(D); atualizar(); } }).catch(function(e){ console.warn('Retenções RB:',e); });
+  }
+  function engDed(dk){
+    var key=DED_MAP[dk]; if(!key) return; var nome=(DED.filter(function(d){ return d[0]===dk; })[0]||[])[1]||dk;
+    _apBalAbrir(ST.eid,String(ST.ano),key,{ periodico:true, linha:{id:key,nome:nome,nat:'D'},
+      getItens:function(){ return ((_apBalMapa(ST.eid)||{})[key]||[]).slice(); },
+      salvar:function(itens){ var m=Object.assign({},_apBalMapa(ST.eid)); if(itens.length) m[key]=itens; else delete m[key]; _apBalGravarMapa(ST.eid,m); },
+      depois:async function(){ if(typeof _apBalCache!=='undefined') _apBalCache={}; await aplicarRetencoes(); atualizar(); toast('Valores puxados do Balancete (débito do mês + saldo anterior).','ok'); } });
+  }
   function manKey(id,i){ return ST.regime+'|'+ST.bloco+'|'+id+'|'+i; }
   function digitou(inp){
     var id=inp.getAttribute('data-id'), i=+inp.getAttribute('data-i'), D=dados(), R=D[ST.regime];
@@ -349,7 +367,7 @@
     var comp=d.comp||{};
     return calcular(comp.cont||{},comp.ded||{},'M',parRuf(eid,'rb',ano,d.params)).rows;
   }
-  root.ApPres={secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
+  root.ApPres={engDed:engDed,secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
 })(typeof window!=='undefined'?window:this);
 
 /* ── Lucro Real Anual: engrenagem nas linhas de Adições/Exclusões Permanentes e Temporárias (pedido do usuário 12/11/2026) ──
