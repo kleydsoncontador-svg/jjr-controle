@@ -91,6 +91,8 @@
     ['apuracaoTipoModal','apuracaoGerenciador','apuracaoFormAnual','parteBFormAnual'].forEach(function(id){ var e=document.getElementById(id); if(e) e.style.display='none'; });
     var c=container(); if(!c){ toast('Tela de apuração não encontrada','err'); return; }
     c.style.display='flex'; desenhar();
+    // 25/11/2026: retenções da engrenagem (mesmas contas do Lucro Real Anual) = débito de janeiro; depois débito do mês + saldo anterior
+    if(ST.modo==='rb'&&typeof _apBalRetencoes==='function') _apBalRetencoes(ST.eid,ST.ano).then(function(r){ var mapa={csll_retida:'csll_ret',irrf:'irrf',irrf_ap_fin:'irrf_af'}, D=dados(), mud=false; ['comp','caixa'].forEach(function(rg){ Object.keys(mapa).forEach(function(k){ if(!r[k]) return; var dk=mapa[k]; D[rg].ded[dk]=D[rg].ded[dk]||[]; r[k].forEach(function(v,i){ if(v==null) return; if(NUM(D[rg].ded[dk][i])!==v){ D[rg].ded[dk][i]=v; mud=true; } }); }); }); if(mud){ salvar(D); atualizar(); } }).catch(function(e){ console.warn('Retenções RB:',e); });
     montarMapaBalancete().catch(function(e){ console.warn('Apuração × Balancete:',e); });
   }
   function voltar(){
