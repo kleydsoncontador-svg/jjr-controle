@@ -44,7 +44,7 @@
       if(pr.lc224){ if(per==='T') exc=Math.max(0,o.rb-PER.T.limRB); else exc=Math.max(0,acum-pr.limiteAno)-Math.max(0,acumAnt-pr.limiteAno); }
       o.exc=R2(exc);
       // Exceção Rufato (eid 4) 2026: valor excluído SÓ da base do IRPJ (a CSLL segue com a receita cheia)
-      var ex=NUM(pr.exclIrpj&&pr.exclIrpj[i]); o.exI=R2(ex); var comI=com-ex, rbI=o.rb-ex;
+      var ex=NUM(pr.exclIrpj&&pr.exclIrpj[i]); o.exI=R2(ex); var comI=com, rbI=o.rb; // 25/11/2026: ajuste DIGITADO pelo usuário, com sinal (negativo exclui), somado direto na base total do IRPJ
       var pI=rbI>0?(comI*0.08+srv*pr.servIrpj)/rbI:0, pC=o.rb>0?(com*0.12+srv*pr.servCsll)/o.rb:0;
       var ult=P.meses(i)[P.meses(i).length-1], primeiro=P.meses(i)[0];
       o.csllAtiva=(primeiro>=pr.csllDesdeMes)||(ult>=pr.csllDesdeMes&&per==='T'&&false);
@@ -56,9 +56,9 @@
       var dc=0; DED_CSLL.forEach(function(k){ dc+=NUM(ded[k]&&ded[k][i]); }); o.cDed=R2(dc);
       o.cPagar=R2(Math.max(0,o.cProv-o.cDed));
       // IRPJ
-      o.i8=R2(com*0.08); // 25/11/2026: a exclusão sai direto da base total (abaixo), não da receita de vendas o.i32=R2(srv*pr.servIrpj); o.i100=b100;
+      o.i8=R2(com*0.08); o.i32=R2(srv*pr.servIrpj); o.i100=b100; /* 25/11/2026: a "Receita excluída" (digitada) sai direto da base total, abaixo */
       o.iLC=pr.lc224?R2(exc*pI*0.10):0;
-      o.iBase=R2(o.i8+o.i32+o.i100+o.iLC-o.exI);
+      o.iBase=R2(o.i8+o.i32+o.i100+o.iLC+o.exI);
       o.iAdBase=R2(Math.max(0,o.iBase-P.lim));
       o.i15=R2(o.iBase*0.15); o.iAd=R2(o.iAdBase*0.10); o.iProv=R2(o.i15+o.iAd);
       var di=0; DED_IRPJ.forEach(function(k){ di+=NUM(ded[k]&&ded[k][i]); }); o.iDed=R2(di);
@@ -73,7 +73,7 @@
   var excecaoRufato=function(){ return String(ST.eid)==='4'&&ST.modo==='rb'&&Number(ST.ano)===2026; };
   var chave=function(){ return 'apuracao_pres_'+ST.modo+'_'+ST.eid+'_'+ST.ano; };
   var per=function(){ return ST.modo==='rb'?'M':'T'; };
-  function dados(){ var d=null; try{ d=S.g(chave()); }catch(e){} d=d||{}; d.comp=d.comp||{cont:{},fisc:{},ded:{}}; d.caixa=d.caixa||{cont:{},fisc:{},ded:{}}; ['comp','caixa'].forEach(function(r){ d[r].cont=d[r].cont||{}; d[r].fisc=d[r].fisc||{}; d[r].ded=d[r].ded||{}; }); d.params=d.params||{}; if(excecaoRufato()&&!d.params.exclIrpj) d.params.exclIrpj={1:912957}; return d; }
+  function dados(){ var d=null; try{ d=S.g(chave()); }catch(e){} d=d||{}; d.comp=d.comp||{cont:{},fisc:{},ded:{}}; d.caixa=d.caixa||{cont:{},fisc:{},ded:{}}; ['comp','caixa'].forEach(function(r){ d[r].cont=d[r].cont||{}; d[r].fisc=d[r].fisc||{}; d[r].ded=d[r].ded||{}; }); d.params=d.params||{}; if(d.params.exclIrpj&&NUM(d.params.exclIrpj[1])===912957&&Object.keys(d.params.exclIrpj).length===1&&!d.params.exclIrpjDigitado) delete d.params.exclIrpj; /* 25/11/2026: o valor automático antigo sai; agora é só digitado */ return d; }
   function salvar(d){ try{ S.s(chave(),d); }catch(e){ console.error('Apuração presumido: não salvou',e); toast('Erro ao salvar: '+(e.message||e),'err'); } }
   var mapKey=function(){ return 'apuracao_pres_balmap_'+ST.eid+(ST.regime==='caixa'?'_caixa':''); };
   function mapa(){ try{ return S.g(mapKey())||{}; }catch(e){ return {}; } }
@@ -190,7 +190,7 @@
     h+=linha('CSLL A RECOLHER'+(ST.modo==='rb'?' (estimativa mensal — DARF 2484 ou 6012)':' (DARF 2372)'),function(o){ return o.cPagar; },{bg:'#FFD700'});
     if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lacs_rb',N,(function(){ var a=[]; for(var i=0;i<N;i++) a.push(rows[i]?rows[i].cPagar:0); return a; })(),TDI); // 25/11/2026: valor do meu sistema (PDF) + diferença
     h+=barra('CÁLCULO DO IRPJ — 15% + adicional de 10%','#000');
-    if(excecaoRufato()) h+=linha('(-) Receita excluída só da base do IRPJ (exceção: fev/2026 não foi somada na apuração real)',function(o){ return o.exI; },{cor:'#7c2d12'});
+    (function(){ var ex=(D.params||{}).exclIrpj||{}, tt=0; h+='<tr><td style="border:none;width:34px"></td><td style="padding:6px 12px;border:1px solid #ccc;background:white;color:#7c2d12">(+/−) Ajuste só da base do IRPJ — digite (negativo exclui)</td>'; for(var i=0;i<N;i++){ var v=NUM(ex[i]); tt+=v; h+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-exi="'+i+'" value="'+(v?FMT(v):'')+'" placeholder="0,00" onfocus="this.select()" onchange="ApPres.digitouEx(this)" style="'+INP+'"></td>'; } h+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:#fafafa">'+FMT(R2(tt))+'</td></tr>'; })();
     h+=linha('Base de Cálculo 8% (comércio e indústria)',function(o){ return o.i8; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servIrpj||PARAM_PADRAO.servIrpj)*100)+'% (serviços)',function(o){ return o.i32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.i100; });
@@ -252,6 +252,7 @@
     D.manual=D.manual||{}; var mk=manKey(id,i); if(!D.manual[mk]) D.manual[mk]={orig:NUM(((R[ST.bloco]||{})[id]||[])[i])}; // 25/11/2026: editado à mão (guarda o valor de antes)
     R[ST.bloco][id]=R[ST.bloco][id]||[]; R[ST.bloco][id][i]=v; inp.value=FMT(v); salvar(D); atualizar();
   }
+  function digitouEx(inp){ var i=+inp.getAttribute('data-exi'), D=dados(); var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value); D.params.exclIrpj=D.params.exclIrpj||{}; if(v) D.params.exclIrpj[i]=v; else delete D.params.exclIrpj[i]; D.params.exclIrpjDigitado=true; salvar(D); atualizar(); }
   function digitouDed(inp){
     var id=inp.getAttribute('data-ded'), i=+inp.getAttribute('data-i'), D=dados(), R=D[ST.regime];
     var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value);
@@ -367,7 +368,7 @@
     var comp=d.comp||{};
     return calcular(comp.cont||{},comp.ded||{},'M',parRuf(eid,'rb',ano,d.params)).rows;
   }
-  root.ApPres={engDed:engDed,secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
+  root.ApPres={digitouEx:digitouEx,engDed:engDed,secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
 })(typeof window!=='undefined'?window:this);
 
 /* ── Lucro Real Anual: engrenagem nas linhas de Adições/Exclusões Permanentes e Temporárias (pedido do usuário 12/11/2026) ──
