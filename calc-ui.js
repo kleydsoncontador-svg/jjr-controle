@@ -21,6 +21,7 @@
     irrf_pf: { titulo: 'IRRF — Pessoa Física', desc: 'Imposto de renda retido na fonte sobre rendimentos do trabalho, com a tabela e o redutor da competência.', campos: [
       { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual },
       { k: 'rendimentos', l: 'Rendimentos tributáveis (R$)', t: 'money' },
+      { k: 'ehLiquido', l: 'O valor informado é LÍQUIDO (achar o bruto)', t: 'bool', def: false },
       { k: 'previdencia', l: 'Previdência oficial (INSS) (R$)', t: 'money' },
       { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 },
       { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' },
@@ -37,6 +38,7 @@
     pro_labore: { titulo: 'Pró-labore líquido', desc: 'INSS de 11% do contribuinte individual até o teto do RGPS (considerando base já usada em outra fonte) e IRRF.', campos: [
       { k: 'competencia', l: 'Competência', t: 'month', def: mesAtual },
       { k: 'proLabore', l: 'Pró-labore bruto (R$)', t: 'money' },
+      { k: 'ehLiquido', l: 'O valor informado é LÍQUIDO (achar o bruto)', t: 'bool', def: false },
       { k: 'baseJaUtilizadaTeto', l: 'Base já utilizada do teto em outra fonte (R$)', t: 'money' },
       { k: 'outrasContribuicoes', l: 'Outras contribuições previdenciárias no mês (R$)', t: 'money' },
       { k: 'dependentes', l: 'Nº de dependentes', t: 'int', def: 0 }, { k: 'pensao', l: 'Pensão alimentícia (R$)', t: 'money' }, { k: 'outrosDescontos', l: 'Outros descontos (R$)', t: 'money' },
@@ -577,7 +579,24 @@ html.dark-mode .calc-item.cmp{background:#fff;color:#111;border-color:#fff}
       v.numHerdeiros = est.herd.length;
     }
     if (est.key === 'rescisao') { /* avisoModo 'padrao' = conforme o tipo */ if (v.avisoModo === 'padrao') v.avisoModo = ''; }
-    const r = C.calcular(est.key, v); est.ultimo = r; est.ultimoInp = v; mostrarResultado(r, v);
+    // 25/11/2026: valor informado é LÍQUIDO → acha o bruto (busca binária: o líquido cresce com o bruto)
+    let notaLiq = '';
+    if ((est.key === 'irrf_pf' || est.key === 'pro_labore') && v.ehLiquido) {
+      const campo = est.key === 'irrf_pf' ? 'rendimentos' : 'proLabore';
+      const num = s => { s = String(s || '').replace(/[^\d,.-]/g, ''); return parseFloat(s.includes(',') ? s.replace(/\./g, '').replace(',', '.') : s) || 0; };
+      const fmt = n => n.toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+      const alvo = num(v[campo]);
+      const liq = b => { const t = Object.assign({}, v); t[campo] = fmt(b); const rr = C.calcular(est.key, t); const o = (rr && rr.resultado) || {}; return est.key === 'irrf_pf' ? b - (Number(o.irrf) || 0) : (Number(o.liquido) || 0); };
+      if (alvo > 0) {
+        let lo = alvo, hi = alvo * 2 + 10000; let it = 0; while (liq(hi) < alvo && it++ < 20) hi *= 2;
+        for (let k = 0; k < 80; k++) { const m = (lo + hi) / 2; if (liq(m) < alvo) lo = m; else hi = m; }
+        let b = Math.round(hi * 100) / 100; while (liq(b - 0.01) >= alvo - 0.004 && b > alvo) b = Math.round((b - 0.01) * 100) / 100;
+        v[campo] = fmt(b); const el = document.getElementById('cf_' + campo);
+        notaLiq = 'Valor informado como LÍQUIDO: R$ ' + fmt(alvo) + ' → bruto encontrado R$ ' + fmt(b) + (est.key === 'irrf_pf' ? ' (bruto − IRRF = líquido).' : ' (bruto − INSS − IRRF − descontos = líquido).');
+        if (el) el.title = notaLiq;
+      }
+    }
+    const r = C.calcular(est.key, v); if (notaLiq && r) { r.avisos = (r.avisos || []).concat([notaLiq]); } est.ultimo = r; est.ultimoInp = v; mostrarResultado(r, v);
   };
   function g(id) { return (document.getElementById('cf_' + id) || {}).value || ''; }
   const brl = n => 'R$ ' + C.brl(n);
