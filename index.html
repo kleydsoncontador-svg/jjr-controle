@@ -35639,20 +35639,61 @@ function _lancctbBarraProc(txt){ const el=document.getElementById('lancctbRegist
 // automaticamente. Só age quando acha UMA NF de venda com esse número; valor maior que todas as parcelas pendentes, NF ambígua ou sem parcela pendente = não mexe (fica pendente p/ o usuário).
 // ── #250 NASA TRUCK (pedido do usuário 25/11/2026): a linha do Fluxo traz "Número 458 e 150 | ..." = nº da(s) NF(s). Recebimento → NF de venda; pagamento → NF de compra (número repetido entre fornecedores: desempata pelo nome no histórico).
 // Várias NFs = 1 lançamento com vários créditos/débitos. Valor menor que a parcela: a parcela vale o pago e o saldo vira parcela no mês seguinte. Valor maior que todas as parcelas pendentes, NF não achada ou ambígua = não mexe.
-// 25/11/2026: na lista de NFs, clicar em "conciliado" mostra a qual lançamento do banco a parcela foi amarrada
+// 25/11/2026: na lista de NFs, clicar em "conciliado" mostra a qual lançamento do banco a parcela foi amarrada; permite trocar a conta do cliente/fornecedor ou desassociar
 async function _lancctbVerAmarracaoNf(parcId){
-  const { data: p } = await _supaClient.from('notas_fiscais_parcelas').select('id,numero_parcela,valor_parcela,lancamento_extrato_id,notas_fiscais(numero)').eq('id',parcId).maybeSingle();
-  const { data: ctb } = await _supaClient.from('lancamentos_contabeis').select('lancamento_extrato_id,data,historico,valor,tipo,classificacao').eq('nf_parcela_id',parcId);
-  const ids=[...new Set([p&&p.lancamento_extrato_id,...(ctb||[]).map(c=>c.lancamento_extrato_id)].filter(Boolean))];
-  let ext=[]; if(ids.length){ const r=await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,status_conciliacao,agencias_bancarias(banco_nome,agencia,conta_corrente)').in('id',ids); ext=r.data||[]; }
+  const { data: p } = await _supaClient.from('notas_fiscais_parcelas').select('id,empresa_eid,numero_parcela,valor_parcela,lancamento_extrato_id,notas_fiscais(numero,direcao)').eq('id',parcId).maybeSingle();
+  if(!p){ toast('Parcela não encontrada.','err'); return; }
+  const { data: ctb } = await _supaClient.from('lancamentos_contabeis').select('id,lancamento_extrato_id,data,historico,valor,tipo,classificacao,conta_contabil_id').eq('nf_parcela_id',parcId).eq('estornado',false);
+  const ids=[...new Set([p.lancamento_extrato_id,...(ctb||[]).map(c=>c.lancamento_extrato_id)].filter(Boolean))];
+  let ext=[]; if(ids.length){ const r=await _supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_entrada,valor_saida,historico_bancario,status_conciliacao,fonte,agencias_bancarias(banco_nome,agencia,conta_corrente)').in('id',ids); ext=r.data||[]; }
   const fd=d=>d?String(d).split('-').reverse().join('/'):'';
-  let h='<div style="font-size:15px;font-weight:700;margin-bottom:10px">NF '+esc(p&&p.notas_fiscais?p.notas_fiscais.numero:'')+' · parcela '+esc(p?p.numero_parcela:'')+' (R$ '+_fmt(p?p.valor_parcela:0)+')</div>';
+  const compra=p.notas_fiscais&&p.notas_fiscais.direcao==='compra';
+  let h='<div style="font-size:15px;font-weight:700;margin-bottom:10px">NF '+esc(p.notas_fiscais?p.notas_fiscais.numero:'')+' · parcela '+esc(p.numero_parcela)+' (R$ '+_fmt(p.valor_parcela)+')</div>';
   if(!ext.length) h+='<div style="color:var(--amber)">Não achei o lançamento do banco ligado a esta parcela.</div>';
-  ext.forEach(e=>{ const ag=e.agencias_bancarias||{}; h+='<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12.5px"><b>'+fd(e.data_pagamento)+'</b> · '+(Number(e.valor_entrada)>0?'Entrada R$ '+_fmt(e.valor_entrada):'Saída R$ '+_fmt(e.valor_saida))+' · '+esc(e.status_conciliacao||'')+'<br>Banco: '+esc(ag.banco_nome||'')+(ag.conta_corrente?' (Ag '+esc(ag.agencia||'')+' Cc '+esc(ag.conta_corrente)+')':'')+'<br>Histórico: '+esc(e.historico_bancario||'')+'<br><span style="color:var(--slate)">ID do lançamento: '+e.id+'</span></div>'; });
-  const mine=(ctb||[]); if(mine.length) h+='<div style="font-size:12px;color:var(--slate);margin-top:6px">Contábil desta parcela: '+mine.map(c=>fd(c.data)+' '+c.tipo+' '+esc(c.classificacao||'')+' R$ '+_fmt(c.valor)+' — '+esc(c.historico||'')).join('<br>')+'</div>';
-  const d=document.createElement('div'); d.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
-  d.innerHTML='<div style="background:var(--white);color:var(--ink);border-radius:10px;padding:18px;max-width:620px;width:92%;max-height:80vh;overflow:auto">'+h+'<div style="text-align:right;margin-top:10px"><button class="btn bo bsm" onclick="this.closest(\'div[style*=fixed]\').remove()">Fechar</button></div></div>';
+  ext.forEach(e=>{ const ag=e.agencias_bancarias||{}; h+='<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;font-size:12.5px"><b>'+fd(e.data_pagamento)+'</b> · '+(Number(e.valor_entrada)>0?'Entrada R$ '+_fmt(e.valor_entrada):'Saída R$ '+_fmt(e.valor_saida))+' · '+esc(e.status_conciliacao||'')+'<br>Banco: '+esc(ag.banco_nome||'')+(ag.conta_corrente?' (Ag '+esc(ag.agencia||'')+' Cc '+esc(ag.conta_corrente)+')':'')+'<br>Histórico: '+esc(e.historico_bancario||'')+'<br><span style="color:var(--slate)">ID do lançamento: '+e.id+'</span>'
+    +'<div style="margin-top:8px"><button class="btn bsm" style="background:#dc2626;color:#fff" onclick="_lancctbNfDesassociar('+parcId+','+e.id+',this)">✖ Desassociar (volta para pendente)</button></div></div>'; });
+  if((ctb||[]).length){
+    h+='<div style="font-size:12px;color:var(--slate);margin-top:6px">Contábil desta parcela:<br>'+ctb.map(c=>fd(c.data)+' '+c.tipo+' '+esc(c.classificacao||'')+' R$ '+_fmt(c.valor)+' — '+esc(c.historico||'')).join('<br>')+'</div>';
+    h+='<div style="margin-top:10px;display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12.5px"><b>Conta '+(compra?'débito (fornecedor)':'crédito (cliente)')+':</b><input class="fi" id="nfAmarrConta_'+p.empresa_eid+'_0" list="convPlanoDL" autocomplete="off" onfocus="_convPlanoDL(this)" placeholder="nº ou nome da conta" style="width:240px;font-size:12px"><button class="btn bp bsm" onclick="_lancctbNfTrocarConta('+parcId+',\''+p.empresa_eid+'\',this)">Alterar conta</button></div>';
+  }
+  document.getElementById('nfAmarrModal')?.remove();
+  const d=document.createElement('div'); d.id='nfAmarrModal'; d.style.cssText='position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center';
+  d.innerHTML='<div style="background:var(--white);color:var(--ink);border-radius:10px;padding:18px;max-width:660px;width:92%;max-height:80vh;overflow:auto">'+h+'<div style="text-align:right;margin-top:10px"><button class="btn bo bsm" onclick="document.getElementById(\'nfAmarrModal\').remove()">Fechar</button></div></div>';
   d.onclick=ev=>{ if(ev.target===d) d.remove(); }; document.body.appendChild(d);
+}
+async function _lancctbNfTrocarConta(parcId,eid,btn){
+  const v=String(document.getElementById('nfAmarrConta_'+eid+'_0').value||'').trim(); if(!v){ toast('Informe a conta.','err'); return; }
+  const { data: cs } = await _supaClient.from('plano_contas').select('id,classificacao,numero_conta,descricao').eq('empresa_eid',String(eid)).eq('numero_conta',v);
+  const c=(cs||[])[0]; if(!c){ toast('Conta '+v+' não existe no plano desta empresa.','err'); return; }
+  const { data: linhas } = await _supaClient.from('lancamentos_contabeis').select('id,data').eq('nf_parcela_id',parcId).eq('estornado',false);
+  if(!(linhas||[]).length){ toast('Nada para alterar.','err'); return; }
+  if(typeof _lancctbExclusaoBloqueada==='function'&&_lancctbExclusaoBloqueada(String(eid),linhas[0].data,'a conta deste lançamento')) return;
+  if(!confirm('Trocar a conta para '+c.numero_conta+' — '+(c.descricao||'')+'?')) return;
+  btn.disabled=true;
+  const { error } = await _supaClient.from('lancamentos_contabeis').update({ conta_contabil_id:c.id, classificacao:c.classificacao }).in('id',linhas.map(l=>l.id));
+  if(error){ btn.disabled=false; toast('Erro: '+error.message,'err'); return; }
+  toast('Conta alterada para '+c.numero_conta+'.','ok'); _lancctbVerAmarracaoNf(parcId);
+}
+async function _lancctbNfDesassociar(parcId,extId,btn){
+  const { data: e } = await _supaClient.from('lancamentos_extrato').select('id,empresa_eid,data_pagamento,valor_saida,fonte').eq('id',extId).maybeSingle();
+  if(!e){ toast('Lançamento não encontrado.','err'); return; }
+  if(typeof _lancctbExclusaoBloqueada==='function'&&_lancctbExclusaoBloqueada(String(e.empresa_eid),e.data_pagamento,'o lançamento contábil deste lançamento (desassociar)')) return;
+  if(!confirm('Desassociar? Desfaz o lançamento contábil deste pagamento/recebimento e devolve TODAS as NFs/comprovantes amarrados nele para pendente. O lançamento do banco volta para pendente no Registro Contábil.')) return;
+  btn.disabled=true;
+  try{
+    const ehSaida=Number(e.valor_saida)>0;
+    const { data: linhas } = await _supaClient.from('lancamentos_contabeis').select('nf_parcela_id,comprovante_id').eq('lancamento_extrato_id',extId).eq('estornado',false);
+    const idsNf=[...new Set([parcId,...(linhas||[]).map(l=>l.nf_parcela_id)].filter(Boolean))], idsComp=[...new Set((linhas||[]).map(l=>l.comprovante_id).filter(Boolean))];
+    await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsNf);
+    if(idsComp.length) await _supaClient.from(ehSaida?'comprovantes_bancarios':'comprovantes_recebimento').update({status_conciliacao:'pendente',lancamento_extrato_id:null}).in('id',idsComp);
+    if(e.fonte!=='fluxo') await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'nao_associado',lancamento_extrato_id:null}).eq('lancamento_extrato_id',extId); // linha que veio do próprio Fluxo continua ligada a ele; conta do banco nunca é apagada
+    const { error } = await _supaClient.from('lancamentos_contabeis').update({estornado:true}).eq('lancamento_extrato_id',extId).eq('estornado',false);
+    if(error) throw new Error(error.message);
+    await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'pendente'}).eq('id',extId);
+    toast('Desassociado: NF e lançamento do banco voltaram para pendente.','ok');
+    document.getElementById('nfAmarrModal')?.remove();
+    if(typeof renderLancctbConteudo==='function') renderLancctbConteudo();
+  }catch(err){ btn.disabled=false; toast('Erro ao desassociar: '+err.message,'err'); }
 }
 async function _lancctbPassadaNasaNumeroHist(eid,contaId,log,restringirPeriodo,lado){
   const out={ conciliadas:0, saldos:0, ignoradas:[] };
