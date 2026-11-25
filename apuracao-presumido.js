@@ -188,7 +188,7 @@
     h+=linha('PROVISÃO DA CSLL (9%)',function(o){ return o.cProv; },{bg:'#f8d7da'});
     h+='<tr><td colspan="'+(N+3)+'" style="padding:4px 12px;border:1px solid #ccc;background:#f0f4f8;font-weight:bold;color:#1E3558">(-) DEDUÇÕES</td></tr>'+dedLinhas(DED_CSLL);
     h+=linha('CSLL A RECOLHER'+(ST.modo==='rb'?' (estimativa mensal — DARF 2484 ou 6012)':' (DARF 2372)'),function(o){ return o.cPagar; },{bg:'#FFD700'});
-    if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lacs_rb',N,rows.map(function(o){ return o.cPagar; }),TDI); // 25/11/2026: valor do meu sistema (PDF) + diferença
+    if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lacs_rb',N,(function(){ var a=[]; for(var i=0;i<N;i++) a.push(rows[i]?rows[i].cPagar:0); return a; })(),TDI); // 25/11/2026: valor do meu sistema (PDF) + diferença
     h+=barra('CÁLCULO DO IRPJ — 15% + adicional de 10%','#000');
     if(excecaoRufato()) h+=linha('(-) Receita excluída só da base do IRPJ (exceção: fev/2026 não foi somada na apuração real)',function(o){ return o.exI; },{cor:'#7c2d12'});
     h+=linha('Base de Cálculo 8% (comércio e indústria)',function(o){ return o.i8; });
@@ -202,7 +202,7 @@
     h+=linha('PROVISÃO DO IRPJ',function(o){ return o.iProv; },{bg:'#f8d7da'});
     h+='<tr><td colspan="'+(N+3)+'" style="padding:4px 12px;border:1px solid #ccc;background:#f0f4f8;font-weight:bold;color:#1E3558">(-) DEDUÇÕES</td></tr>'+dedLinhas(DED_IRPJ);
     h+=linha('IRPJ A RECOLHER'+(ST.modo==='rb'?' (estimativa mensal — DARF 2362 ou 5993)':' (DARF 2089)'),function(o){ return o.iPagar; },{bg:'#FFD700'});
-    if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lalur_rb',N,rows.map(function(o){ return o.iPagar; }),TDI);
+    if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lalur_rb',N,(function(){ var a=[]; for(var i=0;i<N;i++) a.push(rows[i]?rows[i].iPagar:0); return a; })(),TDI);
     h+='</tbody></table></div><div style="font-size:11.5px;color:#666;margin-top:8px;line-height:1.5">Linhas "(-)" entram positivas e são subtraídas. Percentuais: comércio/indústria 8% (IRPJ) e 12% (CSLL); serviços e demais conforme <b>Parâmetros</b>. '
       +'Adicional de 10% do IRPJ sobre o que passa de R$ 60.000 por trimestre (R$ 20.000 por mês). '+(lc?'Acréscimo da LC 224/2025 sobre a parcela que passa do limite, proporcional ao percentual de cada atividade.':'')+'</div>';
     tc.innerHTML=h;
