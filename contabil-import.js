@@ -284,10 +284,10 @@
   }
   async function escolheu(inp){
     var arqs=Array.prototype.slice.call(inp.files||[]); if(!arqs.length) return;
-    await lerLote(arqs,0); inp.value='';                   // solta as referências dos arquivos
+    await lerLote(arqs,0,true); inp.value=''; /* 25/11/2026: escolher de novo ACRESCENTA arquivos à lista (vários balancetes de uma vez) */                   // solta as referências dos arquivos
   }
-  async function lerLote(arqs,pulados){
-    var alvo=infoEmpresa(st.eid), stt=document.getElementById('ctbStatus'); st.docs=[];
+  async function lerLote(arqs,pulados,acumula){
+    var alvo=infoEmpresa(st.eid), stt=document.getElementById('ctbStatus'); if(!acumula||!Array.isArray(st.docs)) st.docs=[]; else { var nomes=arqs.map(function(a){ return a.name; }); st.docs=st.docs.filter(function(d){ return d&&d.parse&&nomes.indexOf(d.nome)<0; }); }
     for(var i=0;i<arqs.length;i++){
       if(stt) stt.textContent='Lendo '+(i+1)+' de '+arqs.length+': '+arqs[i].name+' …';
       var d=await processarArquivo(arqs[i],alvo,st.tipoAlvo); st.docs.push(d);
