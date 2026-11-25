@@ -51,7 +51,7 @@
       // CSLL
       o.c12=R2(com*0.12); o.c32=R2(srv*pr.servCsll); o.c100=b100;
       o.cLC=pr.lc224&&o.csllAtiva?R2(exc*pC*0.10):0;
-      o.cBase=R2(o.c12+o.c32+o.c100+o.cLC);
+      o.exC=R2(NUM(pr.exclCsll&&pr.exclCsll[i])); o.cBase=R2(o.c12+o.c32+o.c100+o.cLC+o.exC); /* ajuste digitado só da base da CSLL (com sinal) */
       o.cProv=R2(o.cBase*0.09);
       var dc=0; DED_CSLL.forEach(function(k){ dc+=NUM(ded[k]&&ded[k][i]); }); o.cDed=R2(dc);
       o.cPagar=R2(Math.max(0,o.cProv-o.cDed));
@@ -118,7 +118,7 @@
       +'<span style="width:10px"></span>'
       +btn('Contábil','ApPres.set(\'bloco\',\'cont\')',ST.bloco==='cont')+btn('Fiscal','ApPres.set(\'bloco\',\'fisc\')',ST.bloco==='fisc')+btn('Divergências','ApPres.set(\'bloco\',\'div\')',ST.bloco==='div')
       +'<span style="width:10px"></span>'))
-      +'<button class="btn bo" onclick="ApPres.parametros()" style="padding:6px 12px">⚙ Parâmetros</button>'+(ST.modo==='rb'?'<button class="btn bo" onclick="_apSistAnexar()" style="padding:6px 12px" title="Anexe os PDFs do LACS/LALUR (receita bruta) do seu sistema">📎 Anexar LACS/LALUR</button>':'')
+      +'<button class="btn bo" onclick="ApPres.parametros()" style="padding:6px 12px">⚙ Parâmetros</button>'+'<button class="btn bo" onclick="ApPres.toggleAjustes()" style="padding:6px 12px" title="Mostrar/ocultar as linhas de ajuste só da base do IRPJ e da CSLL">'+((dados().params||{}).ocultarAjustes?'👁 Mostrar ajustes de base':'🙈 Ocultar ajustes de base')+'</button>'+(ST.modo==='rb'?'<button class="btn bo" onclick="_apSistAnexar()" style="padding:6px 12px" title="Anexe os PDFs do LACS/LALUR (receita bruta) do seu sistema">📎 Anexar LACS/LALUR</button>':'')
       +'<button class="action-btn action-btn-excel" onclick="ApPres.excel()" style="padding:8px 14px;font-size:12.5px">📊 Gerar Excel</button>'
       +'<button class="btn bo bsm" onclick="ApPres.voltar()">← Voltar</button><button class="btn bo bsm" onclick="apuracaoVoltarEmpresas()">← Empresas</button><span id="apPresStatus" style="font-size:12px;color:#666;margin-left:8px"></span></div></div>';
     h+='<div style="padding:16px 20px 24px 20px"><div style="margin-bottom:10px;padding:10px 12px;background:#f5f5f5;border-radius:4px;color:#333;font-size:12.5px;display:flex;flex-wrap:wrap;gap:14px;align-items:center">'
@@ -169,6 +169,12 @@
     var per0=PER[per()], lim=per0.lim;
     var linha=function(rot,fn,cfg){ cfg=cfg||{}; var s='<tr'+(cfg.bg?' style="background:'+cfg.bg+';font-weight:bold"':'')+'><td style="border:none;width:34px;background:'+(cfg.bg||'transparent')+'"></td><td style="padding:6px 12px;border:1px solid #ccc;'+(cfg.bg?'background:'+cfg.bg+';':'background:white;')+(cfg.cor?'color:'+cfg.cor+';':'')+'">'+rot+'</td>'; var tt=0; for(var i=0;i<N;i++){ var v=fn(rows[i],i); tt+=v; s+='<td style="'+TDI+';text-align:right;padding:4px 8px;'+(cfg.bg?'background:'+cfg.bg+';':'background:white;')+'">'+FMT(v)+'</td>'; } s+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:'+(cfg.bg||'#fafafa')+'">'+(cfg.semTotal?'':FMT(R2(tt)))+'</td></tr>'; return s; };
     var barra=function(t,cor){ return '<tr style="background:'+cor+';color:white;font-weight:bold"><td colspan="'+(N+3)+'" style="padding:8px 12px;border:1px solid #ccc">'+t+'</td></tr>'; };
+    // 25/11/2026: linhas de ajuste DIGITADAS (com sinal; negativo exclui) só da base do IRPJ / da CSLL — em qualquer empresa; podem ser ocultadas
+    var linhaAjuste=function(t){ var k=t==='irpj'?'exclIrpj':'exclCsll', ex=(D.params||{})[k]||{}, tt=0, oculta=!!(D.params||{}).ocultarAjustes; for(var j=0;j<N;j++) tt+=NUM(ex[j]);
+      if(oculta) return tt?'<tr><td style="border:none;width:34px"></td><td colspan="'+(N+1)+'" style="padding:4px 12px;border:1px solid #ccc;background:white;color:#7c2d12;font-size:11.5px">Ajuste da base '+(t==='irpj'?'do IRPJ':'da CSLL')+' oculto, mas em uso (total '+FMT(R2(tt))+'). <a href="#" onclick="ApPres.toggleAjustes();return false">Mostrar</a></td></tr>':'';
+      var s='<tr><td style="border:none;width:34px;text-align:center;padding:0"><button type="button" title="Ocultar as linhas de ajuste" onclick="ApPres.toggleAjustes()" style="border:none;background:none;cursor:pointer;font-size:12px">🙈</button></td><td style="padding:6px 12px;border:1px solid #ccc;background:white;color:#7c2d12">(+/−) Ajuste só da base '+(t==='irpj'?'do IRPJ':'da CSLL')+' — digite (negativo exclui)</td>';
+      for(var i=0;i<N;i++){ var v=NUM(ex[i]); s+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-exk="'+k+'" data-exi="'+i+'" value="'+(v?FMT(v):'')+'" placeholder="0,00" onfocus="this.select()" onchange="ApPres.digitouEx(this)" style="'+INP+'"></td>'; }
+      return s+'<td style="'+TDI+';text-align:right;padding:4px 8px;background:#fafafa">'+FMT(R2(tt))+'</td></tr>'; };
     var dedLinhas=function(ids,rotulo){ var s=''; DED.filter(function(d){ return ids.indexOf(d[0])>=0; }).forEach(function(d){ var temC=((_apBalMapa(ST.eid)||{})[DED_MAP[d[0]]]||[]).length>0; s+='<tr><td style="border:none;width:34px;text-align:center;padding:0">'+(DED_MAP[d[0]]?'<button type="button" onclick="ApPres.engDed(\''+d[0]+'\')" title="'+(temC?'Valor vem do Balancete (total a débito) — ver/alterar as contas':'Informar as contas do Balancete desta dedução')+'" style="border:none;background:none;cursor:pointer;font-size:14px;opacity:'+(temC?'1':'.45')+'">⚙</button>':'')+'</td><td style="padding:6px 12px;border:1px solid #ccc;background:white">'+ESC(d[1])+'</td>'; for(var i=0;i<N;i++) s+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-ded="'+d[0]+'" data-i="'+i+'" value="'+FMT(NUM(((R.ded||{})[d[0]]||[])[i]))+'" onfocus="this.select()" onchange="ApPres.digitouDed(this)" style="'+INP+'"></td>'; s+='<td style="'+TDI+';background:#fafafa"></td></tr>'; }); return s; };
     var h='<div style="font-weight:700;color:#1E3558;margin:0 0 6px;font-size:13px">CÁLCULO'+(usouAlt?' <span style="font-weight:400;color:#b45309">— o bloco escolhido está vazio; calculando com o '+(usouAlt==='cont'?'Contábil':'Fiscal')+'</span>':'')+'</div>'
       +'<div style="overflow:visible"><table style="'+GRADE(N).tab+'border-collapse:collapse;font-size:12px;background:white;color:#111">'+GRADE(N).cols+'<thead><tr><th style="width:34px;border:none;background:#2D3447;padding:0"></th><th style="'+TH+';text-align:left">DESCRIÇÃO</th>';
@@ -180,6 +186,7 @@
     h+=linha('Receita bruta das atividades',function(o){ return o.rb; },{bg:'#fef9c3'});
     if(lc) h+=linha('Receita bruta que excede o limite ('+(per()==='T'?'R$ 1.250.000 por trimestre':'acumulado acima de R$ '+FMT(NUM((D.params||{}).limiteAno||PARAM_PADRAO.limiteAno))+' no ano')+') — LC 224/2025',function(o){ return o.exc; },{cor:'#7c2d12'});
     h+=barra('CÁLCULO DA CSLL — 9%','#000');
+    h+=linhaAjuste('csll');
     h+=linha('Base de Cálculo 12% (comércio e indústria)',function(o){ return o.c12; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servCsll||PARAM_PADRAO.servCsll)*100)+'% (serviços)',function(o){ return o.c32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.c100; });
@@ -190,7 +197,7 @@
     h+=linha('CSLL A RECOLHER'+(ST.modo==='rb'?' (estimativa mensal — DARF 2484 ou 6012)':' (DARF 2372)'),function(o){ return o.cPagar; },{bg:'#FFD700'});
     if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lacs_rb',N,(function(){ var a=[]; for(var i=0;i<N;i++) a.push(rows[i]?rows[i].cPagar:0); return a; })(),TDI); // 25/11/2026: valor do meu sistema (PDF) + diferença
     h+=barra('CÁLCULO DO IRPJ — 15% + adicional de 10%','#000');
-    (function(){ var ex=(D.params||{}).exclIrpj||{}, tt=0; h+='<tr><td style="border:none;width:34px"></td><td style="padding:6px 12px;border:1px solid #ccc;background:white;color:#7c2d12">(+/−) Ajuste só da base do IRPJ — digite (negativo exclui)</td>'; for(var i=0;i<N;i++){ var v=NUM(ex[i]); tt+=v; h+='<td style="'+TDI+';background:white"><input type="text" inputmode="decimal" data-exi="'+i+'" value="'+(v?FMT(v):'')+'" placeholder="0,00" onfocus="this.select()" onchange="ApPres.digitouEx(this)" style="'+INP+'"></td>'; } h+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:#fafafa">'+FMT(R2(tt))+'</td></tr>'; })();
+    h+=linhaAjuste('irpj');
     h+=linha('Base de Cálculo 8% (comércio e indústria)',function(o){ return o.i8; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servIrpj||PARAM_PADRAO.servIrpj)*100)+'% (serviços)',function(o){ return o.i32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.i100; });
@@ -252,7 +259,8 @@
     D.manual=D.manual||{}; var mk=manKey(id,i); if(!D.manual[mk]) D.manual[mk]={orig:NUM(((R[ST.bloco]||{})[id]||[])[i])}; // 25/11/2026: editado à mão (guarda o valor de antes)
     R[ST.bloco][id]=R[ST.bloco][id]||[]; R[ST.bloco][id][i]=v; inp.value=FMT(v); salvar(D); atualizar();
   }
-  function digitouEx(inp){ var i=+inp.getAttribute('data-exi'), D=dados(); var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value); D.params.exclIrpj=D.params.exclIrpj||{}; if(v) D.params.exclIrpj[i]=v; else delete D.params.exclIrpj[i]; D.params.exclIrpjDigitado=true; salvar(D); atualizar(); }
+  function digitouEx(inp){ var k=inp.getAttribute('data-exk')||'exclIrpj', i=+inp.getAttribute('data-exi'), D=dados(); var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value); D.params[k]=D.params[k]||{}; if(v) D.params[k][i]=v; else delete D.params[k][i]; D.params.exclIrpjDigitado=true; salvar(D); atualizar(); }
+  function toggleAjustes(){ var D=dados(); D.params.ocultarAjustes=!D.params.ocultarAjustes; salvar(D); desenhar(); }
   function digitouDed(inp){
     var id=inp.getAttribute('data-ded'), i=+inp.getAttribute('data-i'), D=dados(), R=D[ST.regime];
     var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value);
@@ -368,7 +376,7 @@
     var comp=d.comp||{};
     return calcular(comp.cont||{},comp.ded||{},'M',parRuf(eid,'rb',ano,d.params)).rows;
   }
-  root.ApPres={digitouEx:digitouEx,engDed:engDed,secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
+  root.ApPres={toggleAjustes:toggleAjustes,digitouEx:digitouEx,engDed:engDed,secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
 })(typeof window!=='undefined'?window:this);
 
 /* ── Lucro Real Anual: engrenagem nas linhas de Adições/Exclusões Permanentes e Temporárias (pedido do usuário 12/11/2026) ──
