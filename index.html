@@ -4158,6 +4158,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
       <button class="btn bo" onclick="abrirMelhorOpcao()" style="padding:6px 12px" title="Compara, mês a mês, o valor a recolher pelo Lucro Real e pela Receita Bruta, e acumula a opção escolhida">🏆 Melhor opção</button>
       <button class="action-btn action-btn-excel" onclick="exportarParaExcel()" style="padding:10px 20px;font-size:13px">📊 Gerar Excel</button>
       <button class="action-btn action-btn-pdf" onclick="exportarParaPDF()" style="padding:10px 20px;font-size:13px">📄 Gerar PDF</button>
+      <button class="btn bo" onclick="_apSistAnexar()" style="padding:6px 12px" title="Anexe os PDFs do LACS/LALUR do seu sistema (Lucro Real ou receita bruta): o site acha a competência no PDF e põe o valor a recolher ao lado da apuração, com a diferença">📎 Anexar LACS/LALUR</button>
       <button class="btn bo" onclick="abrirCalculoReverso()" style="padding:6px 12px" title="Até que lucro os recolhimentos e retenções já cobrem, e quanto falta recolher (IRPJ e CSLL)">🔁 Cálculo reverso</button>
       <button class="btn bo" onclick="abrirResultadoMensal()" style="padding:6px 12px" title="Valores mensais (não acumulados) das linhas ligadas ao Balancete, com total — só informativo">📋 Resultado mensal</button>
       <button class="btn bo bsm" onclick="voltarApuracao()" style="margin-left:auto">← Voltar à Apuração</button><div id="statusSalvo" style="margin-left:16px;font-size:12px;color:#666"></div>
@@ -65156,6 +65157,88 @@ function renderLucSocios(){
     +'<tbody>'+rows+'</tbody></table></div></div>';
 }
 
+// ── 25/11/2026: valores do MEU SISTEMA (LACS/LALUR em PDF) ao lado da apuração do site, com a diferença ──
+// Chave apuracao_sist_<eid>_<ano> = { lacs:{1:..}, lalur:{}, lacs_rb:{}, lalur_rb:{} } (mês 1–12 → valor "a recolher"). O PDF não é guardado: só o valor.
+const _AP_SIST_ROT={ lacs:'CSLL a recolher — LACS (meu sistema)', lalur:'IRPJ a recolher — LALUR (meu sistema)', lacs_rb:'CSLL a recolher — LACS receita bruta (meu sistema)', lalur_rb:'IRPJ a recolher — LALUR receita bruta (meu sistema)' };
+function _apSistGet(eid,ano){ try{ const v=S.g('apuracao_sist_'+eid+'_'+ano); const o=typeof v==='string'?JSON.parse(v):(v||{}); ['lacs','lalur','lacs_rb','lalur_rb'].forEach(k=>{ o[k]=o[k]||{}; }); return o; }catch(e){ return {lacs:{},lalur:{},lacs_rb:{},lalur_rb:{}}; } }
+function _apSistSet(eid,ano,o){ S.s('apuracao_sist_'+eid+'_'+ano, JSON.stringify(o)); }
+function _apSistNum(t){ const s=String(t||'').replace(/[^\d,.-]/g,''); if(!s) return 0; return parseFloat(s.includes(',')?s.replace(/\./g,'').replace(',','.'):s)||0; }
+function _apSistFmt(v){ return (Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2}); }
+function _apSistEditar(eid,ano,k,m,inp){ const o=_apSistGet(eid,ano); const t=String(inp.value||'').trim(); if(t==='') delete o[k][m]; else o[k][m]=_apSistNum(t); _apSistSet(eid,ano,o); inp.value=t===''?'':_apSistFmt(o[k][m]); _apSistTick(true); if(k.endsWith('_rb')) _apSistRbRefresh(); }
+// Anexar PDFs: identifica tributo (CSLL/IRPJ), tipo (Lucro Real × Estimado = receita bruta) e a competência dentro do próprio PDF
+function _apSistAnexar(){
+  const eid=window._currentApuracaoEid||window._apuracaoEidAtual||(window.ApPres&&ApPres._ST&&ApPres._ST.eid); if(!eid){ toast('Abra a apuração de uma empresa.','err'); return; }
+  const inp=document.createElement('input'); inp.type='file'; inp.accept='.pdf'; inp.multiple=true;
+  inp.onchange=async()=>{
+    const emp=S.emps().find(e=>String(e.eid)===String(eid))||{}, cnpjEmp=String(emp.cnpj||'').replace(/\D/g,'');
+    const res=[], erros=[];
+    for(const f of inp.files){
+      try{
+        const pdf=await pdfjsLib.getDocument({data:await f.arrayBuffer()}).promise; let t='';
+        for(let p=1;p<=pdf.numPages;p++){ const pg=await pdf.getPage(p); const c=await pg.getTextContent(); t+=c.items.map(x=>x.str).join(' ')+'\n'; }
+        const T=t.replace(/\s+/g,' ');
+        const comp=(T.match(/Compet[êe]ncia:\s*(\d{2})\/(\d{4})/i)||[]);
+        if(!comp[1]){ erros.push(f.name+': não achei a competência'); continue; }
+        const trib=/CONTRIBUI[ÇC][ÃA]O SOCIAL/i.test(T)?'CSLL':(/IMPOSTO DE RENDA/i.test(T)?'IRPJ':'');
+        const estimado=/Lucro:\s*Estimado/i.test(T);
+        const v=[...T.matchAll(/\(=\)\s*(?:CSLL|IRPJ)\s+a\s+recolher\s+(-?[\d.]+,\d{2})/gi)].map(x=>x[1]);
+        if(!trib||!v.length){ erros.push(f.name+': não achei "(=) '+(trib||'CSLL/IRPJ')+' a recolher"'); continue; }
+        const cnpjPdf=((T.match(/C\.?N\.?P\.?J\.?:\s*([\d./-]+)/i)||[])[1]||'').replace(/\D/g,'');
+        if(cnpjEmp&&cnpjPdf&&cnpjPdf.slice(0,8)!==cnpjEmp.slice(0,8)){ erros.push(f.name+': CNPJ do PDF ('+cnpjPdf+') não é desta empresa'); continue; }
+        const k=(trib==='CSLL'?'lacs':'lalur')+(estimado?'_rb':'');
+        res.push({k,m:+comp[1],ano:+comp[2],valor:_apSistNum(v[v.length-1]),arq:f.name});
+      }catch(e){ erros.push(f.name+': '+e.message); }
+    }
+    if(!res.length){ toast('Nenhum valor lido.\n'+erros.join('\n'),'err'); return; }
+    const porAno={}; res.forEach(r=>{ (porAno[r.ano]=porAno[r.ano]||_apSistGet(eid,r.ano))[r.k][r.m]=r.valor; });
+    Object.keys(porAno).forEach(a=>_apSistSet(eid,a,porAno[a]));
+    const nm={lacs:'LACS',lalur:'LALUR',lacs_rb:'LACS receita bruta',lalur_rb:'LALUR receita bruta'};
+    alert('Lidos '+res.length+' PDF(s):\n\n'+res.sort((a,b)=>a.k.localeCompare(b.k)||a.m-b.m).map(r=>nm[r.k]+' — competência '+String(r.m).padStart(2,'0')+'/'+r.ano+' — a recolher R$ '+_apSistFmt(r.valor)).join('\n')+(erros.length?'\n\nNão lidos:\n'+erros.join('\n'):'')+'\n\nSe já havia valor nessa competência, foi substituído. Pode editar na própria linha.');
+    _apSistTick(true); _apSistRbRefresh();
+  };
+  inp.click();
+}
+// Lucro Real Anual: linhas "meu sistema" + "diferença" logo abaixo de CSLL A RECOLHER e IRPJ A RECOLHER
+function _apSistTick(forcar){
+  const eid=window._currentApuracaoEid, base=document.getElementById('csll_recolher_0'); if(!eid||!base) return;
+  const ano=window._currentApuracaoAno||+(document.getElementById('apuracaoFormAnoNome')?.textContent||2026), o=_apSistGet(eid,ano);
+  [['csll_recolher_','lacs'],['irpj_recolher_','lalur']].forEach(([pf,k])=>{
+    const el0=document.getElementById(pf+'0'); if(!el0) return; const tr=el0.closest('tr'); if(!tr) return;
+    let r1=tr.nextElementSibling;
+    if(!r1||r1.getAttribute('data-apsist')!==k){
+      const ncel=tr.cells.length, off=ncel-12;
+      const mk=(rot,cls,bg)=>{ const x=document.createElement('tr'); x.setAttribute('data-apsist',k+(cls||'')); let h=''; for(let c=0;c<off;c++) h+=c===off-1?'<td style="padding:6px 12px;border:1px solid #ccc;background:'+bg+';color:#111;font-weight:600">'+rot+'</td>':'<td style="border:none;background:transparent"></td>'; for(let i=0;i<12;i++) h+='<td style="padding:3px;border:1px solid #ccc;background:'+bg+'" data-apsist-i="'+i+'"></td>'; x.innerHTML=h; return x; };
+      const a=mk(_AP_SIST_ROT[k],'','#e0f2fe'), b=mk('Diferença (site − meu sistema)','_d','#f8fafc'); a.setAttribute('data-apsist',k);
+      for(let i=0;i<12;i++){ a.querySelector('[data-apsist-i="'+i+'"]').innerHTML='<input type="text" inputmode="decimal" data-apsist-k="'+k+'" data-apsist-m="'+(i+1)+'" style="width:100%;border:none;padding:4px;text-align:right;background:transparent;color:#111" placeholder="—" onchange="_apSistEditar(\''+eid+'\','+ano+',\''+k+'\','+(i+1)+',this)">'; }
+      tr.after(a); a.after(b); r1=a; forcar=true;
+    }
+    const r2=r1.nextElementSibling;
+    for(let i=0;i<12;i++){
+      const inp=r1.querySelector('input[data-apsist-m="'+(i+1)+'"]'), v=o[k][i+1];
+      if(inp&&document.activeElement!==inp&&(forcar||inp.value==='')) inp.value=v!=null?_apSistFmt(v):'';
+      const cel=r2&&r2.querySelector('[data-apsist-i="'+i+'"]'); if(!cel) continue;
+      if(v==null){ cel.innerHTML='<span style="display:block;text-align:right;padding:4px;color:#94a3b8">—</span>'; continue; }
+      const site=_revNum(pf+i), d=Math.round((site-v)*100)/100;
+      cel.innerHTML='<span style="display:block;text-align:right;padding:4px;font-weight:700;color:'+(Math.abs(d)<0.01?'#16a34a':(d>0?'#b45309':'#dc2626'))+'" title="'+(Math.abs(d)<0.01?'Iguais':(d>0?'O site está MAIOR':'O site está MENOR'))+'">'+(Math.abs(d)<0.01?'0,00 ✓':_apSistFmt(d))+'</span>';
+    }
+  });
+}
+setInterval(()=>{ try{ _apSistTick(false); }catch(e){} },1500);
+// Receita Bruta (apuracao-presumido.js chama esta função para montar as 2 linhas logo abaixo de CSLL/IRPJ A RECOLHER)
+function _apSistLinhasRB(eid,ano,k,N,siteVals,TDI){
+  const o=_apSistGet(eid,ano)[k]||{}, bg='#e0f2fe';
+  let a='<tr><td style="border:none;width:34px"></td><td style="padding:6px 12px;border:1px solid #ccc;background:'+bg+';color:#111;font-weight:600">'+_AP_SIST_ROT[k]+'</td>', b='<tr><td style="border:none;width:34px"></td><td style="padding:6px 12px;border:1px solid #ccc;background:#f8fafc;color:#111">Diferença (site − meu sistema)</td>', ta=0, td=0;
+  for(let i=0;i<N;i++){
+    const v=o[i+1]; ta+=Number(v)||0;
+    a+='<td style="'+TDI+';background:'+bg+'"><input type="text" inputmode="decimal" value="'+(v!=null?_apSistFmt(v):'')+'" placeholder="—" onchange="_apSistEditar(\''+eid+'\','+ano+',\''+k+'\','+(i+1)+',this)" style="width:100%;border:none;padding:4px;text-align:right;background:transparent;color:#111"></td>';
+    if(v==null){ b+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:#f8fafc;color:#94a3b8">—</td>'; continue; }
+    const d=Math.round(((Number(siteVals[i])||0)-v)*100)/100; td+=d;
+    b+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:#f8fafc;font-weight:700;color:'+(Math.abs(d)<0.01?'#16a34a':(d>0?'#b45309':'#dc2626'))+'">'+(Math.abs(d)<0.01?'0,00 ✓':_apSistFmt(d))+'</td>';
+  }
+  a+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:'+bg+';color:#111">'+_apSistFmt(ta)+'</td></tr>'; b+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:#f8fafc;color:#111">'+_apSistFmt(td)+'</td></tr>';
+  return a+b;
+}
+function _apSistRbRefresh(){ try{ if(window.ApPres&&ApPres._ST&&ApPres._ST.modo==='rb'&&document.getElementById('apPresCalc')) ApPres.set('bloco',ApPres._ST.bloco); }catch(e){} }
 // 25/11/2026: "Cálculo reverso IRPJ/CSLL" (pedido do João Mimura): até que lucro os recolhimentos + retenções já cobrem e quanto falta, na posição de um mês.
 // 25/11/2026: calendário de dias úteis (fim de semana + feriados nacionais/bancários) — vencimento do IRPJ/CSLL = último dia útil do mês seguinte
 function _calPascoa(a){ const b=a%19,c=Math.floor(a/100),d=a%100,e=Math.floor(c/4),f=c%4,g=Math.floor((c+8)/25),h=Math.floor((c-g+1)/3),i=(19*b+c-e-h+15)%30,k=Math.floor(d/4),l=d%4,m=(32+2*f+2*k-i-l)%7,n=Math.floor((b+11*i+22*m)/451),mes=Math.floor((i+m-7*n+114)/31),dia=((i+m-7*n+114)%31)+1; return new Date(a,mes-1,dia); }
