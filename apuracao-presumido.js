@@ -666,7 +666,7 @@ async function _apManualDesfazer(eid,ano,id){
       var eid=window._currentApuracaoEid, ano=window._currentApuracaoAno||window._apuracaoAnoNovo; if(!eid||!ano||!t.closest('#apuracaoFormAnoConteudo')) return;
       if(/_total_\d+$/.test(t.id)||!_apManualEhPreenchivel(eid,t.id)) return;
       var m=Object.assign({},_apManualGet(eid,ano)), v=String(t.value||'').trim();
-      if(v===''){ delete m[t.id]; t.style.outline=''; t.title=''; } else m[t.id]=1;
+      m[t.id]=1; // 25/11/2026: apagar o valor também é edição (fica o ↺ para desfazer e voltar ao Balancete)
       S.s('apuracao_manual_'+eid+'_'+ano,m); _apManualMarcar(eid,ano);
     }catch(err){ console.warn('Ajuste manual:',err); }
   },true);
