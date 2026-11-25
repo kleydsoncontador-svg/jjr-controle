@@ -4478,13 +4478,13 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
 
 <div class="page" id="page-finpend" style="display:none">
   <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px">
-    <div class="ptitle" style="margin-bottom:0">Balancete publicado sem financeiro</div>
+    <div class="ptitle" style="margin-bottom:0" id="finPendTitulo">Balancete publicado sem financeiro</div>
     <div class="action-bar-sticky">
       <button class="btn bo bsm" onclick="goPage('dash')">← Voltar à Visão geral</button>
       <button class="action-btn action-btn-excel" onclick="finPendExcel()">📊 Gerar Excel</button>
     </div>
   </div>
-  <div class="psub">Meses em que o balancete foi publicado (por causa do prazo) mas o financeiro não foi entregue pelo cliente. Não entram N/A nem S/M.</div>
+  <div class="psub" id="finPendSub">Meses em que o balancete foi publicado (por causa do prazo) mas o financeiro não foi entregue pelo cliente. Não entram N/A nem S/M.</div>
   <div id="finPendRoot"></div>
 </div>
 
@@ -7477,18 +7477,28 @@ function _empBloqueadaEm(e,m){
   return (fs.bloqueios||[]).some(p=>p.de&&p.de<=m&&(!p.ate||m<p.ate));
 }
 // 24/11/2026: lista de empresas com balancete publicado e financeiro NÃO entregue, por mês
-let _finPendF={id:'',nome:'',grupo:'',cnpj:'',resp:'',trib:'',mes:''};
+let _finPendF={id:'',nome:'',grupo:'',cnpj:'',resp:'',trib:'',mes:'',aba:'pend'};
 function _finPendDados(){
-  const linhas=[];
+  const ent=_finPendF.aba==='ent', linhas=[];
   S.emps().forEach(e=>{
-    const meses=Object.keys(e.fechMes||{}).filter(m=>{ const f=e.fechMes[m]||{}; return (f.balancete==='ok') && !(f.financeiro==='ok'||f.financeiro==='na'||f.financeiro==='sm'); }).sort();
-    if(meses.length) linhas.push({e,meses});
+    const info={};
+    Object.keys(e.fechMes||{}).forEach(m=>{
+      const f=e.fechMes[m]||{};
+      if(f.balancete!=='ok') return;
+      if(!ent){ if(!(f.financeiro==='ok'||f.financeiro==='na'||f.financeiro==='sm')) info[m]={}; return; }
+      // entregue depois: financeiro marcado ✓ em dia posterior ao do balancete
+      if(f.financeiro!=='ok') return;
+      const b=_cronDataLocal(f.balancete_data), fi=_cronDataLocal(f.financeiro_data);
+      if(b&&fi&&fi>b) info[m]={bal:b,fin:fi};
+    });
+    const meses=Object.keys(info).sort();
+    if(meses.length) linhas.push({e,meses,info});
   });
   return linhas;
 }
 function _finPendFiltrado(){
   const F=_finPendF, low=v=>String(v||'').toLowerCase();
-  return _finPendDados().map(l=>({e:l.e,meses:l.meses.filter(m=>!F.mes||m===F.mes)})).filter(l=>l.meses.length).filter(l=>{
+  return _finPendDados().map(l=>({e:l.e,info:l.info,meses:l.meses.filter(m=>!F.mes||m===F.mes)})).filter(l=>l.meses.length).filter(l=>{
     const e=l.e;
     if(F.id&&!low(e.eid).includes(low(F.id))) return false;
     if(F.nome&&!low(e.nome).includes(low(F.nome))) return false;
@@ -7500,9 +7510,12 @@ function _finPendFiltrado(){
   }).sort((a,b)=>(a.e.nome||'').localeCompare(b.e.nome||'','pt-BR'));
 }
 function _finPendMesBR(m){ const p=String(m).split('-'); return p[1]+'/'+p[0]; }
+function _finPendDiaBR(d){ const p=String(d).split('-'); return p[2]+'/'+p[1]+'/'+p[0]; }
+function _finPendDias(a,b){ return Math.round((new Date(b+'T00:00:00')-new Date(a+'T00:00:00'))/86400000); }
+function _finPendAba(a){ _finPendF.aba=a; _finPendF.mes=''; const t=document.getElementById('finPendTitulo'); if(t) t.textContent=a==='ent'?'Financeiro entregue após o balancete':'Balancete publicado sem financeiro'; const s=document.getElementById('finPendSub'); if(s) s.textContent=a==='ent'?'Meses em que o balancete foi publicado por causa do prazo e o cliente entregou o financeiro depois (você marcou o ✓ do financeiro em data posterior à do balancete).':'Meses em que o balancete foi publicado (por causa do prazo) mas o financeiro não foi entregue pelo cliente. Não entram N/A nem S/M.'; renderFinPend(); }
 function renderFinPend(){
   const root=document.getElementById('finPendRoot'); if(!root) return;
-  const todos=_finPendDados(), F=_finPendF;
+  const todos=_finPendDados(), F=_finPendF, ent=F.aba==='ent';
   const meses=[...new Set(todos.flatMap(l=>l.meses))].sort();
   const grupos=[...new Set(todos.map(l=>l.e.grupoNome).filter(Boolean))].sort((a,b)=>a.localeCompare(b,'pt-BR'));
   const resps=[...new Set(todos.map(l=>l.e.resp).filter(Boolean))].sort();
@@ -7510,23 +7523,29 @@ function renderFinPend(){
   const opt=(arr,v,t,fmt)=>'<option value="">'+t+'</option>'+arr.map(x=>'<option value="'+esc(x)+'"'+(x===v?' selected':'')+'>'+esc(fmt?fmt(x):x)+'</option>').join('');
   const inp=(k,ph,w)=>'<input class="fi" style="width:'+w+';padding:4px 6px;font-size:12px" placeholder="🔎 '+ph+'" value="'+esc(F[k])+'" oninput="_finPendF.'+k+'=this.value;_finPendCorpo()">';
   const sel=(k,html)=>'<select class="fi" style="width:100%;padding:4px 6px;font-size:12px" onchange="_finPendF.'+k+'=this.value;_finPendCorpo()">'+html+'</select>';
-  root.innerHTML='<div id="finPendResumo" style="font-size:12px;color:var(--slate);margin:12px 0 6px"></div>'
-    +'<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr><th>ID</th><th>Empresa</th><th>Grupo</th><th>CNPJ</th><th>Resp.</th><th>Tributação</th><th style="width:40%">Meses com balancete publicado sem financeiro</th></tr>'
+  const aba=(k,t)=>'<button class="btn '+(F.aba===k?'bp':'bo')+' bsm" onclick="_finPendAba(\''+k+'\')">'+t+'</button>';
+  root.innerHTML='<div style="display:flex;gap:8px;margin:12px 0 0;flex-wrap:wrap">'+aba('pend','⚠ Ainda sem financeiro')+aba('ent','✅ Financeiro entregue após o balancete')+'</div>'
+    +'<div id="finPendResumo" style="font-size:12px;color:var(--slate);margin:12px 0 6px"></div>'
+    +'<div style="overflow-x:auto"><table class="tbl" style="width:100%"><thead><tr><th>ID</th><th>Empresa</th><th>Grupo</th><th>CNPJ</th><th>Resp.</th><th>Tributação</th><th style="width:40%">'+(ent?'Meses entregues em atraso (balancete → financeiro)':'Meses com balancete publicado sem financeiro')+'</th></tr>'
     +'<tr><th>'+inp('id','ID','60px')+'</th><th>'+inp('nome','empresa','100%')+'</th><th>'+sel('grupo',opt(grupos,F.grupo,'Todos'))+'</th><th>'+inp('cnpj','CNPJ','140px')+'</th><th>'+sel('resp',opt(resps,F.resp,'Todos'))+'</th><th>'+sel('trib',opt(tribs,F.trib,'Todas'))+'</th><th>'+sel('mes',opt(meses,F.mes,'Todos os meses',_finPendMesBR))+'</th></tr></thead><tbody id="finPendCorpo"></tbody></table></div>';
   _finPendCorpo();
 }
 function _finPendCorpo(){
   const tb=document.getElementById('finPendCorpo'); if(!tb) return;
-  const lin=_finPendFiltrado();
+  const lin=_finPendFiltrado(), ent=_finPendF.aba==='ent';
   const rs=document.getElementById('finPendResumo'); if(rs) rs.innerHTML='<b>'+lin.length+'</b> empresa(s) · <b>'+lin.reduce((s,l)=>s+l.meses.length,0)+'</b> mês(es)';
-  tb.innerHTML=lin.length?lin.map(l=>'<tr style="cursor:pointer" onclick="goEmpresa(\''+l.e.eid+'\')"><td><span class="idtag">'+l.e.eid+'</span></td><td><b>'+esc(l.e.nome)+'</b></td><td style="font-size:11px">'+esc(l.e.grupoNome||'—')+'</td><td style="font-family:var(--mono);font-size:12px;white-space:nowrap">'+esc(l.e.cnpj||'—')+'</td><td>'+esc(l.e.resp||'—')+'</td><td style="font-size:12px">'+esc(l.e.reg||'—')+'</td><td><div style="display:flex;flex-wrap:wrap;gap:4px">'+l.meses.map(m=>'<span style="background:var(--amber-bg);color:var(--amber);border-radius:4px;padding:2px 7px;font-size:11.5px;font-weight:600">'+_finPendMesBR(m)+'</span>').join('')+'</div></td></tr>').join('')
+  const chip=(l,m)=>{ const i=l.info[m]||{}; return ent
+    ? '<span style="background:var(--green-bg,#dcfce7);color:var(--green,#166534);border-radius:4px;padding:2px 7px;font-size:11.5px;font-weight:600" title="Balancete em '+_finPendDiaBR(i.bal)+' · financeiro em '+_finPendDiaBR(i.fin)+'">'+_finPendMesBR(m)+' · fin. '+_finPendDiaBR(i.fin).slice(0,5)+' (+'+_finPendDias(i.bal,i.fin)+'d)</span>'
+    : '<span style="background:var(--amber-bg);color:var(--amber);border-radius:4px;padding:2px 7px;font-size:11.5px;font-weight:600">'+_finPendMesBR(m)+'</span>'; };
+  tb.innerHTML=lin.length?lin.map(l=>'<tr style="cursor:pointer" onclick="goEmpresa(\''+l.e.eid+'\')"><td><span class="idtag">'+l.e.eid+'</span></td><td><b>'+esc(l.e.nome)+'</b></td><td style="font-size:11px">'+esc(l.e.grupoNome||'—')+'</td><td style="font-family:var(--mono);font-size:12px;white-space:nowrap">'+esc(l.e.cnpj||'—')+'</td><td>'+esc(l.e.resp||'—')+'</td><td style="font-size:12px">'+esc(l.e.reg||'—')+'</td><td><div style="display:flex;flex-wrap:wrap;gap:4px">'+l.meses.map(m=>chip(l,m)).join('')+'</div></td></tr>').join('')
     :'<tr><td colspan="7" style="text-align:center;color:var(--slate);padding:24px">Nenhuma empresa neste filtro.</td></tr>';
 }
 function finPendExcel(){
-  const lin=_finPendFiltrado(); if(!lin.length){ toast('Nada para exportar.','err'); return; }
-  const rows=[['ID','Empresa','Grupo','CNPJ','Responsável','Tributação','Qtd meses','Meses']].concat(lin.map(l=>[l.e.eid,l.e.nome,l.e.grupoNome||'',l.e.cnpj||'',l.e.resp||'',l.e.reg||'',l.meses.length,l.meses.map(_finPendMesBR).join(', ')]));
-  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),'Sem financeiro');
-  XLSX.writeFile(wb,'Balancete_sem_financeiro_'+new Date().toISOString().slice(0,10)+'.xlsx');
+  const lin=_finPendFiltrado(), ent=_finPendF.aba==='ent'; if(!lin.length){ toast('Nada para exportar.','err'); return; }
+  const mt=(l,m)=>ent?_finPendMesBR(m)+' (balancete '+_finPendDiaBR(l.info[m].bal)+', financeiro '+_finPendDiaBR(l.info[m].fin)+')':_finPendMesBR(m);
+  const rows=[['ID','Empresa','Grupo','CNPJ','Responsável','Tributação','Qtd meses',ent?'Meses entregues após o balancete':'Meses sem financeiro']].concat(lin.map(l=>[l.e.eid,l.e.nome,l.e.grupoNome||'',l.e.cnpj||'',l.e.resp||'',l.e.reg||'',l.meses.length,l.meses.map(m=>mt(l,m)).join('; ')]));
+  const wb=XLSX.utils.book_new(); XLSX.utils.book_append_sheet(wb,XLSX.utils.aoa_to_sheet(rows),ent?'Entregue apos balancete':'Sem financeiro');
+  XLSX.writeFile(wb,(ent?'Financeiro_entregue_apos_balancete_':'Balancete_sem_financeiro_')+new Date().toISOString().slice(0,10)+'.xlsx');
 }
 function goPage(id){
   if(_ehPerfilFiscal()&&id!=='dash') id='dash'; // perfil fiscal: só a Visão geral
