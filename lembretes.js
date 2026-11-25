@@ -104,7 +104,7 @@
           <button class="btn bp" onclick="lemAbrirNovo()">＋ Adicionar lembrete</button>
         </div>
       </div>
-      <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--slate);margin-bottom:10px"><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#1E3A8A;vertical-align:middle"></b> com lembrete pendente</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#B91C1C;vertical-align:middle"></b> pendente e atrasado</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#16A34A;vertical-align:middle"></b> tudo concluído</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;outline:2px solid var(--teal);vertical-align:middle"></b> hoje</span></div>
+      <div style="display:flex;gap:14px;flex-wrap:wrap;font-size:11.5px;color:var(--slate);margin-bottom:10px"><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#1E3A8A;vertical-align:middle"></b> com lembrete pendente</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#B91C1C;vertical-align:middle"></b> pendente e atrasado</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#16A34A;vertical-align:middle"></b> tudo concluído</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;outline:2px solid var(--teal);vertical-align:middle"></b> hoje</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#CBD5E1;vertical-align:middle"></b> fim de semana</span><span><b style="display:inline-block;width:11px;height:11px;border-radius:3px;background:#FDE68A;vertical-align:middle"></b> feriado nacional</span></div>
       <div class="lem-grid">`;
     for (let m = 0; m < 12; m++) {
       const primeiro = new Date(LEM.ano, m, 1).getDay(), dias = new Date(LEM.ano, m + 1, 0).getDate();
@@ -114,7 +114,9 @@
         const di = LEM.ano + '-' + p2(m + 1) + '-' + p2(d), ls = porDia[di] || [];
         const pend = ls.filter(x => !x.feito).length;
         const cls = 'lem-d' + (di === hoje ? ' hoje' : '') + (ls.length ? ' tem' + (pend ? (di < hoje ? ' atras' : '') : ' feito') : '');
-        h += `<button class="${cls}" data-d="${di}" onclick="lemAbrirDia(this.dataset.d)" title="${ls.length ? ls.length + ' lembrete(s)' : ''}">${d}${ls.length > 1 ? `<small>${ls.length}</small>` : ''}</button>`;
+        const wd = (primeiro + d - 1) % 7, fer = (typeof _calFeriados === 'function') && _calFeriados(LEM.ano).has(di); // 25/11/2026: fim de semana e feriado nacional/bancário com cor própria
+        const stl = ls.length ? '' : (fer ? 'background:#FDE68A;color:#92400E;font-weight:700' : (wd === 0 || wd === 6 ? 'background:#CBD5E1;color:#475569' : ''));
+        h += `<button class="${cls}" style="${stl}" data-d="${di}" onclick="lemAbrirDia(this.dataset.d)" title="${ls.length ? ls.length + ' lembrete(s)' : (fer ? 'Feriado' : (wd === 0 || wd === 6 ? 'Fim de semana' : ''))}">${d}${ls.length > 1 ? `<small>${ls.length}</small>` : ''}</button>`;
       }
       h += '</div></div>';
     }
