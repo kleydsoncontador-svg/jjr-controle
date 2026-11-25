@@ -640,7 +640,23 @@ function _apManualEhPreenchivel(eid,id){
 }
 function _apManualMarcar(eid,ano){
   var m=_apManualGet(eid,ano);
-  Object.keys(m).forEach(function(id){ var el=document.getElementById(id); if(!el) return; el.style.outline='2px solid #f59e0b'; el.style.outlineOffset='-2px'; el.title='Ajustado manualmente — o Balancete não sobrescreve. Apague o valor para voltar ao Balancete.'; });
+  Object.keys(m).forEach(function(id){ var el=document.getElementById(id); if(!el) return; el.style.outline='2px solid #f59e0b'; el.style.outlineOffset='-2px'; el.title='Ajustado manualmente — o Balancete não sobrescreve. Clique em ↺ para desfazer.';
+    // 25/11/2026: botãozinho ↺ no canto esquerdo da célula editada, para desfazer a edição e voltar ao valor do Balancete
+    var td=el.parentElement; if(!td||td.querySelector('.apman-undo')) return; td.style.position='relative';
+    var b=document.createElement('button'); b.type='button'; b.className='apman-undo'; b.textContent='↺'; b.title='Desfazer a edição (volta ao valor do Balancete)';
+    b.style.cssText='position:absolute;left:2px;top:50%;transform:translateY(-50%);z-index:2;font-size:10px;line-height:1;padding:1px 3px;border:1px solid #f59e0b;border-radius:3px;background:#fff7ed;color:#b45309;cursor:pointer';
+    b.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); _apManualDesfazer(eid,ano,id); };
+    td.appendChild(b);
+  });
+}
+async function _apManualDesfazer(eid,ano,id){
+  var m=Object.assign({},_apManualGet(eid,ano)); delete m[id]; S.s('apuracao_manual_'+eid+'_'+ano,m);
+  var el=document.getElementById(id); if(el){ el.style.outline=''; el.title=''; var bt=el.parentElement&&el.parentElement.querySelector('.apman-undo'); if(bt) bt.remove(); }
+  try{
+    if(/^(ad_perm|ad_temp|excl_perm|excl_temp)(_irpj)?_\d+_\d+$/.test(id)){ if(typeof _apAdExAplicar==='function') await _apAdExAplicar(eid,ano); }
+    else { var lin=(id.match(/^(.*)_(\d+)$/)||[])[1]; if(lin&&typeof _apBalPreencher==='function') await _apBalPreencher(eid,String(ano),lin); }
+    toast('Edição desfeita: voltou o valor do Balancete.','ok');
+  }catch(e){ toast('Não consegui buscar o valor do Balancete: '+(e.message||e),'err'); }
 }
 (function(){
   if(window.__apManualInit) return; window.__apManualInit=true;
