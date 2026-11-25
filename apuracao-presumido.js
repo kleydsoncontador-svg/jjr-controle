@@ -92,7 +92,7 @@
     var c=container(); if(!c){ toast('Tela de apuração não encontrada','err'); return; }
     c.style.display='flex'; desenhar();
     // 25/11/2026: retenções da engrenagem (mesmas contas do Lucro Real Anual) = débito de janeiro; depois débito do mês + saldo anterior
-    if(ST.modo==='rb'&&typeof _apBalRetencoes==='function') _apBalRetencoes(ST.eid,ST.ano).then(function(r){ var mapa={csll_retida:'csll_ret',irrf:'irrf',irrf_ap_fin:'irrf_af'}, D=dados(), mud=false; ['comp','caixa'].forEach(function(rg){ Object.keys(mapa).forEach(function(k){ if(!r[k]) return; var dk=mapa[k]; D[rg].ded[dk]=D[rg].ded[dk]||[]; r[k].forEach(function(v,i){ if(v==null) return; if(NUM(D[rg].ded[dk][i])!==v){ D[rg].ded[dk][i]=v; mud=true; } }); }); }); if(mud){ salvar(D); atualizar(); } }).catch(function(e){ console.warn('Retenções RB:',e); });
+    if(ST.modo==='rb'&&typeof _apBalRetencoes==='function') _apBalRetencoes(ST.eid,ST.ano).then(function(r){ var mapa={csll_retida:'csll_ret',irrf:'irrf',irrf_ap_fin:'irrf_af'}, D=dados(), mud=false; ['comp','caixa'].forEach(function(rg){ Object.keys(mapa).forEach(function(k){ if(!r[k]) return; var dk=mapa[k]; D[rg].ded[dk]=D[rg].ded[dk]||[]; r[k].forEach(function(v,i){ if(v==null) return; var mk=rg+'|ded|'+dk+'|'+i; if(D.manual&&D.manual[mk]){ if(D.manual[mk].orig!==v){ D.manual[mk].orig=v; mud=true; } return; } if(NUM(D[rg].ded[dk][i])!==v){ D[rg].ded[dk][i]=v; mud=true; } }); }); }); if(mud){ salvar(D); atualizar(); } }).catch(function(e){ console.warn('Retenções RB:',e); });
     montarMapaBalancete().catch(function(e){ console.warn('Apuração × Balancete:',e); });
   }
   function voltar(){
@@ -150,7 +150,7 @@
     });
     h+='</tbody></table></div>';
     h+='<div id="apPresCalc" style="margin-top:18px"></div></div>';
-    c.innerHTML=h; atualizar();
+    c.innerHTML=h; atualizar(); try{ marcarManual(); }catch(e){}
   }
   function valsDe(bloco){ var D=dados(), R=D[ST.regime]; return R[bloco]||{}; }
   function atualizar(){
@@ -205,17 +205,39 @@
     if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lalur_rb',N,(function(){ var a=[]; for(var i=0;i<N;i++) a.push(rows[i]?rows[i].iPagar:0); return a; })(),TDI);
     h+='</tbody></table></div><div style="font-size:11.5px;color:#666;margin-top:8px;line-height:1.5">Linhas "(-)" entram positivas e são subtraídas. Percentuais: comércio/indústria 8% (IRPJ) e 12% (CSLL); serviços e demais conforme <b>Parâmetros</b>. '
       +'Adicional de 10% do IRPJ sobre o que passa de R$ 60.000 por trimestre (R$ 20.000 por mês). '+(lc?'Acréscimo da LC 224/2025 sobre a parcela que passa do limite, proporcional ao percentual de cada atividade.':'')+'</div>';
-    tc.innerHTML=h;
+    tc.innerHTML=h; try{ marcarManual(); }catch(e){}
   }
+  function marcarManual(){
+    var D=dados(), man=D.manual||{}; var c=container(); if(!c) return;
+    c.querySelectorAll('input[data-id][data-i],input[data-ded][data-i]').forEach(function(inp){
+      var ded=inp.hasAttribute('data-ded'), mk=ded?ST.regime+'|ded|'+inp.getAttribute('data-ded')+'|'+inp.getAttribute('data-i'):manKey(inp.getAttribute('data-id'),inp.getAttribute('data-i')), o=man[mk]; if(!o) return;
+      inp.style.outline='2px solid #f59e0b'; inp.style.outlineOffset='-2px';
+      inp.title='Editado à mão — valor original: '+FMT(o.orig)+'. Clique em ↺ para desfazer.';
+      var td=inp.parentElement; if(!td||td.querySelector('.apman-undo')) return; td.style.position='relative';
+      var b=document.createElement('button'); b.type='button'; b.className='apman-undo'; b.textContent='↺'; b.title='Desfazer (volta para '+FMT(o.orig)+')';
+      b.style.cssText='position:absolute;left:2px;top:50%;transform:translateY(-50%);z-index:2;font-size:10px;line-height:1;padding:1px 3px;border:1px solid #f59e0b;border-radius:3px;background:#fff7ed;color:#b45309;cursor:pointer';
+      b.onclick=function(ev){ ev.preventDefault(); ev.stopPropagation(); if(ded) desfazerDed(inp.getAttribute('data-ded'),+inp.getAttribute('data-i')); else desfazer(inp.getAttribute('data-id'),+inp.getAttribute('data-i')); };
+      td.appendChild(b);
+    });
+  }
+  function desfazer(id,i){
+    var D=dados(), R=D[ST.regime], mk=manKey(id,i), o=(D.manual||{})[mk]; if(!o) return;
+    R[ST.bloco][id]=R[ST.bloco][id]||[]; R[ST.bloco][id][i]=o.orig; delete D.manual[mk]; salvar(D); desenhar();
+    montarMapaBalancete().catch(function(){}); toast('Edição desfeita: voltou '+FMT(o.orig)+'.','ok');
+  }
+  function desfazerDed(id,i){ var D=dados(), R=D[ST.regime], mk=ST.regime+'|ded|'+id+'|'+i, o=(D.manual||{})[mk]; if(!o) return; R.ded[id]=R.ded[id]||[]; R.ded[id][i]=o.orig; delete D.manual[mk]; salvar(D); atualizar(); toast('Edição desfeita: voltou '+FMT(o.orig)+'.','ok'); }
   function set(k,v){ ST[k]=v; desenhar(); if(k==='regime'||k==='bloco') montarMapaBalancete().catch(function(){}); }
+  function manKey(id,i){ return ST.regime+'|'+ST.bloco+'|'+id+'|'+i; }
   function digitou(inp){
     var id=inp.getAttribute('data-id'), i=+inp.getAttribute('data-i'), D=dados(), R=D[ST.regime];
     var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value);
+    D.manual=D.manual||{}; var mk=manKey(id,i); if(!D.manual[mk]) D.manual[mk]={orig:NUM(((R[ST.bloco]||{})[id]||[])[i])}; // 25/11/2026: editado à mão (guarda o valor de antes)
     R[ST.bloco][id]=R[ST.bloco][id]||[]; R[ST.bloco][id][i]=v; inp.value=FMT(v); salvar(D); atualizar();
   }
   function digitouDed(inp){
     var id=inp.getAttribute('data-ded'), i=+inp.getAttribute('data-i'), D=dados(), R=D[ST.regime];
     var v=(typeof _parseInput==='function')?_parseInput(inp.value):NUM(inp.value);
+    D.manual=D.manual||{}; var mk=ST.regime+'|ded|'+id+'|'+i; if(!D.manual[mk]) D.manual[mk]={orig:NUM(((R.ded||{})[id]||[])[i])};
     R.ded[id]=R.ded[id]||[]; R.ded[id][i]=v; inp.value=FMT(v); salvar(D); atualizar();
   }
   function copiarContabil(){
@@ -251,6 +273,7 @@
         var ms=P.meses(i), tem=false, tot=0;
         ms.forEach(function(mm){ var c=meses[String(mm).padStart(2,'0')]; if(c){ tem=true; tot+=_apBalValor(c,itens,neg?'D':'C'); } });
         if(!tem) continue;
+        var mk=ST.regime+'|cont|'+id+'|'+i; if(D.manual&&D.manual[mk]){ if(D.manual[mk].orig!==R2(tot)){ D.manual[mk].orig=R2(tot); mudou=true; } continue; } // editado à mão: o Balancete não sobrescreve
         R.cont[id]=R.cont[id]||[]; if(R.cont[id][i]!==R2(tot)){ R.cont[id][i]=R2(tot); mudou=true; }
       }
     });
@@ -407,7 +430,7 @@ async function _apAdExAplicar(eid,ano){
           var contas=meses[String(i+1).padStart(2,'0')]; if(!contas) continue;
           var inp=document.getElementById(pref+'_'+jj+'_'+i); if(!inp) continue;
           acum+=_apBalValor(contas,[it],it.nat||T.nat); var v=Math.round(acum*100)/100;
-          if(_apManualGet(eid,ano)[inp.id]) continue; // ajustado à mão: o Balancete não sobrescreve
+          if(_apManualGet(eid,ano)[inp.id]){ _apManualGuardarOrig(eid,ano,inp.id,v); continue; } // ajustado à mão: o Balancete não sobrescreve
           inp.value=v.toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
           inp.dispatchEvent(new Event('input',{bubbles:true})); inp.dispatchEvent(new Event('blur',{bubbles:true}));
         }
@@ -640,7 +663,7 @@ function _apManualEhPreenchivel(eid,id){
 }
 function _apManualMarcar(eid,ano){
   var m=_apManualGet(eid,ano);
-  Object.keys(m).forEach(function(id){ var el=document.getElementById(id); if(!el) return; el.style.outline='2px solid #f59e0b'; el.style.outlineOffset='-2px'; el.title='Ajustado manualmente — o Balancete não sobrescreve. Clique em ↺ para desfazer.';
+  Object.keys(m).forEach(function(id){ var el=document.getElementById(id); if(!el) return; el.style.outline='2px solid #f59e0b'; el.style.outlineOffset='-2px'; var o=m[id]&&typeof m[id]==='object'?m[id].orig:null; el.title='Editado à mão'+(o!=null&&o!==''?' — valor original (Balancete): '+o:'')+'. Clique em ↺ para desfazer.';
     // 25/11/2026: botãozinho ↺ no canto esquerdo da célula editada, para desfazer a edição e voltar ao valor do Balancete
     var td=el.parentElement; if(!td||td.querySelector('.apman-undo')) return; td.style.position='relative';
     var b=document.createElement('button'); b.type='button'; b.className='apman-undo'; b.textContent='↺'; b.title='Desfazer a edição (volta ao valor do Balancete)';
@@ -660,14 +683,22 @@ async function _apManualDesfazer(eid,ano,id){
 }
 (function(){
   if(window.__apManualInit) return; window.__apManualInit=true;
+  document.addEventListener('focusin',function(e){ var t=e.target; if(t&&t.tagName==='INPUT'&&t.id&&t.closest&&t.closest('#apuracaoFormAnoConteudo')) t.dataset.apAntes=t.value; },true);
   document.addEventListener('change',function(e){
     try{
       var t=e.target; if(!e.isTrusted||!t||t.tagName!=='INPUT'||!t.id||t.readOnly) return;
       var eid=window._currentApuracaoEid, ano=window._currentApuracaoAno||window._apuracaoAnoNovo; if(!eid||!ano||!t.closest('#apuracaoFormAnoConteudo')) return;
       if(/_total_\d+$/.test(t.id)||!_apManualEhPreenchivel(eid,t.id)) return;
       var m=Object.assign({},_apManualGet(eid,ano)), v=String(t.value||'').trim();
-      m[t.id]=1; // 25/11/2026: apagar o valor também é edição (fica o ↺ para desfazer e voltar ao Balancete)
+      var ant=m[t.id]; m[t.id]=(ant&&typeof ant==='object')?ant:{orig:(t.dataset.apAntes!=null?t.dataset.apAntes:'')}; // 25/11/2026: guarda o valor de antes (tooltip); apagar também é edição
       S.s('apuracao_manual_'+eid+'_'+ano,m); _apManualMarcar(eid,ano);
     }catch(err){ console.warn('Ajuste manual:',err); }
   },true);
 })();
+
+// 25/11/2026: guarda o valor que o Balancete daria numa célula editada à mão (aparece ao passar o mouse)
+function _apManualGuardarOrig(eid,ano,id,v){
+  try{ var m=Object.assign({},_apManualGet(eid,ano)); var f=(Number(v)||0).toLocaleString('pt-BR',{minimumFractionDigits:2,maximumFractionDigits:2});
+    var cur=m[id]; if(cur&&typeof cur==='object'&&cur.orig===f) return; m[id]={orig:f}; S.s('apuracao_manual_'+eid+'_'+ano,m);
+    var el=document.getElementById(id); if(el) el.title='Editado à mão — valor original (Balancete): '+f+'. Clique em ↺ para desfazer.'; }catch(e){}
+}
