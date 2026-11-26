@@ -45,7 +45,7 @@
       + '<div style="padding:4px 0 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
       + '<button class="btn bo bsm" onclick="LucImp.fechar()">← Lucros / Dividendos</button>'
       + '<div class="ptitle" style="margin:0">🚫 Impedimentos à distribuição de lucros</div>'
-      + '<span style="margin-left:auto;display:flex;gap:6px;align-items:center"><button class="btn bp bsm" onclick="LucImp.base()" title="Leis e artigos (texto original) com explicação simples">📜 Base legal</button><select class="si" onchange="LucImp.ano(this.value)">' + anos.map(y => '<option' + (y === ST.ano ? ' selected' : '') + '>' + y + '</option>').join('') + '</select></span></div>'
+      + '<span style="margin-left:auto;display:flex;gap:6px;align-items:center;flex-wrap:wrap"><button class="action-btn action-btn-excel" onclick="LucImp.excel()" title="Excel personalizado (JJR) com a lista da tela">📊 Gerar Excel</button><button class="action-btn action-btn-pdf" onclick="LucImp.pdf()" title="Relatório em PDF">📄 Gerar PDF</button><button class="btn bo bsm" onclick="LucImp.teams()" title="Copia a tabela formatada para colar (Ctrl+V) no Teams">💬 Copiar p/ Teams</button><button class="btn bp bsm" onclick="LucImp.base()" title="Leis e artigos (texto original) com explicação simples">📜 Base legal</button><select class="si" onchange="LucImp.ano(this.value)">' + anos.map(y => '<option' + (y === ST.ano ? ' selected' : '') + '>' + y + '</option>').join('') + '</select></span></div>'
       + '<div class="psub" style="margin:0 0 10px">STF, ADI 5.161 (30/09/2026): a multa do art. 32 da Lei 4.357/64 e do art. 52 da Lei 8.212/91 por distribuir lucros só existe quando os 3 requisitos acontecem ao mesmo tempo. Clique no nome de cada requisito para ver a lei.</div>'
       + '<div style="padding:10px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">'
       + '<label style="font-weight:700;font-size:13px">Adicionar empresa:</label>'
@@ -58,16 +58,22 @@
   }
   const fIn = (k, ph, w) => '<th style="padding:3px;background:var(--ink3,#2D3447)"><input class="si" data-fc="' + k + '" value="' + E(ST.fc[k] || '') + '" placeholder="' + (ph || '🔎') + '" oninput="LucImp.fcol(\'' + k + '\',this.value)" style="width:100%;min-width:' + (w || 50) + 'px;font-size:11px;padding:2px 4px"></th>';
   const fSel = (k, ops) => '<th style="padding:3px;background:var(--ink3,#2D3447)"><select class="si" onchange="LucImp.fcol(\'' + k + '\',this.value,1)" style="width:100%;font-size:11px;padding:2px">' + ops.map(([v, t]) => '<option value="' + v + '"' + ((ST.fc[k] || '') === v ? ' selected' : '') + '>' + t + '</option>').join('') + '</select></th>';
-  function corpo() {
-    const el = document.getElementById('lucImpCorpo'); if (!el) return;
+  // linhas da tela (com os filtros de coluna) — usadas também pelo Excel, PDF e Teams
+  function linhasAtuais() {
     const d = dados(), fc = ST.fc; const fa = (typeof S.fechAtual === 'function' && S.fechAtual()) || '';
     const mkHoje = String(fa).slice(0, 7);
-    let ids = Object.keys(d).filter(k => d[k] && typeof d[k] === 'object');
+    const ids = Object.keys(d).filter(k => d[k] && typeof d[k] === 'object');
     let linhas = ids.map(eid => { const e = emp(eid), r = d[eid]; return { eid, nome: e.nome || '(empresa #' + eid + ')', cnpj: e.cnpj || '', r, hoje: mkHoje ? bloqueado(eid, mkHoje) : false }; })
       .sort((a, b) => String(a.nome).localeCompare(String(b.nome), 'pt-BR'));
     linhas = linhas.filter(l => (!fc.eid || String(l.eid).includes(fc.eid.trim())) && (!fc.nome || nrm(l.nome).includes(nrm(fc.nome))) && (!fc.cnpj || String(l.cnpj).replace(/\D/g, '').includes(String(fc.cnpj).replace(/\D/g, '')))
       && REQ.every(([k]) => !fc[k] || (fc[k] === 's' ? !!(l.r.req || {})[k] : !(l.r.req || {})[k]))
       && (!fc.sit || (fc.sit === 'bloq' ? l.hoje : !l.hoje)));
+    linhas.forEach(l => { l.meses = []; for (let m = 1; m <= 12; m++) { const mk = mkDe(ST.ano, m); l.meses.push({ mk, b: bloqueado(l.eid, mk), ev: (l.r.ev || {})[mk] || '' }); } l.ok = reqOk(l.r); });
+    return { linhas, ids, mkHoje };
+  }
+  function corpo() {
+    const el = document.getElementById('lucImpCorpo'); if (!el) return;
+    const { linhas, ids, mkHoje } = linhasAtuais();
     const th = (t, al, tt) => '<th style="padding:6px 6px;background:var(--ink2);color:#fff;font-size:11px;white-space:nowrap;text-align:' + (al || 'center') + '"' + (tt ? ' title="' + E(tt) + '"' : '') + '>' + t + '</th>';
     let h = '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;z-index:2"><tr>'
       + th('ID') + th('Empresa', 'left') + th('CNPJ', 'left') + REQ.map(([k, n, t]) => th('<span onclick="LucImp.base(\'' + k + '\')" style="cursor:pointer;text-decoration:underline dotted" title="' + E(t) + ' — clique para ver a base legal">' + n + ' 📜</span>', 'center')).join('') + th('3 requisitos') + th('Situação ' + (mkHoje ? mkHoje.slice(5) + '/' + mkHoje.slice(0, 4) : 'hoje'))
@@ -125,6 +131,96 @@
     salvar(d); if (typeof _lucCalcCache !== 'undefined') try { _lucCalcCache = {}; } catch (e) { }
     corpo();
   }
+  // ── Relatórios: Excel (personalizado JJR), PDF e Teams — mesma lista/filtros da tela ──
+  const celMes = x => x.ev === 'bloq' ? 'Bloqueia' : x.ev === 'desbloq' ? 'Libera' : (x.b ? 'Bloqueado' : '');
+  const hojeBR = () => new Date().toLocaleDateString('pt-BR');
+  const sitTxt = (l, mkHoje) => l.hoje ? 'Impedida' : 'Liberada';
+  async function excel() {
+    const { linhas, mkHoje } = linhasAtuais(); if (!linhas.length) { toast('Nenhuma empresa na lista.', 'err'); return; }
+    if (typeof ExcelJS === 'undefined') { toast('Biblioteca de Excel não carregada. Atualize a página (Ctrl+F5).', 'err'); return; }
+    const AZUL = 'FF1E3558', VERDE = 'FF0F766E', OURO = 'FFFFD700', BRANCO = 'FFFFFFFF', VERM = 'FFB91C1C', VERM_CL = 'FFFEE2E2', VERDE_CL = 'FFDCFCE7', VERDE_OK = 'FF15803D', CINZA = 'FFF1F5F9', AMAR_CL = 'FFFEF3C7';
+    const fill = c => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: c } });
+    const bd = { top: { style: 'thin', color: { argb: 'FFCBD5E1' } }, left: { style: 'thin', color: { argb: 'FFCBD5E1' } }, bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } }, right: { style: 'thin', color: { argb: 'FFCBD5E1' } } };
+    const NC = 8 + 12;
+    const wb = new ExcelJS.Workbook(); wb.creator = 'JJR Consultoria Contábil';
+    const ws = wb.addWorksheet('Impedimentos ' + ST.ano, { views: [{ showGridLines: false, state: 'frozen', ySplit: 6, xSplit: 2 }], pageSetup: { paperSize: 9, orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0, margins: { left: 0.3, right: 0.3, top: 0.4, bottom: 0.4, header: 0.2, footer: 0.2 } } });
+    ws.columns = [{ width: 7 }, { width: 44 }, { width: 20 }, { width: 12 }, { width: 13 }, { width: 13 }, { width: 12 }, { width: 13 }, ...Array(12).fill({ width: 10.5 })];
+    const faixa = (r, txt, cor, tam, corTxt, alt) => { ws.mergeCells(r, 1, r, NC); const c = ws.getCell(r, 1); c.value = txt; c.font = { name: 'Calibri', size: tam || 11, bold: true, color: { argb: corTxt || BRANCO } }; c.fill = fill(cor); c.alignment = { vertical: 'middle', horizontal: 'left', indent: 1, wrapText: true }; ws.getRow(r).height = alt || 20; };
+    faixa(1, 'JJR CONSULTORIA CONTÁBIL', AZUL, 16, OURO, 28);
+    faixa(2, 'Impedimentos à distribuição de lucros — ' + ST.ano, VERDE, 13, BRANCO, 22);
+    faixa(3, 'STF, ADI 5.161 (30/09/2026): a multa do art. 32 da Lei 4.357/1964 e do art. 52 da Lei 8.212/1991 só incide quando os 3 requisitos existem ao mesmo tempo — débito inscrito em dívida ativa, exigibilidade não suspensa (art. 151 CTN) e sem garantia (art. 9º Lei 6.830/80).', CINZA, 9.5, 'FF334155', 30);
+    faixa(4, 'Gerado em ' + hojeBR() + (mkHoje ? ' · Situação no Fechamento Atual ' + mkHoje.slice(5) + '/' + mkHoje.slice(0, 4) : '') + ' · ' + linhas.length + ' empresa(s)', CINZA, 9, 'FF64748B', 16);
+    const cab = ['ID', 'Empresa', 'CNPJ', 'Dívida ativa', 'Não suspensa', 'Sem garantia', '3 requisitos', 'Situação', ...MESES.map(m => m + '/' + String(ST.ano).slice(2))];
+    const r6 = ws.getRow(6); cab.forEach((t, i) => { const c = r6.getCell(i + 1); c.value = t; c.font = { bold: true, color: { argb: BRANCO }, size: 10 }; c.fill = fill(i >= 8 ? VERDE : AZUL); c.alignment = { horizontal: i === 1 ? 'left' : 'center', vertical: 'middle', wrapText: true }; c.border = bd; }); r6.height = 30;
+    let r = 7;
+    linhas.forEach((l, i) => {
+      const row = ws.getRow(r), zebra = i % 2 ? CINZA : BRANCO;
+      const vals = [Number(l.eid) || l.eid, l.nome, l.cnpj, ...REQ.map(([k]) => (l.r.req || {})[k] ? 'Sim' : 'Não'), l.ok ? 'Sim' : 'Não', sitTxt(l, mkHoje), ...l.meses.map(celMes)];
+      vals.forEach((v, j) => { const c = row.getCell(j + 1); c.value = v; c.border = bd; c.fill = fill(zebra); c.font = { size: 10 }; c.alignment = { horizontal: j === 1 ? 'left' : 'center', vertical: 'middle' }; });
+      REQ.forEach((_, q) => { const c = row.getCell(4 + q); if (c.value === 'Sim') { c.font = { size: 10, bold: true, color: { argb: VERM } }; } else c.font = { size: 10, color: { argb: 'FF64748B' } }; });
+      const c7 = row.getCell(7); if (l.ok) { c7.fill = fill(VERM_CL); c7.font = { size: 10, bold: true, color: { argb: VERM } }; }
+      const c8 = row.getCell(8); c8.fill = fill(l.hoje ? VERM_CL : VERDE_CL); c8.font = { size: 10, bold: true, color: { argb: l.hoje ? VERM : VERDE_OK } };
+      l.meses.forEach((x, j) => { const c = row.getCell(9 + j); if (x.b) { c.fill = fill(VERM_CL); c.font = { size: 10, bold: !!x.ev, color: { argb: VERM } }; } else if (x.ev === 'desbloq') { c.fill = fill(VERDE_CL); c.font = { size: 10, bold: true, color: { argb: VERDE_OK } }; } });
+      r++;
+    });
+    r++;
+    const leg = (txt, cor) => { ws.mergeCells(r, 1, r, NC); const c = ws.getCell(r, 1); c.value = txt; c.font = { size: 9, color: { argb: 'FF334155' } }; c.fill = fill(cor); c.alignment = { horizontal: 'left', indent: 1 }; r++; };
+    leg('Legenda: "Bloqueia" = mês a partir do qual a distribuição de lucros fica bloqueada; "Bloqueado" = mês bloqueado (herdado); "Libera" = mês em que a distribuição volta a ser permitida.', AMAR_CL);
+    leg('Multa (quando os 3 requisitos existem): 50% do valor distribuído (empresa) e 50% do recebido (diretores/administradores), limitada a 50% do débito não garantido — Lei 4.357/1964, art. 32, §§ 1º e 2º.', AMAR_CL);
+    ws.autoFilter = { from: { row: 6, column: 1 }, to: { row: 6 + linhas.length, column: NC } };
+    const buf = await wb.xlsx.writeBuffer();
+    const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' })); a.download = 'Impedimentos_distribuicao_lucros_' + ST.ano + '.xlsx'; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+    toast('Excel gerado.', 'ok');
+  }
+  function pdf() {
+    const { linhas, mkHoje } = linhasAtuais(); if (!linhas.length) { toast('Nenhuma empresa na lista.', 'err'); return; }
+    if (!window.jspdf || !window.jspdf.jsPDF) { toast('Biblioteca de PDF não carregada. Atualize a página (Ctrl+F5).', 'err'); return; }
+    const doc = new window.jspdf.jsPDF({ orientation: 'landscape', unit: 'mm', format: 'a4' }); const W = doc.internal.pageSize.getWidth();
+    doc.setFillColor(30, 53, 88); doc.rect(0, 0, W, 16, 'F'); doc.setTextColor(255, 215, 0); doc.setFont('helvetica', 'bold'); doc.setFontSize(15); doc.text('JJR CONSULTORIA CONTÁBIL', 10, 10.5);
+    doc.setFillColor(15, 118, 110); doc.rect(0, 16, W, 9, 'F'); doc.setTextColor(255, 255, 255); doc.setFontSize(11.5); doc.text('Impedimentos à distribuição de lucros — ' + ST.ano, 10, 22);
+    doc.setTextColor(51, 65, 85); doc.setFont('helvetica', 'normal'); doc.setFontSize(8);
+    doc.text(doc.splitTextToSize('STF, ADI 5.161 (30/09/2026): a multa do art. 32 da Lei 4.357/1964 e do art. 52 da Lei 8.212/1991 só incide quando os 3 requisitos existem ao mesmo tempo — débito inscrito em dívida ativa, exigibilidade não suspensa (art. 151 CTN) e sem garantia (art. 9º Lei 6.830/80).', W - 20), 10, 30);
+    doc.setTextColor(100, 116, 139); doc.text('Gerado em ' + hojeBR() + (mkHoje ? ' · Situação no Fechamento Atual ' + mkHoje.slice(5) + '/' + mkHoje.slice(0, 4) : '') + ' · ' + linhas.length + ' empresa(s)', 10, 38);
+    const head = [['ID', 'Empresa', 'CNPJ', 'Dívida ativa', 'Não susp.', 'Sem garant.', '3 req.', 'Situação', ...MESES.map(m => m + '/' + String(ST.ano).slice(2))]];
+    const body = linhas.map(l => [String(l.eid), l.nome, l.cnpj, ...REQ.map(([k]) => (l.r.req || {})[k] ? 'Sim' : 'Não'), l.ok ? 'Sim' : 'Não', sitTxt(l, mkHoje), ...l.meses.map(x => x.ev === 'bloq' ? 'Bloqueia' : x.ev === 'desbloq' ? 'Libera' : (x.b ? 'Bloq.' : ''))]);
+    doc.autoTable({ startY: 41, head, body, theme: 'grid', styles: { fontSize: 7, cellPadding: 1.4, halign: 'center', valign: 'middle', lineColor: [203, 213, 225], lineWidth: 0.1 }, headStyles: { fillColor: [30, 53, 88], textColor: 255, fontStyle: 'bold' },
+      columnStyles: { 1: { halign: 'left', cellWidth: 52 }, 2: { cellWidth: 27 } }, alternateRowStyles: { fillColor: [241, 245, 249] },
+      didParseCell: c => { if (c.section !== 'body') return; const l = linhas[c.row.index]; const j = c.column.index;
+        if (j >= 3 && j <= 5 && c.cell.raw === 'Sim') { c.cell.styles.textColor = [185, 28, 28]; c.cell.styles.fontStyle = 'bold'; }
+        if (j === 6 && l.ok) { c.cell.styles.fillColor = [254, 226, 226]; c.cell.styles.textColor = [185, 28, 28]; c.cell.styles.fontStyle = 'bold'; }
+        if (j === 7) { c.cell.styles.fillColor = l.hoje ? [254, 226, 226] : [220, 252, 231]; c.cell.styles.textColor = l.hoje ? [185, 28, 28] : [21, 128, 61]; c.cell.styles.fontStyle = 'bold'; }
+        if (j >= 8) { const x = l.meses[j - 8]; if (x.b) { c.cell.styles.fillColor = [254, 226, 226]; c.cell.styles.textColor = [185, 28, 28]; if (x.ev) c.cell.styles.fontStyle = 'bold'; } else if (x.ev === 'desbloq') { c.cell.styles.fillColor = [220, 252, 231]; c.cell.styles.textColor = [21, 128, 61]; c.cell.styles.fontStyle = 'bold'; } } } });
+    let y = doc.lastAutoTable.finalY + 6; doc.setFontSize(7.5); doc.setTextColor(51, 65, 85);
+    doc.text(doc.splitTextToSize('Legenda: "Bloqueia" = mês a partir do qual a distribuição de lucros fica bloqueada; "Bloq." = mês bloqueado; "Libera" = mês em que a distribuição volta a ser permitida. Multa (com os 3 requisitos): 50% do valor distribuído (empresa) e 50% do recebido (diretores), limitada a 50% do débito não garantido — Lei 4.357/1964, art. 32, §§ 1º e 2º.', W - 20), 10, y);
+    const n = doc.getNumberOfPages(); for (let p = 1; p <= n; p++) { doc.setPage(p); doc.setFontSize(7); doc.setTextColor(148, 163, 184); doc.text('JJR Consultoria Contábil · página ' + p + ' de ' + n, W - 10, doc.internal.pageSize.getHeight() - 5, { align: 'right' }); }
+    doc.save('Impedimentos_distribuicao_lucros_' + ST.ano + '.pdf'); toast('PDF gerado.', 'ok');
+  }
+  async function teams() {
+    const { linhas, mkHoje } = linhasAtuais(); if (!linhas.length) { toast('Nenhuma empresa na lista.', 'err'); return; }
+    const td = (v, st) => '<td style="border:1px solid #CBD5E1;padding:4px 6px;font-size:12px;text-align:center;' + (st || '') + '">' + E(v) + '</td>';
+    const thh = (v, cor) => '<th style="border:1px solid #CBD5E1;padding:5px 6px;font-size:12px;background:' + (cor || '#1E3558') + ';color:#fff">' + E(v) + '</th>';
+    let html = '<div style="font-family:Segoe UI,Arial;font-size:13px"><div style="background:#1E3558;color:#FFD700;font-weight:700;font-size:15px;padding:6px 10px">JJR CONSULTORIA CONTÁBIL</div>'
+      + '<div style="background:#0F766E;color:#fff;font-weight:700;padding:5px 10px">Impedimentos à distribuição de lucros — ' + ST.ano + '</div>'
+      + '<div style="color:#334155;font-size:12px;margin:6px 0">STF, ADI 5.161 (30/09/2026): multa do art. 32 da Lei 4.357/1964 e do art. 52 da Lei 8.212/1991 só com os 3 requisitos ao mesmo tempo (dívida ativa, não suspensa, sem garantia).</div>'
+      + '<table style="border-collapse:collapse"><tr>' + thh('ID') + thh('Empresa') + thh('CNPJ') + thh('Dívida ativa') + thh('Não suspensa') + thh('Sem garantia') + thh('3 requisitos') + thh('Situação') + MESES.map(m => thh(m + '/' + String(ST.ano).slice(2), '#0F766E')).join('') + '</tr>';
+    const txt = ['JJR CONSULTORIA CONTÁBIL', 'Impedimentos à distribuição de lucros — ' + ST.ano, ''];
+    linhas.forEach((l, i) => {
+      const zebra = i % 2 ? 'background:#F1F5F9;' : '';
+      html += '<tr>' + td(l.eid, zebra) + td(l.nome, zebra + 'text-align:left;font-weight:600') + td(l.cnpj, zebra) + REQ.map(([k]) => td((l.r.req || {})[k] ? 'Sim' : 'Não', zebra + ((l.r.req || {})[k] ? 'color:#B91C1C;font-weight:700' : 'color:#64748B'))).join('')
+        + td(l.ok ? 'Sim' : 'Não', l.ok ? 'background:#FEE2E2;color:#B91C1C;font-weight:700' : zebra)
+        + td(sitTxt(l, mkHoje), l.hoje ? 'background:#FEE2E2;color:#B91C1C;font-weight:700' : 'background:#DCFCE7;color:#15803D;font-weight:700')
+        + l.meses.map(x => td(celMes(x), x.b ? 'background:#FEE2E2;color:#B91C1C;' + (x.ev ? 'font-weight:700' : '') : (x.ev === 'desbloq' ? 'background:#DCFCE7;color:#15803D;font-weight:700' : zebra))).join('') + '</tr>';
+      const bl = l.meses.filter(x => x.b).map(x => MESES[+x.mk.slice(5) - 1]);
+      txt.push(l.eid + ' - ' + l.nome + ' (' + l.cnpj + ') | 3 requisitos: ' + (l.ok ? 'Sim' : 'Não') + ' | ' + sitTxt(l, mkHoje) + ' | Meses bloqueados em ' + ST.ano + ': ' + (bl.length ? bl.join(', ') : 'nenhum'));
+    });
+    html += '</table><div style="font-size:11px;color:#64748B;margin-top:6px">"Bloqueia" = início do bloqueio · "Bloqueado" = mês bloqueado · "Libera" = distribuição permitida de novo. Gerado em ' + hojeBR() + '.</div></div>';
+    const t = txt.join('\n');
+    try {
+      if (window.ClipboardItem) await navigator.clipboard.write([new ClipboardItem({ 'text/html': new Blob([html], { type: 'text/html' }), 'text/plain': new Blob([t], { type: 'text/plain' }) })]);
+      else await navigator.clipboard.writeText(t);
+      toast('Copiado! Cole (Ctrl+V) na conversa do Teams.', 'ok');
+    } catch (e) { try { await navigator.clipboard.writeText(t); toast('Copiado como texto. Cole (Ctrl+V) no Teams.', 'ok'); } catch (e2) { toast('Não consegui copiar: ' + e2.message, 'err'); } }
+  }
   // ── Base legal (tela inteira): texto original do Planalto + explicação simples embaixo de cada dispositivo ──
   function renderBase(ov) {
     const B = root.LUC_IMP_BASE || [];
@@ -154,7 +250,7 @@
   }
   function irBase(id) { ST.tema = id; const el = document.getElementById('lucImpB_' + id); if (!el) return; document.querySelectorAll('[id^="lucImpB_"]').forEach(x => x.style.boxShadow = x === el ? '0 0 0 2px var(--teal)' : ''); el.scrollIntoView({ block: 'start' }); }
   root.LucImp = {
-    abrir, fechar, render, adicionar, remover, req, mes, base, irBase,
+    abrir, fechar, render, adicionar, remover, req, mes, base, irBase, excel, pdf, teams,
     voltar: () => { ST.view = 'lista'; render(); window.scrollTo(0, 0); },
     ano: a => { ST.ano = +a; render(); },
     fcol: (k, v, ja) => { ST.fc[k] = v; ST.foco = ja ? '' : k; clearTimeout(root._lucImpF); root._lucImpF = setTimeout(corpo, ja ? 0 : 250); },
