@@ -3509,6 +3509,9 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
         <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:4px;cursor:pointer">
           <input type="radio" name="lancctbClassificarLoteHistModo" value="bancario" checked onchange="_lancctbClassificarLoteAtualizarCampoHist()"> Usar o histórico bancário de cada lançamento
         </label>
+        <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;margin-bottom:4px;cursor:pointer" title="Monta o histórico pela linha do Fluxo de Caixa ligada a cada lançamento; sem Fluxo, usa o histórico bancário">
+          <input type="radio" name="lancctbClassificarLoteHistModo" value="fluxo" onchange="_lancctbClassificarLoteAtualizarCampoHist()"> Usar o histórico do Fluxo de Caixa (ex.: "Recebimento de HOSPITAL BLANC - NF 475 - parcela 1")
+        </label>
         <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;cursor:pointer">
           <input type="radio" name="lancctbClassificarLoteHistModo" value="fixo" onchange="_lancctbClassificarLoteAtualizarCampoHist()"> Personalizado — mesmo texto pra todos
         </label>
@@ -42725,8 +42728,12 @@ async function abrirLancctbClassificarLoteModal(){
   openModal('mLancctbClassificarLote');
 }
 function _lancctbClassificarLoteAtualizarCampoHist(){
-  const fixo=document.querySelector('input[name="lancctbClassificarLoteHistModo"]:checked')?.value==='fixo';
+  const modoSel=document.querySelector('input[name="lancctbClassificarLoteHistModo"]:checked')?.value;
+  const fixo=modoSel==='fixo';
   document.getElementById('lancctbClassificarLoteHistFixo').style.display=fixo?'':'none';
+  if(modoSel==='fluxo'){ try{ const sel=document.getElementById('lancctbClassificarLoteConta'); const rs=[..._lancctbRegistroSelecionados.values()];
+    const todasE=rs.every(r=>!(r.valor_saida>0)), todasS=rs.every(r=>r.valor_saida>0);
+    if(sel&&!sel.value&&(todasE||todasS)){ const alvo=todasE?'10000':'10001'; const op=[...sel.options].find(o=>new RegExp('^\\s*'+alvo+'\\b').test(o.textContent)||new RegExp('\\b'+alvo+'\\b').test(o.textContent.split(' - ')[0]||'')); if(op){ sel.value=op.value; toast('Conta sugerida: '+op.textContent.trim()+' (pode trocar).','info'); } } }catch(e){} }
 }
 // Cada lançamento vira sua própria partida dobrada (banco automático pelo
 // lado entrada/saída dele + a MESMA conta escolhida como contrapartida) —
@@ -42761,7 +42768,10 @@ async function _lancctbExecutarClassificarLote(){
       }
       const cb=cacheBanco[r.conta_bancaria_id];
       if(!cb?.conta_contabil_id){ falhas++; continue; }
-      const historico=histModo==='fixo'?histFixo:(r.historico_bancario||'');
+      // 26/11/2026: "Usar o histórico do Fluxo de Caixa" — Recebimento de / Pagamento a <cliente> - NF <n> - parcela <p> (Fluxo sugerido ou ligado a este lançamento)
+      const _itFx=(_lancctbUltimoRegistro||[]).find(it=>it.extrato&&it.extrato.id===r.id); const _fxL=_itFx?(_itFx.fluxoSugerido||_itFx.fluxoConciliado||null):null;
+      const _histFx=_fxL?(()=>{ const nome=String(_fxL.cliente_fornecedor_nome||_fxL.descricao||'').trim(); const nf=String(_fxL.numero||_fxL.documento_numero||'').trim(); return nome?((ehSaida?'Pagamento a ':'Recebimento de ')+nome+(nf?' - NF '+nf:'')+(_fxL.parcela?' - parcela '+_fxL.parcela:'')):''; })():'';
+      const historico=histModo==='fixo'?histFixo:(histModo==='fluxo'&&_histFx?_histFx:(r.historico_bancario||''));
       const bancoTipo=ehSaida?'C':'D', contrapartidaTipo=ehSaida?'D':'C';
       const linhas=[
         { empresa_eid:eid, data:r.data_pagamento, classificacao:cb.plano_contas.classificacao, conta_contabil_id:cb.conta_contabil_id, tipo:bancoTipo, valor, historico, lancamento_extrato_id:r.id, origem_match:'manual' },
@@ -42770,6 +42780,7 @@ async function _lancctbExecutarClassificarLote(){
       const { error } = await _supaClient.rpc('criar_lancamento_partida_dobrada',{ linhas });
       if(error){ console.error('Erro ao classificar em lote (id '+r.id+'):',error); falhas++; continue; }
       await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',r.id);
+      if(histModo==='fluxo'&&_fxL&&_fxL.id){ try{ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:r.id}).eq('id',_fxL.id); }catch(e){} }
       ok++;
     }
     toast(`${ok} lançamento(s) classificado(s)${falhas?`, ${falhas} com erro (veja o console)`:''}.`,falhas?'info':'ok');
