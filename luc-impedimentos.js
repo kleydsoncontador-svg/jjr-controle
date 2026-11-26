@@ -152,7 +152,7 @@
     ov.innerHTML = h + '</div>';
     if (ST.tema) setTimeout(() => irBase(ST.tema), 30); else window.scrollTo(0, 0);
   }
-  function irBase(id) { ST.tema = id; const el = document.getElementById('lucImpB_' + id); if (!el) return; document.querySelectorAll('[id^="lucImpB_"]').forEach(x => x.style.boxShadow = x === el ? '0 0 0 2px var(--teal)' : ''); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  function irBase(id) { ST.tema = id; const el = document.getElementById('lucImpB_' + id); if (!el) return; document.querySelectorAll('[id^="lucImpB_"]').forEach(x => x.style.boxShadow = x === el ? '0 0 0 2px var(--teal)' : ''); el.scrollIntoView({ block: 'start' }); }
   root.LucImp = {
     abrir, fechar, render, adicionar, remover, req, mes, base, irBase,
     voltar: () => { ST.view = 'lista'; render(); window.scrollTo(0, 0); },
