@@ -3378,7 +3378,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
 </div>
 
 <div class="mb" id="mLancctbConfigAbas" style="display:none">
-  <div class="modal" style="max-width:420px">
+  <div class="modal" style="max-width:560px">
     <div class="mt">
       <h3>Abas visíveis nesta empresa</h3>
       <button onclick="closeModal('mLancctbConfigAbas')">&#x2715;</button>
@@ -3386,6 +3386,7 @@ janela, não cancela nada, então o chip deixa reabrir pra ver o resultado. -->
     <div class="mc">
       <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Desmarque o que essa empresa não usa — some da barra de abas só aqui, os dados continuam salvos se algum dia precisar de novo.</div>
       <div id="lancctbConfigAbasBody" style="display:grid;gap:6px"></div>
+      <div id="lancctbConfigSaldoIni" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--border)"></div>
       <div class="ma"><button class="btn bp" onclick="closeModal('mLancctbConfigAbas')">Fechar</button></div>
     </div>
   </div>
@@ -24937,6 +24938,48 @@ function abrirLancctbConfigAbasModal(){
       ${esc(a.label)}
     </label>`).join('');
   openModal('mLancctbConfigAbas');
+  _lancctbNfSaldoIniRender();
+}
+// ═══ ⚙ Registro Contábil → "NF de saldo anterior" (pedido do usuário 26/11/2026) ═══
+// NF emitida ANTES da data escolhida: o pagamento (débito) vai para a conta escolhida em vez da 10001 e o recebimento (crédito) em vez da 10000.
+// Quem troca a conta é o trigger trg_nasa_nf_saldo_inicial no banco (vale para qualquer caminho de amarração); a configuração fica em
+// dados_app 'lancctb_nf_saldo_inicial_<eid>' = {antes:'AAAA-MM-DD', pagar:'<nº conta>', receber:'<nº conta>'}.
+function _lancctbNfSaldoIniGet(eid){ const v=S.g('lancctb_nf_saldo_inicial_'+eid); return (v&&typeof v==='object')?v:{}; }
+async function _lancctbNfSaldoIniRender(){
+  const el=document.getElementById('lancctbConfigSaldoIni'); if(!el) return;
+  const eid=_lancctbEidAtual; const cfg=_lancctbNfSaldoIniGet(eid);
+  el.innerHTML='<div style="font-size:12px;color:var(--slate)">Carregando plano de contas…</div>';
+  const { data: contas } = await _lancctbFetchTudo(()=>_supaClient.from('plano_contas').select('numero_conta,descricao,tipo').eq('empresa_eid',eid).eq('tipo','A').order('numero_conta'));
+  const mapa=new Map((contas||[]).map(c=>[String(c.numero_conta),c])); window.__lancctbNfSaldoIniMapa=mapa;
+  const rot=n=>{ const c=n?mapa.get(String(n)):null; return c?c.numero_conta+' - '+c.descricao:(n||''); };
+  el.innerHTML='<div style="font-weight:700;font-size:13px;margin-bottom:4px">📄 Notas fiscais de saldo anterior</div>'
+    +'<div style="font-size:12px;color:var(--slate);margin-bottom:8px">NF <b>emitida antes</b> da data abaixo (não importa o vencimento) é saldo anterior: ao amarrar, o pagamento vai para a conta escolhida em vez da <b>10001</b> e o recebimento em vez da <b>10000</b>. Deixe a data vazia para desligar.</div>'
+    +'<datalist id="lancctbNfSaldoIniLista">'+(contas||[]).map(c=>'<option value="'+esc(c.numero_conta+' - '+c.descricao)+'"></option>').join('')+'</datalist>'
+    +'<div class="fg"><div class="fl">NF emitidas antes de</div><input class="si" type="date" style="width:180px" value="'+esc(cfg.antes||'')+'" onchange="_lancctbNfSaldoIniSalvar(\'antes\',this)"></div>'
+    +'<div class="fg"><div class="fl">Pagamento → conta (em vez da 10001)</div><input class="si" list="lancctbNfSaldoIniLista" style="width:100%" placeholder="Digite o número ou o nome da conta…" value="'+esc(rot(cfg.pagar))+'" onchange="_lancctbNfSaldoIniSalvar(\'pagar\',this)"></div>'
+    +'<div class="fg"><div class="fl">Recebimento → conta (em vez da 10000)</div><input class="si" list="lancctbNfSaldoIniLista" style="width:100%" placeholder="Digite o número ou o nome da conta…" value="'+esc(rot(cfg.receber))+'" onchange="_lancctbNfSaldoIniSalvar(\'receber\',this)"></div>'
+    +'<button class="btn bo bsm" onclick="_lancctbNfSaldoIniReaplicar()" title="Passa para as contas acima os pagamentos/recebimentos JÁ amarrados a NF emitida antes da data">↻ Aplicar nos lançamentos já amarrados</button>';
+}
+function _lancctbNfSaldoIniSalvar(k,input){
+  const eid=_lancctbEidAtual; const cfg={..._lancctbNfSaldoIniGet(eid)};
+  const txt=String(input.value||'').trim();
+  if(k==='antes'){ if(txt) cfg.antes=txt; else delete cfg.antes; }
+  else if(!txt){ delete cfg[k]; }
+  else { const num=txt.split(' - ')[0].trim(); const mapa=window.__lancctbNfSaldoIniMapa;
+    if(!(mapa&&mapa.has(num))){ toast('Conta não encontrada no Plano de Contas desta empresa (só contas analíticas) — escolha uma da lista.','err'); input.value=''; delete cfg[k]; }
+    else { cfg[k]=num; input.value=num+' - '+mapa.get(num).descricao; } }
+  S.s('lancctb_nf_saldo_inicial_'+eid,cfg);
+  toast(cfg.antes&&(cfg.pagar||cfg.receber)?'Regra salva: NF emitidas antes de '+cfg.antes.split('-').reverse().join('/')+(cfg.pagar?' → pagamento na '+cfg.pagar:'')+(cfg.receber?', recebimento na '+cfg.receber:'')+'.':'Regra de NF de saldo anterior atualizada.','ok');
+}
+async function _lancctbNfSaldoIniReaplicar(){
+  const eid=_lancctbEidAtual; const cfg=_lancctbNfSaldoIniGet(eid);
+  if(!cfg.antes||!(cfg.pagar||cfg.receber)){ toast('Preencha a data e ao menos uma conta antes.','err'); return; }
+  try{ await new Promise(r=>setTimeout(r,800)); /* dá tempo da configuração chegar ao banco */
+    const { data, error } = await _supaClient.rpc('lancctb_reaplicar_nf_saldo_inicial',{ p_eid:String(eid) });
+    if(error) throw error;
+    toast(data?data+' lançamento(s) passado(s) para a conta de saldo anterior.':'Nada a mudar — os lançamentos já estavam nas contas certas.','ok');
+    try{ if(_lancctbAbaAtiva==='registro') renderLancctbRegistroContabil(); }catch(e){}
+  }catch(e){ toast('Não consegui aplicar: '+(e.message||e),'err'); }
 }
 function _lancctbToggleAbaVisivel(id,visivel){
   const eid=_lancctbEidAtual;
