@@ -36760,7 +36760,22 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       if(assoc.length>=2){ const sA=assoc.reduce((a,f)=>a+Math.round(vFluxo(f)*100),0); if(Math.abs(sA-Math.round(valor*100))<=1){ fl=assoc; _fixoAssoc=true; } } }
     // Intermediadora (SARFATY, REDFACTOR…): só vale a composição escolhida pela passada própria das intermediadoras (_fixoAssoc); nunca reescolhe nem separa por pessoas/linhas do Fluxo.
     if(ehPonteL&&!_fixoAssoc){ diagAglutinado.push(`${rotuloL}: intermediadora — resolvida só pela passada das intermediadoras`); return false; }
+    // 26/11/2026 (Pride, CREDITO DE BOLETO 16/07 R$ 129.162,50 = 30 linhas do Hospital Albert Sabin no Fluxo): a busca de combinações só olha até 20 linhas e a composição
+    // aceitava até 25 — um lote grande que fecha EXATO nunca amarrava. Atalho: TODAS as linhas do Fluxo do mesmo dia (depois ±1 dia) — ou todas de UM cliente nesse dia — somando
+    // exatamente o valor do banco formam a composição inteira (sem busca de subconjunto, até 200 linhas).
+    let _grupoInteiro=false;
     if(!_fixoAssoc){
+      const tol0=Math.round((ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)*100), alvo0=Math.round(valor*100);
+      const soma0=g=>g.reduce((a,f)=>a+Math.round(vFluxo(f)*100),0);
+      for(const jan of [0,1]){
+        const g=flTudo.filter(f=>_lancctbDiffDias(f.data,l.data_pagamento)<=jan); if(g.length<2) continue;
+        if(Math.abs(soma0(g)-alvo0)<=tol0){ fl=g; _grupoInteiro=true; break; }
+        const porCli=new Map(); g.forEach(f=>{ const k=String(f.cliente_fornecedor_nome||f.descricao||'').toUpperCase().replace(/\s+/g,' ').trim(); if(!k) return; (porCli.get(k)||porCli.set(k,[]).get(k)).push(f); });
+        const fecham=[...porCli.values()].filter(gc=>gc.length>=2&&Math.abs(soma0(gc)-alvo0)<=tol0);
+        if(fecham.length===1){ fl=fecham[0]; _grupoInteiro=true; break; }
+      }
+    }
+    if(!_fixoAssoc&&!_grupoInteiro){
       const tolCent=Math.round((ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)*100);
       for(const jan of [0,1,LANCCTB_MATCH_TOLERANCIA_DIAS]){
         const f2=flTudo.filter(f=>_lancctbDiffDias(f.data,l.data_pagamento)<=jan);
@@ -36779,7 +36794,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       comps.push({f,c:c||null});
     });
     cp.filter(c=>!cpUsadosMerge.has(c.id)).forEach(c=>comps.push({f:null,c}));
-    if(comps.length<2||comps.length>(_fixoAssoc?60:25)){ if(comps.length>25||fl.length) diagAglutinado.push(`${rotuloL}: ${comps.length} linha(s) de Fluxo candidata(s) (precisa de 2 a 25, data ±${LANCCTB_MATCH_TOLERANCIA_DIAS} dias)`); return false; }
+    if(comps.length<2||comps.length>(_fixoAssoc?60:(_grupoInteiro?200:25))){ if(comps.length>25||fl.length) diagAglutinado.push(`${rotuloL}: ${comps.length} linha(s) de Fluxo candidata(s) (precisa de 2 a 25, data ±${LANCCTB_MATCH_TOLERANCIA_DIAS} dias)`); return false; }
     // Resolve cada componente
     comps.forEach(x=>{
       x.valor=x.c?x.c.valor_pago:vFluxo(x.f);
@@ -36806,7 +36821,9 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       }
       x.resolvido=!!(x.par||x.regra);
     });
-    const { sols, estourou } = _lancctbSubconjuntosSoma(comps.map(x=>Math.round(x.valor*100)),Math.round(valor*100),Math.round((ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)*100),20,300000);
+    const { sols, estourou } = (_grupoInteiro&&comps.every(x=>x.f)&&Math.abs(comps.reduce((a,x)=>a+Math.round(x.valor*100),0)-Math.round(valor*100))<=Math.round((ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)*100))
+      ? { sols:[comps.map((_,i)=>i)], estourou:false } /* grupo inteiro fecha exato: é a única combinação que interessa */
+      : _lancctbSubconjuntosSoma(comps.map(x=>Math.round(x.valor*100)),Math.round(valor*100),Math.round((ehSaida?LANCCTB_MATCH_TOLERANCIA_VALOR_NF:0.005)*100),20,300000);
     if(estourou||!sols.length){ diagAglutinado.push(`${rotuloL}: nenhuma combinação das ${comps.length} linha(s) do Fluxo fecha o valor (${comps.map(x=>_fmt(x.valor)).join(' / ')})`); return false; }
     const completas=sols.filter(sol=>sol.every(i=>comps[i].resolvido));
     // Pedido do usuário 04/10/2026 (ACCI: saída 1.885,00 = BY CAR 1.846,00 + 39,00 do Fluxo): quando só PARTE dos componentes tem NF/Regra,
