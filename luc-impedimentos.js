@@ -132,14 +132,14 @@
     const item = it => '<div style="margin:0 0 12px">'
       + '<div style="font-family:Georgia,\'Times New Roman\',serif;font-size:14.5px;line-height:1.55;color:var(--ink)">' + E(it.t) + '</div>'
       + '<div style="margin-top:3px;padding:6px 10px;border-left:3px solid var(--teal);background:rgba(15,118,110,.08);font-size:13px;line-height:1.5;color:var(--ink)">(' + E(it.e) + ')</div></div>';
-    let h = '<div style="padding:4px 0 10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5;border-bottom:1px solid var(--border)">'
+    let h = '<div style="padding:4px 0 10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--border)">'
       + '<button class="btn bo bsm" onclick="LucImp.voltar()">← Impedimentos</button>'
       + '<div class="ptitle" style="margin:0">📜 Base legal — distribuição de lucros com débito federal</div>'
       + '<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">' + nav + '</span></div>'
       + '<div style="max-width:980px;margin:14px auto 40px">'
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:14px">Textos copiados do site oficial do Planalto (redação vigente em 26/11/2026; trechos revogados omitidos). Embaixo de cada dispositivo, entre parênteses, a explicação em linguagem simples. A tese do STF (ADI 5.161, 30/09/2026) está resumida conforme noticiado; confira o acórdão antes de citar em parecer.</div>';
     B.forEach(s => {
-      h += '<section id="lucImpB_' + s.id + '" style="scroll-margin-top:150px;margin:0 0 26px;padding:16px 18px;border:1px solid var(--border);border-radius:10px;background:var(--white);' + (ST.tema === s.id ? 'box-shadow:0 0 0 2px var(--teal)' : '') + '">'
+      h += '<section id="lucImpB_' + s.id + '" style="scroll-margin-top:70px;margin:0 0 26px;padding:16px 18px;border:1px solid var(--border);border-radius:10px;background:var(--white);' + (ST.tema === s.id ? 'box-shadow:0 0 0 2px var(--teal)' : '') + '">'
         + '<h2 style="margin:0 0 8px;font-size:18px;color:var(--teal)">' + E(s.titulo) + '</h2>'
         + (s.intro ? '<div style="font-size:13.5px;line-height:1.55;margin-bottom:12px">' + E(s.intro) + '</div>' : '');
       (s.itens || []).forEach(it => { h += item(it); });
