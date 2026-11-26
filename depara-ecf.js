@@ -99,7 +99,8 @@
   function render() {
     const el = document.getElementById('deparaEcfRoot'); if (!el) return;
     const o = ST.eid ? ler(ST.eid) : null, d = o && o.dados;
-    let h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><select class="si" style="min-width:320px" onchange="DeparaECF.empresa(this.value)">' + opcoesEmpresas() + '</select>'
+    const empA = (S.emps() || []).find(e => String(e.eid) === String(ST.eid)) || {};
+    let h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:10px"><button class="btn bo bsm" onclick="DeparaECF.abrir()">← Empresas</button><b style="font-size:15px">#' + E(ST.eid) + ' ' + E(empA.nome || '') + '</b>'
       + '<button class="btn bp" onclick="DeparaECF.importar()" ' + (ST.eid ? '' : 'disabled') + ' title="Excel com os relatórios do Domínio: Balancete e DRE no plano Contábil e no Referencial (pode ser 1 arquivo com as 4 abas ou vários arquivos)">📥 Importar relatórios do Domínio (Excel)</button>'
       + (d ? '<button class="action-btn action-btn-excel" onclick="DeparaECF.excel()">📊 Gerar Excel</button>' : '') + '</div>';
     if (!ST.eid) { el.innerHTML = h + '<div class="psub">Escolha a empresa para ver ou montar o de-para.</div>'; return; }
@@ -191,6 +192,8 @@
     const buf = await wb.xlsx.writeBuffer(); const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     const a = document.createElement('a'); a.href = url; a.download = 'Depara_Contabil_x_ECF_' + ST.eid + '.xlsx'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
-  function abrir() { if (!ST.eid && typeof _empAtual !== 'undefined' && _empAtual) ST.eid = String(_empAtual); render(); }
-  root.DeparaECF = { abrir, render, empresa, aba, filtrar, soPend, definir, importar, excel, _lerAba: lerAba, _identificar: identificarAbas, _auto: autoMapear, _conciliar: conciliar };
+  // lista padrão de empresas (Adicionar empresa + tabela com filtros), igual Ganhos/Rendimentos
+  function abrir() { const la = document.getElementById('deparaecfListaArea'), rt = document.getElementById('deparaEcfRoot'); if (la) la.style.display = ''; if (rt) rt.style.display = 'none'; if (typeof prepararAdicionarEmpresa === 'function') prepararAdicionarEmpresa('deparaecf'); }
+  function abrirEmp(eid) { ST.eid = String(eid); const la = document.getElementById('deparaecfListaArea'), rt = document.getElementById('deparaEcfRoot'); if (la) la.style.display = 'none'; if (rt) rt.style.display = ''; render(); }
+  root.DeparaECF = { abrirEmp, abrir, render, empresa, aba, filtrar, soPend, definir, importar, excel, _lerAba: lerAba, _identificar: identificarAbas, _auto: autoMapear, _conciliar: conciliar };
 })(typeof window !== 'undefined' ? window : this);
