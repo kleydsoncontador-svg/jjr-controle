@@ -51362,7 +51362,10 @@ async function _lancctbParsearExtratoC6MultiMes(pdf){
   const txt=l=>l.map(i=>i.str).join(' ').replace(/\s+/g,' ').trim();
   const todo=semAcento(linhas.map(txt).join(' ')).toUpperCase();
   // âncoras do layout (não depende de nome de empresa)
-  if(!/EXTRATO EXPORTADO NO DIA/.test(todo)||!/CONTABIL/.test(todo)||!/SALDO DO DIA/.test(todo)||!/ENTRADAS:.*SAIDAS:/.test(todo)) return null;
+  // 26/11/2026 (Pride 142, C/C 314067965): modelo NOVO do C6 — "Exportado em dd/mm/aa", "Período da Exportação", "Saldo contábil do dia dd/mm/aa"; a tabela (Data da transação | Data de processamento | Tipo | Descrição | Valor) é a mesma
+  const _c6Antigo=/EXTRATO EXPORTADO NO DIA/.test(todo)&&/CONTABIL/.test(todo)&&/SALDO DO DIA/.test(todo);
+  const _c6Novo=/EXPORTADO EM \d{2}\/\d{2}\/\d{2}/.test(todo)&&/SALDO CONTABIL DO DIA/.test(todo)&&/PERIODO DA EXPORTACAO/.test(todo);
+  if(!(_c6Antigo||_c6Novo)||!/ENTRADAS:.*SAIDAS:/.test(todo)) return null;
   const parseBR=s=>{ const neg=/^-/.test(s.trim()); const v=parseFloat(String(s).replace(/[^\d,]/g,'').replace(',','.'))||0; return neg?-v:v; };
   const r2=v=>Math.round(v*100)/100;
   const iso=(d,m,a)=>`${a}-${String(m).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
@@ -51370,12 +51373,14 @@ async function _lancctbParsearExtratoC6MultiMes(pdf){
   let empresaNome=null, cnpj=null, agencia=null, conta=null, periodoIni=null, periodoFim=null;
   for(const l of linhas){
     const t=txt(l);
-    const mc=t.match(/^(.*?)\s*•\s*(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/);
+    const mc=t.match(/^(.*?)\s*•\s*(?:CNPJ:\s*)?(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/); /* modelo novo: "PRIDE SURGERY • CNPJ: 48.548.403/0001-04" */
     if(mc&&!cnpj){ empresaNome=mc[1].trim(); cnpj=mc[2].replace(/\D/g,''); }
     const ma=t.match(/Ag[êe]ncia:\s*(\S+)\s*•\s*Conta:\s*(\S+)/i);
     if(ma&&!agencia){ agencia=ma[1]; conta=ma[2]; }
     const mp=semAcento(t).match(/Periodo\s*•\s*(\d{1,2}) de (\w+) de (\d{4})\s*ate\s*(\d{1,2}) de (\w+) de (\d{4})/i);
     if(mp&&!periodoIni){ periodoIni=iso(mp[1],LANCCTB_C6_MESES[mp[2].toLowerCase()],mp[3]); periodoFim=iso(mp[4],LANCCTB_C6_MESES[mp[5].toLowerCase()],mp[6]); }
+    const mp2=t.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+a\s+(\d{2})\/(\d{2})\/(\d{4})/); /* modelo novo: linha abaixo de "Período da Exportação" */
+    if(mp2&&!periodoIni){ periodoIni=iso(mp2[1],mp2[2],mp2[3]); periodoFim=iso(mp2[4],mp2[5],mp2[6]); }
   }
   const reMes=/^([A-Za-zÀ-ú]+)\s+(\d{4})\s*\(\s*(\d{2})\/(\d{2})\/(\d{4})\s*-\s*(\d{2})\/(\d{2})\/(\d{4})\s*\)\s*Entradas:\s*R\$\s*([\d.,]+)\s*•\s*Sa[íi]das:\s*R\$\s*([\d.,]+)/i;
   const meses=[]; let bloco=null, descX=225, ultimaTx=null;
@@ -51392,7 +51397,8 @@ async function _lancctbParsearExtratoC6MultiMes(pdf){
     if(!bloco) continue;
     if(/^Sem lan[çc]amentos no m[êe]s/i.test(t)){ bloco.semLancamentos=true; continue; }
     const hd=l.find(i=>/^Descri[çc][ãa]o$/i.test(i.str.trim())); if(hd){ descX=hd.x-8; continue; }
-    const ms=t.match(/^Saldo do dia\s+\d{2}\/\d{2}\/\d{2}\s+(-?)R\$\s*([\d.,]+)/i);
+    if(/C6 Bank\s*•/i.test(t)||/^\d+\s*\/\s*\d+$/.test(t)){ ultimaTx=null; continue; } /* rodapé (endereço do banco) e nº da página nunca são continuação de descrição */
+    const ms=t.match(/^Saldo (?:cont[áa]bil )?do dia\s+\d{2}\/\d{2}\/\d{2}\s+(-?)R\$\s*([\d.,]+)/i);
     if(ms){ bloco.closingBalance=r2((ms[1]?-1:1)*parseBR(ms[2])); ultimaTx=null; continue; } // DAILY_BALANCE: fora da tabela
     if(/^Informa/i.test(t)||/^(Data|lan[çc]amento)\b/i.test(t)){ ultimaTx=null; continue; }
     const md=l.length>=4&&/^\d{2}\/\d{2}$/.test(l[0].str.trim())&&/^\d{2}\/\d{2}$/.test(l[1].str.trim());
