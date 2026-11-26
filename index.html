@@ -37908,6 +37908,57 @@ const LANCCTB_MODO_INFO={
 // explícito do usuário 15/09/2026, só pra Taylu por enquanto (não é um
 // comportamento genérico do módulo).
 const LANCCTB_EIDS_RECEB_SO_REGRAS=['203'];
+// ═══ VÁRIOS pagamentos (ou recebimentos) quitando UMA NF (pedido do usuário 26/11/2026 — Nasa/Ryan: 6.135,70 em 07/07 + 2.500,00 em 21/07 = NF 8 de 8.635,70) ═══
+// Pendências do MESMO CNPJ (do histórico do banco ou da linha do Fluxo ligada) cuja soma de 2 a 4 delas bate EXATAMENTE (±R$ 0,01) uma parcela de NF pendente desse CNPJ
+// (pagamentos até 60 dias antes/depois da emissão): a parcela é dividida em uma parcela por pagamento (valor e vencimento de cada um) — aí o matching normal amarra cada um à sua parte.
+// Só divide quando existe UMA combinação possível (nunca chuta).
+async function _lancctbVariosPagamentosUmaNf(eid,contaId,ehSaida){
+  let divididas=0;
+  try{
+    const { data: pend } = await _lancctbFetchTudo(()=>_lancctbAplicarFiltroPeriodo(_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
+      .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente').gt(ehSaida?'valor_saida':'valor_entrada',0)));
+    if(!pend||pend.length<2) return 0;
+    // CNPJ de cada pendência: linha do Fluxo ligada (Nasa grava o CNPJ do extrato nela) ou o próprio histórico do banco
+    const fxPor=new Map(); const ids=pend.map(l=>l.id);
+    for(let i=0;i<ids.length;i+=200){ const { data } = await _supaClient.from('fluxo_caixa_lancamentos').select('lancamento_extrato_id,cnpj_cpf').eq('empresa_eid',eid).in('lancamento_extrato_id',ids.slice(i,i+200)); (data||[]).forEach(f=>{ const d=String(f.cnpj_cpf||'').replace(/\D/g,''); if(d.length===14) fxPor.set(String(f.lancamento_extrato_id),d); }); }
+    const grupos=new Map();
+    pend.forEach(l=>{ let c=fxPor.get(String(l.id)); if(!c){ const dh=_lancctbExtrairDocDoHistorico(l.historico_bancario); if(dh&&dh.tipo==='CNPJ') c=dh.doc; } if(!c&&typeof _nasaIdentDoHistorico==='function'){ const id=_nasaIdentDoHistorico(l.historico_bancario); if(id&&id.tipo==='CNPJ') c=id.doc; }
+      if(c){ (grupos.get(c)||grupos.set(c,[]).get(c)).push({ id:l.id, d:l.data_pagamento, v:Math.round(Number(ehSaida?l.valor_saida:l.valor_entrada)*100) }); } });
+    for(const [cnpj,ps] of grupos){
+      if(ps.length<2) continue;
+      const { data: nfs } = await _supaClient.from('notas_fiscais').select('id,numero,data_emissao,tipo,direcao').eq('empresa_eid',eid).eq('direcao',ehSaida?'compra':'venda').eq(ehSaida?'cnpj_emitente':'cnpj_destinatario',cnpj);
+      if(!nfs||!nfs.length) continue;
+      const { data: parcs } = await _supaClient.from('notas_fiscais_parcelas').select('id,nf_id,numero_parcela,valor_parcela,data_vencimento,status_conciliacao,lancamento_extrato_id').in('nf_id',nfs.map(n=>n.id));
+      const nfPor=new Map(nfs.map(n=>[n.id,n]));
+      const livres=(parcs||[]).filter(p=>p.status_conciliacao==='pendente'&&!p.lancamento_extrato_id);
+      const achados=[];
+      for(const p of livres){
+        const nf=nfPor.get(p.nf_id); const alvo=Math.round(Number(p.valor_parcela)*100);
+        const perto=ps.filter(x=>!nf.data_emissao||Math.abs((new Date(x.d)-new Date(nf.data_emissao))/86400000)<=60);
+        if(perto.length<2||perto.length>12) continue;
+        const n=perto.length; let sols=[];
+        for(let m=1;m<(1<<n);m++){ let cnt=0,soma=0; const sub=[]; for(let b=0;b<n;b++) if(m&(1<<b)){ cnt++; soma+=perto[b].v; sub.push(perto[b]); } if(cnt>=2&&cnt<=4&&Math.abs(soma-alvo)<=1) sols.push(sub); }
+        if(sols.length===1) achados.push({ p, nf, sub:sols[0] });
+      }
+      // cada pagamento só pode ir para UMA NF; e cada NF só uma combinação
+      const usados=new Set();
+      for(const a of achados){
+        if(a.sub.some(x=>usados.has(x.id))||achados.some(b=>b!==a&&b.sub.some(x=>a.sub.some(y=>y.id===x.id)))) continue; // ambíguo entre NFs: não mexe
+        a.sub.forEach(x=>usados.add(x.id));
+        const sub=a.sub.slice().sort((x,y)=>String(x.d).localeCompare(String(y.d)));
+        const maxN=Math.max(...(parcs||[]).filter(q=>q.nf_id===a.p.nf_id).map(q=>Number(q.numero_parcela)||1));
+        const { error: eU } = await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:sub[0].v/100, data_vencimento:sub[0].d }).eq('id',a.p.id).eq('status_conciliacao','pendente');
+        if(eU){ console.warn('Dividir parcela:',eU); continue; }
+        const novas=sub.slice(1).map((x,k)=>({ nf_id:a.p.nf_id, empresa_eid:String(eid), numero_parcela:maxN+1+k, valor_parcela:x.v/100, data_vencimento:x.d, status_conciliacao:'pendente', data_emissao:a.nf.data_emissao, tipo:a.nf.tipo, direcao:a.nf.direcao }));
+        const { error: eI } = await _supaClient.from('notas_fiscais_parcelas').insert(novas);
+        if(eI){ console.warn('Nova parcela:',eI); await _supaClient.from('notas_fiscais_parcelas').update({ valor_parcela:a.p.valor_parcela, data_vencimento:a.p.data_vencimento }).eq('id',a.p.id); continue; }
+        divididas++;
+        console.info('NF '+a.nf.numero+' dividida em '+sub.length+' parcelas: '+sub.map(x=>(x.v/100).toFixed(2)+' em '+x.d).join(' + '));
+      }
+    }
+  }catch(e){ console.warn('Vários pagamentos → 1 NF:',e); }
+  return divididas;
+}
 async function _lancctbProcessarFonteRegistro(modo){
   if(!_lancctbExtratoContaSel){ toast('Selecione uma conta bancária primeiro','err'); return; }
   const info=LANCCTB_MODO_INFO[modo];
@@ -37915,6 +37966,13 @@ async function _lancctbProcessarFonteRegistro(modo){
   const statusEl=document.getElementById('lancctbRegistroProcessarStatus');
   if(btn) btn.disabled=true;
   const resultado=await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,(msg)=>{ if(statusEl) statusEl.textContent=msg; },modo,true);
+  // 26/11/2026: vários pagamentos/recebimentos do mesmo CNPJ que somam UMA NF → divide a parcela e roda o matching de novo só para eles
+  if(!resultado.erro&&(modo==='comprovantes_pagamento'||modo==='comprovantes_recebimento')){ try{
+    if(statusEl) statusEl.textContent='Procurando pagamentos que somam uma NF…';
+    const nDiv=await _lancctbVariosPagamentosUmaNf(_lancctbEidAtual,_lancctbExtratoContaSel,modo==='comprovantes_pagamento');
+    if(nDiv){ const r2=await _lancctbRodarMatching(_lancctbEidAtual,_lancctbExtratoContaSel,(msg)=>{ if(statusEl) statusEl.textContent=msg; },modo,true);
+      if(r2&&!r2.erro){ ['resolvNF','resolvSubsetSum','resolvSocio','resolvVt','resolvRegra'].forEach(k=>{ resultado[k]=(resultado[k]||0)+(r2[k]||0); }); resultado.aindaPendente=r2.aindaPendente; resultado.nfDivididas=nDiv; } }
+  }catch(e){ console.warn('Vários pagamentos → 1 NF:',e); } }
   // Aplica também as Regras com gatilho de Fluxo de Caixa (antes ficava num
   // botão à parte "Processar Fluxo (Regras)" — o botão "Processar Fluxo"
   // agora só associa, sem aplicar Regra). Silencioso: o toast é do matching.
@@ -37927,6 +37985,7 @@ async function _lancctbProcessarFonteRegistro(modo){
   const partes=[];
   if(resultado.resolvNF) partes.push(`${resultado.resolvNF} por NF`);
   if(resultado.resolvSubsetSum) partes.push(`${resultado.resolvSubsetSum} por soma de NFs`);
+  if(resultado.nfDivididas) partes.push(`${resultado.nfDivididas} NF(s) paga(s) em mais de um pagamento (parcela dividida)`);
   if(resultado.resolvSocio) partes.push(`${resultado.resolvSocio} por sócio`);
   if(resultado.resolvVt) partes.push(`${resultado.resolvVt} VT ref. mês seguinte`);
   if(resultado.resolvRegra) partes.push(`${resultado.resolvRegra} por Regra`);
