@@ -3,6 +3,8 @@
    • Tela principal POR COMPETÊNCIA; tela secundária POR CAIXA. Em cada uma: Contábil (vem do Balancete pela ⚙ ou digitado), Fiscal (digitado/copiado) e Divergências (Contábil − Fiscal).
    • Cálculo: CSLL 9% e IRPJ 15% + adicional 10% (sobre o que passa de R$ 60 mil por trimestre / R$ 20 mil por mês), com as deduções (retenções, IRRF, incentivos).
    • LC 224/2025: acréscimo de 10% no percentual de presunção sobre a receita bruta que passa de R$ 5 milhões no ano (R$ 1,25 milhão por trimestre). Parâmetros editáveis em "Parâmetros".
+   • LC 239/2026 (art. 4º, publicada em 24/11/2026; informativo do Dr. João, 25/11/2026): o acréscimo passa a 20% — IRPJ a partir de 1º/1/2027 e CSLL a partir de 1º/3/2027 (art. 15).
+     Automático pelo ANO da apuração: 2026 = 10%; 2027 em diante = 20%. No 1º trimestre de 2027 a CSLL é proporcional: 10% sobre a parte de jan–fev e 20% sobre a de março (receita de março em "Parâmetros"; sem ela, 1/3).
    Dados guardados em S: 'apuracao_pres_<modo>_<eid>_<ano>'. Só leitura do Balancete (nunca altera nada nele). */
 (function(root){
   'use strict';
@@ -28,9 +30,15 @@
             M:{n:12,rot:function(i){ return ['Jan','Fev','Mar','Abr','Mai','Jun','Jul','Ago','Set','Out','Nov','Dez'][i]; },meses:function(i){ return [i+1]; },lim:20000,limRB:null} };
   var PARAM_PADRAO={ servIrpj:0.32, servCsll:0.32, lc224:true, limiteAno:5000000, csllDesdeMes:4 };
 
+  // LC 224/2025 (10%) → LC 239/2026 (20%): IRPJ desde 1º/1/2027; CSLL desde 1º/3/2027 (no 1º tri/2027, proporcional à receita de março)
+  function fatorLC(ano){ return Number(ano)>=2027?0.20:0.10; }
+  function pctLC(ano){ return Number(ano)>=2027?'20%':'10%'; }
+  function leiLC(ano){ return Number(ano)>=2027?'LC 224/2025 com a redação da LC 239/2026':'LC 224/2025'; }
   // ── cálculo (puro: recebe os valores e devolve tudo por período) ──
-  function calcular(vals,ded,per,params){
-    var P=PER[per], N=P.n, pr=Object.assign({},PARAM_PADRAO,params||{}), out={rows:{},ded:{}};
+  function calcular(vals,ded,per,params,ano){
+    ano=Number(ano||ST.ano)||2026;
+    var P=PER[per], N=P.n, pr=Object.assign({},PARAM_PADRAO,(ano>=2027?{csllDesdeMes:1}:{}),params||{}), out={rows:{},ded:{}};
+    if(ano>=2027&&!(params&&params.csllDesdeMes2027)) pr.csllDesdeMes=1; // em 2027 a LC 224 já vale na CSLL desde janeiro (o "mês 4" era só a anterioridade de 2026)
     if(per==='M') pr.lc224=false; // LC 224/2025 só vale no Lucro Presumido (não na Apuração por Receita Bruta do Lucro Real)
     var G=function(id,i){ var a=vals[id]; return NUM(a&&a[i]); };
     var acum=0, acumAnt=0;
@@ -50,14 +58,17 @@
       o.csllAtiva=(primeiro>=pr.csllDesdeMes)||(ult>=pr.csllDesdeMes&&per==='T'&&false);
       // CSLL
       o.c12=R2(com*0.12); o.c32=R2(srv*pr.servCsll); o.c100=b100;
-      o.cLC=pr.lc224&&o.csllAtiva?R2(exc*pC*0.10):0;
+      var fC=fatorLC(ano);
+      if(ano===2027&&per==='T'&&i===0){ var recMar=NUM(pr.lc239RecMar2027), fr=(recMar>0&&o.rb>0)?Math.min(1,recMar/o.rb):1/3; fC=R2((0.10+0.10*fr)*1e6)/1e6; o.fracMar=fr; } // CSLL: 20% só a partir de março/2027
+      o.fC=fC;
+      o.cLC=pr.lc224&&o.csllAtiva?R2(exc*pC*fC):0;
       o.exC=R2(NUM(pr.exclCsll&&pr.exclCsll[i])); o.cBase=R2(o.c12+o.c32+o.c100+o.cLC+o.exC); /* ajuste digitado só da base da CSLL (com sinal) */
       o.cProv=R2(o.cBase*0.09);
       var dc=0; DED_CSLL.forEach(function(k){ dc+=NUM(ded[k]&&ded[k][i]); }); o.cDed=R2(dc);
       o.cPagar=R2(Math.max(0,o.cProv-o.cDed));
       // IRPJ
       o.i8=R2(com*0.08); o.i32=R2(srv*pr.servIrpj); o.i100=b100; /* 25/11/2026: a "Receita excluída" (digitada) sai direto da base total, abaixo */
-      o.iLC=pr.lc224?R2(exc*pI*0.10):0;
+      o.iLC=pr.lc224?R2(exc*pI*fatorLC(ano)):0;
       o.iBase=R2(o.i8+o.i32+o.i100+o.iLC+o.exI);
       o.iAdBase=R2(Math.max(0,o.iBase-P.lim));
       o.i15=R2(o.iBase*0.15); o.iAd=R2(o.iAdBase*0.10); o.iProv=R2(o.i15+o.iAd);
@@ -160,12 +171,12 @@
     if(!tem){ var alt=blocoCalc==='fisc'?'cont':'fisc'; var t2=false; ROWIDS.forEach(function(id){ ((R[alt]||{})[id]||[]).forEach(function(v){ if(NUM(v)) t2=true; }); }); if(t2){ vals=R[alt]; usouAlt=alt; } }
     // totais por linha e por grupo (do bloco exibido; em Divergências, da diferença)
     var show=ST.bloco==='div'?null:R[ST.bloco];
-    var base=ST.bloco==='div'?null:calcular(show,{},per(),D.params);
+    var base=ST.bloco==='div'?null:calcular(show,{},per(),D.params,ST.ano);
     ROWIDS.forEach(function(id){ var el=document.getElementById('ap_tot_'+id); if(!el) return; var t=0; for(var i=0;i<N;i++){ t+=(ST.bloco==='div'?NUM((R.cont[id]||[])[i])-NUM((R.fisc[id]||[])[i]):NUM(((show||{})[id]||[])[i])); } el.textContent=FMT(R2(t)); });
-    var gc=calcular(ST.bloco==='div'?R.cont:show,{},per(),D.params), gf=ST.bloco==='div'?calcular(R.fisc,{},per(),D.params):null;
+    var gc=calcular(ST.bloco==='div'?R.cont:show,{},per(),D.params,ST.ano), gf=ST.bloco==='div'?calcular(R.fisc,{},per(),D.params,ST.ano):null;
     GRUPOS.forEach(function(g){ var tt=0; for(var i=0;i<N;i++){ var v=gc.rows[i][g.tot]-(gf?gf.rows[i][g.tot]:0); tt+=v; var el=document.getElementById('ap_g_'+g.tot+'_'+i); if(el) el.textContent=FMT(R2(v)); } var e2=document.getElementById('ap_g_'+g.tot+'_T'); if(e2) e2.textContent=FMT(R2(tt)); });
     // bloco de CÁLCULO
-    var cc=calcular(vals,R.ded,per(),D.params), rows=cc.rows, tc=document.getElementById('apPresCalc'); if(!tc) return;
+    var cc=calcular(vals,R.ded,per(),D.params,ST.ano), rows=cc.rows, tc=document.getElementById('apPresCalc'); if(!tc) return;
     var per0=PER[per()], lim=per0.lim;
     var linha=function(rot,fn,cfg){ cfg=cfg||{}; var s='<tr'+(cfg.bg?' style="background:'+cfg.bg+';font-weight:bold"':'')+'><td style="border:none;width:34px;background:'+(cfg.bg||'transparent')+'"></td><td style="padding:6px 12px;border:1px solid #ccc;'+(cfg.bg?'background:'+cfg.bg+';':'background:white;')+(cfg.cor?'color:'+cfg.cor+';':'')+'">'+rot+'</td>'; var tt=0; for(var i=0;i<N;i++){ var v=fn(rows[i],i); tt+=v; s+='<td style="'+TDI+';text-align:right;padding:4px 8px;'+(cfg.bg?'background:'+cfg.bg+';':'background:white;')+'">'+FMT(v)+'</td>'; } s+='<td style="'+TDI+';text-align:right;padding:4px 8px;background:'+(cfg.bg||'#fafafa')+'">'+(cfg.semTotal?'':FMT(R2(tt)))+'</td></tr>'; return s; };
     var barra=function(t,cor){ return '<tr style="background:'+cor+';color:white;font-weight:bold"><td colspan="'+(N+3)+'" style="padding:8px 12px;border:1px solid #ccc">'+t+'</td></tr>'; };
@@ -190,7 +201,7 @@
     h+=linha('Base de Cálculo 12% (comércio e indústria)',function(o){ return o.c12; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servCsll||PARAM_PADRAO.servCsll)*100)+'% (serviços)',function(o){ return o.c32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.c100; });
-    if(lc) h+=linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025'+(per()==='T'?' (CSLL a partir do 2º trimestre de 2026)':''),function(o){ return o.cLC; },{cor:'#7c2d12'});
+    if(lc) h+=linha('(+) Acréscimo de '+pctLC(ST.ano)+' no percentual de presunção — '+leiLC(ST.ano)+(per()==='T'?(Number(ST.ano)>=2027?(Number(ST.ano)===2027?' (CSLL: 20% a partir de março/2027 — 1º trimestre proporcional)':''):' (CSLL a partir do 2º trimestre de 2026)'):''),function(o){ return o.cLC; },{cor:'#7c2d12'});
     h+=linha('Total Base de Cálculo da CSLL',function(o){ return o.cBase; },{bg:'#fef9c3'});
     h+=linha('PROVISÃO DA CSLL (9%)',function(o){ return o.cProv; },{bg:'#f8d7da'});
     h+='<tr><td colspan="'+(N+3)+'" style="padding:4px 12px;border:1px solid #ccc;background:#f0f4f8;font-weight:bold;color:#1E3558">(-) DEDUÇÕES</td></tr>'+dedLinhas(DED_CSLL);
@@ -201,7 +212,7 @@
     h+=linha('Base de Cálculo 8% (comércio e indústria)',function(o){ return o.i8; });
     h+=linha('Base de Cálculo '+Math.round(NUM((D.params||{}).servIrpj||PARAM_PADRAO.servIrpj)*100)+'% (serviços)',function(o){ return o.i32; });
     h+=linha('Base de Cálculo 100% (financeiras, demais receitas, ganho de capital, LALUP)',function(o){ return o.i100; });
-    if(lc) h+=linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',function(o){ return o.iLC; },{cor:'#7c2d12'});
+    if(lc) h+=linha('(+) Acréscimo de '+pctLC(ST.ano)+' no percentual de presunção — '+leiLC(ST.ano),function(o){ return o.iLC; },{cor:'#7c2d12'});
     h+=linha('Total Base de Cálculo do IRPJ — 15%',function(o){ return o.iBase; },{bg:'#fef9c3'});
     h+=linha('Base do Adicional — 10% (o que passa de R$ '+FMT(lim)+(per()==='T'?' no trimestre':' no mês')+')',function(o){ return o.iAdBase; });
     h+=linha('IRPJ — 15%',function(o){ return o.i15; });
@@ -211,7 +222,7 @@
     h+=linha('IRPJ A RECOLHER'+(ST.modo==='rb'?' (estimativa mensal — DARF 2362 ou 5993)':' (DARF 2089)'),function(o){ return o.iPagar; },{bg:'#FFD700'});
     if(ST.modo==='rb'&&typeof _apSistLinhasRB==='function') h+=_apSistLinhasRB(ST.eid,ST.ano,'lalur_rb',N,(function(){ var a=[]; for(var i=0;i<N;i++) a.push(rows[i]?rows[i].iPagar:0); return a; })(),TDI);
     h+='</tbody></table></div><div style="font-size:11.5px;color:#666;margin-top:8px;line-height:1.5">Linhas "(-)" entram positivas e são subtraídas. Percentuais: comércio/indústria 8% (IRPJ) e 12% (CSLL); serviços e demais conforme <b>Parâmetros</b>. '
-      +'Adicional de 10% do IRPJ sobre o que passa de R$ 60.000 por trimestre (R$ 20.000 por mês). '+(lc?'Acréscimo da LC 224/2025 sobre a parcela que passa do limite, proporcional ao percentual de cada atividade.':'')+'</div>';
+      +'Adicional de 10% do IRPJ sobre o que passa de R$ 60.000 por trimestre (R$ 20.000 por mês). '+(lc?'Acréscimo de '+pctLC(ST.ano)+' ('+leiLC(ST.ano)+') sobre a parcela que passa do limite, proporcional ao percentual de cada atividade.'+(Number(ST.ano)===2027?' CSLL no 1º trimestre de 2027: 10% sobre a parte de janeiro e fevereiro e 20% sobre a de março (informe a receita de março em Parâmetros; sem ela, considera 1/3).':''):'')+'</div>';
     tc.innerHTML=h; try{ marcarManual(); }catch(e){}
   }
   function marcarManual(){
@@ -279,13 +290,13 @@
       +'<div style="display:grid;gap:10px;margin:12px 0;font-size:13px">'
       +'<label>Percentual de presunção do IRPJ nos serviços <select id="apPmServI" style="padding:4px"><option value="0.32"'+(p.servIrpj===0.32?' selected':'')+'>32% (serviços em geral)</option><option value="0.16"'+(p.servIrpj===0.16?' selected':'')+'>16% (transporte de passageiros, receita até R$ 120 mil/ano)</option><option value="0.08"'+(p.servIrpj===0.08?' selected':'')+'>8% (serviços hospitalares, transporte de cargas)</option></select></label>'
       +'<label>Percentual de presunção da CSLL nos serviços <select id="apPmServC" style="padding:4px"><option value="0.32"'+(p.servCsll===0.32?' selected':'')+'>32%</option><option value="0.12"'+(p.servCsll===0.12?' selected':'')+'>12% (serviços hospitalares)</option></select></label>'
-      +(ST.modo==='rb'?'':'<label><input type="checkbox" id="apPmLc"'+(p.lc224?' checked':'')+'> Aplicar o acréscimo de 10% da LC 224/2025 sobre a presunção</label>')
+      +(ST.modo==='rb'?'':'<label><input type="checkbox" id="apPmLc"'+(p.lc224?' checked':'')+'> Aplicar o acréscimo de '+pctLC(ST.ano)+' da '+leiLC(ST.ano)+' sobre a presunção</label>'+(Number(ST.ano)===2027?'<label>Receita bruta de MARÇO/2027 (R$) <input id="apPmMar" value="'+(p.lc239RecMar2027?FMT(p.lc239RecMar2027):'')+'" placeholder="vazio = 1/3 do trimestre" style="padding:4px;width:140px;text-align:right"> <span style="color:#777">(CSLL do 1º tri: 20% só a partir de março)</span></label>':''))
       +(ST.modo==='rb'?'':'<label>Limite anual da receita bruta (R$) <input id="apPmLim" value="'+FMT(p.limiteAno)+'" style="padding:4px;width:140px;text-align:right"> <span style="color:#777">(trimestral: R$ 1.250.000)</span></label>')
-      +(ST.modo==='rb'?'':'<label>CSLL: acréscimo vale a partir do mês <select id="apPmCsll" style="padding:4px">'+[1,2,3,4,5,6,7].map(function(m){ return '<option value="'+m+'"'+(p.csllDesdeMes===m?' selected':'')+'>'+m+'</option>'; }).join('')+'</select> <span style="color:#777">(4 = abril/2026, anterioridade de 90 dias — confira na IN da Receita)</span></label>')
+      +(ST.modo==='rb'||Number(ST.ano)>=2027?'':'<label>CSLL: acréscimo vale a partir do mês <select id="apPmCsll" style="padding:4px">'+[1,2,3,4,5,6,7].map(function(m){ return '<option value="'+m+'"'+(p.csllDesdeMes===m?' selected':'')+'>'+m+'</option>'; }).join('')+'</select> <span style="color:#777">(4 = abril/2026, anterioridade de 90 dias — confira na IN da Receita)</span></label>')
       +'</div><div style="display:flex;gap:8px;justify-content:flex-end"><button onclick="document.getElementById(\'apPresParam\').remove()" style="padding:7px 14px;border:1px solid #bbb;background:#fff;border-radius:6px;cursor:pointer">Cancelar</button><button id="apPmOk" style="padding:7px 16px;border:none;background:#166534;color:#fff;border-radius:6px;cursor:pointer;font-weight:700">Salvar</button></div></div>';
     document.body.appendChild(ov);
     document.getElementById('apPmOk').onclick=function(){
-      var d=dados(); d.params={ servIrpj:parseFloat(document.getElementById('apPmServI').value), servCsll:parseFloat(document.getElementById('apPmServC').value), lc224:(document.getElementById('apPmLc')?document.getElementById('apPmLc').checked:p.lc224), limiteAno:(document.getElementById('apPmLim')?((typeof _parseInput==='function'?_parseInput(document.getElementById('apPmLim').value):NUM(document.getElementById('apPmLim').value))||5000000):p.limiteAno), csllDesdeMes:(document.getElementById('apPmCsll')?(parseInt(document.getElementById('apPmCsll').value,10)||4):p.csllDesdeMes), exclIrpj:(D.params||{}).exclIrpj };
+      var d=dados(); d.params={ servIrpj:parseFloat(document.getElementById('apPmServI').value), servCsll:parseFloat(document.getElementById('apPmServC').value), lc224:(document.getElementById('apPmLc')?document.getElementById('apPmLc').checked:p.lc224), limiteAno:(document.getElementById('apPmLim')?((typeof _parseInput==='function'?_parseInput(document.getElementById('apPmLim').value):NUM(document.getElementById('apPmLim').value))||5000000):p.limiteAno), csllDesdeMes:(document.getElementById('apPmCsll')?(parseInt(document.getElementById('apPmCsll').value,10)||4):p.csllDesdeMes), lc239RecMar2027:(document.getElementById('apPmMar')?((typeof _parseInput==='function'?_parseInput(document.getElementById('apPmMar').value):NUM(document.getElementById('apPmMar').value))||0):(p.lc239RecMar2027||0)), exclIrpj:(D.params||{}).exclIrpj };
       salvar(d); ov.remove(); atualizar();
     };
   }
@@ -327,7 +338,7 @@
       GRUPOS.forEach(function(g){ aoa.push([g.t]); g.itens.forEach(function(it){ var a=D[ST.regime][b][it[0]]||[], r=[it[1]], t=0; for(var i=0;i<N;i++){ r.push(NUM(a[i])); t+=NUM(a[i]); } r.push(R2(t)); aoa.push(r); }); });
       aoa.push([]);
     });
-    var vals=D[ST.regime][ST.calcCom]||{}, cc=calcular(vals,D[ST.regime].ded,per(),D.params).rows;
+    var vals=D[ST.regime][ST.calcCom]||{}, cc=calcular(vals,D[ST.regime].ded,per(),D.params,ST.ano).rows;
     var L=function(rot,k){ var r=[rot],t=0; for(var i=0;i<N;i++){ r.push(cc[i][k]); t+=cc[i][k]; } r.push(R2(t)); aoa.push(r); };
     aoa.push(['CÁLCULO'].concat(Array.apply(null,{length:N}).map(function(_,i){ return P.rot(i); }),['TOTAL']));
     L('Receita bruta das atividades','rb'); if(ST.modo!=='rb') L('Receita bruta excedente (LC 224/2025)','exc'); L('CSLL — total base de cálculo','cBase'); L('CSLL — provisão 9%','cProv'); L('CSLL a recolher','cPagar'); L('IRPJ — total base de cálculo','iBase'); L('IRPJ 15%','i15'); L('Adicional IRPJ 10%','iAd'); L('IRPJ a recolher','iPagar');
@@ -339,7 +350,7 @@
     var chv='apuracao_pres_'+modo+'_'+eid+'_'+ano, d=null; try{ d=S.g(chv); }catch(e){} d=d||{};
     var comp=d.comp||{}, vals=comp.cont||{}, ded=comp.ded||{}, pr=parRuf(eid,modo,ano,d.params);
     var pk=modo==='rb'?'M':'T', P=PER[pk], N=P.n;
-    var cc=calcular(vals,ded,pk,pr).rows;
+    var cc=calcular(vals,ded,pk,pr,ano).rows;
     var cab=['DESCRIÇÃO'].concat(Array.apply(null,{length:N}).map(function(_,i){ return P.rot(i); }),['TOTAL']);
     var L=[{cells:cab.map(function(t){ return {v:t,b:1,fg:'#FFFFFF',bg:'#2D3447',al:'c'}; })}];
     var linha=function(rot,arr,o){ o=o||{}; var t=0, cells=[{v:rot,b:o.b,bg:o.bg,fg:o.fg}]; arr.forEach(function(x){ t+=x; cells.push({v:R2(x),n:1,b:o.b,bg:o.bg,fg:o.fg}); }); cells.push({v:R2(t),n:1,b:1,bg:o.bg||'#FAFAFA',fg:o.fg}); L.push({cells:cells}); };
@@ -357,13 +368,13 @@
     if(lc) linha('Receita bruta que excede o limite — LC 224/2025',F('exc'),{fg:'#7C2D12'});
     barra('CÁLCULO DA CSLL — 9%','#000000');
     linha('Base de Cálculo 12% (comércio e indústria)',F('c12')); linha('Base de Cálculo dos serviços',F('c32')); linha('Base de Cálculo 100% (financeiras, demais, ganho de capital, LALUP)',F('c100'));
-    if(lc) linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('cLC'),{fg:'#7C2D12'});
+    if(lc) linha('(+) Acréscimo de '+pctLC(ano)+' no percentual de presunção — '+leiLC(ano),F('cLC'),{fg:'#7C2D12'});
     linha('Total Base de Cálculo da CSLL',F('cBase'),{b:1,bg:'#FEF9C3'}); linha('PROVISÃO DA CSLL (9%)',F('cProv'),{b:1,bg:'#F8D7DA'});
     DED.filter(function(x){ return DED_CSLL.indexOf(x[0])>=0; }).forEach(function(x){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((ded[x[0]]||[])[i])); linha('(-) '+x[1],a); });
     linha('CSLL A RECOLHER',F('cPagar'),{b:1,bg:'#FFD700'});
     barra('CÁLCULO DO IRPJ — 15% + adicional de 10%','#000000');
     linha('Base de Cálculo 8% (comércio e indústria)',F('i8')); linha('Base de Cálculo dos serviços',F('i32')); linha('Base de Cálculo 100%',F('i100'));
-    if(lc) linha('(+) Acréscimo de 10% no percentual de presunção — LC 224/2025',F('iLC'),{fg:'#7C2D12'});
+    if(lc) linha('(+) Acréscimo de '+pctLC(ano)+' no percentual de presunção — '+leiLC(ano),F('iLC'),{fg:'#7C2D12'});
     linha('Total Base de Cálculo do IRPJ — 15%',F('iBase'),{b:1,bg:'#FEF9C3'}); linha('Base do Adicional — 10%',F('iAdBase')); linha('IRPJ — 15%',F('i15')); linha('ADICIONAL IRPJ — 10%',F('iAd'));
     linha('PROVISÃO DO IRPJ',F('iProv'),{b:1,bg:'#F8D7DA'});
     DED.filter(function(x){ return DED_IRPJ.indexOf(x[0])>=0; }).forEach(function(x){ var a=[]; for(var i=0;i<N;i++) a.push(NUM((ded[x[0]]||[])[i])); linha('(-) '+x[1],a); });
@@ -374,7 +385,7 @@
   function resumoRB(eid,ano){
     var d=null; try{ d=S.g('apuracao_pres_rb_'+eid+'_'+ano); }catch(e){} d=d||{};
     var comp=d.comp||{};
-    return calcular(comp.cont||{},comp.ded||{},'M',parRuf(eid,'rb',ano,d.params)).rows;
+    return calcular(comp.cont||{},comp.ded||{},'M',parRuf(eid,'rb',ano,d.params),ano).rows;
   }
   root.ApPres={toggleAjustes:toggleAjustes,digitouEx:digitouEx,engDed:engDed,secao:secao,resumoRB:resumoRB,abrir:abrir,voltar:voltar,set:set,digitou:digitou,digitouDed:digitouDed,copiarContabil:copiarContabil,parametros:parametros,engrenagem:engrenagem,excel:excel,calcular:calcular,_ST:ST};
 })(typeof window!=='undefined'?window:this);
