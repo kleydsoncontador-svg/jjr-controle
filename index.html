@@ -36129,6 +36129,62 @@ async function _lancctbRodarMatching(eid,contaId,statusCb,modo='completo',restri
     if(_lancctbProcAtual===atual){ _lancctbProcAtual=null; const el=document.getElementById('lancctbRegistroProcessarStatus'); if(el&&el.textContent===atual.msg) el.textContent=''; }
   }
 }
+// ═══ #250 NASA TRUCK (pedido do usuário 26/11/2026): pagamento/recebimento do Registro que veio do Fluxo e AINDA NÃO amarrou NF → busca no EXTRATO do banco (linha "referência", mesma conta, data e valor) o NOME e o CPF/CNPJ
+// da contraparte ("PIX EMITIDO OUTRA IF - Pagamento Pix|@47.468.395 0001-15|@ 47.468.395 RYAN FELIPE MORAIS DA SILVA"), grava na linha do Fluxo ligada (só campo VAZIO, nunca sobrescreve; log em fluxo_cnpj_historico)
+// e o Processar Pagamentos/Recebimentos usa esse nome/CPF/CNPJ para tentar amarrar a NF. Só na Nasa.
+const NASA_IDENT_EIDS=['250'];
+function _nasaCpfValido(c){ c=String(c||'').replace(/\D/g,''); if(c.length!==11||/^(\d)\1+$/.test(c)) return false; const dv=n=>{ let s=0; for(let i=0;i<n;i++) s+=(+c[i])*(n+1-i); const r=(s*10)%11; return r===10?0:r; }; return dv(9)===+c[9]&&dv(10)===+c[10]; }
+function _nasaIdentDoHistorico(h,cnpjEmpresa){
+  const s=String(h||''); if(!s.trim()) return null;
+  let doc=null,tipo=null;
+  const mc=s.match(/(\d{2})\.(\d{3})\.(\d{3})\s*\/?\s*(\d{4})\s*-\s*(\d{2})/);
+  if(mc){ const d=mc.slice(1,6).join(''); if(_fxcnpjValido(d)){ doc=d; tipo='CNPJ'; } }
+  if(!doc){ const mp=s.match(/(?:^|[^\d*.])(\d{3})\.(\d{3})\.(\d{3})-(\d{2})(?!\d)/); if(mp){ const d=mp.slice(1,5).join(''); if(_nasaCpfValido(d)){ doc=d; tipo='CPF'; } } }
+  if(!doc){ const r=_lancctbExtrairDocDoHistorico(s); if(r&&(r.tipo==='CNPJ'?_fxcnpjValido(r.doc):_nasaCpfValido(r.doc))){ doc=r.doc; tipo=r.tipo; } }
+  const raizEmp=String(cnpjEmpresa||'').replace(/\D/g,'').slice(0,8);
+  if(doc&&tipo==='CNPJ'&&raizEmp&&doc.slice(0,8)===raizEmp) return null; // a própria empresa (transferência entre contas)
+  let t=_convMpRemoverAcentos(s.toUpperCase());
+  if(/MESMA TIT/.test(t)) return null;
+  t=t.replace(/PIX\s+(EMITIDO|RECEBIDO)(\s*-?\s*OUTRA\s+IF)?/g,' ').replace(/CREDITO\s+DEVOLUCAO\s+PIX/g,' ').replace(/(PAGAMENTO|RECEBIMENTO|DEVOLUCAO)\s+PIX/g,' ')
+    .replace(/DEB\.?\s*TIT\.?\s*COMPE\s*EFETIVADO/g,' ').replace(/\*+[\d.\s*-]*/g,' ')
+    .replace(/\d[\d.\/-]*\d|\d/g,' ');
+  const NAO_NOME=/^(COMPRA NACIONAL|SAQUE|BANCO24HORAS|DEB\.?\s*PAGAMENTO|DEVOLUCAO DE JUROS|TARIFA|IOF|JUROS|RESGATE|APLICACAO|ESTORNO)/;
+  const nomes=t.split(/[|@]/).map(x=>x.replace(/[^A-Z0-9&.,' ]/g,' ').replace(/\s+/g,' ').replace(/^[\s.,-]+|[\s.,-]+$/g,'').trim()).filter(x=>x.replace(/[^A-Z]/g,'').length>=4&&!NAO_NOME.test(x));
+  const nome=nomes.sort((a,b)=>b.length-a.length)[0]||'';
+  if(!doc&&!nome) return null;
+  return { doc, tipo, nome };
+}
+async function _nasaIdentPreencher(eid,contaId,lancamentos){
+  if(!NASA_IDENT_EIDS.includes(String(eid))||!lancamentos||!lancamentos.length) return 0;
+  const datas=lancamentos.map(l=>l.data_pagamento).filter(Boolean).sort(); if(!datas.length) return 0;
+  const { data: refs } = await _lancctbFetchTudo(()=>_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
+    .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','referencia').gte('data_pagamento',datas[0]).lte('data_pagamento',datas[datas.length-1]));
+  if(!refs||!refs.length) return 0;
+  const k=(d,s,e)=>d+'|'+Math.round(Number(s||0)*100)+'|'+Math.round(Number(e||0)*100);
+  const porChave=new Map(); refs.forEach(r=>{ const c=k(r.data_pagamento,r.valor_saida,r.valor_entrada); porChave.set(c,(porChave.get(c)||[]).concat([r])); });
+  const pend=lancamentos.filter(l=>{ const a=porChave.get(k(l.data_pagamento,l.valor_saida,l.valor_entrada)); return a&&a.length===1; });
+  if(!pend.length) return 0;
+  const ids=pend.map(l=>l.id); let fx=[];
+  for(let i=0;i<ids.length;i+=200){ const { data } = await _supaClient.from('fluxo_caixa_lancamentos').select('id,lancamento_extrato_id,cliente_fornecedor_nome,cnpj_cpf').eq('empresa_eid',eid).in('lancamento_extrato_id',ids.slice(i,i+200)); fx=fx.concat(data||[]); }
+  const fxPor=new Map(); fx.forEach(f=>{ const c=String(f.lancamento_extrato_id); fxPor.set(c,(fxPor.get(c)||[]).concat([f])); });
+  const emp=(S.emps()||[]).find(e=>String(e.eid)===String(eid))||{};
+  const logAlvos=[]; let n=0;
+  for(const l of pend){
+    const ref=porChave.get(k(l.data_pagamento,l.valor_saida,l.valor_entrada))[0];
+    const id=_nasaIdentDoHistorico(ref.historico_bancario,emp.cnpj); if(!id) continue;
+    l._ident=Object.assign({ href:ref.historico_bancario },id);
+    const fs=fxPor.get(String(l.id))||[]; if(fs.length!==1) continue; // composto (várias linhas do Fluxo) ou sem Fluxo: só usa no matching, não grava
+    const f=fs[0], up={};
+    if(!String(f.cliente_fornecedor_nome||'').trim()&&id.nome) up.cliente_fornecedor_nome=id.nome;
+    if(!String(f.cnpj_cpf||'').replace(/\D/g,'')&&id.doc) up.cnpj_cpf=id.doc;
+    if(!Object.keys(up).length) continue;
+    const { error } = await _supaClient.from('fluxo_caixa_lancamentos').update(up).eq('id',f.id);
+    if(!error){ n++; logAlvos.push({ id:f.id, novo:up.cnpj_cpf||null, nome:up.cliente_fornecedor_nome||null, metodo:'extrato_referencia', evidencia:ref.historico_bancario }); }
+  }
+  if(logAlvos.length){ try{ const log=(S.g(FXCNPJ_LOG)&&typeof S.g(FXCNPJ_LOG)==='object'&&!Array.isArray(S.g(FXCNPJ_LOG)))?Object.assign({},S.g(FXCNPJ_LOG)):{}; const quem=(typeof currentUser!=='undefined'&&currentUser&&(currentUser.nome||currentUser.login))||''; const ts=new Date().toISOString();
+    log[eid]=(log[eid]||[]).concat(logAlvos.map(a=>Object.assign({ts,usuario:quem},a))).slice(-30000); S.s(FXCNPJ_LOG,log); }catch(e){ console.warn('log Nasa ident',e); } }
+  return n;
+}
 async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo',restringirPeriodo=false){
   const log=(msg)=>{ if(statusCb) statusCb(msg); };
   log('Carregando pendências (etapa 1 de 3)…');
@@ -36154,6 +36210,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     .select('id,data_pagamento,valor_saida,valor_entrada,historico_bancario')
     .eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).eq('status_conciliacao','pendente')
     .order('data_pagamento',{ascending:true})));
+  try{ if(NASA_IDENT_EIDS.includes(String(eid))&&modo!=='recebimentos_so_regras'){ log('Nasa: lendo nome e CPF/CNPJ no extrato…'); const _nNasa=await _nasaIdentPreencher(eid,contaId,lancamentos||[]); if(_nNasa) console.info('Nasa: '+_nNasa+' linha(s) do Fluxo com nome/CPF/CNPJ do extrato'); } }catch(e){ console.warn('Nasa ident extrato:',e); }
   // Faixa de datas dos lançamentos pendentes ±tolerância — limita as queries
   // grandes abaixo sem perder nenhum candidato relevante (mesmo padrão do
   // renderLancctbRegistroContabil, commit 9f2c4da).
@@ -37352,8 +37409,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // coincidência de valor+data contra a NF de um cliente PJ completamente
     // diferente (ex. "BAGAROTII PNEUS LTDA"). docHistorico só entra em jogo
     // quando NÃO tem CNPJ-âncora de comprovante (esse já é mais confiável).
-    const docHistorico=cnpjAncora?null:_lancctbExtrairDocDoHistorico(l.historico_bancario);
-    const historicoTemNome=cnpjAncora?false:_lancctbHistoricoTemNomeEmpresa(l.historico_bancario);
+    /* 26/11/2026 Nasa: histórico do Fluxo + nome e CPF/CNPJ achados no extrato do banco (_nasaIdentPreencher) */
+    const _hbNF=l._ident?(String(l.historico_bancario||'')+' | '+(l._ident.nome||'')+(l._ident.doc?' '+_fmtCnpjCpf(l._ident.doc):'')):l.historico_bancario;
+    const _semNfNF=_lancctbHistoricoSemNF(l.historico_bancario)&&!(l._ident&&l._ident.tipo==='CNPJ'&&!_lancctbHistoricoEhTributo(l.historico_bancario));
+    const docHistorico=cnpjAncora?null:_lancctbExtrairDocDoHistorico(_hbNF);
+    const historicoTemNome=cnpjAncora?false:_lancctbHistoricoTemNomeEmpresa(_hbNF);
     // Securitizadora/FIDC é só PONTE entre pagador e recebedor (pedido do
     // usuário 18/09/2026, Peixoto: "BOLETO PAGO GAVEA SECURITIZADORA"): o
     // beneficiário real está no Fluxo de Caixa. Só amarra NF se o Fluxo tiver
@@ -37371,12 +37431,12 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
     // se ela não existir nas NFs importadas, o lançamento fica PENDENTE (pra criar a Regra via Fluxo) — nunca vai pra outra NF só porque o valor/data bate.
     const nfsDoFluxoLigado=new Set((_fxPorLanc.get(String(l.id))||[]).map(f=>String(f.numero||f.documento_numero||'').split('/')[0].replace(/\D/g,'').replace(/^0+/,'')).filter(Boolean));
     const nfBateFluxoLigado=p=>!nfsDoFluxoLigado.size||nfsDoFluxoLigado.has(String(p.notas_fiscais&&p.notas_fiscais.numero||'').replace(/\D/g,'').replace(/^0+/,''));
-    const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_lancctbHistoricoSemNF(l.historico_bancario))?[]:_parcCand(valor).filter(p=>{
+    const nfCandidatas=(gruposComprovantes||bloqueiaNf||modo==='recebimentos_so_regras'||_semNfNF)?[]:_parcCand(valor).filter(p=>{
       if(parcelasUsadas.has(p.id)) return false;
       if(!nfBateFluxoLigado(p)) return false;
-      if(!_lancctbNfParamOk(l.historico_bancario,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
+      if(!_lancctbNfParamOk(_hbNF,p.notas_fiscais,ehSaida,_fpListaEng)) return false;
       if(!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,p.notas_fiscais)) return false;
-      if(exigeNomeForte&&!_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)) return false;
+      if(exigeNomeForte&&!_lancctbNfNomeForteOk(_hbNF,p.notas_fiscais,ehSaida)) return false;
       if(ehPonte){
         if(p.notas_fiscais?.direcao!==(ehSaida?'compra':'venda')) return false;
         if(!_lancctbNaturezaEhFinanceira(p.notas_fiscais?.natureza_operacao,p.notas_fiscais?.modelo)) return false;
@@ -37405,7 +37465,7 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // Mesma RAIZ de CNPJ (8 primeiros dígitos) = mesma empresa (matriz × filial) — achado 21/10/2026, EMBREPAR: histórico 12.049.403/0001-04, NF emitida pela filial 12.049.403/0008-80.
       const _mesmaRaizCnpj=docHistorico?.tipo==='CNPJ'&&cnpjNf&&cnpjNf.length===14&&docHistorico.doc.length===14&&cnpjNf.slice(0,8)===docHistorico.doc.slice(0,8);
       if(docHistorico&&cnpjNf&&cnpjNf.length===docHistorico.doc.length&&cnpjNf!==docHistorico.doc&&!_mesmaRaizCnpj) return false; // PIX de OUTRO CPF/CNPJ não paga esta NF
-      if(!cnpjAncora&&!_lancctbNomeCompativel([l.historico_bancario,comprovanteMatch?.cliente_fornecedor_nome],nomeNf)) return false;
+      if(!cnpjAncora&&!_lancctbNomeCompativel([_hbNF,comprovanteMatch?.cliente_fornecedor_nome],nomeNf)) return false;
       // Trava PF (histórico) × PJ (NF): só passa se valor E data de
       // vencimento forem EXATOS (nada de tolerância) — vira só sugestão
       // manual quando não bater exato, nunca classifica sozinho.
@@ -37417,11 +37477,11 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         // e o vencimento da parcela é no mesmo mês do recebimento; a diferença vai pra Juros recebidos (a mais) ou Desconto concedido (a menos) — ver gerarLancamentoNF.
         const _difCentNf=Math.abs(_lancctbNfValorParaMatching(p,valor)-valor);
         const _centEntradaOk=!ehSaida&&_difCentNf<=0.0101&&String(p.data_vencimento||'').slice(0,7)===String(l.data_pagamento||'').slice(0,7)
-          &&((docHistorico?.tipo==='CNPJ'&&cnpjNf&&(cnpjNf===docHistorico.doc||_mesmaRaizCnpj))||(!docHistorico&&_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida)));
+          &&((docHistorico?.tipo==='CNPJ'&&cnpjNf&&(cnpjNf===docHistorico.doc||_mesmaRaizCnpj))||(!docHistorico&&_lancctbNfNomeForteOk(_hbNF,p.notas_fiscais,ehSaida)));
         if(_difCentNf>tolNF&&!_centEntradaOk&&!(comprovanteMatch&&Number(comprovanteMatch.valor_documento)>0&&(Number(comprovanteMatch.juros)||Number(comprovanteMatch.multa)||Number(comprovanteMatch.desconto))&&Math.abs(p.valor_parcela-Number(comprovanteMatch.valor_documento))<=tolNF)) return false;
         const cnpjExatoDoHistorico=docHistorico?.tipo==='CNPJ'&&(cnpjNf===docHistorico.doc||_mesmaRaizCnpj);
         // 22/10/2026: sem CNPJ no extrato, valor EXATO + nome forte (todas as palavras do nome da NF no histórico) também vale pagar adiantado (CC Comércio de Etiquetas: pago 21/08, venc. 26/08, R$ 280,98)
-        const _nomeForteExato=!cnpjExatoDoHistorico&&Math.abs(_lancctbNfValorParaMatching(p,valor)-valor)<0.005&&_lancctbNfNomeForteOk(l.historico_bancario,p.notas_fiscais,ehSaida);
+        const _nomeForteExato=!cnpjExatoDoHistorico&&Math.abs(_lancctbNfValorParaMatching(p,valor)-valor)<0.005&&_lancctbNfNomeForteOk(_hbNF,p.notas_fiscais,ehSaida);
         if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento,(cnpjExatoDoHistorico||_nomeForteExato)?LANCCTB_MATCH_JANELA_DIAS_NF:undefined)) return false;
       }
       if(cnpjAncora){
