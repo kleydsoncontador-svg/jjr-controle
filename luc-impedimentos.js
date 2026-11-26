@@ -139,7 +139,7 @@
       + '<div style="max-width:980px;margin:14px auto 40px">'
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:14px">Textos copiados do site oficial do Planalto (redação vigente em 26/11/2026; trechos revogados omitidos). Embaixo de cada dispositivo, entre parênteses, a explicação em linguagem simples. A tese do STF (ADI 5.161, 30/09/2026) está resumida conforme noticiado; confira o acórdão antes de citar em parecer.</div>';
     B.forEach(s => {
-      h += '<section id="lucImpB_' + s.id + '" style="margin:0 0 26px;padding:16px 18px;border:1px solid var(--border);border-radius:10px;background:var(--white);' + (ST.tema === s.id ? 'box-shadow:0 0 0 2px var(--teal)' : '') + '">'
+      h += '<section id="lucImpB_' + s.id + '" style="scroll-margin-top:150px;margin:0 0 26px;padding:16px 18px;border:1px solid var(--border);border-radius:10px;background:var(--white);' + (ST.tema === s.id ? 'box-shadow:0 0 0 2px var(--teal)' : '') + '">'
         + '<h2 style="margin:0 0 8px;font-size:18px;color:var(--teal)">' + E(s.titulo) + '</h2>'
         + (s.intro ? '<div style="font-size:13.5px;line-height:1.55;margin-bottom:12px">' + E(s.intro) + '</div>' : '');
       (s.itens || []).forEach(it => { h += item(it); });
