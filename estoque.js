@@ -132,7 +132,9 @@
   const grp = (t, n, cor) => '<th colspan="' + n + '" style="padding:4px;text-align:center;background:' + cor + ';color:#fff;font-size:11px">' + t + '</th>';
   const THEAD = '<thead style="position:sticky;top:0;z-index:3">';
   const vc = (x, b, cor, dec) => '<td style="padding:4px 6px;text-align:right;font-family:var(--mono);white-space:nowrap;' + (b ? 'font-weight:700;' : '') + (cor ? 'color:' + cor + ';' : '') + '">' + (Math.abs(x) > 1e-9 ? (dec ? Q(x) : F(x)) : '') + '</td>';
-  const box = t => '<div style="overflow:auto;max-height:calc(100vh - 330px);border:1px solid var(--border);border-radius:6px"><table class="luc-t" style="width:100%;border-collapse:collapse;font-size:12px">' + t + '</table></div>';
+  /* 26/11/2026: linhas verticais entre as colunas (e horizontais entre as linhas) */
+  const ESTILO = '<style>#estoqueCorpo table.est-grade td,#estoqueCorpo table.est-grade th{border-right:1px solid rgba(100,116,139,.45);border-bottom:1px solid rgba(100,116,139,.25)}#estoqueCorpo table.est-grade th{border-right-color:rgba(255,255,255,.25)}</style>';
+  const box = t => ESTILO + '<div style="overflow:auto;max-height:calc(100vh - 330px);border:1px solid var(--border);border-radius:6px"><table class="luc-t est-grade" style="width:100%;border-collapse:collapse;font-size:12px">' + t + '</table></div>';
   function corpo() { corpo0(); if (ST.foco) { const i = document.querySelector('#estoqueCorpo [data-fc="' + ST.foco + '"]'); if (i) { i.focus(); const n = i.value.length; try { i.setSelectionRange(n, n); } catch (e) { } } } }
   function corpo0() {
     const el = document.getElementById('estoqueCorpo'); if (!el) return; const f = nrm(ST.filtro), emp = lerEmp(ST.eid);
