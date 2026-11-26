@@ -30,30 +30,30 @@
   function reqOk(r) { return !!(r && r.req && REQ.every(([k]) => r.req[k])); }
 
   // ── tela ──
-  function abrir() {
-    let ov = document.getElementById('lucImpModal');
-    if (!ov) { ov = document.createElement('div'); ov.id = 'lucImpModal'; ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9990;display:flex;align-items:stretch;justify-content:center;padding:18px'; document.body.appendChild(ov); }
-    const fa = (typeof S.fechAtual === 'function' && S.fechAtual()) || ''; const a = parseInt(String(fa).slice(0, 4), 10); if (a) ST.ano = a;
-    render();
-  }
-  function fechar() { document.getElementById('lucImpModal')?.remove(); if (typeof renderLucros === 'function') try { renderLucros(); } catch (e) { } }
+  // 26/11/2026: tela COMPLETA do site (page-lucimp), não janela. Duas vistas: lista das empresas e Base legal.
+  let _anoIni = false;
+  function abrir() { ST.view = 'lista'; if (typeof goPage === 'function') goPage('lucimp'); else render(); }
+  function fechar() { if (typeof goPage === 'function') goPage('lucros'); }
+  function base(tema) { ST.view = 'base'; ST.tema = tema || ''; render(); }
   function render() {
-    const ov = document.getElementById('lucImpModal'); if (!ov) return;
+    const ov = document.getElementById('lucImpRoot'); if (!ov) return;
+    if (!_anoIni) { _anoIni = true; const fa = (typeof S.fechAtual === 'function' && S.fechAtual()) || ''; const a = parseInt(String(fa).slice(0, 4), 10); if (a) ST.ano = a; }
+    if (ST.view === 'base') { renderBase(ov); return; }
     const lista = (S.emps() || []).slice().sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR'));
     const anos = []; for (let y = ST.ano - 3; y <= ST.ano + 2; y++) anos.push(y);
-    ov.innerHTML = '<div style="background:var(--white);color:var(--ink);border-radius:10px;width:100%;max-width:1500px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.35)">'
-      + '<div style="padding:14px 18px;border-bottom:1px solid var(--border);display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
-      + '<b style="font-size:16px">🚫 Impedimentos à distribuição de lucros</b>'
-      + '<span style="font-size:12px;color:var(--slate)">STF, ADI 5.161 (30/09/2026): multa do art. 32 da Lei 4.357/64 e do art. 52 da Lei 8.212/91 só quando os 3 requisitos existem ao mesmo tempo.</span>'
-      + '<span style="margin-left:auto;display:flex;gap:6px;align-items:center"><select class="si" onchange="LucImp.ano(this.value)">' + anos.map(y => '<option' + (y === ST.ano ? ' selected' : '') + '>' + y + '</option>').join('') + '</select>'
-      + '<button class="btn bo bsm" onclick="LucImp.fechar()">✕ Fechar</button></span></div>'
-      + '<div style="padding:10px 18px;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-bottom:1px solid var(--border)">'
+    ov.innerHTML = '<div style="display:flex;flex-direction:column;min-height:calc(100vh - 120px)">'
+      + '<div style="padding:4px 0 12px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">'
+      + '<button class="btn bo bsm" onclick="LucImp.fechar()">← Lucros / Dividendos</button>'
+      + '<div class="ptitle" style="margin:0">🚫 Impedimentos à distribuição de lucros</div>'
+      + '<span style="margin-left:auto;display:flex;gap:6px;align-items:center"><button class="btn bp bsm" onclick="LucImp.base()" title="Leis e artigos (texto original) com explicação simples">📜 Base legal</button><select class="si" onchange="LucImp.ano(this.value)">' + anos.map(y => '<option' + (y === ST.ano ? ' selected' : '') + '>' + y + '</option>').join('') + '</select></span></div>'
+      + '<div class="psub" style="margin:0 0 10px">STF, ADI 5.161 (30/09/2026): a multa do art. 32 da Lei 4.357/64 e do art. 52 da Lei 8.212/91 por distribuir lucros só existe quando os 3 requisitos acontecem ao mesmo tempo. Clique no nome de cada requisito para ver a lei.</div>'
+      + '<div style="padding:10px 0;display:flex;gap:8px;align-items:center;flex-wrap:wrap;border-top:1px solid var(--border);border-bottom:1px solid var(--border)">'
       + '<label style="font-weight:700;font-size:13px">Adicionar empresa:</label>'
       + '<input class="si" id="lucImpAdd" list="lucImpDL" placeholder="🔍 ID, nome ou CNPJ…" style="width:360px">'
       + '<datalist id="lucImpDL">' + lista.map(e => '<option value="' + E(e.eid + ' — ' + (e.nome || '') + (e.cnpj ? ' — ' + e.cnpj : '')) + '"></option>').join('') + '</datalist>'
       + '<button class="btn bp bsm" onclick="LucImp.adicionar()">＋ Adicionar</button>'
       + '<span style="font-size:11.5px;color:var(--slate);margin-left:8px">Clique no mês para <b>bloquear a partir dele</b>; os meses seguintes ficam bloqueados até você clicar num mês para <b>desbloquear</b>. Clicar de novo no mesmo mês desfaz.</span></div>'
-      + '<div id="lucImpCorpo" style="flex:1;overflow:auto;padding:0 18px 14px"></div></div>';
+      + '<div id="lucImpCorpo" style="flex:1;overflow:auto;max-height:calc(100vh - 260px);margin-top:8px"></div></div>';
     corpo();
   }
   const fIn = (k, ph, w) => '<th style="padding:3px;background:var(--ink3,#2D3447)"><input class="si" data-fc="' + k + '" value="' + E(ST.fc[k] || '') + '" placeholder="' + (ph || '🔎') + '" oninput="LucImp.fcol(\'' + k + '\',this.value)" style="width:100%;min-width:' + (w || 50) + 'px;font-size:11px;padding:2px 4px"></th>';
@@ -70,7 +70,7 @@
       && (!fc.sit || (fc.sit === 'bloq' ? l.hoje : !l.hoje)));
     const th = (t, al, tt) => '<th style="padding:6px 6px;background:var(--ink2);color:#fff;font-size:11px;white-space:nowrap;text-align:' + (al || 'center') + '"' + (tt ? ' title="' + E(tt) + '"' : '') + '>' + t + '</th>';
     let h = '<table style="width:100%;border-collapse:collapse;font-size:12.5px"><thead style="position:sticky;top:0;z-index:2"><tr>'
-      + th('ID') + th('Empresa', 'left') + th('CNPJ', 'left') + REQ.map(([k, n, t]) => th(n, 'center', t)).join('') + th('3 requisitos') + th('Situação ' + (mkHoje ? mkHoje.slice(5) + '/' + mkHoje.slice(0, 4) : 'hoje'))
+      + th('ID') + th('Empresa', 'left') + th('CNPJ', 'left') + REQ.map(([k, n, t]) => th('<span onclick="LucImp.base(\'' + k + '\')" style="cursor:pointer;text-decoration:underline dotted" title="' + E(t) + ' — clique para ver a base legal">' + n + ' 📜</span>', 'center')).join('') + th('3 requisitos') + th('Situação ' + (mkHoje ? mkHoje.slice(5) + '/' + mkHoje.slice(0, 4) : 'hoje'))
       + MESES.map(m => th(m + '/' + String(ST.ano).slice(2))).join('') + th('') + '</tr><tr>'
       + fIn('eid', 'ID', 40) + fIn('nome', '🔎 empresa', 160) + fIn('cnpj', 'CNPJ', 90) + REQ.map(([k]) => fSel(k, [['', 'Todos'], ['s', '✔'], ['n', '—']])).join('')
       + '<th style="background:var(--ink3,#2D3447)"></th>' + fSel('sit', [['', 'Todas'], ['bloq', '🔒 Impedida'], ['lib', '✅ Liberada']])
@@ -125,8 +125,37 @@
     salvar(d); if (typeof _lucCalcCache !== 'undefined') try { _lucCalcCache = {}; } catch (e) { }
     corpo();
   }
+  // ── Base legal (tela inteira): texto original do Planalto + explicação simples embaixo de cada dispositivo ──
+  function renderBase(ov) {
+    const B = root.LUC_IMP_BASE || [];
+    const nav = B.map(s => '<button class="btn ' + (ST.tema === s.id ? 'bp' : 'bo') + ' bsm" onclick="LucImp.irBase(\'' + s.id + '\')">' + E(s.titulo.split(' — ')[0]) + '</button>').join('');
+    const item = it => '<div style="margin:0 0 12px">'
+      + '<div style="font-family:Georgia,\'Times New Roman\',serif;font-size:14.5px;line-height:1.55;color:var(--ink)">' + E(it.t) + '</div>'
+      + '<div style="margin-top:3px;padding:6px 10px;border-left:3px solid var(--teal);background:rgba(15,118,110,.08);font-size:13px;line-height:1.5;color:var(--ink)">(' + E(it.e) + ')</div></div>';
+    let h = '<div style="padding:4px 0 10px;display:flex;gap:10px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5;border-bottom:1px solid var(--border)">'
+      + '<button class="btn bo bsm" onclick="LucImp.voltar()">← Impedimentos</button>'
+      + '<div class="ptitle" style="margin:0">📜 Base legal — distribuição de lucros com débito federal</div>'
+      + '<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">' + nav + '</span></div>'
+      + '<div style="max-width:980px;margin:14px auto 40px">'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:14px">Textos copiados do site oficial do Planalto (redação vigente em 26/11/2026; trechos revogados omitidos). Embaixo de cada dispositivo, entre parênteses, a explicação em linguagem simples. A tese do STF (ADI 5.161, 30/09/2026) está resumida conforme noticiado; confira o acórdão antes de citar em parecer.</div>';
+    B.forEach(s => {
+      h += '<section id="lucImpB_' + s.id + '" style="margin:0 0 26px;padding:16px 18px;border:1px solid var(--border);border-radius:10px;background:var(--white);' + (ST.tema === s.id ? 'box-shadow:0 0 0 2px var(--teal)' : '') + '">'
+        + '<h2 style="margin:0 0 8px;font-size:18px;color:var(--teal)">' + E(s.titulo) + '</h2>'
+        + (s.intro ? '<div style="font-size:13.5px;line-height:1.55;margin-bottom:12px">' + E(s.intro) + '</div>' : '');
+      (s.itens || []).forEach(it => { h += item(it); });
+      (s.leis || []).forEach(l => {
+        if (l.nome) h += '<h3 style="margin:14px 0 8px;font-size:14.5px;color:var(--ink)">' + E(l.nome) + (l.url ? ' <a href="' + E(l.url) + '" target="_blank" rel="noopener" style="font-size:11.5px;font-weight:400">(abrir no Planalto ↗)</a>' : '') + '</h3>';
+        l.itens.forEach(it => { h += item(it); });
+      });
+      h += '</section>';
+    });
+    ov.innerHTML = h + '</div>';
+    if (ST.tema) setTimeout(() => irBase(ST.tema), 30); else window.scrollTo(0, 0);
+  }
+  function irBase(id) { ST.tema = id; const el = document.getElementById('lucImpB_' + id); if (!el) return; document.querySelectorAll('[id^="lucImpB_"]').forEach(x => x.style.boxShadow = x === el ? '0 0 0 2px var(--teal)' : ''); el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
   root.LucImp = {
-    abrir, fechar, render, adicionar, remover, req, mes,
+    abrir, fechar, render, adicionar, remover, req, mes, base, irBase,
+    voltar: () => { ST.view = 'lista'; render(); window.scrollTo(0, 0); },
     ano: a => { ST.ano = +a; render(); },
     fcol: (k, v, ja) => { ST.fc[k] = v; ST.foco = ja ? '' : k; clearTimeout(root._lucImpF); root._lucImpF = setTimeout(corpo, ja ? 0 : 250); },
     bloqueado: (eid, ano, mes) => bloqueado(eid, mkDe(ano, mes)),
