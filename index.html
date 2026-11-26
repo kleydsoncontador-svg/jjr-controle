@@ -37739,6 +37739,50 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
         }
       }
     }
+    // 26/11/2026 (Pride 09/09, "CasaGiacomo SAO PAULO BRA" R$ 523,87 = NF 68500 R$ 346,67 + NF 397242 R$ 100,40 + NFS-e 83155 R$ 76,80, todas da CASA GIACOMO, raiz 43.732.908):
+    // compra sem CNPJ no extrato (cartão/débito) nunca tentava soma de NFs — esse caminho exige CNPJ âncora. Agora, SEM âncora, soma 2 a 15 parcelas de UMA só raiz de CNPJ quando:
+    // o nome da NF combina com o histórico do banco, existe UMA linha do Fluxo com o MESMO valor e a MESMA data cujo nome também combina (confirma quem recebeu), a soma fecha EXATA
+    // e só UMA raiz de CNPJ fecha. Qualquer dúvida = fica pendente, como antes.
+    if(!resolvido&&!cnpjAncora&&!comprovanteMatch&&!ehPonte&&!bloqueiaNf&&!gruposComprovantes&&modo!=='recebimentos_so_regras'&&!_semNfNF&&historicoTemNome&&docHistorico?.tipo!=='CPF'){
+      try{
+        const _vFx=f=>ehSaida?f.valor_saida:f.valor_entrada, _vC=Math.round(valor*100);
+        const _fxMesmo=(fluxoCaixaPonteBase||[]).filter(f=>(!f.lancamento_extrato_id||f.lancamento_extrato_id===l.id)&&!fluxoPonteUsados.has(f.id)&&f.data===l.data_pagamento&&Math.round((_vFx(f)||0)*100)===_vC&&_lancctbFluxoDaConta(f,contaId));
+        const _fxNome=_fxMesmo.filter(f=>_lancctbFluxoIdentidade(l.historico_bancario,f)==='ok');
+        if(_fxMesmo.length===1&&_fxNome.length===1){
+          const fx=_fxNome[0], txtNome=_hbNF+' | '+(fx.cliente_fornecedor_nome||'')+' | '+(fx.descricao||'');
+          // o motor só carrega NFs de valor IGUAL ao do pagamento: busca aqui as parcelas pendentes do fornecedor (maior palavra do nome do Fluxo) no período
+          const _tk=_lancctbIdentTokens(fx.cliente_fornecedor_nome||fx.descricao||'').filter(t=>t.length>=4).sort((a,b)=>b.length-a.length)[0];
+          const extras=[]; if(_tk){ const _dI=new Date(l.data_pagamento+'T12:00:00'); _dI.setDate(_dI.getDate()-LANCCTB_MATCH_JANELA_DIAS_NF-60); const _dF=new Date(l.data_pagamento+'T12:00:00'); _dF.setDate(_dF.getDate()+LANCCTB_MATCH_JANELA_DIAS_NF);
+            const { data: nfsN } = await _supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).eq('direcao',ehSaida?'compra':'venda').ilike(ehSaida?'nome_emitente':'nome_destinatario','%'+_tk+'%').gte('data_emissao',_dI.toISOString().slice(0,10)).lte('data_emissao',_dF.toISOString().slice(0,10)).limit(200);
+            const idsN=(nfsN||[]).map(n=>n.id); if(idsN.length){ const { data: pN } = await _supaClient.from('notas_fiscais_parcelas').select(LANCCTB_SEL_PARCELA_MOTOR).eq('empresa_eid',eid).eq('status_conciliacao','pendente').in('nf_id',idsN); const jaT=new Set(parcelas.map(x=>x.id)); (pN||[]).forEach(x=>{ if(!jaT.has(x.id)) extras.push(x); }); } }
+          const cands=[...parcelas,...extras].filter(p=>{
+            if(parcelasUsadas.has(p.id)||!nfBateFluxoLigado(p)) return false;
+            const nf=p.notas_fiscais; if(!nf||nf.direcao!==(ehSaida?'compra':'venda')) return false;
+            if(!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)) return false;
+            if(!_lancctbNfParamOk(_hbNF,nf,ehSaida,_fpListaEng)||!_lancctbNfRegraMesAnteriorOk(eid,l.data_pagamento,nf)) return false;
+            if(!_lancctbNfDentroJanela(p.data_vencimento,l.data_pagamento)) return false;
+            const nomeNf=(ehSaida?nf.nome_emitente:nf.nome_destinatario)||'', cn=String((ehSaida?nf.cnpj_emitente:nf.cnpj_destinatario)||'');
+            if(cn.length!==14||!String(nomeNf).trim()) return false;
+            return _lancctbNomeCompativel([_hbNF],nomeNf)&&_lancctbNfNomeForteOk(txtNome,nf,ehSaida);
+          });
+          const porRaiz=new Map(); cands.forEach(p=>{ const cn=String(ehSaida?p.notas_fiscais.cnpj_emitente:p.notas_fiscais.cnpj_destinatario).slice(0,8); (porRaiz.get(cn)||porRaiz.set(cn,[]).get(cn)).push(p); });
+          const sols=[]; porRaiz.forEach(ps=>{ const lista=ps.slice(0,15); if(lista.length<2) return; const sub=_lancctbSubsetSum(lista.map(p=>Math.round(p.valor_parcela*100)),_vC,0); if(sub&&sub.length>1) sols.push(sub.map(i=>lista[i])); });
+          if(sols.length===1){
+            const escolhidas=sols[0], nf0=escolhidas[0].notas_fiscais;
+            const cnpjT=ehSaida?nf0.cnpj_emitente:nf0.cnpj_destinatario, nomeT=ehSaida?nf0.nome_emitente:nf0.nome_destinatario;
+            const { error } = await gerarLancamentoMultiNF(l,valor,ehSaida,cnpjT,nomeT,escolhidas,null);
+            if(error){ erros.push(`Lançamento de ${l.data_pagamento} (R$ ${_fmt(valor)}): ${error.message}`); }
+            else {
+              const ids=escolhidas.map(p=>p.id); ids.forEach(id=>parcelasUsadas.add(id));
+              await _supaClient.from('notas_fiscais_parcelas').update({status_conciliacao:'conciliado',lancamento_extrato_id:l.id}).in('id',ids);
+              await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',fx.id); fluxoPonteUsados.add(fx.id);
+              await _supaClient.from('lancamentos_extrato').update({status_conciliacao:'conciliado'}).eq('id',l.id);
+              resolvSubsetSum++; resolvido=true;
+            }
+          }
+        }
+      }catch(eMN){ console.warn('Soma de NFs pelo nome (sem CNPJ) falhou:',eMN); }
+    }
 
     // Passo 2b — diferença APRENDIDA (pedido do usuário 29/10/2026, "sim, na ordem"): só entra se nada acima resolveu, há CNPJ âncora e o usuário já mandou, 3+ vezes, a diferença deste
     // fornecedor/cliente (mesma direção: a mais/a menos) pra MESMA conta e lado. Exige UMA única parcela do CNPJ na janela, com diferença pequena (até 3% e R$ 300) e o lado aprendido fechando a partida.
