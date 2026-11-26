@@ -33863,7 +33863,7 @@ function _lancctbFluxoIdentPeloComprovante(cp,f){
 }
 // SEMPRE que o Fluxo é anexado em 2+ linhas (pedido do usuário 31/10/2026): o extrato fica inteiro (1 crédito no banco, nunca dividido) e abre em 1 DÉBITO por linha do Fluxo; se a soma difere do extrato, a diferença vira mais
 // 1 linha (mesmo histórico, "(diferença)"; lado oposto quando o Fluxo é maior). As contas de cada débito ficam pendentes no Registro Contábil. Não mexe em extrato já aberto/classificado.
-async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUma,difMesmaConta){
+async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUma,difMesmaConta,parPorFx){
   try{
     if(!fluxoRows||fluxoRows.length<(permitirUma?1:2)) return false;
     const id=typeof extratoOuId==='object'?extratoOuId.id:extratoOuId;
@@ -33907,7 +33907,7 @@ async function _lancctbFluxoAbrirLinhas(extratoOuId,fluxoRows,ehSaida,permitirUm
     const _temNfFx=f=>{ const n=String(f.numero||f.documento_numero||'').split('/')[0].replace(/\D/g,''); return !!n&&!_lancctbTextoParecidoTributo((f.cliente_fornecedor_nome||'')+' '+(f.descricao||'')); };
     const comp=rows.map(f=>{ const vf=Math.round(Number((ehSaida?f.valor_saida:f.valor_entrada)||0)*100)/100; const rg=regraDa(f);
       const t=(rg&&rg.historico_fixo&&_lancctbResolverHistFluxo(rg.historico_fixo,f))||txtDe(f);
-      return { codigo:null, denominacao:t, encargo:null, uf:null, valor:vf, historico:t, resumo:t.slice(0,120), competencia:null, conta_contabil_id:rg?rg.conta_contabil_id:((_contaNfPadrao&&_temNfFx(f))?_contaNfPadrao:null), regra_id:rg?rg.id:null, fx:{ id:f.id, cliente_fornecedor_nome:f.cliente_fornecedor_nome||'', descricao:f.descricao||'', descricao_conta_origem:f.descricao_conta_origem||'', documento_numero:f.documento_numero||'', numero:f.numero||'', unidade:f.unidade||'', cnpj_cpf:f.cnpj_cpf||'', data:f.data||'', parcela:f.parcela||'' } }; });
+      return { codigo:null, denominacao:t, encargo:null, uf:null, valor:vf, historico:t, resumo:t.slice(0,120), competencia:null, conta_contabil_id:rg?rg.conta_contabil_id:((_contaNfPadrao&&(_temNfFx(f)||(parPorFx&&parPorFx[f.id])))?_contaNfPadrao:null), nf_parcela_id:(parPorFx&&parPorFx[f.id])||undefined, regra_id:rg?rg.id:null, fx:{ id:f.id, cliente_fornecedor_nome:f.cliente_fornecedor_nome||'', descricao:f.descricao||'', descricao_conta_origem:f.descricao_conta_origem||'', documento_numero:f.documento_numero||'', numero:f.numero||'', unidade:f.unidade||'', cnpj_cpf:f.cnpj_cpf||'', data:f.data||'', parcela:f.parcela||'' } }; });
     const soma=Math.round(comp.reduce((a,c)=>a+c.valor,0)*100)/100, dif=Math.round((vExt-soma)*100)/100;
     if(comp.length===1&&comp[0].regra_id&&Math.abs(dif)<0.005) return false; // 1 linha que já tem Regra: quem classifica é o Processar Fluxo (Regras)
     // Pedido do usuário 31/10/2026: a diferença de centavos dos pagamentos PUCOMEX vai SEMPRE na conta 576 (1.1.6.09.000001 Importações em andamento).
@@ -36861,10 +36861,13 @@ async function _lancctbRodarMatchingInterno(eid,contaId,statusCb,modo='completo'
       // Pedido do usuário 31/10/2026: o extrato NUNCA é dividido em várias linhas ("Separada pelo Fluxo"). É UM lançamento: 1 crédito no banco com o valor total e 1 débito por linha do Fluxo.
       // Abre a composição no próprio extrato (cada linha com o seu Fluxo, Regra e conta quando já existe). Parte com NF e parte sem NF: não divide — fica pendente pra resolver à mão.
       const R=escolhidos.filter(x=>x.resolvido);
-      if(R.some(x=>x.par)){ diagAglutinado.push(`${rotuloL}: parte com NF e parte sem — o extrato não é dividido; resolva à mão`); return false; }
+      // 26/11/2026 (Pride 16/09, R$ 146.162,50 = 42 NFs do Hospital Albert Sabin, parte importada e parte não): antes recusava ("resolva à mão"). Agora abre UM lançamento:
+      // a parte com NF importada leva a parcela da NF; a parte só com o Fluxo vai pela NF que o Fluxo indica (10000/10001) — ver _lancctbFluxoAbrirLinhas.
       const fxRows=escolhidos.map(x=>x.f).filter(Boolean);
       if(fxRows.length!==escolhidos.length||fxRows.length<2){ diagAglutinado.push(`${rotuloL}: nem todas as partes vêm do Fluxo — o extrato não é dividido`); return false; }
-      const okAb=await _lancctbFluxoAbrirLinhas(l.id,fxRows,ehSaida);
+      const _parPorFx={}; escolhidos.forEach(x=>{ if(x.par&&x.f) _parPorFx[x.f.id]=x.par.id; });
+      const okAb=await _lancctbFluxoAbrirLinhas(l.id,fxRows,ehSaida,undefined,undefined,Object.keys(_parPorFx).length?_parPorFx:null);
+      if(okAb) escolhidos.forEach(x=>{ if(x.par) parcelasUsadas.add(x.par.id); });
       if(!okAb){ diagAglutinado.push(`${rotuloL}: não consegui abrir o extrato em linhas`); return false; }
       for(const f of fxRows){ await _supaClient.from('fluxo_caixa_lancamentos').update({status_associado:'associado',lancamento_extrato_id:l.id}).eq('id',f.id); fluxoPonteUsados.add(f.id); }
       resolvAbertas++; return true;
