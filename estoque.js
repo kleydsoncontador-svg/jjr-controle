@@ -16,6 +16,7 @@
 (function (root) {
   'use strict';
   const MESES = ['Jan', 'Fev', 'Mar', 'Abr', 'Mai', 'Jun', 'Jul', 'Ago', 'Set', 'Out', 'Nov', 'Dez'];
+  const nomeMes = m => m === 13 ? 'Acumulado' : MESES[m - 1];
   const fechAno = () => { try { return +String(S.fechAtual()).slice(0, 4) || new Date().getFullYear(); } catch (e) { return new Date().getFullYear(); } };
   const fechMes = () => { try { return +String(S.fechAtual()).slice(5, 7) || 1; } catch (e) { return 1; } };
   const ST = { eid: '', ano: fechAno(), mes: fechMes(), aba: 'est', filtro: '', soMov: true };
@@ -89,7 +90,7 @@
     let atual = {}, conhecidos = new Set();
     // estoque inicial do ano: dezembro do ano anterior, se existir
     if (emp.anos.includes(ano - 1)) { const ant = calcularAno(eid, ano - 1, 12); ant.linhas.forEach(l => { atual[l.p] = { q: l.fq, t: l.ft }; conhecidos.add(l.p); }); }
-    let res = null; const ordem = [];
+    let res = null; const ordem = [], porMes = {};
     for (let m = 1; m <= ateMes; m++) {
       if (a.iniMes[m]) { atual = {}; Object.keys(a.iniMes[m]).forEach(p => { atual[p] = { q: num(a.iniMes[m][p].q), t: num(a.iniMes[m][p].t) }; if (!conhecidos.has(p)) { conhecidos.add(p); ordem.push(p); } }); }
       Object.keys(atual).forEach(p => { if (!ordem.includes(p)) ordem.push(p); conhecidos.add(p); });
@@ -104,9 +105,18 @@
         const dq = R4(si.q + o.cq + o.dvq), dt = si.t + o.ct + dvt, pm = dq ? dt / dq : 0, cmv = o.vq * pm; /* 26/11/2026: devolução de compra é SAÍDA (depois do preço médio), pelo custo da nota */
         const l = { p, desc: (emp.prod[p] || {}).desc || o.desc || (a.iniMes[m] && a.iniMes[m][p] && a.iniMes[m][p].desc) || '', novo: novos.includes(p), iq: si.q, it: si.t, cq: o.cq, ct: o.ct, dvq: o.dvq, dvt, dcq: o.dcq, dct: o.dct, dq, dt, pm, vq: o.vq, cmv, teq: o.cq + o.dvq, tet: o.ct + dvt, tsq: o.vq + o.dcq, tst: cmv + o.dct, fq: R4(dq - o.vq - o.dcq), ft: dt - cmv - o.dct };
         l.alerta = l.fq < -1e-9; linhas.push(l); prox[p] = { q: l.fq, t: l.ft }; });
-      atual = prox; res = { linhas };
+      atual = prox; res = { linhas }; porMes[m] = linhas;
     }
-    return res || { linhas: [] };
+    return Object.assign(res || { linhas: [] }, { porMes });
+  }
+  // 26/11/2026: ACUMULADO do ano — começa no mês do último estoque inicial importado (inventário zera a cadeia) ou em janeiro; inicial = estoque inicial desse mês; entradas/saídas/CMV = soma dos meses; final = dezembro → inicial + entradas − saídas = final
+  function mesInicioAcum(eid, ano) { const ks = Object.keys(lerAno(eid, ano).iniMes).map(Number).filter(m => m >= 1 && m <= 12); return ks.length ? Math.max(...ks) : 1; }
+  function calcularAcumulado(eid, ano) {
+    const r = calcularAno(eid, ano, 12), ac = {}, ordem = [], m0 = mesInicioAcum(eid, ano);
+    for (let m = m0; m <= 12; m++) (r.porMes[m] || []).forEach(l => { let a = ac[l.p]; if (!a) { a = ac[l.p] = { p: l.p, desc: l.desc, novo: false, iq: m === m0 ? l.iq : 0, it: m === m0 ? l.it : 0, cq: 0, ct: 0, dvq: 0, dvt: 0, vq: 0, cmv: 0, dcq: 0, dct: 0 }; ordem.push(l.p); }
+      if (l.novo) a.novo = true; ['cq', 'ct', 'dvq', 'dvt', 'vq', 'cmv', 'dcq', 'dct'].forEach(k => a[k] += l[k]); a.fq = l.fq; a.ft = l.ft; if (!a.desc && l.desc) a.desc = l.desc; });
+    const linhas = ordem.map(p => { const a = ac[p]; a.teq = a.cq + a.dvq; a.tet = a.ct + a.dvt; a.dq = R4(a.iq + a.teq); a.dt = a.it + a.tet; a.pm = a.dq ? a.dt / a.dq : 0; a.tsq = a.vq + a.dcq; a.tst = a.cmv + a.dct; a.alerta = a.fq < -1e-9; return a; });
+    return { linhas, m0 };
   }
 
   // ── lista padrão de empresas ──
@@ -116,12 +126,12 @@
   function render() {
     const el = document.getElementById('estoqueRoot'); if (!el) return;
     const empC = (S.emps() || []).find(e => String(e.eid) === String(ST.eid)) || {}, emp = lerEmp(ST.eid);
-    let h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><button class="btn bo bsm" onclick="Estoque.abrir()">← Empresas</button><b style="font-size:15px">#' + E(ST.eid) + ' ' + E(empC.nome || '') + '</b>'
+    let h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><button class="btn bo bsm" onclick="Estoque.abrir()">← Empresas</button><b style="font-size:15px">#' + E(ST.eid) + ' ' + E(empC.nome || '') + '</b>' + (empC.cnpj ? '<span style="font-size:13px;color:var(--slate);font-weight:600">CNPJ ' + E(String(empC.cnpj).replace(/D/g, '').length === 14 ? String(empC.cnpj).replace(/D/g, '').replace(/(d{2})(d{3})(d{3})(d{4})(d{2})/, '$1.$2.$3/$4-$5') : empC.cnpj) + '</span>' : '')
       + '<select class="si" onchange="Estoque.ano(this.value)">' + emp.anos.slice().sort().map(a => '<option' + (a === ST.ano ? ' selected' : '') + '>' + a + '</option>').join('') + '</select><button class="btn bo bsm" onclick="Estoque.novoAno()" title="Abrir um novo ano">+ Ano</button>'
-      + '<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="btn bo bsm" onclick="Estoque.anexarXml()" title="Escolha à mão os XMLs das NF-e (pode marcar vários): o site separa entrada e saída pelo CNPJ e o mês pela data da nota">📎 Anexar notas</button><span id="estPastaBtns"></span><button class="btn bo bsm" onclick="Estoque.importarInicial()" title="Excel do inventário (código, descrição, quantidade, total) — vira o estoque inicial do mês aberto">📥 Estoque inicial (' + MESES[ST.mes - 1] + ')</button><button class="btn bo bsm" onclick="Estoque.config()" title="O que descontar do custo das entradas">⚙ Custo das entradas</button><button class="action-btn action-btn-excel" onclick="Estoque.excel()">📊 Gerar Excel</button></span></div>';
+      + '<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="btn bo bsm" onclick="Estoque.anexarXml()" title="Escolha à mão os XMLs das NF-e (pode marcar vários): o site separa entrada e saída pelo CNPJ e o mês pela data da nota">📎 Anexar notas</button><span id="estPastaBtns"></span><button class="btn bo bsm" onclick="Estoque.importarInicial()" title="Excel do inventário (código, descrição, quantidade, total) — vira o estoque inicial do mês aberto">📥 Estoque inicial (' + nomeMes(ST.mes) + ')</button><button class="btn bo bsm" onclick="Estoque.config()" title="O que descontar do custo das entradas">⚙ Custo das entradas</button><button class="action-btn action-btn-excel" onclick="Estoque.excel()">📊 Gerar Excel</button></span></div>';
     const ab = (k, t) => '<button class="btn ' + (ST.aba === k ? 'bp' : 'bo') + ' bsm" onclick="Estoque.aba(\'' + k + '\')">' + t + '</button>';
     h += '<div style="display:flex;gap:6px;margin-bottom:6px">' + ab('est', '📦 Estoque') + ab('ent', '⬇️ Entradas') + ab('sai', '⬆️ Saídas') + '</div>';
-    h += '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;align-items:center">' + MESES.map((n, i) => '<button class="btn ' + (ST.mes === i + 1 ? 'bp' : 'bo') + ' bsm" style="min-width:52px" onclick="Estoque.mes(' + (i + 1) + ')">' + n + '/' + String(ST.ano).slice(2) + '</button>').join('') + '<input class="si" placeholder="🔎 filtrar" value="' + E(ST.filtro) + '" oninput="Estoque.filtrar(this.value)" style="margin-left:auto;min-width:200px">' + (ST.aba === 'est' ? '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" ' + (ST.soMov ? 'checked' : '') + ' onchange="Estoque.soMov(this.checked)"> só com saldo/movimento</label>' : '') + '</div><div id="estoqueCorpo"></div>';
+    h += '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;align-items:center">' + MESES.map((n, i) => '<button class="btn ' + (ST.mes === i + 1 ? 'bp' : 'bo') + ' bsm" style="min-width:52px" onclick="Estoque.mes(' + (i + 1) + ')">' + n + '/' + String(ST.ano).slice(2) + '</button>').join('') + '<button class="btn ' + (ST.mes === 13 ? 'bp' : 'bo') + ' bsm" style="margin-left:6px;font-weight:700" onclick="Estoque.mes(13)" title="Soma do ano inteiro">Σ Acumulado ' + ST.ano + '</button>' + '<input class="si" placeholder="🔎 filtrar" value="' + E(ST.filtro) + '" oninput="Estoque.filtrar(this.value)" style="margin-left:auto;min-width:200px">' + (ST.aba === 'est' ? '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" ' + (ST.soMov ? 'checked' : '') + ' onchange="Estoque.soMov(this.checked)"> só com saldo/movimento</label>' : '') + '</div><div id="estoqueCorpo"></div>';
     el.innerHTML = h; corpo(); pastaBotoes();
   }
   const th = (t, al) => '<th style="padding:4px 4px;text-align:' + (al || 'right') + ';background:var(--ink2);color:#fff;white-space:nowrap;font-size:11px">' + t + '</th>';
@@ -139,7 +149,7 @@
   function corpo0() {
     const el = document.getElementById('estoqueCorpo'); if (!el) return; const f = nrm(ST.filtro), emp = lerEmp(ST.eid);
     if (ST.aba === 'est') {
-      const r = calcularAno(ST.eid, ST.ano, ST.mes); let ls = r.linhas.filter(l => !f || nrm(l.p + ' ' + l.desc).includes(f)); if (ST.soMov) ls = ls.filter(l => l.iq || l.it || l.cq || l.dvq || l.vq || l.dcq || l.fq || Math.abs(l.ft) > 0.004);
+      const r = ST.mes === 13 ? calcularAcumulado(ST.eid, ST.ano) : calcularAno(ST.eid, ST.ano, ST.mes); let ls = r.linhas.filter(l => !f || nrm(l.p + ' ' + l.desc).includes(f)); if (ST.soMov) ls = ls.filter(l => l.iq || l.it || l.cq || l.dvq || l.vq || l.dcq || l.fq || Math.abs(l.ft) > 0.004);
       if (!r.linhas.length) { el.innerHTML = '<div style="padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--slate)">Sem estoque neste mês. Importe o <b>estoque inicial</b> (inventário) e anexe os <b>XMLs</b> das notas de entrada e saída.</div>'; return; }
       const T = {}; ['iq', 'it', 'cq', 'ct', 'dvq', 'dvt', 'teq', 'tet', 'dq', 'dt', 'vq', 'cmv', 'dcq', 'dct', 'tsq', 'tst', 'fq', 'ft'].forEach(k => T[k] = 0);
       const C15 = ['iq', 'it', 'cq', 'ct', 'dvq', 'dvt', 'teq', 'tet', 'dq', 'dt', 'pm', 'vq', 'cmv', 'dcq', 'dct', 'tsq', 'tst', 'fq', 'ft']; const fc = ST.fc || {};
@@ -154,12 +164,12 @@
       t += '<tr style="font-weight:700;background:var(--bg)"><td></td><td colspan="2" style="padding:5px 8px">TOTAL (' + ls.length + ')</td>' + ['iq', 'it', 'cq', 'ct', 'dvq', 'dvt', 'teq', 'tet', 'dq', 'dt'].map((k, i) => vc(T[k], 1, 0, i % 2 === 0)).join('') + '<td></td>' + ['vq', 'cmv', 'dcq', 'dct', 'tsq', 'tst', 'fq', 'ft'].map((k, i) => vc(T[k], 1, 0, i % 2 === 0)).join('') + '</tr></tbody>';
       const nN = r.linhas.filter(l => l.novo).length, nA = r.linhas.filter(l => l.alerta).length;
       el.innerHTML = (nN ? '<div style="font-size:12.5px;margin-bottom:4px"><span style="background:#fef08a;color:#854d0e;padding:1px 6px;border-radius:4px;font-weight:700">' + nN + ' produto(s) novo(s)</span> neste mês (no fim da lista).</div>' : '') + (nA ? '<div style="color:#dc2626;font-size:12.5px;margin-bottom:4px">⚠ ' + nA + ' produto(s) com saída maior que o estoque (vermelho): falta estoque inicial, entrada ou vínculo do produto.</div>' : '') + box(t)
-        + '<div style="font-size:11.5px;color:var(--slate);margin-top:6px">Inicial = ' + (lerAno(ST.eid, ST.ano).iniMes[ST.mes] ? 'estoque inicial importado para ' + MESES[ST.mes - 1] : 'estoque final do mês anterior') + '. Entradas = compras (custo da nota, ⚙) + devoluções de venda (pelo preço médio inicial). Preço médio = total disponível ÷ qtd. disponível. Saídas = vendas × preço médio (CMV) + devoluções de compra (custo da nota). Final = disponível − saídas.</div>';
+        + '<div style="font-size:11.5px;color:var(--slate);margin-top:6px">' + (ST.mes === 13 ? 'Acumulado de ' + MESES[mesInicioAcum(ST.eid, ST.ano) - 1] + ' a Dez/' + ST.ano + (mesInicioAcum(ST.eid, ST.ano) > 1 ? ' (começa no mês do estoque inicial importado — os meses antes dele não entram, porque o inventário já os substitui)' : '') + ': inicial = estoque inicial do primeiro mês; entradas, saídas e CMV = soma dos meses; final = estoque de dezembro. Inicial + entradas − saídas = final. ' : '') + 'Inicial = ' + (lerAno(ST.eid, ST.ano).iniMes[ST.mes] ? 'estoque inicial importado para ' + nomeMes(ST.mes) : 'estoque final do mês anterior') + '. Entradas = compras (custo da nota, ⚙) + devoluções de venda (pelo preço médio inicial). Preço médio = total disponível ÷ qtd. disponível. Saídas = vendas × preço médio (CMV) + devoluções de compra (custo da nota). Final = disponível − saídas.</div>';
       return;
     }
     const tipo = ST.aba === 'ent' ? 'E' : 'S', ded = emp.cfg.ded;
-    const its = lerMes(ST.eid, ST.ano, ST.mes).itens.filter(i => i.tipo === tipo).filter(i => !f || nrm([i.nf, i.part, i.cfop, i.cprod, i.desc, i.ncm].join(' ')).includes(f)).sort((a, b) => String(a.data).localeCompare(String(b.data)) || String(a.nf).localeCompare(String(b.nf)) || a.n - b.n);
-    if (!its.length) { el.innerHTML = '<div style="padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--slate)">Nenhuma nota de ' + (tipo === 'E' ? 'entrada' : 'saída') + ' em ' + MESES[ST.mes - 1] + '/' + ST.ano + '. Use <b>📥 Anexar XMLs</b> ou <b>📁 Pasta de XMLs</b>.</div>'; return; }
+    const its = (ST.mes === 13 ? [].concat(...Array.from({ length: 12 }, (_, k) => k + 1 >= mesInicioAcum(ST.eid, ST.ano) ? lerMes(ST.eid, ST.ano, k + 1).itens : [])) : lerMes(ST.eid, ST.ano, ST.mes).itens).filter(i => i.tipo === tipo).filter(i => !f || nrm([i.nf, i.part, i.cfop, i.cprod, i.desc, i.ncm].join(' ')).includes(f)).sort((a, b) => String(a.data).localeCompare(String(b.data)) || String(a.nf).localeCompare(String(b.nf)) || a.n - b.n);
+    if (!its.length) { el.innerHTML = '<div style="padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--slate)">Nenhuma nota de ' + (tipo === 'E' ? 'entrada' : 'saída') + ' em ' + nomeMes(ST.mes) + '/' + ST.ano + '. Use <b>📥 Anexar XMLs</b> ou <b>📁 Pasta de XMLs</b>.</div>'; return; }
     const dlP = '<datalist id="estProdDL">' + Object.keys(emp.prod).slice(0, 3000).map(p => '<option value="' + E(p) + '" label="' + E(p + ' — ' + (emp.prod[p].desc || '')) + '"></option>').join('') + '</datalist>';
     const fc = ST.fc || {};
     const colsF = tipo === 'E' ? ['data', 'nf', 'part', 'cfop', 'op', 'cprod', 'desc', 'ncm', 'q', 'vProd', 'fr', 'vDesc', 'vIPI', 'vST', 'vICMS', 'vPIS', 'vCOFINS', 'custo', 'cu', 'prod'] : ['data', 'nf', 'part', 'cfop', 'op', 'cprod', 'desc', 'ncm', 'q', 'vProd', 'prod'];
@@ -223,6 +233,7 @@
     }
   }
   function importarInicial() {
+    if (ST.mes === 13) { toast('Escolha o mês do estoque inicial (Jan a Dez) antes de importar.', 'err'); return; }
     if (typeof XLSX === 'undefined') { toast('Biblioteca de Excel não carregada.', 'err'); return; }
     const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.xlsx,.xls,.csv';
     inp.onchange = async () => {
@@ -234,9 +245,9 @@
       for (let r = hdr + 1; r < aoa.length; r++) { const row = aoa[r] || []; const p = row[cP]; if (p == null || String(p).trim() === '') continue; const k = String(p).trim(); const q = num(row[cQ]); let t = cT >= 0 ? num(row[cT]) : 0; if (!t && cU >= 0) t = q * num(row[cU]); const desc = cD >= 0 ? String(row[cD] || '').trim() : '';
         ini[k] = { q, t: R2(t), desc }; if (!emp.prod[k]) emp.prod[k] = { desc }; else if (desc && !emp.prod[k].desc) emp.prod[k].desc = desc; n++; tot += t; }
       if (!n) { toast('Nenhum produto encontrado.', 'err'); return; }
-      if (a.iniMes[ST.mes] && !confirm('Já existe estoque inicial em ' + MESES[ST.mes - 1] + '/' + ST.ano + '. Substituir pelo deste arquivo?')) return;
+      if (a.iniMes[ST.mes] && !confirm('Já existe estoque inicial em ' + nomeMes(ST.mes) + '/' + ST.ano + '. Substituir pelo deste arquivo?')) return;
       a.iniMes[ST.mes] = ini; S.s(kAno(ST.eid, ST.ano), a); S.s(kEmp(ST.eid), emp);
-      alert('Estoque inicial de ' + MESES[ST.mes - 1] + '/' + ST.ano + ': ' + n + ' produto(s), total R$ ' + F(tot) + '.'); render();
+      alert('Estoque inicial de ' + nomeMes(ST.mes) + '/' + ST.ano + ': ' + n + ' produto(s), total R$ ' + F(tot) + '.'); render();
     };
     inp.click();
   }
@@ -267,5 +278,5 @@
   root.Estoque = { abrir, abrirEmp, render, novoAno, config, salvarConfig, vincular, anexarXml, definirPasta, importarPasta, importarInicial, excel,
     fcol: (k, v, ja) => { ST.fc = ST.fc || {}; ST.fc[k] = v; ST.foco = ja ? '' : k; clearTimeout(root._estF); root._estF = setTimeout(corpo, ja ? 0 : 300); },
     ano: a => { ST.ano = +a; render(); }, mes: m => { ST.mes = m; render(); }, aba: a => { ST.aba = a; render(); }, filtrar: v => { ST.filtro = v; clearTimeout(root._estT); root._estT = setTimeout(corpo, 250); }, soMov: v => { ST.soMov = v; corpo(); },
-    _lerXml: lerXml, _classe: classeCfop, _calc: calcularAno, _custo: custoItem };
+    _lerXml: lerXml, _classe: classeCfop, _calc: calcularAno, _acum: calcularAcumulado, _custo: custoItem };
 })(typeof window !== 'undefined' ? window : this);
