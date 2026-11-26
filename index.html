@@ -42822,7 +42822,7 @@ async function _exportarLancctbRegistroContabilTxtImpl(){
   if(!cnpjLimpo){ toast('Empresa sem CNPJ cadastrado — não é possível gerar o TXT.','err'); return; }
 
   const { data: contaInfo } = await _supaClient.from('agencias_bancarias')
-    .select('banco_nome,agencia,conta_corrente').eq('id',contaId).single();
+    .select('banco_nome,agencia,conta_corrente,conta_contabil_id,saldo_inicial').eq('id',contaId).single();
 
   let qExtratoIds=_supaClient.from('lancamentos_extrato').select('id').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).order('id');
   if(_lancctbRegistroDataDe) qExtratoIds=qExtratoIds.gte('data_pagamento',_lancctbRegistroDataDe);
@@ -42880,6 +42880,35 @@ async function _exportarLancctbRegistroContabilTxtImpl(){
     }
   }
 
+  // 26/11/2026 (pedido do usuário): TXT de um MÊS FECHADO com saldo final do EXTRATO negativo → reclassifica o saldo devedor para o
+  // cheque especial: último dia do mês D banco / C cheque especial; 1º dia do mês seguinte o estorno (D cheque especial / C banco).
+  // O extrato não é tocado (os 2 lançamentos só existem no TXT). Conta do cheque especial = "Contas padrão" → Cheque especial / limite da conta.
+  let _avisoCheque='';
+  try{
+    const de=_lancctbRegistroDataDe, ate=_lancctbRegistroDataAte;
+    const mesTxt=(de&&ate&&de.slice(0,7)===ate.slice(0,7))?de.slice(0,7):'';
+    const ultDia=mesTxt?new Date(+mesTxt.slice(0,4),+mesTxt.slice(5,7),0).getDate():0;
+    if(mesTxt&&de.endsWith('-01')&&+ate.slice(8,10)===ultDia){
+      const saldoFim=await _lancctbSaldoExtratoAte(eid,contaId,ate,contaInfo);
+      if(saldoFim<-0.004){
+        const numCheque=(_lancctbContasPadraoGet(eid)||{}).cheque_especial;
+        let numBanco='';
+        if(contaInfo?.conta_contabil_id){ const { data: pcB } = await _supaClient.from('plano_contas').select('numero_conta').eq('id',contaInfo.conta_contabil_id).maybeSingle(); numBanco=pcB?.numero_conta||''; }
+        const valorNeg=Math.round(-saldoFim*100)/100;
+        if(!numCheque||!numBanco){
+          _avisoCheque=' ATENÇÃO: saldo final do extrato NEGATIVO (R$ -'+_fmt(valorNeg)+') e '+(!numCheque?'a conta "Cheque especial / limite da conta" não está definida em Contas padrão':'a conta bancária está sem conta contábil')+' — o lançamento do cheque especial NÃO entrou no TXT.';
+        } else {
+          const ccTxt=[contaInfo?.agencia?'Ag '+contaInfo.agencia:'',contaInfo?.conta_corrente?'C/C '+contaInfo.conta_corrente:''].filter(Boolean).join(' ');
+          const bancoTxt=String(contaInfo?.banco_nome||'').replace(/^\d+\s*-\s*/,'');
+          const dUlt=String(ultDia).padStart(2,'0')+'/'+mesTxt.slice(5,7)+'/'+mesTxt.slice(0,4);
+          const prox=new Date(+mesTxt.slice(0,4),+mesTxt.slice(5,7),1); const dProx='01/'+String(prox.getMonth()+1).padStart(2,'0')+'/'+prox.getFullYear();
+          linhasTxt.push({ data:dUlt, debito:numBanco, credito:String(numCheque), valor:valorNeg, historico:'Utilização do cheque especial da conta corrente '+ccTxt+', extrato do banco '+bancoTxt });
+          linhasTxt.push({ data:dProx, debito:String(numCheque), credito:numBanco, valor:valorNeg, historico:'Estorno da utilização do cheque especial da conta corrente '+ccTxt+', extrato do banco '+bancoTxt });
+          _avisoCheque=' Saldo final negativo (R$ -'+_fmt(valorNeg)+'): incluídos o uso do cheque especial em '+dUlt+' e o estorno em '+dProx+'.';
+        }
+      }
+    }
+  }catch(e){ console.warn('Cheque especial no TXT:',e); }
   const nomeEmpSlug=(emp?.nome||eid).normalize('NFD').replace(/[̀-ͯ]/g,'').toUpperCase().replace(/[^A-Z0-9]/g,'');
   const bancoSlug=_lancctbBancoSlug(contaInfo?.banco_nome);
   const agConta=`${contaInfo?.agencia||''}-${contaInfo?.conta_corrente||''}`;
@@ -42900,13 +42929,25 @@ async function _exportarLancctbRegistroContabilTxtImpl(){
   const conteudoTxt=gerarTxtMisterContador(cnpjLimpo,linhasTxt);
   const salvouNaRede=await _lancctbSalvarTxtNaPastaTransfRede(nomeArquivoTxt,conteudoTxt);
   if(!salvouNaRede) _lancctbBaixarTxtNavegador(nomeArquivoTxt,conteudoTxt);
-  toast(`TXT gerado com ${lotesMap.size} lançamento(s).${salvouNaRede?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador (conceda acesso à pasta de rede pra salvar direto lá).'}`,'ok');
+  toast(`TXT gerado com ${lotesMap.size} lançamento(s).${salvouNaRede?' Salvo em Arquivos de Transferência de Rede.':' Baixado pelo navegador (conceda acesso à pasta de rede pra salvar direto lá).'}${_avisoCheque}`,_avisoCheque.includes('ATENÇÃO')?'err':'ok');
   await _lancctbMarcarPeriodoFinalizadoAuto(eid,contaId);
 }
 // Pedido do usuário 26/09/2026: gerar o TXT de um MÊS INTEIRO (dia 1 ao último dia) de uma conta registra que
 // aquela conta foi finalizada naquele mês; quando TODAS as contas bancárias da empresa que têm extrato no mês
 // já tiveram o TXT gerado, o "Período finalizado" da empresa (lista de Lançamentos Contábeis) é marcado com o
 // mês sozinho. Só avança (nunca volta pra um mês anterior); período que não é 1 mês fechado não marca nada.
+// Saldo do EXTRATO até uma data — mesma conta da tela Extrato Bancário: saldo anterior (agencias_bancarias.saldo_inicial) + entradas − saídas, sem os ignorados.
+async function _lancctbSaldoExtratoAte(eid,contaId,dataAte,contaInfo){
+  let ini=contaInfo&&contaInfo.saldo_inicial!=null?Number(contaInfo.saldo_inicial)||0:null;
+  if(ini===null){ const { data: ag } = await _supaClient.from('agencias_bancarias').select('saldo_inicial').eq('id',contaId).maybeSingle(); ini=Number(ag&&ag.saldo_inicial)||0; }
+  const { data: ls } = await _lancctbFetchTudoParalelo(()=>{
+    let qx=_supaClient.from('lancamentos_extrato').select('id,data_pagamento,valor_saida,valor_entrada,status_conciliacao').eq('empresa_eid',eid).eq('conta_bancaria_id',contaId).lte('data_pagamento',dataAte);
+    if(typeof _flContaRef==='function'&&_flContaRef(eid,contaId)) qx=(String(eid)==='4'?qx.or('status_conciliacao.eq.referencia,data_pagamento.lt.2026-10-01'):qx.eq('status_conciliacao','referencia'));
+    return qx.order('id',{ascending:true});
+  });
+  let sd=ini; (ls||[]).forEach(l=>{ if(l.status_conciliacao!=='ignorado') sd+=(Number(l.valor_entrada)||0)-(Number(l.valor_saida)||0); });
+  return Math.round(sd*100)/100;
+}
 async function _lancctbMarcarPeriodoFinalizadoAuto(eid,contaId){
   try{
     const de=_lancctbRegistroDataDe, ate=_lancctbRegistroDataAte;
