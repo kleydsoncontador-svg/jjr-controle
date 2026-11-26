@@ -118,11 +118,11 @@
     const empC = (S.emps() || []).find(e => String(e.eid) === String(ST.eid)) || {}, emp = lerEmp(ST.eid);
     let h = '<div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:8px"><button class="btn bo bsm" onclick="Estoque.abrir()">← Empresas</button><b style="font-size:15px">#' + E(ST.eid) + ' ' + E(empC.nome || '') + '</b>'
       + '<select class="si" onchange="Estoque.ano(this.value)">' + emp.anos.slice().sort().map(a => '<option' + (a === ST.ano ? ' selected' : '') + '>' + a + '</option>').join('') + '</select><button class="btn bo bsm" onclick="Estoque.novoAno()" title="Abrir um novo ano">+ Ano</button>'
-      + '<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="btn bp bsm" onclick="Estoque.anexarXml(false)" title="Escolha os XMLs das NF-e (entradas e saídas): o site separa sozinho pelo CNPJ e pelo mês da nota">📥 Anexar XMLs</button><button class="btn bo bsm" onclick="Estoque.anexarXml(true)" title="Escolha a PASTA com os XMLs (pode ter subpastas por mês)">📁 Pasta de XMLs</button><button class="btn bo bsm" onclick="Estoque.importarInicial()" title="Excel do inventário (código, descrição, quantidade, total) — vira o estoque inicial do mês aberto">📥 Estoque inicial (' + MESES[ST.mes - 1] + ')</button><button class="btn bo bsm" onclick="Estoque.config()" title="O que descontar do custo das entradas">⚙ Custo das entradas</button><button class="action-btn action-btn-excel" onclick="Estoque.excel()">📊 Gerar Excel</button></span></div>';
+      + '<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap"><button class="btn bo bsm" onclick="Estoque.anexarXml()" title="Escolha à mão os XMLs das NF-e (pode marcar vários): o site separa entrada e saída pelo CNPJ e o mês pela data da nota">📎 Anexar notas</button><span id="estPastaBtns"></span><button class="btn bo bsm" onclick="Estoque.importarInicial()" title="Excel do inventário (código, descrição, quantidade, total) — vira o estoque inicial do mês aberto">📥 Estoque inicial (' + MESES[ST.mes - 1] + ')</button><button class="btn bo bsm" onclick="Estoque.config()" title="O que descontar do custo das entradas">⚙ Custo das entradas</button><button class="action-btn action-btn-excel" onclick="Estoque.excel()">📊 Gerar Excel</button></span></div>';
     const ab = (k, t) => '<button class="btn ' + (ST.aba === k ? 'bp' : 'bo') + ' bsm" onclick="Estoque.aba(\'' + k + '\')">' + t + '</button>';
     h += '<div style="display:flex;gap:6px;margin-bottom:6px">' + ab('est', '📦 Estoque') + ab('ent', '⬇️ Entradas') + ab('sai', '⬆️ Saídas') + '</div>';
     h += '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-bottom:8px;align-items:center">' + MESES.map((n, i) => '<button class="btn ' + (ST.mes === i + 1 ? 'bp' : 'bo') + ' bsm" style="min-width:52px" onclick="Estoque.mes(' + (i + 1) + ')">' + n + '/' + String(ST.ano).slice(2) + '</button>').join('') + '<input class="si" placeholder="🔎 filtrar" value="' + E(ST.filtro) + '" oninput="Estoque.filtrar(this.value)" style="margin-left:auto;min-width:200px">' + (ST.aba === 'est' ? '<label style="font-size:12px;display:flex;align-items:center;gap:4px"><input type="checkbox" ' + (ST.soMov ? 'checked' : '') + ' onchange="Estoque.soMov(this.checked)"> só com saldo/movimento</label>' : '') + '</div><div id="estoqueCorpo"></div>';
-    el.innerHTML = h; corpo();
+    el.innerHTML = h; corpo(); pastaBotoes();
   }
   const th = (t, al, top) => '<th style="padding:5px 6px;text-align:' + (al || 'right') + ';background:var(--ink2);color:#fff;position:sticky;top:' + (top || 0) + 'px;z-index:2;white-space:nowrap;font-size:11px">' + t + '</th>';
   const grp = (t, n, cor) => '<th colspan="' + n + '" style="padding:4px;text-align:center;background:' + cor + ';color:#fff;position:sticky;top:0;z-index:2;font-size:11px">' + t + '</th>';
@@ -174,11 +174,24 @@
   }
   function salvarConfig() { const emp = lerEmp(ST.eid); document.querySelectorAll('#estCfgModal input[data-ded]').forEach(c => { emp.cfg.ded[c.dataset.ded] = c.checked; }); S.s(kEmp(ST.eid), emp); document.getElementById('estCfgModal')?.remove(); toast('Custo das entradas atualizado.', 'ok'); render(); }
   function vincular(kv, val) { const emp = lerEmp(ST.eid); val = String(val || '').trim(); if (val) emp.vinc[kv] = val; else delete emp.vinc[kv]; S.s(kEmp(ST.eid), emp); toast(val ? 'Vínculo salvo (vale para as próximas notas desse produto).' : 'Vínculo removido.', 'ok'); corpo(); }
-  function anexarXml(pasta) {
-    const inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true; if (pasta) { inp.webkitdirectory = true; } else inp.accept = '.xml';
-    inp.onchange = async () => {
+  function anexarXml() { const inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true; inp.accept = '.xml'; inp.onchange = () => processarArquivos([...inp.files]); inp.click(); }
+  // ── pasta da empresa (guardada neste navegador, uma por empresa) → 🔄 Importar XMLs sem escolher arquivo ──
+  function dbH() { return new Promise((res, rej) => { const rq = indexedDB.open('ctrlest_handles', 1); rq.onupgradeneeded = () => rq.result.createObjectStore('h'); rq.onsuccess = () => res(rq.result); rq.onerror = () => rej(rq.error); }); }
+  async function handleGet(eid) { const db = await dbH(); return new Promise(r => { const q = db.transaction('h', 'readonly').objectStore('h').get(String(eid)); q.onsuccess = () => r(q.result || null); q.onerror = () => r(null); }); }
+  async function handleSet(eid, h) { const db = await dbH(); return new Promise(r => { const tx = db.transaction('h', 'readwrite'); if (h) tx.objectStore('h').put(h, String(eid)); else tx.objectStore('h').delete(String(eid)); tx.oncomplete = () => r(); tx.onerror = () => r(); }); }
+  async function pastaBotoes() { const sp = document.getElementById('estPastaBtns'); if (!sp) return; if (!window.showDirectoryPicker) { sp.innerHTML = ''; return; } let h = null; try { h = await handleGet(ST.eid); } catch (e) { }
+    sp.innerHTML = h ? '<button class="btn bp bsm" onclick="Estoque.importarPasta()" title="Lê todos os XMLs de NF-e da pasta ' + E(h.name) + ' (e subpastas)">🔄 Importar XMLs</button><button class="btn bo bsm" onclick="Estoque.definirPasta()" title="Trocar a pasta desta empresa" style="font-size:11px">📁 ' + E(h.name) + '</button>' : '<button class="btn bo bsm" onclick="Estoque.definirPasta()" title="Aponte uma vez a pasta onde ficam os XMLs desta empresa (ex.: SIEG\\NF-es\\CNPJ). Depois é só clicar em Importar XMLs">📁 Pasta da empresa</button>'; }
+  async function definirPasta() { if (!window.showDirectoryPicker) { toast('Este navegador não permite guardar pasta. Use o Chrome ou o Edge, ou o 📎 Anexar notas.', 'err'); return; } try { const h = await window.showDirectoryPicker({ mode: 'read' }); await handleSet(ST.eid, h); toast('Pasta guardada para esta empresa: ' + h.name + '. Agora é só clicar em 🔄 Importar XMLs.', 'ok'); pastaBotoes(); } catch (e) { if (e.name !== 'AbortError') toast('Erro: ' + e.message, 'err'); } }
+  async function importarPasta() { const h = await handleGet(ST.eid); if (!h) { definirPasta(); return; }
+    try { let p = await h.queryPermission({ mode: 'read' }); if (p !== 'granted') p = await h.requestPermission({ mode: 'read' }); if (p !== 'granted') { toast('Sem permissão para ler a pasta.', 'err'); return; } } catch (e) { toast('Não consegui acessar a pasta: ' + e.message, 'err'); return; }
+    const arqs = []; toast('Lendo a pasta ' + h.name + '…', 'info');
+    const andar = async (dir) => { for await (const [nome, item] of dir.entries()) { if (item.kind === 'directory') await andar(item); else if (/\.xml$/i.test(nome)) arqs.push(await item.getFile()); } };
+    try { await andar(h); } catch (e) { toast('Erro lendo a pasta: ' + e.message, 'err'); return; }
+    if (!arqs.length) { toast('Nenhum XML na pasta ' + h.name + '.', 'err'); return; } processarArquivos(arqs); }
+  async function processarArquivos(lista) {
+    {
       const empC = (S.emps() || []).find(e => String(e.eid) === String(ST.eid)) || {}; if (!empC.cnpj) { toast('A empresa está sem CNPJ no cadastro.', 'err'); return; }
-      const arqs = [...inp.files].filter(f => /\.xml$/i.test(f.name)); if (!arqs.length) { toast('Nenhum XML encontrado.', 'err'); return; }
+      const arqs = lista.filter(f => /\.xml$/i.test(f.name)); if (!arqs.length) { toast('Nenhum XML encontrado.', 'err'); return; }
       const porMes = {}, erros = []; let nNotas = 0, nItens = 0;
       for (const f of arqs) { try { const n = lerXml(await f.text(), empC.cnpj); if (!n) continue; if (n.erro) { erros.push(f.name + ': ' + n.erro); continue; } const a = +n.data.slice(0, 4), m = +n.data.slice(5, 7); const k = a + '|' + m; (porMes[k] = porMes[k] || []).push(n); nNotas++; nItens += n.itens.length; } catch (e) { erros.push(f.name + ': ' + e.message); } }
       const emp = lerEmp(ST.eid); const anosNovos = [];
@@ -190,8 +203,7 @@
       emp.anos.sort(); S.s(kEmp(ST.eid), emp);
       alert(nNotas + ' nota(s) lida(s), ' + nItens + ' item(ns), em ' + Object.keys(porMes).length + ' mês(es).' + (anosNovos.length ? '\nAno(s) aberto(s) sozinho(s): ' + anosNovos.join(', ') + '.' : '') + (erros.length ? '\n\nNão lidos (' + erros.length + '):\n' + erros.slice(0, 12).join('\n') + (erros.length > 12 ? '\n…' : '') : '') + '\n\nSe a mesma nota já estava, foi substituída (não duplica).');
       render();
-    };
-    inp.click();
+    }
   }
   function importarInicial() {
     if (typeof XLSX === 'undefined') { toast('Biblioteca de Excel não carregada.', 'err'); return; }
@@ -235,7 +247,7 @@
     const buf = await wb.xlsx.writeBuffer(); const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
     const a = document.createElement('a'); a.href = url; a.download = 'Controle_de_Estoque_' + ST.eid + '_' + ST.ano + '.xlsx'; document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 4000);
   }
-  root.Estoque = { abrir, abrirEmp, render, novoAno, config, salvarConfig, vincular, anexarXml, importarInicial, excel,
+  root.Estoque = { abrir, abrirEmp, render, novoAno, config, salvarConfig, vincular, anexarXml, definirPasta, importarPasta, importarInicial, excel,
     ano: a => { ST.ano = +a; render(); }, mes: m => { ST.mes = m; render(); }, aba: a => { ST.aba = a; render(); }, filtrar: v => { ST.filtro = v; clearTimeout(root._estT); root._estT = setTimeout(corpo, 250); }, soMov: v => { ST.soMov = v; corpo(); },
     _lerXml: lerXml, _classe: classeCfop, _calc: calcularAno, _custo: custoItem };
 })(typeof window !== 'undefined' ? window : this);
