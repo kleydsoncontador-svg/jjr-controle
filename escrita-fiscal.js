@@ -128,11 +128,11 @@
       if (s && Math.abs(f.valor - s.valor) > 0.05) obs.push('diferença de R$ ' + F(R2(f.valor - s.valor)));
       if (s && s.data && f.data !== s.data) obs.push('data no site ' + br(s.data)); if (s && f.numero !== s.numero) obs.push('nº no site ' + s.numero);
       if (s) obs.push('no site: ' + ({ nfe: 'NF-e', nfse: 'NFS-e', nfce: 'NFC-e', cte: 'CT-e' }[s.tipo] || s.tipo) + ' ' + (s.es === 'E' ? 'entrada' : 'saída'));
-      return { sit: s ? (Math.abs(f.valor - s.valor) > 0.05 ? 'valor_dif' : 'site') : 'nao_site', es: f.es, data: f.data, numero: f.numero, doc: f.doc || (s && s.doc) || '', nome: f.nome || (s && s.nome) || '', cfop: f.cfop, op: opFisc(f).op, vf: f.valor, vs: s ? s.valor : null, obs: obs.join(' · '), ref: f };
+      return { sit: s ? (Math.abs(f.valor - s.valor) > 0.05 ? 'valor_dif' : 'site') : (opFisc(f).op === 'remessa' ? 'remessa' : 'nao_site'), es: f.es, data: f.data, numero: f.numero, doc: f.doc || (s && s.doc) || '', nome: f.nome || (s && s.nome) || '', cfop: f.cfop, op: opFisc(f).op, vf: f.valor, vs: s ? s.valor : null, obs: obs.join(' · '), ref: f };
     }).sort((a, b) => (a.data || '').localeCompare(b.data || '') || (+a.numero || 0) - (+b.numero || 0));
   }
-  const SIT = { site: 'Está no site', valor_dif: 'No site, valor diferente', nao_site: 'Não está no site', nao_fiscal: 'Não está no fiscal', so_fiscal: 'Não está no site' };
-  const SITCOR = { site: 'var(--green)', valor_dif: 'var(--amber)', nao_site: 'var(--red)', nao_fiscal: 'var(--red)', so_fiscal: 'var(--red)' };
+  const SIT = { remessa: 'Remessa (não considerada)', site: 'Está no site', valor_dif: 'No site, valor diferente', nao_site: 'Não está no site', nao_fiscal: 'Não está no fiscal', so_fiscal: 'Não está no site' };
+  const SITCOR = { remessa: 'var(--slate)', site: 'var(--green)', valor_dif: 'var(--amber)', nao_site: 'var(--red)', nao_fiscal: 'var(--red)', so_fiscal: 'var(--red)' };
 
   // ── tela principal ──
   async function render(eid) {
@@ -172,7 +172,7 @@
     if (eid !== ST.eid || ym !== ST.ym) return; // trocou de mês/empresa no meio
     ST.fisc = [somaMes(ym, -1), ym, somaMes(ym, 1)].reduce((a, m) => a.concat(lerLivro(eid, m)), []).filter(r => String(r.data || '').slice(0, 7) === ym).map(r => Object.assign({}, r));
     confrontar(ST.site, ST.fisc); ST.ok = true; ST.okYm = ym; ST.okEid = eid;
-    if (ST.fisc.length) { const r = { soFiscal: ST.fisc.filter(f => !f.par).length, soSite: ST.site.filter(s => !s.par).length, em: new Date().toISOString().slice(0, 10) }; const ant = sOk(kRes(eid, ym)); if (!ant || ant.soFiscal !== r.soFiscal || ant.soSite !== r.soSite) { S.s(kRes(eid, ym), r); render(); return; } }
+    if (ST.fisc.length) { const r = { soFiscal: pendF().length, soSite: pendS().length, em: new Date().toISOString().slice(0, 10) }; const ant = sOk(kRes(eid, ym)); if (!ant || ant.soFiscal !== r.soFiscal || ant.soSite !== r.soSite) { S.s(kRes(eid, ym), r); render(); return; } }
     corpo();
   }
   function filtrar(L, f) {
@@ -186,7 +186,7 @@
   function corpo() {
     const box = document.getElementById('escfisTab'); if (!box) return;
     const L = linhasTela(), V = filtrar(L, ST.f), f = ST.f, cb = 'EscFis.filtro';
-    const n = k => L.filter(l => l.sit === k).length, soSite = ST.site.filter(s => !s.par).length;
+    const n = k => L.filter(l => l.sit === k).length, soSite = pendS().length;
     const rs = document.getElementById('escfisResumo');
     if (rs) rs.innerHTML = !ST.fisc.length
       ? '<span style="color:var(--amber)">Nenhum livro fiscal importado neste mês. Importe pelo botão <b>📒 Importar Livros Fiscais (PDF)</b> na lista de Lançamentos Contábeis (todas as empresas) ou pelo <b>📥 Importar livro fiscal</b> aqui em cima.</span>' + (ST.site.length ? ' <span style="color:var(--slate)">(o site tem ' + ST.site.length + ' nota(s) neste mês)</span>' : '')
@@ -194,7 +194,7 @@
         + (soSite ? ' · <a href="#" onclick="event.preventDefault();EscFis.diferencas()" style="color:var(--red)"><b>' + soSite + '</b> nota(s) do site não estão no fiscal → 🔎 Diferenças</a>' : '');
     if (!ST.fisc.length) { box.innerHTML = ''; return; }
     const head = '<tr><th>Situação</th><th>E/S</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Destinatário / Remetente</th><th>CFOP</th><th>Operação</th><th style="text-align:right">Valor no fiscal</th><th style="text-align:right">Valor no site</th><th>Observação</th></tr>'
-      + '<tr>' + thS('sit', [['site', SIT.site], ['valor_dif', SIT.valor_dif], ['nao_site', SIT.nao_site]], f, cb) + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thS('op', Object.entries(OPS), f, cb) + thF('vf', 'valor', f, cb) + thF('vs', 'valor', f, cb) + thF('obs', 'obs.', f, cb) + '</tr>';
+      + '<tr>' + thS('sit', [['site', SIT.site], ['valor_dif', SIT.valor_dif], ['nao_site', SIT.nao_site], ['remessa', SIT.remessa]], f, cb) + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thS('op', Object.entries(OPS), f, cb) + thF('vf', 'valor', f, cb) + thF('vs', 'valor', f, cb) + thF('obs', 'obs.', f, cb) + '</tr>';
     const body = V.length ? V.map(l => '<tr><td style="color:' + SITCOR[l.sit] + ';font-weight:600;white-space:nowrap">' + SIT[l.sit] + '</td><td>' + (l.es === 'E' ? 'Entrada' : 'Saída') + '</td><td>' + br(l.data) + '</td><td>' + E(l.numero) + '</td><td style="font-family:var(--mono);font-size:11px;white-space:nowrap">' + E(fmtDoc(l.doc)) + '</td><td>' + E(l.nome) + '</td><td style="white-space:nowrap">' + E(fmtCfop(l.cfop)) + '</td><td>' + E(OPS[l.op] || '') + '</td><td style="text-align:right">' + (l.vf == null ? '—' : F(l.vf)) + '</td><td style="text-align:right' + (l.sit === 'valor_dif' ? ';color:var(--amber);font-weight:700' : '') + '">' + (l.vs == null ? '—' : F(l.vs)) + '</td><td style="font-size:11px;color:var(--slate)">' + E(l.obs) + '</td></tr>').join('')
       : '<tr><td colspan="11" style="padding:14px;color:var(--slate)">Nenhuma nota com esses filtros.</td></tr>';
     const tv = V.reduce((s, l) => s + (l.vs || 0), 0), tf = V.reduce((s, l) => s + (l.vf || 0), 0);
@@ -239,7 +239,7 @@
     else if (!ST.ok) await carregar();
     if (!ST.fisc.length && !confirm('Não há livro fiscal importado em ' + MESES_L[+ST.ym.slice(5) - 1] + '/' + ST.ym.slice(0, 4) + ' — todas as notas do site vão aparecer como "não está no fiscal". Abrir mesmo assim?')) return;
     ST.mf = { fisc: {}, site: {} }; ST.mSel = {}; ST.mDet = {};
-    ST.site.filter(s => !s.par).forEach(s => { ST.mDet[s.id] = s.det || ''; ST.mSel[s.id] = !!s.det; });
+    pendS().forEach(s => { ST.mDet[s.id] = s.det || ''; ST.mSel[s.id] = !!s.det; });
     let ov = document.getElementById('escfisModal'); if (ov) ov.remove();
     ov = document.createElement('div'); ov.id = 'escfisModal';
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99990;display:flex;align-items:center;justify-content:center;padding:12px';
@@ -249,22 +249,23 @@
   }
   function modal() {
     const el = document.getElementById('escfisModalCorpo'); if (!el) return;
-    const [a, m] = ST.ym.split('-').map(Number), so = ST.fisc.filter(f => !f.par), ss = ST.site.filter(s => !s.par);
+    const [a, m] = ST.ym.split('-').map(Number), so = pendF(), ss = pendS();
     const ab = (k, t, n) => '<button onclick="EscFis.mAba(\'' + k + '\')" style="padding:8px 14px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;color:' + (ST.mAba === k ? OURO : 'var(--slate)') + ';border-bottom:2px solid ' + (ST.mAba === k ? OURO : 'transparent') + '">' + t + ' (' + n + ')</button>';
     el.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><b style="font-size:15px;color:' + OURO + '">📒 Escrita Fiscal — ' + MESES_L[m - 1] + '/' + a + '</b>'
       + '<span style="margin-left:auto;display:flex;gap:6px"><button class="btn bo bsm" onclick="EscFis.mMes(-1)" title="Mês anterior">‹</button><button class="btn bo bsm" onclick="EscFis.mMes(1)" title="Próximo mês">›</button><button class="action-btn action-btn-excel" onclick="EscFis.excelModal()">📊 Gerar Excel</button><button class="btn bo bsm" onclick="document.getElementById(\'escfisModal\').remove()">Fechar</button></span></div>'
       + '<div style="border-bottom:1px solid var(--border);margin-bottom:10px">' + ab('fisc', 'No fiscal, não no site', so.length) + ab('site', 'No site, não no fiscal', ss.length) + '</div><div id="escfisModalTab"></div>';
     modalTab();
   }
+  const pendF = () => ST.fisc.filter(f => !f.par && opFisc(f).op !== 'remessa'), pendS = () => ST.site.filter(s => !s.par && s.op !== 'remessa');
   function modalLinhas(aba) {
-    if (aba === 'fisc') return ST.fisc.filter(f => !f.par).map(f => { return { sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: opFisc(f).op, vs: null, vf: f.valor, obs: '', ref: f }; });
-    return ST.site.filter(s => !s.par).map(s => ({ sit: 'nao_fiscal', es: s.es, data: s.data, numero: s.numero, doc: s.doc, nome: s.nome, cfop: '', op: s.op, vs: s.valor, vf: null, obs: s.tipo.toUpperCase() + (s.natureza_operacao ? ' · ' + s.natureza_operacao : ''), ref: s }));
+    if (aba === 'fisc') return pendF().map(f => { return { sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: opFisc(f).op, vs: null, vf: f.valor, obs: '', ref: f }; });
+    return pendS().map(s => ({ sit: 'nao_fiscal', es: s.es, data: s.data, numero: s.numero, doc: s.doc, nome: s.nome, cfop: '', op: s.op, vs: s.valor, vf: null, obs: s.tipo.toUpperCase() + (s.natureza_operacao ? ' · ' + s.natureza_operacao : ''), ref: s }));
   }
   function modalTab() {
     const el = document.getElementById('escfisModalTab'); if (!el) return;
     const aba = ST.mAba, f = ST.mf[aba] = ST.mf[aba] || {}, cb = 'EscFis.mFiltro', V = filtrar(modalLinhas(aba), f);
     if (aba === 'fisc') {
-      el.innerHTML = '<div style="font-size:12px;color:var(--slate);margin-bottom:6px">Notas que estão no livro fiscal mas <b>não foram encontradas no site</b> (falta importar o XML no site, ou a nota está com outro número/CNPJ).</div>'
+      el.innerHTML = '<div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px"><button class="btn bp bsm" onclick="EscFis.gerarNoSite()" title="Cria no site (NF-e Entrada/Saída, NFS-e, CT-e) as notas filtradas desta lista, com os dados do livro fiscal. Remessa e nota de valor zero não entram.">➕ Gerar no site (' + V.filter(l => l.vf > 0).length + ')</button></div><div style="font-size:12px;color:var(--slate);margin-bottom:6px">Notas que estão no livro fiscal mas <b>não foram encontradas no site</b> (falta importar o XML no site, ou a nota está com outro número/CNPJ).</div>'
         + '<div style="overflow-x:auto"><table class="tbl" style="width:100%;font-size:12px"><thead><tr><th>E/S</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Destinatário / Remetente</th><th>CFOP</th><th>Operação</th><th style="text-align:right">Valor</th></tr><tr>'
         + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thS('op', Object.entries(OPS), f, cb) + thF('vf', 'valor', f, cb) + '</tr></thead><tbody>'
         + (V.length ? V.map(l => '<tr><td>' + (l.es === 'E' ? 'Entrada' : 'Saída') + '</td><td>' + br(l.data) + '</td><td>' + E(l.numero) + '</td><td style="font-family:var(--mono);font-size:11px">' + E(fmtDoc(l.doc)) + '</td><td>' + E(l.nome) + '</td><td>' + E(fmtCfop(l.cfop)) + '</td><td>' + E(OPS[l.op] || '') + '</td><td style="text-align:right">' + F(l.vf) + '</td></tr>').join('') : '<tr><td colspan="8" style="padding:12px;color:var(--slate)">Nenhuma nota.</td></tr>')
@@ -286,6 +287,40 @@
   function mFiltro(k, v) { (ST.mf[ST.mAba] = ST.mf[ST.mAba] || {})[k] = v; clearTimeout(_tmM); _tmM = setTimeout(modalTab, 200); }
   async function mMes(n) { const ym = somaMes(ST.ym, n); ST.ym = ym; ST.ok = false; await render(); await diferencas(); }
   function mTodas(v) { filtrar(modalLinhas('site'), ST.mf.site || {}).forEach(l => { ST.mSel[l.ref.id] = v && !!ST.mDet[l.ref.id]; }); modalTab(); }
+
+  // ── "Gerar no site": cria em notas_fiscais as notas que estão no livro fiscal e não no site (sem XML: status 'metadados'),
+  // com 1 parcela (vencimento = emissão), igual à importação da UneCont. Tipo pelo CFOP/livro: serviço = NFS-e, transporte = CT-e, resto = NF-e.
+  async function gerarNoSite() {
+    const V = filtrar(modalLinhas('fisc'), ST.mf.fisc || {}).filter(l => l.vf > 0 && l.numero);
+    if (!V.length) { toast('Nenhuma nota para gerar (remessa e valor zero não entram).', 'err'); return; }
+    const tot = V.reduce((s, l) => s + l.vf, 0);
+    if (!confirm('Criar no site ' + V.length + ' nota(s) do livro fiscal, total R$ ' + F(tot) + '?\n\nElas entram nas abas de notas (NF-e Entrada/Saída, NFS-e, CT-e) como nota SEM XML, com os dados do livro (número, data, CNPJ, valor) e 1 parcela vencendo na emissão.')) return;
+    const cnE = cnpjEmp(ST.eid); let nomeE = ''; try { const e = S.emps().find(x => String(x.eid) === ST.eid); nomeE = (e && e.nome) || ''; } catch (e) { }
+    const NAT = { compra_mercadoria: 'Compra de mercadoria', compra_uso_consumo: 'Compra para uso e consumo', venda: 'Venda', dev_venda: 'Devolucao de venda', dev_compra_mercadoria: 'Devolucao de compra', dev_compra_uso_consumo: 'Devolucao de compra (uso e consumo)' };
+    const regs = V.map(l => {
+      const f = l.ref, cl = opFisc(f), r = +dig(String(f.cfop || '').split('/')[0]).slice(1) || 0, ent = f.es === 'E', transp = r >= 350 && r <= 360;
+      const tipo = transp ? 'cte' : (f.livro === 'V' || cl.op === 'servico') ? 'nfse' : 'nfe';
+      const part = { doc: f.doc || null, nome: f.nome || null }, emp = { doc: cnE || null, nome: nomeE || null };
+      const em = ent ? part : emp, de = ent ? emp : part;
+      return { empresa_eid: ST.eid, tipo, chave_acesso: 'ESCFIS-' + f.livro + '-' + (f.doc || 'SEMDOC') + '-' + (f.serie || '0') + '-' + f.numero + '-' + f.data, numero: f.numero, serie: f.serie || null,
+        modelo: tipo === 'nfse' ? 'NFSe' : tipo === 'cte' ? '57' : '55', cnpj_emitente: em.doc, nome_emitente: em.nome, cnpj_destinatario: de.doc, nome_destinatario: de.nome,
+        direcao: ent ? 'compra' : 'venda', data_emissao: f.data, valor_total: R2(f.valor), xml_storage_path: null, status_captura: 'metadados',
+        natureza_operacao: tipo === 'nfe' ? (NAT[cl.det] || (ent ? 'Compra' : 'Venda')) + ' (Escrita Fiscal, CFOP ' + fmtCfop(f.cfop) + ')' : null };
+    });
+    let ok = 0; const erros = [];
+    const SEL = 'id,chave_acesso,valor_total,data_emissao,tipo,direcao';
+    for (let k = 0; k < regs.length; k += 100) {
+      const lote = regs.slice(k, k + 100);
+      let { data: ins, error } = await _supaClient.from('notas_fiscais').upsert(lote, { onConflict: 'empresa_eid,tipo,chave_acesso' }).select(SEL);
+      if (error) { ins = []; for (const r1 of lote) { const x = await _supaClient.from('notas_fiscais').upsert([r1], { onConflict: 'empresa_eid,tipo,chave_acesso' }).select(SEL); if (x.error) erros.push('NF ' + r1.numero + ': ' + x.error.message); else ins.push(...(x.data || [])); } }
+      if (!ins || !ins.length) continue;
+      const parc = ins.map(n => ({ nf_id: n.id, empresa_eid: ST.eid, numero_parcela: 1, data_vencimento: n.data_emissao, valor_parcela: n.valor_total, data_emissao: n.data_emissao, tipo: n.tipo, direcao: n.direcao }));
+      const { error: eP } = await _supaClient.from('notas_fiscais_parcelas').upsert(parc, { onConflict: 'nf_id,numero_parcela' });
+      if (eP) erros.push('parcelas: ' + eP.message); else ok += ins.length;
+    }
+    toast(ok + ' nota(s) criada(s) no site.' + (erros.length ? ' ' + erros.length + ' com erro: ' + erros.slice(0, 3).join(' | ') : ''), erros.length ? 'err' : 'ok');
+    ST.ok = false; await render(); await diferencas();
+  }
 
   // ── TXT padrão (Mister Contador) das notas do site que não estão no fiscal ──
   async function txt() {
@@ -596,11 +631,12 @@
   function excelModal() {
     if (typeof XLSX === 'undefined') { toast('Biblioteca XLSX não carregada', 'err'); return; }
     const [a, m] = ST.ym.split('-').map(Number), t = '#' + ST.eid + ' ' + empNome() + ' — ' + MESES_L[m - 1] + '/' + a;
-    salvarXlsx([planilha(filtrar(modalLinhas('fisc'), ST.mf.fisc || {}), 'No fiscal, nao no site', t + ' — no fiscal, não no site'), planilha(filtrar(modalLinhas('site'), ST.mf.site || {}), 'No site, nao no fiscal', t + ' — no site, não no fiscal')], 'Escrita_Fiscal_Diferencas_' + ST.eid + '_' + ST.ym + '.xlsx');
+    const fisc = ST.mAba === 'fisc';
+    salvarXlsx([fisc ? planilha(filtrar(modalLinhas('fisc'), ST.mf.fisc || {}), 'No fiscal, nao no site', t + ' — no fiscal, não no site') : planilha(filtrar(modalLinhas('site'), ST.mf.site || {}), 'No site, nao no fiscal', t + ' — no site, não no fiscal')], 'Escrita_Fiscal_' + (fisc ? 'No_fiscal_nao_no_site_' : 'No_site_nao_no_fiscal_') + ST.eid + '_' + ST.ym + '.xlsx');
   }
 
   root.EscFis = {
-    render: () => render(typeof _lancctbEidAtual !== 'undefined' ? _lancctbEidAtual : ST.eid), importar, processar, config, salvarConfig, diferencas, excel, excelModal, txt, excluirLivros, excluirLivrosOk, importarLote, fixarPasta, botaoLoteHtml,
+    render: () => render(typeof _lancctbEidAtual !== 'undefined' ? _lancctbEidAtual : ST.eid), importar, processar, config, salvarConfig, diferencas, excel, excelModal, txt, gerarNoSite, excluirLivros, excluirLivrosOk, importarLote, fixarPasta, botaoLoteHtml,
     irMes, mes, filtro, mFiltro, mMes, mTodas,
     mAba: k => { ST.mAba = k; modal(); }, mMarca: (id, v) => { ST.mSel[id] = v; modalTab(); }, mDet: (id, v) => { ST.mDet[id] = v; if (!v) ST.mSel[id] = false; else ST.mSel[id] = true; modalTab(); },
     _t: { classCfop, classSite, confrontar, lerSped, lerTabela, agrupar, isoDe, lerDominio, infoNome, opFisc, lerArquivo, linhasPdf },
