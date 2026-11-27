@@ -282,13 +282,14 @@
       resumo: r => [['Mais vantajosa', r.melhor, 1], ['Menos vantajosa', r.pior], [r.modo === 'liquido' ? 'Líquido ao sócio (efetivado)' : 'Valor pago (bruto)', r.valor]],
       extra: res => rankingHtml(res),
       tabela: res => ({ nome: 'Ranking', cab: ['Posição', 'Forma', 'Bruto necessário', 'Líquido ao sócio', 'Tributos retidos do sócio', 'Encargos da empresa', 'Economia IRPJ/CSLL', 'Custo líquido da empresa', 'Tributos líquidos totais', 'Carga efetiva (%)', 'Observação'], intCols: [0], pctCols: [9], linhas: res.ranking.map(o => [o.posicao, o.nome, o.bruto / 100, o.liquidoSocio / 100, o.socioTributos / 100, o.empresaEncargos / 100, o.empresaEconomia / 100, o.custoEmpresa / 100, o.tributosLiquidos / 100, o.cargaBp / 10000, o.detalhe + (o.naoRemuneracao ? ' | NÃO é remuneração: precisa ser devolvido' : '')]).concat(res.indisponiveis.map(x => ['—', x.nome, '', '', '', '', '', '', '', '', 'Fora da comparação: ' + x.motivo])) }) },
-    lucro_presumido: { titulo: 'Lucro Presumido — IRPJ e CSLL', desc: 'Apuração trimestral com a majoração de 10% sobre o percentual de presunção acima de R$ 1.250.000 por trimestre (IN RFB 2.305/2025, art. 15, com ajuste do 4º trimestre pela receita acumulada do ano).', campos: [
+    lucro_presumido: { titulo: 'Lucro Presumido — IRPJ e CSLL', desc: 'Apuração trimestral com a majoração sobre o percentual de presunção acima de R$ 1.250.000 por trimestre — 10% em 2026 (LC 224/2025) e 20% a partir de 2027 (LC 239/2026; CSLL a 20% desde março/2027) (IN RFB 2.305/2025, art. 15, com ajuste do 4º trimestre pela receita acumulada do ano).', campos: [
       { k: 'ano', l: 'Ano', t: 'int', def: () => new Date().getFullYear() },
       { k: 'trimestre', l: 'Trimestre', t: 'select', def: '1', opts: [['1', '1º trimestre'], ['2', '2º trimestre'], ['3', '3º trimestre'], ['4', '4º trimestre']] },
       { k: '_atividades', t: 'atividades' },
       { k: 'ra1', l: 'Receita bruta total do 1º trimestre (R$) — para o limite proporcional e o ajuste do 4º trimestre', t: 'money', quando: v => parseInt(v.trimestre, 10) > 1 },
       { k: 'ra2', l: 'Receita bruta total do 2º trimestre (R$)', t: 'money', quando: v => parseInt(v.trimestre, 10) > 2 },
       { k: 'ra3', l: 'Receita bruta total do 3º trimestre (R$)', t: 'money', quando: v => parseInt(v.trimestre, 10) > 3 },
+      { k: 'receitaMarco', l: 'Receita bruta de MARÇO/2027 (R$) — CSLL do 1º trimestre: 20% só a partir de março (vazio = 1/3 do trimestre)', t: 'money', quando: v => parseInt(v.ano, 10) === 2027 && parseInt(v.trimestre, 10) === 1 },
       { k: 'compensarSobraLimite', l: 'Considerar a sobra de limite dos trimestres anteriores (IN RFB 2.305, art. 15, § 4º — opcional)', t: 'bool', def: false, quando: v => parseInt(v.trimestre, 10) > 1 },
       { k: 'dataAbertura', l: 'Data de abertura da empresa (opcional) — só importa se foi aberta no mesmo ano; trimestres antes da abertura não geram limite', t: 'date', def: '' },
       { k: 'trimestresAtividade', l: 'Trimestres em atividade no ano (início/encerramento — § 9º) — vazio = padrão', t: 'int', def: '', quando: v => parseInt(v.trimestre, 10) > 3 },

@@ -122,6 +122,10 @@ t('JCP período em dois anos → recusa', () => assert.strictEqual(jcp({ dataIni
 t('JCP lucros do exercício corrente ficam fora da base (só anteriores)', () => assert.strictEqual(jcp({}).resultado.base, c('1300000')));
 t('INSS: contribuição máxima do empregado = 988,09', () => assert.strictEqual(C.calcular('salario_liquido', { competencia: '2026-03', salario: '20000' }).resultado.inss, c('988.09')));
 t('ITCMD: acumulado acima do limite mostra o valor alternativo (sobre o total)', () => { const x = itd({ valorBem: '80000', doacoesAnteriores: '30000' }); assert.ok(x.memoria.some(l => l.k === 'nota' && l.r.includes('TOTAL acumulado'))); });
+// LC 239/2026 (26/11/2026): 20% a partir de 2027 — números do informativo do Dr. João (trimestre de R$ 3 mi)
+t('LC 239: 2026 continua 10% (serviços 339.440 / comércio 91.790)', () => { const a = lp(2026, 2, [{ tipo: 'servicos', receita: '3000000' }]).resultado, b = lp(2026, 2, [{ tipo: 'comercio', receita: '3000000' }]).resultado; assert.strictEqual(a.irpj + a.csll, 33944000); assert.strictEqual(b.irpj + b.csll, 9179000); });
+t('LC 239: 2027 usa 20% (serviços 358.480 / comércio 97.180)', () => { const a = lp(2027, 2, [{ tipo: 'servicos', receita: '3000000' }]), b = lp(2027, 2, [{ tipo: 'comercio', receita: '3000000' }]).resultado; assert.strictEqual(a.parametros[0].id, 'LUCRO_PRESUMIDO_2027'); assert.strictEqual(a.resultado.irpj + a.resultado.csll, 35848000); assert.strictEqual(b.irpj + b.csll, 9718000); });
+t('LC 239: CSLL 1º tri/2027 proporcional (10% jan–fev, 20% março)', () => { const a = lp(2027, 1, [{ tipo: 'servicos', receita: '3000000' }]).resultado, b = lp(2027, 1, [{ tipo: 'servicos', receita: '3000000' }], { receitaMarco: '500000' }).resultado; assert.strictEqual(a.irpj, 26200000); assert.strictEqual(a.csll, 9312000); assert.strictEqual(b.csll, 9228000); });
 t('Lucro Presumido majorado avisa das liminares/ADIs', () => assert.ok(lp(2026, 2, [{ tipo: 'comercio', receita: '1500000' }]).avisos.some(a => a.includes('ADIs'))));
 
 

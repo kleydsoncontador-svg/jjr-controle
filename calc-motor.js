@@ -91,6 +91,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     { id: 'LEI_9430_1996', calcs: ['lucro_presumido'], norma: 'Lei', numero: '9.430/1996', artigo: '(regras do Lucro Presumido)', assunto: 'Apuração trimestral, adicional do IRPJ, receitas que integram a base', vig_ini: '1997-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
     { id: 'LC_224_2025', calcs: ['lucro_presumido'], norma: 'Lei Complementar', numero: '224/2025 (de 26/12/2025)', artigo: 'art. 4º, § 4º, VII e § 5º, I e II; art. 14', assunto: 'Acréscimo de 10% sobre os percentuais de presunção, somente sobre a parcela da receita bruta TOTAL que exceder R$ 5.000.000,00 no ano-calendário; limite aplicado proporcionalmente a cada período de apuração, PERMITIDO O AJUSTE NOS PERÍODOS SEGUINTES; acréscimo proporcional às receitas de cada atividade', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp224.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Art. 14: vigência na publicação; efeitos em 1º/1/2026 (IRPJ) e no 1º dia do 4º mês seguinte à publicação = 1º/4/2026 para tributos sujeitos à anterioridade nonagesimal (CSLL). O ajuste "nos períodos seguintes" NÃO está implementado (limite de R$ 1.250.000 por trimestre, sem compensação). Há liminares individuais e ADIs no STF (7920, 7936, 7944, 7982) contestando a majoração; nenhuma decisão do STF suspendendo foi localizada.' },
     { id: 'DEC_12808_2025', calcs: ['lucro_presumido'], norma: 'Decreto', numero: '12.808/2025', artigo: 'art. 12', assunto: 'Regulamentação da majoração do Lucro Presumido', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: V_USR },
+    { id: 'LC_239_2026', calcs: ['lucro_presumido'], norma: 'Lei Complementar', numero: '239/2026 (publicada em 24/11/2026)', artigo: 'art. 4º (nova redação do art. 4º, § 4º, VII da LC 224/2025) e art. 15', assunto: 'O acréscimo sobre os percentuais de presunção do Lucro Presumido passa de 10% para 20%, sobre a parcela da receita bruta que exceder R$ 5.000.000,00 no ano (R$ 1.250.000,00 por trimestre). IRPJ: a partir de 1º/1/2027. CSLL: a partir de 1º/3/2027 (noventena) — no 1º trimestre/2027 a CSLL usa 10% sobre a receita de janeiro e fevereiro e 20% sobre a de março.', vig_ini: '2027-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br', ultima_verificacao: null, obs: 'Cadastrada em 26/11/2026 a partir do informativo do Dr. João (JJR, 25/11/2026), a pedido do usuário; conferir no texto oficial.' },
     { id: 'RFB_LP_2026', calcs: ['lucro_presumido'], norma: 'Instrução Normativa RFB', numero: '2.305/2025 (31/12/2025), art. 15, com a redação da IN RFB 2.306/2026 (22/1/2026, DOU 23/1/2026)', artigo: 'art. 14 e art. 15, caput e §§ 1º a 9º', assunto: 'Majoração do Lucro Presumido: limite de R$ 1.250.000 por trimestre (§ 2º); trimestre acima do limite: presunção +10% sobre o excedente (§ 3º); sobra pode ser considerada nos trimestres seguintes (§ 4º); no 4º trimestre verifica-se o limite anual com a receita acumulada, hipóteses I, II e III (§ 5º); atividades diversas: proporção por atividade (§ 6º); restituição/compensação do crédito com Selic (§§ 7º e 8º); início/encerramento de atividade: limite anual proporcional aos trimestres em atividade (§ 9º)', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.normaslegais.com.br/legislacao/instrucao-normativa-rfb-2306-2025.htm', ultima_verificacao: '2026-10-20 (texto da IN 2.306 em portal de legislação; o texto no site da Receita não foi lido)', obs: 'Lido o texto integral da IN 2.306/2026 (art. 15 §§ 1º a 9º). O limite anual da CSLL em 2026 (R$ 3.750.000 = 3 trimestres) é a aplicação do § 9º/limite proporcional pelos 3 trimestres de vigência da CSLL — confirmar com a Receita. O recálculo opcional dos trimestres anteriores (§ 5º, I-b e II-b) NÃO é feito pela calculadora (ela mostra as parcelas).' },
     { id: 'LEI_9249_JCP', calcs: ['jcp'], norma: 'Lei', numero: '9.249/1995', artigo: 'art. 9º, caput, §§ 1º, 2º, 3º, 8º, 8º-A, 8º-C, 11 e 12', assunto: 'JCP: dedutível no lucro real (e na CSLL, § 11), pago/creditado individualizadamente, limitado à variação pro rata dia da TJLP sobre as contas do PL (§ 8º: capital social integralizado; reservas de capital do § 2º do art. 13 e p.ú. do art. 14 da Lei 6.404; reservas de lucros exceto a de incentivo fiscal do art. 195-A; ações em tesouraria; lucros ou prejuízos acumulados). § 1º: exige lucros (antes da dedução dos juros) OU lucros acumulados e reservas de lucros ≥ 2× os juros (= limite de 50%). § 8º-A: não contam variações positivas do PL por atos entre partes dependentes sem ingresso efetivo de ativos. § 8º-C: regras valem desde 1º/1/2024.', vig_ini: '1996-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/l9249.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Texto lido no Planalto. A lei diz "lucros computados antes da dedução dos juros" — não menciona CSLL/IRPJ no limite; por isso o lucro do período é um campo informado. O divisor de dias da TJLP (365) NÃO consta na lei (só "pro rata dia").' },
     { id: 'LC_224_JCP', calcs: ['jcp'], norma: 'Lei Complementar', numero: '224/2025', artigo: 'art. 8º (nova redação do § 2º do art. 9º da Lei 9.249/1995); art. 14, III', assunto: 'IRRF sobre JCP: 17,5% na data do pagamento ou crédito (era 15%)', vig_ini: '2026-01-01', vig_fim: null, fonte: 'https://www.planalto.gov.br/ccivil_03/leis/lcp/lcp224.htm', ultima_verificacao: '2026-10-20 (texto oficial do Planalto)', obs: 'Texto lido no Planalto; efeitos desde 1º/1/2026. § 3º: o IRRF é antecipação para beneficiário PJ do lucro real; tributação definitiva para PF e PJ fora do lucro real. A alíquota de 25% para país com tributação favorecida NÃO está no art. 9º — não foi confirmada.' },
@@ -450,6 +451,17 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       params: { faixas: P([{ ate_dias: 180, aliq: '0.225' }, { ate_dias: 360, aliq: '0.20' }, { ate_dias: 720, aliq: '0.175' }, { ate_dias: null, aliq: '0.15' }], 'dias / taxa', 'Tabela regressiva por prazo (informada pelo usuário)') },
     },
   ];
+  // 26/11/2026 — LC 239/2026: a partir de 2027 o acréscimo da presunção é de 20% (era 10% em 2026). Mesmos percentuais/limites do conjunto 2026;
+  // IRPJ e CSLL com majoração desde o 1º trimestre/2027, mas a CSLL só vai a 20% em 1º/3/2027 (no 1º tri, 10% em jan–fev e 20% em março).
+  (function () {
+    const b = CALC_SEED_SETS.find(s => s.id === 'LUCRO_PRESUMIDO_2026'); if (!b) return;
+    const p = Object.assign({}, b.params); delete p.csll_limite_anual_2026;
+    p.acrescimo_presuncao = P('0.20', 'fator', 'Acréscimo de 20% SOBRE o percentual de presunção (32% → 38,40%; 8% → 9,60%) — LC 224/2025 com a redação da LC 239/2026');
+    p.irpj_majoracao_desde = P({ ano: 2027, trimestre: 1 }, '', 'IRPJ: 20% desde 1º/1/2027');
+    p.csll_majoracao_desde = P({ ano: 2027, trimestre: 1 }, '', 'CSLL: majoração em todos os trimestres de 2027 (10% em jan–fev, 20% desde março)');
+    p.csll_transicao = P({ ano: 2027, trimestre: 1, mesInicio: 3, acrescimoAnterior: '0.10' }, '', 'CSLL no 1º trimestre/2027: 10% sobre a parte de janeiro e fevereiro e 20% sobre a de março (proporcional à receita de março; sem ela, 1/3)');
+    CALC_SEED_SETS.push(Object.assign({}, b, { id: 'LUCRO_PRESUMIDO_2027', valid_from: '2027-01-01', valid_to: null, created_by: 'seed (pedido do usuário, LC 239/2026 — 26/11/2026)', bases: b.bases.concat(['LC_239_2026']), params: p }));
+  })();
 
   // conjuntos aprovados em Bases Legais (guardados no site) entram aqui em tempo de execução
   const EXTRAS = [];
@@ -638,6 +650,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     const alCSLLtab = pv(set, 'csll_aliquotas'); const tipoC = inp.tipoCsll || 'comum';
     if (!alCSLLtab[tipoC]) return ERR('Alíquota da CSLL não cadastrada para este tipo de contribuinte. Cadastre em Bases Legais → Cadastrar parâmetros.');
     const ativ = pv(set, 'atividades');
+    const acrPctTxt = (qRound(qMul(acr, Q(10000))) / 100).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + '%';
     const itens = (inp.atividades || []).map(a => {
       const rec = cents(a.receita); const def = ativ[a.tipo];
       let pi, pc, nome;
@@ -677,6 +690,12 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       o.E = Math.min(E, recTot); return o;
     }
     const lI = limitePara('irpj'), lC = limitePara('csll');
+    // LC 239/2026: CSLL do 1º trimestre/2027 — acréscimo anterior (10%) sobre jan–fev e o novo (20%) sobre março, pela receita de março informada (sem ela, 1/3)
+    let acrC = acr, transC = null; const trC = pv(set, 'csll_transicao');
+    if (trC && ano === trC.ano && tri === trC.trimestre) {
+      const recMar = cents(inp.receitaMarco); const fr = (recMar > 0 && recTot > 0) ? Q(Math.min(recMar, recTot), recTot) : Q(1, 3); const ant = dec(trC.acrescimoAnterior);
+      acrC = qAdd(ant, qMul(qAdd(acr, qMul(ant, Q(-1))), fr)); transC = { recMar, fr, informada: recMar > 0 };
+    }
     function distribui(tipo, E) {
       const limTot = recTot - E; let usados = 0;
       itens.forEach(i => { i['lim_' + tipo] = Math.min(i.rec, mulC(limTot, Q(i.rec, recTot))); usados += i['lim_' + tipo]; });
@@ -696,7 +715,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
       mem.txt(rot + ' — receita do trimestre', recTot > L.disp ? 'acima do limite em ' + brl(recTot - L.disp) : 'dentro do limite');
       if (L.q4) {
         mem.n(rot + ' — 4º trimestre (art. 15, § 5º): receita acumulada ' + brl(L.q4.A) + '; limite anual (' + L.nAtiv + ' trimestre(s) em atividade × ' + brl(lim) + ') ' + brl(L.q4.AL) + '; parcela excedente anual ' + brl(L.q4.AE) + '; soma das parcelas excedentes dos trimestres anteriores ' + brl(L.q4.S) + '.');
-        if (L.caso === 'I') mem.n(rot + ' — hipótese I (receita acumulada inferior ao limite anual): NÃO incide o acréscimo de 10% no 4º trimestre.');
+        if (L.caso === 'I') mem.n(rot + ' — hipótese I (receita acumulada inferior ao limite anual): NÃO incide o acréscimo de ' + acrPctTxt + ' no 4º trimestre.');
         if (L.caso === 'II') mem.n(rot + ' — hipótese II (excedente anual menor que a soma dos excedentes anteriores): NÃO incide o acréscimo no 4º trimestre.');
         if (L.caso === 'III') mem.n(rot + ' — hipótese III (excedente anual maior): a parcela excedente do 4º trimestre fica limitada a ' + brl(Math.min(max0(recTot - L.disp), max0(L.q4.AE - L.q4.S))) + '.');
       }
@@ -707,14 +726,14 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     if (itens.length > 1 && (lI.E > 0 || lC.E > 0)) { mem.n('Mais de uma atividade (art. 15, § 6º): o limite é distribuído pela participação de cada atividade na receita do trimestre.'); itens.forEach(i => mem.l('Limite da atividade ' + i.nome + ' (' + (i.rec * 100 / recTot).toFixed(2).replace('.', ',') + '%)', i.lim_irpj)); }
     // avisos sobre o ajuste do 4º trimestre que a calculadora NÃO faz (recálculo dos trimestres anteriores)
     [['IRPJ', lI], ['CSLL', lC]].forEach(([rot, L]) => {
-      if (L.caso === 'I' && L.q4.S > 0) avisos.push(rot + ' — art. 15, § 5º, I, b: a empresa PODE recalcular os trimestres anteriores sem o acréscimo de 10% (parcelas excedentes somadas: ' + brl(L.q4.S) + ') e deduzir a diferença do ' + rot + ' do 4º trimestre. Esse recálculo exige os dados de cada trimestre e NÃO foi feito aqui.');
+      if (L.caso === 'I' && L.q4.S > 0) avisos.push(rot + ' — art. 15, § 5º, I, b: a empresa PODE recalcular os trimestres anteriores sem o acréscimo de ' + acrPctTxt + ' (parcelas excedentes somadas: ' + brl(L.q4.S) + ') e deduzir a diferença do ' + rot + ' do 4º trimestre. Esse recálculo exige os dados de cada trimestre e NÃO foi feito aqui.');
       if (L.caso === 'II') { const adj = L.q4.Ek.map((E, i) => E === null ? null : (L.q4.S > 0 ? qRound(qMul(Q(E, L.q4.S), Q(L.q4.AE))) : 0)); avisos.push(rot + ' — art. 15, § 5º, II, b: a empresa PODE recalcular os trimestres anteriores com parcela excedente proporcional (' + adj.map((v, i) => v === null ? '' : (i + 1) + 'º tri: ' + brl(v)).filter(Boolean).join('; ') + ', em vez de ' + L.q4.Ek.map((v, i) => v === null ? '' : (i + 1) + 'º tri: ' + brl(v)).filter(Boolean).join('; ') + ') e deduzir a diferença do 4º trimestre. Esse recálculo NÃO foi feito aqui.'); }
     });
 
     function base(tipo, maj) {
       const L = []; let total = Q(0);
       itens.forEach(i => {
-        const normal = tipo === 'irpj' ? i.pi : i.pc; const majorada = qMul(normal, qAdd(Q(1), acr));
+        const normal = tipo === 'irpj' ? i.pi : i.pc; const majorada = qMul(normal, qAdd(Q(1), tipo === 'csll' ? acrC : acr));
         const parteNormal = mulQ(maj ? i['lim_' + tipo] : i.rec, normal); total = qAdd(total, parteNormal);
         L.push({ r: i.nome + ' — ' + brl(maj ? i['lim_' + tipo] : i.rec) + ' × ' + (tipo === 'irpj' ? i.piTxt : i.pcTxt).replace('.', ',') + '%', v: qRound(parteNormal) });
         if (maj && i['exc_' + tipo] > 0) { const pm = mulQ(i['exc_' + tipo], majorada); total = qAdd(total, pm); const pctM = qRound(qMul(majorada, Q(10000))); L.push({ r: i.nome + ' (excedente) — ' + brl(i['exc_' + tipo]) + ' × ' + (pctM / 100).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + '%', v: qRound(pm) }); }
@@ -741,6 +760,7 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     const irpjSaldo = irpjTotal - irrf - antI; mem.tot(irpjSaldo >= 0 ? 'IRPJ A PAGAR' : 'IRPJ — SALDO NEGATIVO (a compensar)', irpjSaldo);
     // CSLL
     mem.t('CSLL — ' + (majCSLL ? 'regra NOVA (majoração vigente desde ' + cDesde.trimestre + 'º tri/' + cDesde.ano + ')' : 'regra anterior SEM majoração (a majoração da CSLL só vale a partir do ' + cDesde.trimestre + 'º trimestre/' + cDesde.ano + ')'));
+    if (transC && majCSLL) mem.n('CSLL no 1º trimestre/2027 (LC 239/2026): acréscimo de 10% sobre a parte de janeiro e fevereiro e de 20% sobre a de março. ' + (transC.informada ? 'Receita de março informada: ' + brl(transC.recMar) + ' (' + (qRound(qMul(transC.fr, Q(10000))) / 100).toLocaleString('pt-BR', { maximumFractionDigits: 2 }) + '% do trimestre)' : 'Receita de março NÃO informada: considerado 1/3 do trimestre') + ' → acréscimo médio de ' + (qRound(qMul(acrC, Q(1000000))) / 10000).toLocaleString('pt-BR', { maximumFractionDigits: 4 }) + '%.');
     const bc = base('csll', majCSLL); bc.L.forEach(x => mem.l(x.r, x.v, '+')); mem.s('Base presumida (receitas × coeficientes)', bc.total);
     mem.l('Receitas financeiras', fin, '+'); mem.l('Ganhos de capital', gc, '+'); mem.l('Outras adições integrais', oa, '+');
     const baseCSLL = bc.total + adicoes; mem.s('BASE DE CÁLCULO DA CSLL', baseCSLL);
@@ -748,7 +768,8 @@ const V_SEC = 'Conferida em 20/10/2026 em sites especializados (fonte SECUNDÁRI
     const csllRet = cents(inp.csllRetida), antC = cents(inp.outrasAntecipacoesCsll);
     mem.l('(−) CSLL retida a compensar', csllRet, '−'); mem.l('(−) Outras antecipações da CSLL', antC, '−');
     const csllSaldo = csll - csllRet - antC; mem.tot(csllSaldo >= 0 ? 'CSLL A PAGAR' : 'CSLL — SALDO NEGATIVO (a compensar)', csllSaldo);
-    if (majIRPJ || majCSLL) avisos.push('Há liminares individuais na Justiça Federal e ADIs no STF (7920, 7936, 7944, 7982) contestando a majoração de 10%. O cálculo aplica a lei em vigor; se a empresa tem decisão favorável, a base muda — confira o andamento.');
+    if (ano >= 2027 && (majIRPJ || majCSLL)) avisos.push('A partir de 2027 o acréscimo é de ' + acrPctTxt + ' (LC 224/2025 com a redação da LC 239/2026): IRPJ desde 1º/1/2027 e CSLL desde 1º/3/2027' + (transC ? ' — por isso a CSLL deste 1º trimestre é proporcional (informe a receita de março para o valor exato).' : '.'));
+    if (majIRPJ || majCSLL) avisos.push('Há liminares individuais na Justiça Federal e ADIs no STF (7920, 7936, 7944, 7982) contestando a majoração de ' + acrPctTxt + '. O cálculo aplica a lei em vigor; se a empresa tem decisão favorável, a base muda — confira o andamento.');
     if (ano === 2026) avisos.push('CSLL 2026: limite anual proporcional de ' + brl(cents(pv(set, 'csll_limite_anual_2026'))) + ' (três trimestres sujeitos à nova regra). O 1º trimestre/2026 NÃO participa da nova sistemática da CSLL (noventena: a majoração vale a partir de 01/04/2026) e sua cota não é transportada. A partir de 2027 voltam os quatro trimestres.');
     if (alCSLLtab && tipoC === 'comum') avisos.push('CSLL calculada à alíquota da empresa comum. Entidades financeiras e outras atividades têm alíquota própria — não cadastradas.');
     return { ok: true, resultado: { baseIRPJ, irpj: irpjTotal, irpjAPagar: max0(irpjSaldo), irpjSaldo, baseCSLL, csll, csllAPagar: max0(csllSaldo), csllSaldo, majoracaoIRPJ: majIRPJ, majoracaoCSLL: majCSLL }, memoria: mem.L, parametros: [refSet(set)], bases: basesDe([set]), avisos };
