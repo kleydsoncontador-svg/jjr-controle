@@ -1067,6 +1067,7 @@ html.dark-mode span.af-sem-txt-badge, :root[data-theme="dark"] span.af-sem-txt-b
 <script src="estoque.js?v=12"></script>
 <script src="municipios-ibge.js?v=1"></script>
 <script src="barra-importacoes.js?v=1"></script>
+<script src="retencoes-txt.js?v=1"></script>
 <script src="escrita-fiscal.js?v=7"></script>
 <script>
 // Barra de rolagem horizontal TAMBÉM acima de toda tabela larga (pedido do usuário 11/11/2026: "todas as telas que tiverem barra de rolagem lá no final, também em cima, acima da linha de título").
@@ -3093,7 +3094,7 @@ html.dark-mode span.af-sem-txt-badge, :root[data-theme="dark"] span.af-sem-txt-b
 <div class="mb" id="mLancctbRetIgn" style="display:none">
   <div class="modal" style="max-width:640px">
     <div class="mt">
-      <h3>⚙ Retenções desconsideradas (NFS-e)</h3>
+      <h3>⚙ Regras de retenções (NFS-e)</h3>
       <button onclick="closeModal('mLancctbRetIgn')">&#x2715;</button>
     </div>
     <div class="mc" id="lancctbRetIgnBody"></div>
@@ -24297,7 +24298,7 @@ const _LANCCTB_FETCH_PARALELO_LOTE=8;
 // de 1.000 estourava o tempo do banco em 16.000 linhas e devolvia só esse pedaço, SEM AVISO — NFs como BECAR/JADMAX (CNPJ igual, valor exato) nunca entravam e o motor dizia "nenhuma NF candidata".
 // Agora só vem o que pode casar: (A) parcelas de valor igual (±2 centavos) ao de algum lançamento a processar, (B) parcelas de NFs com RETENÇÃO (o valor líquido difere do bruto) e (C) as NFs que o Fluxo cita.
 // Um trecho que falha é refeito; se ainda falhar, avisa na tela em vez de seguir com a carga incompleta.
-const LANCCTB_SEL_PARCELA_MOTOR='id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(empresa_eid,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)';
+const LANCCTB_SEL_PARCELA_MOTOR='id,nf_id,numero_parcela,data_vencimento,valor_parcela,notas_fiscais(empresa_eid,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,numero,natureza_operacao,modelo,tipo,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,cod_servico,desc_servico)';
 async function _lancctbFetchPaginas(construirQuery){
   const todos=[]; let off=0;
   while(true){
@@ -26130,25 +26131,36 @@ function _lancctbRetIgnGet(eid){
 }
 function _lancctbRetIgnSet(eid,lista){ _lancctbRetIgnCache[String(eid)]=lista; S.s('lancctb_ret_ign_'+eid,lista); }
 // devolve { iss:true, pis:true, ... } só com os impostos desconsiderados pra ESTA nota
-function _lancctbRetIgnPara(nf){
-  const regras=_lancctbRetIgnGet(nf.empresa_eid||_lancctbEidAtual);
-  const out={};
-  if(!regras.length) return out;
-  const dir=nf.direcao;
+// 27/11/2026: (1) AUTOMÁTICO — retenção que a planilha UneCont trouxe VAZIA (coluna ISS Dentro/Fora do Município, Valor PIS/COFINS/CSLL/IRRF)
+// não é descontada do Valor Líquido (fica riscada na tela); gravada na nota em notas_fiscais.ret_une_vazias a cada Importar UneCont.
+// (2) Regras do usuário (⚙): ação "não descontar" (padrão, regras antigas) ou "descontar"; IRRF entrou; filtro opcional por código OU descrição do serviço.
+// "Descontar" sempre ganha — nem a varredura da UneCont nem outra regra sobrepõem.
+const LANCCTB_RET_KEYS=['iss','pis','cofins','csll','irrf'];
+function _lancctbRetRegraBate(r,nf){
+  const dir=nf.direcao, dr=r.dir||'ambos';
+  if(dr==='tomado'&&dir!=='compra') return false;
+  if(dr==='prestado'&&dir!=='venda') return false;
   const cnpj=String((dir==='venda'?nf.cnpj_destinatario:nf.cnpj_emitente)||'').replace(/\D/g,'');
-  regras.forEach(r=>{
-    const dr=r.dir||'ambos';
-    if(dr==='tomado'&&dir!=='compra') return;
-    if(dr==='prestado'&&dir!=='venda') return;
-    if(r.escopo==='cnpj'&&String(r.cnpj||'').replace(/\D/g,'')!==cnpj) return;
-    (r.impostos||[]).forEach(k=>{ out[k]=true; });
-  });
+  if(r.escopo==='cnpj'&&String(r.cnpj||'').replace(/\D/g,'')!==cnpj) return false;
+  if(r.filtro==='cod'){ const a=String(r.cod||'').replace(/\D/g,''), b=String(nf.cod_servico||'').replace(/\D/g,''); if(!a||!b.startsWith(a)) return false; }
+  if(r.filtro==='desc'){ const n=t=>_convMpRemoverAcentos(String(t||'').toLowerCase()).replace(/\s+/g,' ').trim(); const a=n(r.desc); if(!a||!n(nf.desc_servico).includes(a)) return false; }
+  return true;
+}
+// devolve { iss:'une'|'regra', ... } só com as retenções que NÃO são descontadas nesta nota
+function _lancctbRetIgnPara(nf){
+  const out={};
+  if(Array.isArray(nf.ret_une_vazias)) nf.ret_une_vazias.forEach(k=>{ if(LANCCTB_RET_KEYS.includes(k)) out[k]='une'; });
+  const regras=_lancctbRetIgnGet(nf.empresa_eid||_lancctbEidAtual);
+  if(!regras.length) return out;
+  const descontar=new Set();
+  regras.forEach(r=>{ if(!_lancctbRetRegraBate(r,nf)) return; (r.impostos||[]).forEach(k=>{ if(r.acao==='descontar') descontar.add(k); else out[k]='regra'; }); });
+  descontar.forEach(k=>{ delete out[k]; });
   return out;
 }
 function _lancctbNfValorLiquido(nf){
   const bruto=Number(nf.valor_total)||0;
   const ign=_lancctbRetIgnPara(nf);
-  const deduzir=(ign.iss?0:(Number(nf.iss_valor)||0))+(ign.pis?0:(Number(nf.pis_valor)||0))+(ign.cofins?0:(Number(nf.cofins_valor)||0))+(ign.csll?0:(Number(nf.csll_valor)||0))+(Number(nf.irrf_valor)||0);
+  const deduzir=LANCCTB_RET_KEYS.reduce((a,k)=>a+(ign[k]?0:(Number(nf[k+'_valor'])||0)),0);
   return Math.round((bruto-deduzir)*100)/100;
 }
 // CNPJs do grupo (matriz + filiais) pra essa empresa — usado pelo parser de
@@ -30199,7 +30211,7 @@ async function renderLancctbNotas(aba){
     // volta a ser rápido — o problema de timeout de antes era causado por
     // filtrar tipo/direcao do lado de dentro do join (!inner), não pelo
     // count em si.
-    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,natureza_operacao,cod_servico,desc_servico,chave_acesso)', { count: 'exact' })
+    .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,natureza_operacao,cod_servico,desc_servico,chave_acesso)', { count: 'exact' })
     // Filtra pelas colunas PRÓPRIAS de notas_fiscais_parcelas (duplicadas,
     // indexadas em idx_nfp_empresa_tipo_direcao) em vez de notas_fiscais.*
     // (via join !inner) — filtrar pelo lado relacionado ignora esse índice e
@@ -30258,7 +30270,8 @@ async function renderLancctbNotas(aba){
     <strong>Última ${ehServico?'NFS-e':'NF-e'} capturada:</strong> nº ${esc(ultimaNf.numero)} — em ${new Date(ultimaNf.created_at).toLocaleDateString('pt-BR')} às ${new Date(ultimaNf.created_at).toLocaleTimeString('pt-BR',{hour:'2-digit',minute:'2-digit'})}
   </div>`:'';
 
-  let html=`<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:10px">
+  const _selCol=!!(window.RetTxt&&RetTxt.ativo(aba)); // 27/11/2026: caixinhas p/ TXT das retenções (só NFS-e Tomado)
+  let html=`<div style="display:flex;justify-content:flex-end;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
       ${ehServico?`<span id="lancctbNfeSomaLiq" style="margin-right:auto;font-size:12.5px;color:var(--ink)"></span>`:''}
       ${!ehServico?`<span id="lancctbPreencherNaturezaStatus" style="font-size:11px;color:var(--slate)"></span>
       <button class="btn bo bsm" id="lancctbPreencherNaturezaBtn" onclick="_lancctbPreencherNaturezaOperacao('${aba.tipoDoc}','${aba.direcaoNf}')" title="Reabre o XML já salvo de cada NF sem Natureza da Operação preenchida e completa sozinho">🔄 Preencher Natureza (NFs já importadas)</button>`:''}
@@ -30267,13 +30280,15 @@ async function renderLancctbNotas(aba){
       <button class="btn bo bsm" onclick="ignorarLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico},false)" title="Volta pra Pendente as parcelas IGNORADAS das NFs que batem com os filtros da tela (filtre Status = Ignorado)">↩ Reativar filtradas</button>
       <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="excluirLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico})" title="Apaga todas as NFs que batem com os filtros ativos acima — NFs já conciliadas (com lançamento contábil gerado) nunca são apagadas">🗑️ Excluir todas as filtradas</button>
       ${(ehServico&&aba.direcaoNf==='venda'&&LANCCTB_ISS_TXT_EMPRESAS.includes(String(_lancctbEidAtual)))?`<button class="btn bo bsm" onclick="gerarLancctbIssRetidoTxt()" title="TXT de lançamentos do ISS retido das NFS-e listadas (débito = conta que você informa, crédito = 10000)">📄 Gerar TXT ISS Retido</button>`:''}
-      ${ehServico?`<button class="btn bo bsm" onclick="abrirLancctbRetIgn('')" title="Escolha se ISS, PIS, COFINS e CSLL retidos devem ou não ser descontados no Valor Líquido — por fornecedor/cliente (CNPJ) ou pra todos. Fica salvo pras próximas NFs.">⚙ Retenções desconsideradas${_lancctbRetIgnGet(_lancctbEidAtual).length?' ('+_lancctbRetIgnGet(_lancctbEidAtual).length+')':''}</button>`:''}
+      ${_selCol?RetTxt.botoesHtml():''}
+      ${ehServico?`<button class="btn bo bsm" onclick="abrirLancctbRetIgn('')" title="Escolha se ISS, PIS, COFINS, CSLL e IRRF retidos são ou não descontados do Valor Líquido — por fornecedor/cliente (CNPJ) ou pra todos, e opcionalmente por código ou descrição do serviço. Retenção vazia na UneCont já não é descontada automaticamente.">⚙ Regras de retenções${_lancctbRetIgnGet(_lancctbEidAtual).length?' ('+_lancctbRetIgnGet(_lancctbEidAtual).length+')':''}</button>`:''}
       <button class="action-btn action-btn-excel" onclick="exportarLancctbNotasExcel('${aba.id}')">📊 Gerar Excel</button>
     </div>`+destaqueUltima+`
     <div style="margin-bottom:8px">${_lancctbPagGenericaHtml(_lancctbNfePagina,count,from,to,totalPaginas,'_lancctbNfePagina','renderLancctbConteudo')}</div>
     <div style="overflow-x:auto;overflow-y:auto;max-height:calc(100vh - 360px)">
     <table style="width:100%;border-collapse:collapse;font-size:12.5px">
       <thead><tr style="background:var(--ink2);color:#fff;position:sticky;top:0;z-index:5">
+        ${_selCol?`<th style="padding:8px 6px;text-align:center;width:28px"><input type="checkbox" id="lancctbRetSelTodos" ${RetTxt.paginaToda()?'checked':''} title="Marcar/desmarcar todas desta página" onchange="RetTxt.alternarPagina(this.checked)" style="cursor:pointer"></th>`:''}
         <th style="padding:8px 10px;text-align:left">Dt Emissão</th>
         <th style="padding:8px 10px;text-align:left">Data da Parcela</th>
         <th style="padding:8px 10px;text-align:left">Número</th>
@@ -30292,12 +30307,13 @@ async function renderLancctbNotas(aba){
         <th style="padding:8px 10px;text-align:right" title="3,00% do Valor Bruto — só quando a NF tem retenção federal (campo vRetCSLL)">COFINS</th>
         <th style="padding:8px 10px;text-align:right" title="1,00% do Valor Bruto — só quando a NF tem retenção federal (campo vRetCSLL)">CSLL</th>
         <th style="padding:8px 10px;text-align:right" title="Imposto de Renda Retido na Fonte, quando a NF tiver (campo vRetIRRF)">IRRF</th>
-        <th style="padding:8px 10px;text-align:right" title="Valor Bruto menos ISS, PIS, COFINS, CSLL e IRRF retidos">Valor Líquido</th>`:'<th style="padding:8px 10px;text-align:left">Natureza da Operação</th>'}
+        <th style="padding:8px 10px;text-align:right" title="Valor Bruto menos ISS, PIS, COFINS, CSLL e IRRF retidos. Retenção riscada não é descontada (veio vazia na UneCont ou regra da ⚙)">Valor Líquido</th>`:'<th style="padding:8px 10px;text-align:left">Natureza da Operação</th>'}
         <th style="padding:8px 10px;text-align:left">Modelo</th>
         <th style="padding:8px 10px;text-align:center">Status</th>
         <th style="padding:8px 10px;text-align:center"></th>
       </tr>
       <tr style="background:var(--bg2)">
+        ${_selCol?'<th></th>':''}
         <th style="padding:4px 6px">${_drpBotaoHtml(_lancctbNfeEmissaoDe,_lancctbNfeEmissaoAte,'_lancctbNfeDrpEmissao',{compacto:1,titulo:'Período de emissão: data inicial à esquerda, final à direita'})}</th>
         <th style="padding:4px 6px">${_drpBotaoHtml(_lancctbNfeParcelaDe,_lancctbNfeParcelaAte,'_lancctbNfeDrpParcela',{compacto:1,titulo:'Período da parcela (vencimento): data inicial à esquerda, final à direita'})}</th>
         <th style="padding:4px 6px"><input class="si" data-filtro="nf-numero" placeholder="🔎 número" value="${esc(_lancctbNfeBuscaNumero)}" style="width:100%;font-size:11px" oninput="_lancctbNfeFiltroDebounced('numero',this.value)"></th>
@@ -30323,11 +30339,12 @@ async function renderLancctbNotas(aba){
       </tr></thead>
       <tbody>`;
   if(!_lancctbUltimaLeitura.length){
-    html+=`<tr><td colspan="${ehServico?22:13}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
+    html+=`<tr><td colspan="${(ehServico?22:13)+(_selCol?1:0)}" style="padding:30px;text-align:center;color:var(--slate)">Nenhuma ${ehServico?'NFS-e':'NF-e'} encontrada para esta empresa ainda.</td></tr>`;
   } else {
     _lancctbUltimaLeitura.forEach(({p,nf,nomeTerc,cnpjTerc,qtdParcelas})=>{
       const statusCor=p.status_conciliacao==='conciliado'?'var(--teal)':p.status_conciliacao==='ignorado'?'var(--slate)':'#D97706';
       html+=`<tr style="border-bottom:1px solid var(--border)">
+        ${_selCol?`<td style="padding:7px 6px;text-align:center"><input type="checkbox" class="lancctbRetSelChk" data-nf="${p.nf_id}" ${RetTxt.marcado(p.nf_id)?'checked':''} onchange="RetTxt.alternar(${p.nf_id},this.checked)" style="cursor:pointer" title="Selecionar para o TXT das retenções"></td>`:''}
         <td style="padding:7px 10px">${nf.data_emissao?new Date(nf.data_emissao+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
         <td style="padding:7px 10px">${p.data_vencimento?new Date(p.data_vencimento+'T00:00:00').toLocaleDateString('pt-BR'):''}</td>
         <td style="padding:7px 10px">${esc(nf.numero||'')}</td>
@@ -30340,12 +30357,12 @@ async function renderLancctbNotas(aba){
         <td style="padding:7px 10px;text-align:right">R$ ${_fmt(p.valor_parcela||0)}</td>
         <td style="padding:7px 10px;text-align:center">${p.numero_parcela}</td>
         <td style="padding:7px 10px;text-align:center">${qtdParcelas}</td>
-        ${ehServico?(()=>{ const ign=_lancctbRetIgnPara(nf); const rs=k=>ign[k]?';text-decoration:line-through;opacity:.5" title="Retenção desconsiderada (não entra no Valor Líquido)':''; return `<td style="padding:7px 10px;text-align:right${rs('iss')}">R$ ${_fmt(nf.iss_valor||0)}</td>
+        ${ehServico?(()=>{ const ign=_lancctbRetIgnPara(nf); const rs=k=>ign[k]?';text-decoration:line-through;opacity:.5" title="'+(ign[k]==='une'?'Veio VAZIO na planilha UneCont: não é descontado do Valor Líquido. Para descontar mesmo assim, crie uma regra Descontar na engrenagem ⚙':'Não descontado do Valor Líquido por regra da engrenagem ⚙'):''; return `<td style="padding:7px 10px;text-align:right${rs('iss')}">R$ ${_fmt(nf.iss_valor||0)}</td>
         <td style="padding:7px 10px;text-align:right${rs('pis')}">${nf.pis_valor?'R$ '+_fmt(nf.pis_valor):'—'}</td>
         <td style="padding:7px 10px;text-align:right${rs('cofins')}">${nf.cofins_valor?'R$ '+_fmt(nf.cofins_valor):'—'}</td>
         <td style="padding:7px 10px;text-align:right${rs('csll')}">${nf.csll_valor?'R$ '+_fmt(nf.csll_valor):'—'}</td>
-        <td style="padding:7px 10px;text-align:right">${nf.irrf_valor?'R$ '+_fmt(nf.irrf_valor):'—'}</td>
-        <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(_lancctbNfValorLiquido(nf))} <button type="button" class="btn bo bsm" style="font-size:10px;padding:1px 5px" title="Desconsiderar retenções (ISS/PIS/COFINS/CSLL) deste fornecedor/cliente" onclick="abrirLancctbRetIgn('${esc(String(cnpjTerc||''))}')">⚙</button></td>`; })():`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
+        <td style="padding:7px 10px;text-align:right${rs('irrf')}">${nf.irrf_valor?'R$ '+_fmt(nf.irrf_valor):'—'}</td>
+        <td style="padding:7px 10px;text-align:right;font-weight:600">R$ ${_fmt(_lancctbNfValorLiquido(nf))} <button type="button" class="btn bo bsm" style="font-size:10px;padding:1px 5px" title="Regra de retenções (descontar ou não ISS/PIS/COFINS/CSLL/IRRF) deste fornecedor/cliente" onclick="abrirLancctbRetIgn('${esc(String(cnpjTerc||''))}','${esc(String(nf.cod_servico||''))}')">⚙</button></td>`; })():`<td style="padding:7px 10px;font-size:11px" title="${esc(nf.natureza_operacao||'')}">${esc(nf.natureza_operacao||'—')}${nf.natureza_operacao&&!_lancctbNaturezaEhFinanceira(nf.natureza_operacao,nf.modelo)?' <span style="color:var(--slate)" title="Não gera pagamento/recebimento — não entra no matching automático">⚠</span>':''}</td>`}
         <td style="padding:7px 10px">${esc((nf.modelo||'').toUpperCase())}</td>
         <td style="padding:7px 10px;text-align:center"><span style="color:${statusCor};font-weight:600;font-size:11px${p.status_conciliacao==='conciliado'?';cursor:pointer;text-decoration:underline dotted':''}"${p.status_conciliacao==='conciliado'?` onclick="_lancctbVerAmarracaoNf(${p.id})" title="Clique para ver a qual lançamento esta parcela foi amarrada"`:''}>${esc(p.status_conciliacao||'')}</span></td>
         <td style="padding:7px 10px;text-align:center"><button class="btn bo bsm" style="font-size:10.5px;padding:3px 6px" title="Editar/dividir a(s) parcela(s) desta NF — use quando o XML veio sem abertura de parcela mas o pagamento real foi parcelado" onclick="abrirLancctbDividirParcelaModal(${p.nf_id})">✂️ Parcela</button></td>
@@ -30379,7 +30396,7 @@ async function _lancctbNfeAtualizarSomaLiquido(aba){
     const campoCnpjTerc=aba.direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
     const { data: parcelas, error } = await _lancctbFetchTudo(()=>{
       let q=_supaClient.from('notas_fiscais_parcelas')
-        .select('id,nf_id,numero_parcela,valor_parcela,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
+        .select('id,nf_id,numero_parcela,valor_parcela,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,cod_servico,desc_servico)')
         .eq('empresa_eid',eid).eq('tipo',aba.tipoDoc).eq('direcao',aba.direcaoNf);
       q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,true);
       return q.order('id',{ascending:true});
@@ -30630,22 +30647,25 @@ async function gerarLancctbIssRetidoTxt(){
 
 // ── Modal "Retenções desconsideradas" ───────────────────────────────────────────────────────────────────────────────────────────────
 let _lancctbRetIgnCtx={cnpj:''};
-function abrirLancctbRetIgn(cnpjPre){
-  _lancctbRetIgnCtx={cnpj:String(cnpjPre||'').replace(/\D/g,'')};
+function abrirLancctbRetIgn(cnpjPre,codPre){
+  _lancctbRetIgnCtx={cnpj:String(cnpjPre||'').replace(/\D/g,''),cod:String(codPre||'').replace(/\D/g,'')};
   _lancctbRetIgnRender();
   openModal('mLancctbRetIgn');
 }
 function _lancctbRetIgnRender(){
   const eid=_lancctbEidAtual;
   const regras=_lancctbRetIgnGet(eid);
-  const NOMES={iss:'ISS',pis:'PIS',cofins:'COFINS',csll:'CSLL'};
+  const NOMES={iss:'ISS',pis:'PIS',cofins:'COFINS',csll:'CSLL',irrf:'IRRF'};
   const aba=LANCCTB_ABAS.find(a=>a.id===_lancctbAbaAtiva);
   const dirPadrao=aba&&aba.direcaoNf==='venda'?'prestado':(aba&&aba.direcaoNf==='compra'?'tomado':'ambos');
-  const lista=regras.length?regras.map((r,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg);border-radius:4px;margin-bottom:5px;font-size:12px">
-      <span style="flex:1"><b>${r.escopo==='cnpj'?esc(_fmtCnpjCpf(r.cnpj)):'Todos os fornecedores/clientes'}</b> · ${r.dir==='tomado'?'serviços tomados':r.dir==='prestado'?'serviços prestados':'tomados e prestados'} · não descontar: <b>${(r.impostos||[]).map(k=>NOMES[k]||k).join(', ')}</b></span>
-      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="_lancctbRetIgnExcluir(${i})" title="Remover esta regra (volta a descontar)">Remover</button></div>`).join(''):`<div style="font-size:12px;color:var(--slate);margin-bottom:8px">Nenhuma regra ainda — hoje todas as retenções (ISS, PIS, COFINS, CSLL e IRRF) são descontadas do Valor Líquido.</div>`;
+  const filtroTxt=r=>r.filtro==='cod'?' · código do serviço <b>'+esc(_lancctbFmtCodServico(r.cod)||r.cod)+'</b>':r.filtro==='desc'?' · descrição contém <b>"'+esc(r.desc)+'"</b>':'';
+  const lista=regras.length?regras.map((r,i)=>`<div style="display:flex;align-items:center;gap:8px;padding:6px 8px;background:var(--bg);border-radius:4px;margin-bottom:5px;font-size:12px;border-left:3px solid ${r.acao==='descontar'?'var(--teal)':'#D97706'}">
+      <span style="flex:1"><b>${r.escopo==='cnpj'?esc(_fmtCnpjCpf(r.cnpj)):'Todos os fornecedores/clientes'}</b> · ${r.dir==='tomado'?'serviços tomados':r.dir==='prestado'?'serviços prestados':'tomados e prestados'}${filtroTxt(r)} · ${r.acao==='descontar'?'<span style="color:var(--teal);font-weight:700">DESCONTAR</span>':'<span style="color:#D97706;font-weight:700">NÃO descontar</span>'}: <b>${(r.impostos||[]).map(k=>NOMES[k]||k).join(', ')}</b></span>
+      <button class="btn bo bsm" style="color:#dc2626;border-color:#dc2626" onclick="_lancctbRetIgnExcluir(${i})" title="Remover esta regra">Remover</button></div>`).join(''):'<div style="font-size:12px;color:var(--slate);margin-bottom:8px">Nenhuma regra ainda.</div>';
+  const fPadrao=_lancctbRetIgnCtx.cod?'cod':'nenhum';
   document.getElementById('lancctbRetIgnBody').innerHTML=`
-    <div style="font-size:12px;color:var(--slate);margin-bottom:10px">Marque as retenções que <b>não</b> devem ser descontadas do Valor Líquido (e do ISS retido do TXT). Vale pras NFs já importadas e pras próximas, e fica salvo. O IRRF continua sendo descontado.</div>
+    <div style="font-size:12px;color:var(--slate);margin-bottom:8px">Escolha quais retenções são ou não descontadas do Valor Líquido (e do TXT). Vale pras NFs já importadas e pras próximas.</div>
+    <div style="font-size:12px;background:var(--bg);border-radius:6px;padding:8px 10px;margin-bottom:10px"><b>Automático (UneCont):</b> retenção que veio <b>vazia</b> na planilha da UneCont (ISS, PIS, COFINS, CSLL ou IRRF) <b>não é descontada</b> — aparece riscada. Se a UneCont estiver errada, crie aqui uma regra <b>Descontar</b>: ela sempre vale, mesmo nas próximas importações.</div>
     <div style="margin-bottom:12px">${lista}</div>
     <div style="border:1px solid var(--border);border-radius:6px;padding:10px">
       <div style="font-size:12px;font-weight:700;margin-bottom:8px">Nova regra</div>
@@ -30664,25 +30684,51 @@ function _lancctbRetIgnRender(){
       </div>
       <div class="fg" id="lancctbRetIgnCnpjWrap" style="${_lancctbRetIgnCtx.cnpj?'':'display:none'}"><div class="fl">CNPJ do fornecedor/cliente</div>
         <input class="si" id="lancctbRetIgnCnpj" style="width:100%" value="${esc(_lancctbRetIgnCtx.cnpj?_fmtCnpjCpf(_lancctbRetIgnCtx.cnpj):'')}" placeholder="00.000.000/0000-00"></div>
-      <div class="fg"><div class="fl">Não descontar</div>
-        <div style="display:flex;gap:16px;flex-wrap:wrap">${Object.keys(NOMES).map(k=>`<label style="display:flex;gap:5px;align-items:center;font-size:12.5px;cursor:pointer"><input type="checkbox" class="lancctbRetIgnChk" value="${k}" checked> ${NOMES[k]}</label>`).join('')}</div></div>
+      <div class="grid2">
+        <div class="fg"><div class="fl">Só quando o serviço for</div>
+          <select class="si" id="lancctbRetIgnFiltro" style="width:100%" onchange="document.getElementById('lancctbRetIgnCodWrap').style.display=this.value==='cod'?'':'none';document.getElementById('lancctbRetIgnDescWrap').style.display=this.value==='desc'?'':'none'">
+            <option value="nenhum" ${fPadrao==='nenhum'?'selected':''}>Qualquer serviço</option>
+            <option value="cod" ${fPadrao==='cod'?'selected':''}>Código do serviço</option>
+            <option value="desc">Descrição do serviço (contém)</option>
+          </select></div>
+        <div class="fg"><div id="lancctbRetIgnCodWrap" style="${fPadrao==='cod'?'':'display:none'}"><div class="fl">Código do serviço</div><input class="si" id="lancctbRetIgnCod" style="width:100%" value="${esc(_lancctbRetIgnCtx.cod?(_lancctbFmtCodServico(_lancctbRetIgnCtx.cod)||_lancctbRetIgnCtx.cod):'')}" placeholder="ex.: 14.01"></div>
+          <div id="lancctbRetIgnDescWrap" style="display:none"><div class="fl">Descrição contém</div><input class="si" id="lancctbRetIgnDesc" style="width:100%" placeholder="ex.: manutenção"></div></div>
+      </div>
+      <div class="grid2">
+        <div class="fg"><div class="fl">O que fazer</div>
+          <select class="si" id="lancctbRetIgnAcao" style="width:100%">
+            <option value="nao">NÃO descontar do líquido</option>
+            <option value="descontar">DESCONTAR do líquido (mesmo vazio na UneCont)</option>
+          </select></div>
+        <div class="fg"><div class="fl">Retenções</div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;padding-top:6px">${Object.keys(NOMES).map(k=>`<label style="display:flex;gap:5px;align-items:center;font-size:12.5px;cursor:pointer"><input type="checkbox" class="lancctbRetIgnChk" value="${k}" ${k==='irrf'?'':'checked'}> ${NOMES[k]}</label>`).join('')}</div></div>
+      </div>
       <div style="display:flex;justify-content:flex-end"><button class="btn bp" onclick="_lancctbRetIgnAdicionar()">+ Adicionar regra</button></div>
     </div>`;
 }
 function _lancctbRetIgnAdicionar(){
   const escopo=document.getElementById('lancctbRetIgnEscopo').value;
   const dir=document.getElementById('lancctbRetIgnDir').value;
+  const acao=document.getElementById('lancctbRetIgnAcao').value==='descontar'?'descontar':'nao';
+  const filtro=document.getElementById('lancctbRetIgnFiltro').value;
   const cnpj=(document.getElementById('lancctbRetIgnCnpj').value||'').replace(/\D/g,'');
+  const cod=(document.getElementById('lancctbRetIgnCod').value||'').replace(/\D/g,'');
+  const desc=(document.getElementById('lancctbRetIgnDesc').value||'').trim();
   const impostos=[...document.querySelectorAll('.lancctbRetIgnChk:checked')].map(c=>c.value);
   if(escopo==='cnpj'&&cnpj.length!==14&&cnpj.length!==11){ toast('Informe o CNPJ (ou CPF) completo do fornecedor/cliente.','err'); return; }
-  if(!impostos.length){ toast('Marque pelo menos uma retenção pra não descontar.','err'); return; }
+  if(filtro==='cod'&&!cod){ toast('Informe o código do serviço.','err'); return; }
+  if(filtro==='desc'&&desc.length<3){ toast('Informe a descrição do serviço (pelo menos 3 letras).','err'); return; }
+  if(!impostos.length){ toast('Marque pelo menos uma retenção.','err'); return; }
   const eid=_lancctbEidAtual;
   const lista=[..._lancctbRetIgnGet(eid)];
-  // mesma combinação (escopo+cnpj+direção): junta os impostos em vez de duplicar
-  const ex=lista.find(r=>r.escopo===escopo&&(r.dir||'ambos')===dir&&(escopo!=='cnpj'||String(r.cnpj||'').replace(/\D/g,'')===cnpj));
+  const nova={escopo,cnpj:escopo==='cnpj'?cnpj:null,dir,acao,filtro:filtro==='nenhum'?null:filtro,cod:filtro==='cod'?cod:null,desc:filtro==='desc'?desc:null,impostos};
+  const mesma=r=>r.escopo===escopo&&(r.dir||'ambos')===dir&&(r.acao==='descontar'?'descontar':'nao')===acao&&(r.filtro||null)===nova.filtro&&(r.cod||null)===nova.cod&&(r.desc||null)===nova.desc&&(escopo!=='cnpj'||String(r.cnpj||'').replace(/\D/g,'')===cnpj);
+  // a mesma retenção não pode ficar em "descontar" e "não descontar" pro mesmo alvo: tira da regra oposta
+  lista.forEach(r=>{ if(r.escopo===escopo&&(r.dir||'ambos')===dir&&(r.filtro||null)===nova.filtro&&(r.cod||null)===nova.cod&&(r.desc||null)===nova.desc&&(escopo!=='cnpj'||String(r.cnpj||'').replace(/\D/g,'')===cnpj)&&(r.acao==='descontar'?'descontar':'nao')!==acao) r.impostos=(r.impostos||[]).filter(k=>!impostos.includes(k)); });
+  const ex=lista.find(mesma);
   if(ex) ex.impostos=[...new Set([...(ex.impostos||[]),...impostos])];
-  else lista.push({escopo,cnpj:escopo==='cnpj'?cnpj:null,dir,impostos});
-  _lancctbRetIgnSet(eid,lista);
+  else lista.push(nova);
+  _lancctbRetIgnSet(eid,lista.filter(r=>(r.impostos||[]).length));
   toast('Regra salva — vale pras NFs atuais e futuras.','ok');
   _lancctbRetIgnCtx={cnpj:''};
   _lancctbRetIgnRender();
@@ -30712,7 +30758,7 @@ async function exportarLancctbNotasExcel(abaId){
     const campoCnpjTerc=aba.direcaoNf==='venda'?'notas_fiscais.cnpj_destinatario':'notas_fiscais.cnpj_emitente';
     const { data: parcelas, error } = await _lancctbFetchTudo(()=>{
       let q=_supaClient.from('notas_fiscais_parcelas')
-        .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,natureza_operacao,cod_servico,desc_servico,chave_acesso)')
+        .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,natureza_operacao,cod_servico,desc_servico,chave_acesso)')
         .eq('empresa_eid',eid).eq('tipo',aba.tipoDoc).eq('direcao',aba.direcaoNf);
       q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,ehServ);
       return q.order('data_emissao',{ascending:true}).order('numero_parcela',{ascending:true}).order('id',{ascending:true});
@@ -33577,7 +33623,7 @@ async function _lancctbBuscarNfProLancamento(){
   //  - sem texto: só parcelas de valor perto do lançamento (bruto até ~1/0,62 do líquido, já que a NF pode ter retenções).
   const _t=termo.replace(/[%,()*]/g,' ').trim();
   const _col=ehSaida?'emitente':'destinatario';
-  const _selNf='notas_fiscais(id,numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,empresa_eid,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,natureza_operacao,data_emissao)';
+  const _selNf='notas_fiscais(id,numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,empresa_eid,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,cod_servico,desc_servico,natureza_operacao,data_emissao)';
   const _selP='id,nf_id,numero_parcela,data_vencimento,valor_parcela,'+_selNf;
   const _basePend=()=>_supaClient.from('notas_fiscais_parcelas').select(_selP).eq('empresa_eid',_lancctbEidAtual).eq('status_conciliacao','pendente');
   let parcelas=[], _falhou=false;
@@ -33674,7 +33720,7 @@ async function _lancctbAssociarNfManual(parcelaId,btn){
     const ehSaida=r.valor_saida>0;
     const valor=r.valor_saida||r.valor_entrada;
     const { data: parcela } = await _supaClient.from('notas_fiscais_parcelas')
-      .select('id,nf_id,data_vencimento,numero_parcela,valor_parcela,notas_fiscais(numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,empresa_eid,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)')
+      .select('id,nf_id,data_vencimento,numero_parcela,valor_parcela,notas_fiscais(numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,empresa_eid,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,cod_servico,desc_servico)')
       .eq('id',parcelaId).single();
     if(!parcela){ toast('Parcela não encontrada — pode já ter sido usada por outro lançamento.','err'); return; }
     const nf=parcela.notas_fiscais;
@@ -40944,7 +40990,7 @@ async function _lancctbPagCompostoAmarrarNfs(extratoId){
   const nums=[...new Set(alvos.map(numDe))];
   const { data: nfs } = await _supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).eq('direcao','compra').or(nums.map(n=>`numero.ilike.%${n}%`).join(',')).limit(600);
   const nfIds=(nfs||[]).map(n=>n.id); if(!nfIds.length) return { ligadas:0, divididas:0 };
-  const SEL='id,nf_id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais(id,numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,empresa_eid,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor)';
+  const SEL='id,nf_id,numero_parcela,data_vencimento,valor_parcela,status_conciliacao,notas_fiscais(id,numero,cnpj_emitente,cnpj_destinatario,nome_emitente,nome_destinatario,direcao,empresa_eid,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,cod_servico,desc_servico)';
   const { data: todasP } = await _lancctbFetchPorIds(()=>_supaClient.from('notas_fiscais_parcelas').select(SEL).eq('empresa_eid',eid),'nf_id',nfIds,()=>false);
   const todas=todasP||[], pend=todas.filter(p=>p.status_conciliacao==='pendente');
   const { data: fixas } = await _supaClient.from('plano_contas').select('id,numero_conta,classificacao').eq('empresa_eid',eid).in('numero_conta',['10001']);
@@ -49940,6 +49986,8 @@ function _lancctbUnecontLinhaParaNf(r){
   const _o={ numero, cnpj_emitente:cnpjEmit, nome_emitente:String(r['Prestador']||'').trim(), cnpj_destinatario:dig(r['Cnpj Empresa']), nome_destinatario:String(r['Empresa']||'').trim(),
     data_emissao:emissao, valor_total:valor, iss_valor:issRet>0?Math.round(issRet*100)/100:null, pis_valor:num(r['Valor PIS']), cofins_valor:num(r['Valor COFINS']), csll_valor:num(r['Valor CSLL']), irrf_valor:num(r['Valor IRRF']),
     chave_acesso:chaveNac?('NFS'+chaveNac):('NFSUNE'+cnpjEmit+'-'+numero), valor_liquido:num(r['Valor Líquido']),
+    // 27/11/2026: retenção VAZIA na UneCont = não descontar do líquido (regra "Descontar" do usuário prevalece)
+    ret_une_vazias:[(issRet>0?null:'iss'),(num(r['Valor PIS'])?null:'pis'),(num(r['Valor COFINS'])?null:'cofins'),(num(r['Valor CSLL'])?null:'csll'),(num(r['Valor IRRF'])?null:'irrf')].filter(Boolean),
     // código do serviço (item da Lista de Serviços, "01.05" — só dígitos) e descrição: a do NBS quando a nota traz, senão a do CNAE do prestador
     cod_servico:dig(r['Serviço Federal'])||null,
     desc_servico:(String(r['NBS']||'').replace(/^\s*\d*\s*-\s*/,'').trim()||String(r['CNAE Descrição']||'').trim())||null };
@@ -49982,7 +50030,7 @@ async function _lancctbUnecontRodar(simular){
         if(!conhecidasPorEid[eid]){
           conhecidasPorEid[eid]=await _lancctbChavesConhecidas(eid);
           // NFS-e já gravadas: servem pra COMPLETAR retenção que ficou vazia (nota importada antes de existirem os campos de retenção) — só preenche campo vazio, nunca troca valor existente
-          const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('id,chave_acesso,cnpj_emitente,numero,data_emissao,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,cod_servico,desc_servico').eq('empresa_eid',eid).eq('tipo','nfse').order('id'));
+          const { data: ex } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais').select('id,chave_acesso,cnpj_emitente,numero,data_emissao,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,cod_servico,desc_servico').eq('empresa_eid',eid).eq('tipo','nfse').order('id'));
           const m=new Map(); (ex||[]).forEach(r=>{ m.set(r.chave_acesso,r); m.set(_lancctbChaveNumeroNfse(r.cnpj_emitente,r.numero,r.data_emissao),r); }); conhecidasPorEid[eid+'_ex']=m;
         }
         const conh=conhecidasPorEid[eid], mapaEx=conhecidasPorEid[eid+'_ex'], novas=[];
@@ -49994,6 +50042,7 @@ async function _lancctbUnecontRodar(simular){
             if(ex){ const patch={}; ['iss_valor','pis_valor','cofins_valor','csll_valor','irrf_valor'].forEach(k=>{ if((ex[k]==null||Number(ex[k])===0)&&nf[k]>0) patch[k]=nf[k]; });
               if(!ex.cod_servico&&nf.cod_servico) patch.cod_servico=nf.cod_servico; // a UneCont completa o que o XML (SIEG/pasta NFS-e) não trouxe: código e descrição, cada um só se estiver vazio
               if(!ex.desc_servico&&nf.desc_servico) patch.desc_servico=nf.desc_servico;
+              if(JSON.stringify(ex.ret_une_vazias||null)!==JSON.stringify(nf.ret_une_vazias)) patch.ret_une_vazias=nf.ret_une_vazias; // varredura: o que veio vazio na UneCont não é descontado
               if(Object.keys(patch).length){ const { error } = simular?{error:null}:await _supaClient.from('notas_fiscais').update(patch).eq('id',ex.id); if(error) c.erros++; else { c.retCompletas=(c.retCompletas||0)+1; Object.assign(ex,patch); } } }
             continue;
           }
@@ -50003,7 +50052,7 @@ async function _lancctbUnecontRodar(simular){
           const lote=novas.slice(k,k+100);
           const regs=lote.map(nf=>({ empresa_eid:eid, tipo:'nfse', chave_acesso:nf.chave_acesso, numero:nf.numero, serie:null, modelo:'NFSe', cnpj_emitente:nf.cnpj_emitente, nome_emitente:nf.nome_emitente,
             cnpj_destinatario:nf.cnpj_destinatario, nome_destinatario:nf.nome_destinatario, direcao:'compra', data_emissao:nf.data_emissao, valor_total:nf.valor_total, iss_valor:nf.iss_valor,
-            pis_valor:nf.pis_valor, cofins_valor:nf.cofins_valor, csll_valor:nf.csll_valor, irrf_valor:nf.irrf_valor, xml_storage_path:null, status_captura:'xml_completo', natureza_operacao:null, cod_servico:nf.cod_servico||null, desc_servico:nf.desc_servico||null }));
+            pis_valor:nf.pis_valor, cofins_valor:nf.cofins_valor, csll_valor:nf.csll_valor, irrf_valor:nf.irrf_valor, xml_storage_path:null, status_captura:'xml_completo', natureza_operacao:null, cod_servico:nf.cod_servico||null, desc_servico:nf.desc_servico||null, ret_une_vazias:nf.ret_une_vazias }));
           say(log.concat([`[${i+1}/${arquivos.length}] ${a.nome} — gravando ${Math.min(k+100,novas.length)}/${novas.length} nota(s) nova(s)…`]).join('\n'));
           if(simular){ c.importadas+=lote.length; continue; }
           const { data: ins, error } = await _supaClient.from('notas_fiscais').upsert(regs,{onConflict:'empresa_eid,tipo,chave_acesso'}).select('id,chave_acesso');
