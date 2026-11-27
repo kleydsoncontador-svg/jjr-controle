@@ -55,7 +55,7 @@
     if (typeof ExcelJS === 'undefined') { toast('Biblioteca ExcelJS não carregada', 'err'); return; }
     const V = VARIANTES[chave]; if (!V) return;
     const eid = (document.getElementById('modFluxoEmp') || {}).value || '';
-    const { wb, emp } = montar(chave, eid);
+    const { wb, emp } = await montar(chave, eid);
     const nomeEmp = emp ? ' - ' + String(emp.nome).replace(/[\\/:*?"<>|]/g, '').slice(0, 50) : '';
     const nomeArq = 'Modelo Fluxo de Caixa - ' + V.nome + nomeEmp + '.xlsx';
     const buf = await wb.xlsx.writeBuffer();
@@ -63,7 +63,7 @@
     const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nomeArq; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
     toast('Modelo gerado: ' + nomeArq, 'ok');
   }
-  function montar(chave, eid) {
+  async function montar(chave, eid) {
     const V = VARIANTES[chave];
     const emp = eid ? (S.emps().find(e => String(e.eid) === String(eid)) || null) : null;
     const wb = new ExcelJS.Workbook(); wb.creator = 'JJR Consultoria Contábil SS'; wb.created = new Date();
@@ -90,14 +90,14 @@
       t3.font = { italic: true, size: 10, color: { argb: 'FF64748B' } }; t3.alignment = { horizontal: 'center', wrapText: true };
       // cabeçalho: rótulo em B, valor em C (um por linha)
       const lbl = (end, txt) => { const c = ws.getCell(end); c.value = txt; c.font = { bold: true, color: { argb: COR.lbl } }; c.alignment = { horizontal: 'right', vertical: 'middle', wrapText: true }; };
-      const inp = (end, v, fmt) => { const c = ws.getCell(end); if (a.espelho) { c.value = { formula: ref(princ.nome) + '!' + end }; c.fill = fill(COR.calc); } else { if (v != null) c.value = v; c.fill = fill(COR.inp); } c.border = borda; if (fmt) c.numFmt = fmt; c.alignment = { vertical: 'middle' }; };
+      const inp = (end, v, fmt) => { const c = ws.getCell(end); if (a.espelho) { c.value = { formula: ref(princ.nome) + '!' + end }; c.fill = fill(COR.calc); } else { if (v != null) c.value = v; c.fill = fill(COR.inp); c.protection = { locked: false }; } c.border = borda; if (fmt) c.numFmt = fmt; c.alignment = { vertical: 'middle' }; };
       lbl('B5', 'Empresa:'); ws.mergeCells('C5:E5'); inp('C5', emp ? emp.nome : null);
       lbl('B6', 'CNPJ:'); inp('C6', emp ? (typeof _fmtCnpjCpf === 'function' ? _fmtCnpjCpf(emp.cnpjNum || emp.cnpj || '') : (emp.cnpj || '')) : null);
       lbl('B7', 'Data inicial:'); inp('C7', null, 'dd/mm/yyyy');
       lbl('B8', 'Data final:'); inp('C8', null, 'dd/mm/yyyy');
       lbl('B9', 'Banco (opcional):'); inp('C9', null);
       lbl('B10', 'Agência / conta (opcional):'); inp('C10', null);
-      lbl('B11', 'Saldo inicial do banco:'); inp('C11', null, FMT_V);
+      lbl('B11', 'Digite o saldo inicial do banco:'); inp('C11', null, FMT_V);
       lbl('B12', 'As saídas estão digitadas como:');
       const sx = ws.getCell('C12');
       if (a.tipo === 'mix' && a.cols.includes('valor')) { sx.value = 'Negativas (obrigatório nesta planilha)'; sx.fill = fill(COR.calc); sx.border = borda; }
@@ -132,7 +132,7 @@
       const cSai = col('saida'), cEnt = col('entrada'), cVal = col('valor'), cSal = col('saldo');
       for (let r = LIN_INI; r <= LIN_FIM; r++) {
         const row = ws.getRow(r);
-        C.forEach(x => { const c = row.getCell(x.i + 1); c.border = borda; if (x.k === 'data') c.numFmt = 'dd/mm/yyyy'; if (x.k === 'saida' || x.k === 'entrada' || x.k === 'valor' || x.k === 'saldo') c.numFmt = FMT_V; if (x.k === 'hist' || x.k === 'desc' || x.k === 'forn') c.alignment = { wrapText: true, vertical: 'top' }; });
+        C.forEach(x => { const c = row.getCell(x.i + 1); c.border = borda; if (x.k !== 'saldo') c.protection = { locked: false }; if (x.k === 'data') c.numFmt = 'dd/mm/yyyy'; if (x.k === 'saida' || x.k === 'entrada' || x.k === 'valor' || x.k === 'saldo') c.numFmt = FMT_V; if (x.k === 'hist' || x.k === 'desc' || x.k === 'forn') c.alignment = { wrapText: true, vertical: 'top' }; });
         row.getCell(col('data').i + 1).dataValidation = { type: 'date', operator: 'greaterThan', allowBlank: true, formulae: [new Date(2000, 0, 1)], showErrorMessage: true, errorStyle: 'warning', errorTitle: 'Data', error: 'Digite uma data (dd/mm/aaaa).' };
         row.getCell(col('tipoL').i + 1).dataValidation = { type: 'list', allowBlank: true, formulae: [fLista], showErrorMessage: true, errorStyle: 'information', errorTitle: 'Tipo fora da lista', error: 'Esse tipo não está na lista. Para ele entrar na lista, digite na coluna "Tipo novo".' };
         // auxiliar: numera cada tipo novo (1ª vez que aparece e que não está na lista padrão)
@@ -148,6 +148,9 @@
         }
       }
     });
+    // 27/11/2026: abas protegidas — só os campos amarelos e as linhas de lançamento ficam livres; cabeçalho espelhado, totais e saldo ficam bloqueados (Revisar → Desproteger Planilha, sem senha)
+    const opt = { selectLockedCells: true, selectUnlockedCells: true, formatColumns: true, formatRows: true, autoFilter: true, sort: false };
+    await Promise.all(abas.map(a => a.ws.protect('', opt)).concat([wl.protect('', opt)]));
     return { wb, emp };
   }
 
