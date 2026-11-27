@@ -663,7 +663,7 @@
   // site, ativa no fiscal" (o fiscal precisa cancelar); livro zerado com a nota ativa no site = "zerada no fiscal, ativa no site".
   const ultimoDia = ym => { const [a, m] = ym.split('-').map(Number); return ym + '-' + String(new Date(a, m, 0).getDate()).padStart(2, '0'); };
   const SEL_CANC = 'id,tipo,direcao,chave_acesso,numero,serie,modelo,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,data_emissao,valor_total,origem_cancelamento,cancelada_em,arquivo,nf_original_id,substituta_nf_id,movida_em,lancs:snapshot->lancamentos';
-  const ORIGEM = { portal_evento: 'Portal NFS-e (evento)', sieg_cstat_101: 'SIEG (cStat 101)', sieg_cstat_135: 'SIEG (cStat 135)', sieg_cstat_151: 'SIEG (cStat 151)', sieg_cstat_155: 'SIEG (cStat 155)' };
+  const ORIGEM = { unecont: 'UneCont (planilha)', portal_evento: 'Portal NFS-e (evento)', sieg_cstat_101: 'SIEG (cStat 101)', sieg_cstat_135: 'SIEG (cStat 135)', sieg_cstat_151: 'SIEG (cStat 151)', sieg_cstat_155: 'SIEG (cStat 155)' };
   function tipoNota(c) { return c.tipo === 'nfe' ? (c.direcao === 'compra' ? 'NF-e Entrada' : 'NF-e Saída') : c.tipo === 'nfse' ? (c.direcao === 'compra' ? 'NFS-e Tomada' : 'NFS-e Prestada') : c.tipo === 'nfce' ? 'NFC-e' : c.tipo === 'cte' ? 'CT-e' : c.tipo; }
   async function carregarCanc(eid, de, ate) {
     try {

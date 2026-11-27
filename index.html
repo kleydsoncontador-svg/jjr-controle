@@ -1072,7 +1072,7 @@ html.dark-mode span.af-sem-txt-badge, :root[data-theme="dark"] span.af-sem-txt-b
 <script src="retencoes-txt.js?v=1"></script>
 <script src="alerta-tipos.js?v=1"></script>
 <script src="modelos-fluxo.js?v=6"></script>
-<script src="escrita-fiscal.js?v=7"></script>
+<script src="escrita-fiscal.js?v=8"></script>
 <script>
 // Barra de rolagem horizontal TAMBÉM acima de toda tabela larga (pedido do usuário 11/11/2026: "todas as telas que tiverem barra de rolagem lá no final, também em cima, acima da linha de título").
 // Genérico: acha a caixa com rolagem horizontal que envolve cada <table>, e põe logo acima dela uma barra fina sincronizada nos dois sentidos. Quem já tem a sua própria (Registro Contábil, cronogramas) é pulado.
@@ -24468,6 +24468,9 @@ let _lancctbNfeFiltroNumParcela='';
 let _lancctbNfeFiltroQtdParcelas='';
 let _lancctbNfeFiltroModelo='';
 let _lancctbNfeFiltroCodServ='', _lancctbNfeFiltroDescServ='';
+let _lancctbNfeSoRetDescontada=false; // 27/11/2026: botão "Só com retenção descontada" (NFS-e) — mostra só as notas com alguma retenção que ENTRA no cálculo do Valor Líquido
+function _lancctbNfTemRetDescontada(nf){ const ign=_lancctbRetIgnPara(nf); return LANCCTB_RET_KEYS.some(k=>(Number(nf[k+'_valor'])||0)>0&&!ign[k]); }
+function _lancctbNfeToggleSoRet(){ _lancctbNfeSoRetDescontada=!_lancctbNfeSoRetDescontada; _lancctbNfePagina=0; renderLancctbConteudo(); }
 let _lancctbNfeFiltroUf='', _lancctbNfeFiltroMun=''; // UF e Município do emissor da NFS-e (código IBGE na chave nacional) — pedido 27/11/2026 // código e descrição do serviço (NFS-e) — pedido 03/11/2026
 // Retenções (ISS/PIS/COFINS/CSLL/IRRF) filtradas no servidor; Valor Líquido (calculado) filtrado no navegador sobre TODAS as filtradas. Aceitam "100", "100,50", ">0", ">=50", "<200".
 let _lancctbNfeFiltroRet={iss:'',pis:'',cofins:'',csll:'',irrf:''}, _lancctbNfeFiltroLiquido='';
@@ -30137,6 +30140,7 @@ function _lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,ehSer
   if(ehServico){
     // Código do serviço: só os dígitos ("01.05" ou "0105" casam com "0105"; "010201" com "01.02.01") — o código fica gravado só com dígitos.
     [['iss','iss_valor'],['pis','pis_valor'],['cofins','cofins_valor'],['csll','csll_valor'],['irrf','irrf_valor']].forEach(([k,col])=>{ q=_lancctbFiltroNumQuery(q,'notas_fiscais.'+col,_lancctbNfeFiltroRet[k]); });
+    if(_lancctbNfeSoRetDescontada) q=q.or('iss_valor.gt.0,pis_valor.gt.0,cofins_valor.gt.0,csll_valor.gt.0,irrf_valor.gt.0',{referencedTable:'notas_fiscais'});
     const cod=String(_lancctbNfeFiltroCodServ||'').replace(/\D/g,'');
     if(cod) q=q.ilike('notas_fiscais.cod_servico','%'+cod+'%');
     // Descrição: letras que podem ter acento viram "_" (digitar "informacao" acha "informação")
@@ -30160,6 +30164,7 @@ function _lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,ehSer
 // exclusão em massa.
 function _lancctbNotasAplicarFiltrosCliente(lista,ehServico){
   let out=lista;
+  if(ehServico&&_lancctbNfeSoRetDescontada) out=out.filter(l=>_lancctbNfTemRetDescontada(l.nf));
   if(ehServico){ const fl=_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido); if(fl) out=out.filter(l=>fl(Number(_lancctbNfValorLiquido(l.nf))||0)); }
   if(_lancctbNfeFiltroQtdParcelas.trim()){
     const v=parseInt(_lancctbNfeFiltroQtdParcelas,10);
@@ -30235,11 +30240,11 @@ async function renderLancctbNotas(aba){
     .eq('direcao', aba.direcaoNf);
   q=_lancctbNotasAplicarFiltrosServidor(q,campoNomeTerc,campoCnpjTerc,ehServico);
   let parcelas, error, count;
-  if(ehServico&&_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)){
+  if(ehServico&&(_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)||_lancctbNfeSoRetDescontada)){
     // Valor Líquido é calculado (bruto − retenções, com as "Retenções desconsideradas"): não dá pra filtrar na consulta — busca todas as que batem com os outros filtros, filtra aqui e pagina.
-    const fl=_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido);
+    const fl=_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)||(()=>true);
     const r=await _lancctbFetchTudo(()=>q.order('data_emissao',{ascending:true}).order('numero_parcela',{ascending:true}).order('id',{ascending:true}));
-    error=r.error; const todas=(r.data||[]).filter(pp=>fl(Number(_lancctbNfValorLiquido(pp.notas_fiscais))||0));
+    error=r.error; const todas=(r.data||[]).filter(pp=>fl(Number(_lancctbNfValorLiquido(pp.notas_fiscais))||0)&&(!_lancctbNfeSoRetDescontada||_lancctbNfTemRetDescontada(pp.notas_fiscais)));
     count=todas.length; parcelas=todas.slice(from,to+1);
   } else {
     ({ data: parcelas, error, count } = await q
@@ -30287,6 +30292,7 @@ async function renderLancctbNotas(aba){
       ${ehServico?`<span id="lancctbNfeSomaLiq" style="margin-right:auto;font-size:12.5px;color:var(--ink)"></span>`:''}
       ${!ehServico?`<span id="lancctbPreencherNaturezaStatus" style="font-size:11px;color:var(--slate)"></span>
       <button class="btn bo bsm" id="lancctbPreencherNaturezaBtn" onclick="_lancctbPreencherNaturezaOperacao('${aba.tipoDoc}','${aba.direcaoNf}')" title="Reabre o XML já salvo de cada NF sem Natureza da Operação preenchida e completa sozinho">🔄 Preencher Natureza (NFs já importadas)</button>`:''}
+      ${ehServico?`<button class="btn bo bsm" onclick="_lancctbNfeToggleSoRet()" style="${_lancctbNfeSoRetDescontada?'background:#dc2626;color:#fff;border-color:#dc2626;font-weight:700':''}" title="Mostra só as NFS-e com alguma retenção (ISS, PIS, COFINS, CSLL ou IRRF) que ENTRA no cálculo do Valor Líquido. Clique de novo para mostrar todas.">🔎 Só com retenção descontada${_lancctbNfeSoRetDescontada?' ✓':''}</button>`:''}
       ${_drpBotaoHtml(_lancctbNfeEmissaoDe,_lancctbNfeEmissaoAte,'_lancctbNfeDrpEmissao',{rotulo:'Emissão:',vazio:'todo o período',titulo:'Período de EMISSÃO das NFs: filtra a lista e vale para os botões Ignorar / Reativar / Excluir / Excel. Clique para abrir os 2 calendários (inicial à esquerda, final à direita).'})}
       <button class="btn bo bsm" onclick="ignorarLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico},true)" title="Marca como Ignorado as parcelas PENDENTES das NFs que batem com os filtros da tela: deixam de ser oferecidas na amarração (automática e manual). Nada é apagado.">🚫 Ignorar filtradas p/ amarração</button>
       <button class="btn bo bsm" onclick="ignorarLancctbNotasFiltradas('${aba.tipoDoc}','${aba.direcaoNf}',${ehServico},false)" title="Volta pra Pendente as parcelas IGNORADAS das NFs que batem com os filtros da tela (filtre Status = Ignorado)">↩ Reativar filtradas</button>
@@ -30502,6 +30508,7 @@ let _lancctbExclusaoNotasFiltro=null; // {tipoDoc,direcaoNf,idsApagar,qtdBloquea
 // em notas_fiscais_parcelas) só as parcelas PENDENTES das NFs que batem com os
 // filtros da tela; nunca mexe em conciliadas. Reativar faz o caminho inverso.
 async function ignorarLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico,ignorar){
+  if(ehServico&&_lancctbNfeSoRetDescontada){ toast('Desligue o botão Só com retenção descontada para usar este botão — esse filtro é calculado e não entra na seleção em lote.','err'); return; }
   if(ehServico&&_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)){ toast('Tire o filtro de Valor Líquido para usar este botão — ele é calculado e não entra na seleção em lote.','err'); return; }
   const eid=_lancctbEidAtual;
   const btn=event&&event.target; if(btn) btn.disabled=true;
@@ -30533,6 +30540,7 @@ async function ignorarLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico,ignorar)
   } finally { if(btn) btn.disabled=false; }
 }
 async function excluirLancctbNotasFiltradas(tipoDoc,direcaoNf,ehServico){
+  if(ehServico&&_lancctbNfeSoRetDescontada){ toast('Desligue o botão Só com retenção descontada para usar este botão — esse filtro é calculado e não entra na seleção em lote.','err'); return; }
   if(ehServico&&_lancctbFiltroNumPred(_lancctbNfeFiltroLiquido)){ toast('Tire o filtro de Valor Líquido para usar este botão — ele é calculado e não entra na seleção em lote.','err'); return; }
   const eid=_lancctbEidAtual;
   const btn=event?.target;
