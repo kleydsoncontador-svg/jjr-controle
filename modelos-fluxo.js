@@ -32,6 +32,7 @@
       { k: 'data', t: 'Data da movimentação', w: 14 },
       { k: 'hist', t: 'Histórico bancário (como aparece no extrato)', w: 40 },
       { k: 'forn', t: tp === 'pag' ? 'Fornecedor (destinatário)' : tp === 'rec' ? 'Cliente (remetente)' : 'Fornecedor / Cliente (destinatário / remetente)', w: 34 },
+      { k: 'doc', t: 'CNPJ / CPF', w: 20 },
       { k: 'nf', t: 'Nº da nota fiscal (se houver)', w: 14 }
     ];
     aba.cols.forEach(k => {
@@ -39,8 +40,8 @@
       if (k === 'entrada') c.push({ k, t: 'Valor de entrada', w: 16 });
       if (k === 'valor') c.push({ k, t: 'Valor (entrada + / saída −)', w: 18 });
     });
-    c.push({ k: 'tipoL', t: (tp === 'pag' ? 'Tipo de gasto' : tp === 'rec' ? 'Tipo de recebimento' : 'Tipo de gasto / recebimento') + ' (escolha na lista)', w: 34 });
-    c.push({ k: 'tipoN', t: 'Tipo novo (digite se não achar na lista — ele entra na lista)', w: 30 });
+    c.push({ k: 'tipoL', t: tp === 'pag' ? 'Tipo de gasto' : tp === 'rec' ? 'Tipo de recebimento' : 'Tipo de gasto / recebimento', w: 34 });
+    c.push({ k: 'part', t: tp === 'pag' ? 'Marque "Sim" se o gasto é particular do sócio ou não é da empresa (de terceiros)' : tp === 'rec' ? 'Marque "Sim" se a receita é do sócio ou não é da empresa (de terceiros)' : 'Marque "Sim" se é particular do sócio ou não é da empresa (de terceiros)', w: 24 });
     c.push({ k: 'desc', t: 'Descrição / histórico detalhado (para a contabilidade)', w: 46 });
     if (aba.cols.includes('saldo')) c.push({ k: 'saldo', t: 'Saldo (no fim do dia — automático)', w: 18 });
     c.forEach((x, i) => { x.i = i; x.L = letra(i); });
@@ -79,9 +80,9 @@
     const princ = abas[0];
     abas.forEach((a, ia) => {
       const ws = a.ws, C = a.colunas, ult = C[C.length - 1].L, col = k => C.find(x => x.k === k);
-      const aux = letra(C.length + 2); // coluna auxiliar escondida (tipos novos → lista)
+      const aux = letra(C.length + 2), aux2 = letra(C.length + 3); // colunas auxiliares escondidas (tipos e fornecedores digitados → listas)
       C.forEach(x => { ws.getColumn(x.i + 1).width = x.w; });
-      ws.getColumn(C.length + 3).hidden = true;
+      ws.getColumn(C.length + 3).hidden = true; ws.getColumn(C.length + 4).hidden = true;
       // título
       ws.mergeCells('A1:' + ult + '1'); const t = ws.getCell('A1'); t.value = TITULO; t.font = { bold: true, size: 16, color: { argb: 'FFFFFFFF' } }; t.fill = fill(COR.tit); t.alignment = { vertical: 'middle', horizontal: 'center' }; ws.getRow(1).height = 30;
       ws.mergeCells('A2:' + ult + '2'); const t2 = ws.getCell('A2'); t2.value = 'Fluxo de Caixa — ' + V.nome + (V.abas.length > 1 ? ' (aba ' + a.nome + ')' : ''); t2.font = { bold: true, size: 12, color: { argb: COR.lbl } }; t2.alignment = { horizontal: 'center' };
@@ -118,25 +119,34 @@
       // cabeçalho das colunas
       const hr = ws.getRow(LIN_CAB); hr.height = 42;
       C.forEach(x => { const c = hr.getCell(x.i + 1); c.value = x.t; c.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 }; c.fill = fill(COR.cab); c.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' }; c.border = borda; });
-      ws.getCell(aux + LIN_CAB).value = 'aux';
+      ws.getCell(aux + LIN_CAB).value = 'aux'; ws.getCell(aux2 + LIN_CAB).value = 'aux2';
       ws.autoFilter = { from: { row: LIN_CAB, column: 1 }, to: { row: LIN_CAB, column: C.length } };
-      // lista de tipos: padrão (Pontos de Atenção) + tipos novos digitados nesta aba
-      const lc = letra(ia), pad = tiposPadrao(a.tipo), fimPad = 1 + pad.length;
-      wl.getCell(lc + '1').value = 'Tipos — ' + a.nome; wl.getColumn(ia + 1).width = 44;
+      // listas: tipos = padrão (Pontos de Atenção) + o que for digitado na própria coluna; fornecedores/clientes = o que já foi digitado na coluna
+      const lc = letra(ia * 2), lf = letra(ia * 2 + 1), pad = tiposPadrao(a.tipo), fimPad = 1 + pad.length;
+      wl.getCell(lc + '1').value = 'Tipos — ' + a.nome; wl.getColumn(ia * 2 + 1).width = 44;
+      wl.getCell(lf + '1').value = 'Fornecedores/clientes — ' + a.nome; wl.getColumn(ia * 2 + 2).width = 44;
       pad.forEach((n, k) => { wl.getCell(lc + (2 + k)).value = n; });
-      const tN = col('tipoN').L;
-      for (let k = 1; k <= N_MANUAL; k++) wl.getCell(lc + (fimPad + k)).value = { formula: 'IFERROR(INDEX(' + ref(a.nome) + '!$' + tN + '$' + LIN_INI + ':$' + tN + '$' + LIN_FIM + ',MATCH(' + k + ',' + ref(a.nome) + '!$' + aux + '$' + LIN_INI + ':$' + aux + '$' + LIN_FIM + ',0)),"")' };
-      const fimLista = fimPad + N_MANUAL;
+      const tN = col('tipoL').L, fN = col('forn').L, rg = (L) => ref(a.nome) + '!$' + L + '$' + LIN_INI + ':$' + L + '$' + LIN_FIM;
+      for (let k = 1; k <= N_MANUAL; k++) wl.getCell(lc + (fimPad + k)).value = { formula: 'IFERROR(INDEX(' + rg(tN) + ',MATCH(' + k + ',' + rg(aux) + ',0)),"")' };
+      for (let k = 1; k <= LIN_FIM - LIN_INI + 1; k++) wl.getCell(lf + (1 + k)).value = { formula: 'IFERROR(INDEX(' + rg(fN) + ',MATCH(' + k + ',' + rg(aux2) + ',0)),"")' };
+      const fimLista = fimPad + N_MANUAL, fimForn = 1 + (LIN_FIM - LIN_INI + 1);
       const fLista = 'OFFSET(Listas!$' + lc + '$2,0,0,MAX(1,COUNTIF(Listas!$' + lc + '$2:$' + lc + '$' + fimLista + ',"?*")),1)';
+      const fForn = 'OFFSET(Listas!$' + lf + '$2,0,0,MAX(1,COUNTIF(Listas!$' + lf + '$2:$' + lf + '$' + fimForn + ',"?*")),1)';
+      const FMT_DOC = '[<=99999999999]000"."000"."000"-"00;00"."000"."000"/"0000"-"00';
+      { const p = col('part').L; ws.addConditionalFormatting({ ref: p + LIN_INI + ':' + p + LIN_FIM, rules: [{ type: 'expression', formulae: ['LEN(TRIM(' + p + LIN_INI + '))>0'], style: { fill: { type: 'pattern', pattern: 'solid', bgColor: { argb: 'FFFED7AA' } }, font: { bold: true } } }] }); }
       // linhas de dados
       const cSai = col('saida'), cEnt = col('entrada'), cVal = col('valor'), cSal = col('saldo');
       for (let r = LIN_INI; r <= LIN_FIM; r++) {
         const row = ws.getRow(r);
-        C.forEach(x => { const c = row.getCell(x.i + 1); c.border = borda; if (x.k !== 'saldo') c.protection = { locked: false }; if (x.k === 'data') c.numFmt = 'dd/mm/yyyy'; if (x.k === 'saida' || x.k === 'entrada' || x.k === 'valor' || x.k === 'saldo') c.numFmt = FMT_V; if (x.k === 'hist' || x.k === 'desc' || x.k === 'forn') c.alignment = { wrapText: true, vertical: 'top' }; });
+        C.forEach(x => { const c = row.getCell(x.i + 1); c.border = borda; if (x.k !== 'saldo') c.protection = { locked: false }; if (x.k === 'data') c.numFmt = 'dd/mm/yyyy'; if (x.k === 'saida' || x.k === 'entrada' || x.k === 'valor' || x.k === 'saldo') c.numFmt = FMT_V; if (x.k === 'hist' || x.k === 'desc' || x.k === 'forn' || x.k === 'tipoL') c.alignment = { wrapText: true, vertical: 'top' }; if (x.k === 'doc') { c.numFmt = FMT_DOC; c.alignment = { horizontal: 'left' }; } if (x.k === 'part') c.alignment = { horizontal: 'center' }; });
         row.getCell(col('data').i + 1).dataValidation = { type: 'date', operator: 'greaterThan', allowBlank: true, formulae: [new Date(2000, 0, 1)], showErrorMessage: true, errorStyle: 'warning', errorTitle: 'Data', error: 'Digite uma data (dd/mm/aaaa).' };
-        row.getCell(col('tipoL').i + 1).dataValidation = { type: 'list', allowBlank: true, formulae: [fLista], showErrorMessage: true, errorStyle: 'information', errorTitle: 'Tipo fora da lista', error: 'Esse tipo não está na lista. Para ele entrar na lista, digite na coluna "Tipo novo".' };
-        // auxiliar: numera cada tipo novo (1ª vez que aparece e que não está na lista padrão)
+        // lista + digitação livre, sem mensagem de erro: o que for digitado e não estiver na lista entra na lista sozinho
+        row.getCell(col('tipoL').i + 1).dataValidation = { type: 'list', allowBlank: true, formulae: [fLista], showErrorMessage: false };
+        row.getCell(col('forn').i + 1).dataValidation = { type: 'list', allowBlank: true, formulae: [fForn], showErrorMessage: false };
+        row.getCell(col('part').i + 1).dataValidation = { type: 'list', allowBlank: true, formulae: ['"Sim"'], showErrorMessage: false };
+        // auxiliares: numeram cada tipo novo (1ª vez, fora da lista padrão) e cada fornecedor/cliente (1ª vez)
         ws.getCell(aux + r).value = { formula: 'IF(OR(' + tN + r + '="",COUNTIF(Listas!$' + lc + '$2:$' + lc + '$' + fimPad + ',' + tN + r + ')>0,COUNTIF(' + tN + '$' + LIN_INI + ':' + tN + r + ',' + tN + r + ')>1),"",MAX(' + aux + '$' + LIN_CAB + ':' + aux + (r - 1) + ')+1)' };
+        ws.getCell(aux2 + r).value = { formula: 'IF(OR(' + fN + r + '="",COUNTIF(' + fN + '$' + LIN_INI + ':' + fN + r + ',' + fN + r + ')>1),"",MAX(' + aux2 + '$' + LIN_CAB + ':' + aux2 + (r - 1) + ')+1)' };
         if (cSal) {
           // saldo no FIM DO DIA: aparece só na última linha de cada data (a lista pode estar fora de ordem) e soma todas as abas do arquivo
           const c = row.getCell(cSal.i + 1); c.fill = fill(COR.calc); c.font = { bold: true };
@@ -167,15 +177,17 @@
     el.innerHTML = '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:16px">'
       + '<label style="font-size:12.5px;font-weight:600">Empresa (opcional — preenche nome e CNPJ no modelo):</label>'
       + '<select class="si" id="modFluxoEmp" style="min-width:320px;max-width:100%"><option value="">— Em branco (o cliente preenche) —</option>' + emps.map(e => '<option value="' + E(e.eid) + '">' + E(e.eid + ' - ' + e.nome) + '</option>').join('') + '</select></div>'
-      + '<div style="font-size:13px;font-weight:700;margin:4px 0 10px">Fluxo de Caixa</div>'
+      + '<div style="display:flex;align-items:center;gap:12px;margin:4px 0 10px;flex-wrap:wrap"><span style="font-size:13px;font-weight:700">Fluxo de Caixa</span>'
+      + '<label style="display:flex;gap:6px;align-items:center;font-size:12.5px;cursor:pointer"><input type="checkbox" id="modFluxoTodos" onchange="ModFluxo.marcarTodos(this.checked)" style="cursor:pointer"> Selecionar todos</label>'
+      + '<button class="action-btn action-btn-excel" id="modFluxoBaixarSel" style="display:none" onclick="ModFluxo.baixarSelecionados(this)">📥 Baixar selecionados</button></div>'
       + '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(250px,1fr));gap:12px">'
       + ORDEM.map(k => { const V = VARIANTES[k]; return '<div style="background:var(--white);border:1px solid var(--border);border-radius:10px;padding:14px;display:flex;flex-direction:column;gap:8px">'
-        + '<div style="display:flex;gap:8px;align-items:center"><span style="font-size:20px">' + icone[k] + '</span><b style="font-size:13.5px">' + E(V.nome) + '</b></div>'
+        + '<div style="display:flex;gap:8px;align-items:flex-start"><span style="font-size:20px">' + icone[k] + '</span><b style="font-size:13.5px;flex:1">' + E(V.nome) + '</b><input type="checkbox" class="modFluxoSel" value="' + k + '" title="Selecionar para baixar junto" onchange="ModFluxo.atualizarSel()" style="width:17px;height:17px;cursor:pointer;flex-shrink:0"></div>'
         + '<div style="font-size:12px;color:var(--slate);flex:1">' + E(V.desc) + '</div>'
         + '<button class="action-btn action-btn-excel" onclick="ModFluxo.gerar(\'' + k + '\')">📊 Gerar Excel</button></div>'; }).join('')
       + '</div>'
       + '<div style="font-size:12px;color:var(--slate);margin-top:16px;line-height:1.5">Todos os modelos têm o cabeçalho da JJR, data inicial e final, banco (opcional), saldo inicial e a indicação de como as saídas foram digitadas. '
-      + 'A lista de tipos é a mesma dos Pontos de Atenção, e o que o cliente digitar na coluna "Tipo novo" passa a aparecer na lista. '
+      + 'A lista de tipos é a mesma dos Pontos de Atenção; o cliente também pode digitar um tipo novo ou um fornecedor/cliente novo, e eles passam a aparecer na lista das próximas linhas. '
       + 'Quando o cliente devolver, anexe o arquivo em <b>Lançamentos Contábeis → Fluxo de Caixa</b>: o site reconhece o modelo sozinho.</div>';
   }
 
@@ -202,7 +214,7 @@
       const m = XLSX.utils.sheet_to_json(wb.Sheets[nome], { header: 1, raw: true, defval: '', cellDates: true });
       const hi = m.findIndex(r => (r || []).some(x => /^data da movimenta/.test(norm(x)))); if (hi < 0) return;
       const cab = m[hi].map(norm), ix = re => cab.findIndex(x => re.test(x));
-      const c = { data: ix(/^data da movimenta/), hist: ix(/^historico bancario/), forn: ix(/^(fornecedor|cliente)/), tipoL: ix(/^tipo de (gasto|recebimento)/), tipoN: ix(/^tipo novo/), nf: ix(/^n.{0,3} da nota/), saida: ix(/^valor de saida/), entrada: ix(/^valor de entrada/), valor: ix(/^valor \(entrada/), desc: ix(/^descricao/) };
+      const c = { data: ix(/^data da movimenta/), hist: ix(/^historico bancario/), forn: ix(/^(fornecedor|cliente)/), tipoL: ix(/^tipo de (gasto|recebimento)/), tipoN: ix(/^tipo novo/), doc: ix(/^cnpj/), part: ix(/^marque/), nf: ix(/^n.{0,3} da nota/), saida: ix(/^valor de saida/), entrada: ix(/^valor de entrada/), valor: ix(/^valor \(entrada/), desc: ix(/^descricao/) };
       const campo = re => { for (let r = 0; r < hi; r++) { const row = m[r] || []; for (let k = 0; k < row.length; k++) if (re.test(norm(row[k]))) return row[k + 1] == null ? '' : row[k + 1]; } return ''; }; // valor fica na célula logo à direita do rótulo
       let banco = String(campo(/^banco/) || '').trim(); if (!banco && bancoPrinc) banco = bancoPrinc; if (banco && !bancoPrinc) bancoPrinc = banco;
       const agcc = String(campo(/^agencia/) || '').trim();
@@ -211,6 +223,7 @@
       m.slice(hi + 1).forEach((r, k) => {
         r = r || [];
         const data = _fxmbData(c.data >= 0 ? r[c.data] : '');
+        const part = !!tx(r, c.part) && !/^(nao|não|n)$/i.test(tx(r, c.part)); let doc = c.doc >= 0 ? r[c.doc] : ''; doc = typeof doc === 'number' ? String(Math.round(doc)) : String(doc || '').replace(/\D/g, ''); if (doc) doc = doc.length > 11 ? doc.padStart(14, '0') : doc.padStart(11, '0');
         const hist = tx(r, c.hist), forn = tx(r, c.forn), tipo = tx(r, c.tipoN) || tx(r, c.tipoL), nf = c.nf >= 0 ? r[c.nf] : '', desc = tx(r, c.desc);
         let vs = c.saida >= 0 ? valorBR(r[c.saida]) : NaN, ve = c.entrada >= 0 ? valorBR(r[c.entrada]) : NaN;
         if (c.valor >= 0) { const v = valorBR(r[c.valor], true); if (!isNaN(v)) { if (v < 0) vs = -v; else ve = v; } }
@@ -218,7 +231,7 @@
         if (!data && !temValor && !hist && !forn) return; // linha vazia
         if (!data || !temValor) { descartadas++; return; }
         if (soMes && fech && data.slice(0, 7) !== fech) { foraMes++; return; }
-        const base = { aba: nome, data, descricao: [hist, desc].filter(Boolean).join(' | ') || forn || 'Lançamento do fluxo', documento_numero: _fxmbDocNf(nf), categoria: tipo || null, forma: null, fornecedor: forn || null, banco: banco || null, linha: hi + k + 2 };
+        const base = { aba: nome, data, descricao: [hist, desc, part ? 'PARTICULAR DO SÓCIO / DE TERCEIROS (marcado pelo cliente)' : ''].filter(Boolean).join(' | ') || forn || 'Lançamento do fluxo', cnpj: doc || null, particular: part, documento_numero: _fxmbDocNf(nf), categoria: tipo || null, forma: null, fornecedor: forn || null, banco: banco || null, linha: hi + k + 2 };
         [['S', vs], ['E', ve]].forEach(([t, v]) => {
           if (!(v > 0)) return;
           const v2 = Math.round(v * 100) / 100, kk = data + '|' + t + '|' + v2 + '|' + norm(forn) + '|' + norm(hist);
@@ -232,5 +245,16 @@
     });
     return { resumo, registros, arquivo: nomeArquivo, jjr: true };
   }
-  root.ModFluxo = { gerar, montar, render, ehModelo, lerWorkbook, VARIANTES };
+  function atualizarSel() {
+    const sel = [...document.querySelectorAll('.modFluxoSel:checked')].map(c => c.value), todos = document.querySelectorAll('.modFluxoSel').length;
+    const b = document.getElementById('modFluxoBaixarSel'); if (b) { b.style.display = sel.length ? '' : 'none'; b.textContent = '📥 Baixar selecionados (' + sel.length + ')'; }
+    const t = document.getElementById('modFluxoTodos'); if (t) t.checked = sel.length === todos && todos > 0;
+  }
+  function marcarTodos(on) { document.querySelectorAll('.modFluxoSel').forEach(c => { c.checked = !!on; }); atualizarSel(); }
+  async function baixarSelecionados(btn) {
+    const sel = [...document.querySelectorAll('.modFluxoSel:checked')].map(c => c.value); if (!sel.length) return;
+    if (btn) btn.disabled = true;
+    try { for (const k of sel) { await gerar(k); await new Promise(r => setTimeout(r, 400)); } } finally { if (btn) btn.disabled = false; }
+  }
+  root.ModFluxo = { atualizarSel, marcarTodos, baixarSelecionados, gerar, montar, render, ehModelo, lerWorkbook, VARIANTES };
 })(window);
