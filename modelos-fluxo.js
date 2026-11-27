@@ -102,7 +102,7 @@
       const sx = ws.getCell('E8');
       if (a.tipo === 'mix' && a.cols.includes('valor')) { sx.value = 'Negativas (obrigatório nesta planilha)'; sx.fill = fill(COR.calc); sx.border = borda; }
       else if (a.tipo === 'rec') { sx.value = a.espelho ? { formula: ref(princ.nome) + '!E8' } : 'Não se aplica (só entradas)'; sx.fill = fill(COR.calc); sx.border = borda; }
-      else { inp('E8', 'Positivas (ex.: 150,00)'); if (!a.espelho) sx.dataValidation = { type: 'list', allowBlank: false, formulae: ['"Positivas (ex.: 150,00),Negativas (ex.: -150,00)"'], showErrorMessage: true, errorTitle: 'Escolha da lista', error: 'Escolha Positivas ou Negativas.' }; }
+      else { inp('E8', 'Positivas (sem sinal: 150)'); if (!a.espelho) sx.dataValidation = { type: 'list', allowBlank: false, formulae: ['"Positivas (sem sinal: 150),Negativas (com sinal: -150)"'], showErrorMessage: true, errorTitle: 'Escolha da lista', error: 'Escolha Positivas ou Negativas.' }; }
       ws.mergeCells('F8:' + ult + '8'); const nt = ws.getCell('F8');
       nt.value = (a.tipo === 'mix' && a.cols.includes('valor')) ? 'Entrada com valor positivo (150,00) e saída com sinal de menos (-150,00). O saldo soma tudo a partir do saldo inicial.'
         : 'Informe se digitou as saídas sem sinal (150,00) ou com sinal de menos (-150,00). O saldo é calculado certo nos dois casos.';
