@@ -143,7 +143,7 @@
       + '<b style="color:' + OURO + ';font-size:15px">📒 Escrita Fiscal</b>'
       + '<span style="font-size:12px;color:var(--slate)">confronto do livro fiscal (entradas e saídas) com as notas do site</span>'
       + '<span style="margin-left:auto;display:flex;gap:6px;flex-wrap:wrap">'
-      + '<button class="btn bo bsm" onclick="EscFis.importar()" title="Livro fiscal de Entradas e/ou Saídas do sistema fiscal: SPED EFD (.txt), planilha (.xlsx/.csv) ou PDF">📥 Importar livro fiscal</button>'
+      + '<button class="btn bo bsm" onclick="EscFis.importar()" title="Anexar o livro fiscal desta empresa: PDF do Domínio, planilha Excel (.xls/.xlsx/.csv) ou SPED EFD (.txt). Só os dados ficam no site.">📎 Anexar livro (PDF ou Excel)</button>'
       + '<button class="btn bo bsm" onclick="EscFis.diferencas()" title="Janela com as notas que estão só no fiscal e só no site (com o TXT)">🔎 Diferenças de ' + MESES_L[m - 1] + '</button>'
       + '<button class="action-btn action-btn-excel" onclick="EscFis.excel()">📊 Gerar Excel</button>'
       + '<button class="btn bo bsm" onclick="EscFis.config()" title="Contas de cada operação para o TXT">⚙️</button></span></div>';
@@ -160,7 +160,7 @@
       + '<span style="margin-left:8px;font-weight:700">' + a + '</span>'
       + '<button class="btn bo bsm" onclick="EscFis.mes(-12)" title="Ano anterior">«</button><button class="btn bo bsm" onclick="EscFis.mes(12)" title="Próximo ano">»</button></div>';
     h += '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">Livro fiscal de ' + MESES_L[m - 1] + '/' + a + ': '
-      + (inf.length ? inf.map(i => '<b>' + LIVRO_NOME[i.lv] + '</b> ' + i.n + ' nota(s)' + (i.arq ? ' (' + E(i.arq) + ')' : '')).join(' · ') + ' <button class="btn bo bsm" style="padding:0 6px;font-size:10.5px" onclick="EscFis.excluirLivros()" title="Excluir os livros fiscais importados de um ou vários meses (as notas do site não são tocadas)">🗑 excluir livros…</button>' : '<span style="color:var(--amber)">nenhum livro importado — use 📥 Importar livro fiscal</span>')
+      + (inf.length ? inf.map(i => '<b>' + LIVRO_NOME[i.lv] + '</b> ' + i.n + ' nota(s)' + (i.arq ? ' (' + E(i.arq) + ')' : '')).join(' · ') + ' <button class="btn bo bsm" style="padding:0 6px;font-size:10.5px" onclick="EscFis.excluirLivros()" title="Excluir os livros fiscais importados de um ou vários meses (as notas do site não são tocadas)">🗑 excluir livros…</button>' : '<span style="color:var(--amber)">nenhum livro importado — use 📎 Anexar livro ou o 📒 da lista de empresas</span>')
       + '</div><div id="escfisResumo" style="margin-bottom:8px;font-size:12.5px"></div><div id="escfisTab"></div>';
     el.innerHTML = h;
     if (!ST.ok || ST.okYm !== ST.ym || ST.okEid !== ST.eid) await carregar(); else corpo();
@@ -189,7 +189,7 @@
     const n = k => L.filter(l => l.sit === k).length, soSite = pendS().length;
     const rs = document.getElementById('escfisResumo');
     if (rs) rs.innerHTML = !ST.fisc.length
-      ? '<span style="color:var(--amber)">Nenhum livro fiscal importado neste mês. Importe pelo botão <b>📒 Importar Livros Fiscais (PDF)</b> na lista de Lançamentos Contábeis (todas as empresas) ou pelo <b>📥 Importar livro fiscal</b> aqui em cima.</span>' + (ST.site.length ? ' <span style="color:var(--slate)">(o site tem ' + ST.site.length + ' nota(s) neste mês)</span>' : '')
+      ? '<span style="color:var(--amber)">Nenhum livro fiscal importado neste mês. Importe pelo botão <b>📒 Importar Livros Fiscais (PDF)</b> na lista de Lançamentos Contábeis (todas as empresas) ou pelo <b>📎 Anexar livro (PDF ou Excel)</b> aqui em cima.</span>' + (ST.site.length ? ' <span style="color:var(--slate)">(o site tem ' + ST.site.length + ' nota(s) neste mês)</span>' : '')
       : '<b>' + L.length + '</b> nota(s) no livro fiscal · <span style="color:var(--green)">está no site: <b>' + n('site') + '</b></span> · <span style="color:var(--amber)">no site com valor diferente: <b>' + n('valor_dif') + '</b></span> · <span style="color:var(--red)">não está no site: <b>' + n('nao_site') + '</b></span>'
         + (soSite ? ' · <a href="#" onclick="event.preventDefault();EscFis.diferencas()" style="color:var(--red)"><b>' + soSite + '</b> nota(s) do site não estão no fiscal → 🔎 Diferenças</a>' : '');
     if (!ST.fisc.length) { box.innerHTML = ''; return; }
@@ -371,7 +371,7 @@
     ov = document.createElement('div'); ov.id = 'escfisImp';
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99995;display:flex;align-items:center;justify-content:center;padding:12px';
     ov.innerHTML = '<div style="background:var(--white);color:var(--ink);border-radius:12px;width:min(540px,100%);padding:16px 18px;box-shadow:var(--shadow-md)">'
-      + '<div style="font-weight:700;font-size:15px;color:' + OURO + ';margin-bottom:8px">📥 Importar livro fiscal desta empresa</div>'
+      + '<div style="font-weight:700;font-size:15px;color:' + OURO + ';margin-bottom:8px">📎 Anexar livro fiscal desta empresa</div>'
       + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">PDF do Domínio (Acompanhamento de Entradas / Saídas / Serviços), SPED EFD (.txt) ou planilha (.xlsx/.csv). Só os dados lidos ficam no site — o arquivo não é guardado. O livro já importado do mesmo mês é substituído.<br>Para importar de <b>todas as empresas</b> de uma vez, use o botão <b>📒 Importar Livros Fiscais (PDF)</b> na lista de Lançamentos Contábeis.</div>'
       + '<div style="font-size:12.5px;margin-bottom:10px"><b>Este arquivo é:</b><br><label><input type="radio" name="escfisTipo" value="" checked> descobrir sozinho</label> <label style="margin-left:6px"><input type="radio" name="escfisTipo" value="E"> Entradas</label> <label style="margin-left:6px"><input type="radio" name="escfisTipo" value="S"> Saídas</label> <label style="margin-left:6px"><input type="radio" name="escfisTipo" value="V"> Serviços</label></div>'
       + '<input type="file" id="escfisArq" multiple accept=".txt,.csv,.xlsx,.xls,.pdf" class="fi" style="width:100%">'
@@ -502,7 +502,7 @@
   async function lerArquivo(f, tipo) {
     const nome = f.name.toLowerCase(), inf = infoNome(f.name); if (inf && !tipo) tipo = inf.lv;
     if (nome.endsWith('.pdf')) { const r = await lerPdf(await f.arrayBuffer(), tipo); if (inf && !r.eid) r.eid = inf.eid; return r; }
-    if (nome.endsWith('.xlsx') || nome.endsWith('.xls')) { const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true }); let out = { rows: [] }; wb.SheetNames.forEach(sn => { const r = lerTabela(XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' }), tipo); out.rows = out.rows.concat(r.rows); if (r.aviso && !out.rows.length) out.aviso = r.aviso; }); return out; }
+    if (nome.endsWith('.xlsx') || nome.endsWith('.xls')) { const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true }); let out = { rows: [] }; wb.SheetNames.forEach(sn => { const r = lerTabela(XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' }), tipo); out.rows = out.rows.concat(r.rows); if (r.eid && !out.eid) out.eid = r.eid; if (r.aviso && !out.rows.length) out.aviso = r.aviso; }); return out; }
     let txt = await f.text(); if (txt.includes('�')) { try { txt = new TextDecoder('windows-1252').decode(await f.arrayBuffer()); } catch (e) { } }
     if (/^\|0000\|/m.test(txt.slice(0, 2000))) return lerSped(txt);
     const sep = (txt.split('\n')[0].match(/;/g) || []).length >= 2 ? ';' : (txt.split('\n')[0].match(/\t/g) || []).length >= 2 ? '\t' : ',';
@@ -529,12 +529,14 @@
     fim();
     return { rows };
   }
-  // planilha/CSV: acha a linha de cabeçalho e as colunas sozinho
+  // Planilha/CSV: varre TODAS as linhas — acha o cabeçalho sozinho (e de novo em cada seção), a seção "Notas de Entrada/Saída/Serviços"
+  // (modelo da Pride, 26/11/2026: uma aba com as duas seções) e o código da empresa em "Empresa: 0142 - …".
+  // Número/CFOP que o Excel guarda como número (26.0, 1407.0) viram inteiro — sem isso "26.0" virava "260".
   function lerTabela(aoa, tipo) {
     const H = h => nrm(h).toLowerCase();
     const acha = (cab, testes) => { for (const t of testes) { const i = cab.findIndex(h => t(H(h))); if (i >= 0) return i; } return -1; };
-    for (let li = 0; li < Math.min(40, aoa.length); li++) {
-      const cab = (aoa[li] || []).map(x => String(x == null ? '' : x));
+    const inteiro = v => typeof v === 'number' ? String(Math.round(v)) : String(v == null ? '' : v);
+    const cabecalho = cab => {
       const ix = {
         data: acha(cab, [h => /emiss/.test(h), h => /data (do )?doc|dt\.? ?doc/.test(h), h => /^data$|^dt$/.test(h), h => /^data/.test(h)]),
         numero: acha(cab, [h => /^(n[o°º.]?|num(ero)?|nota|nf|n\. ?doc|num\.? ?doc|numero (da )?nota|numero do documento|documento|doc)$/.test(h.replace(/[º°]/g, 'o')), h => /^n(umero|o|º)?\.? ?(doc|nf|nota)/.test(h)]),
@@ -544,17 +546,24 @@
         cfop: acha(cab, [h => /cfop/.test(h)]),
         valor: acha(cab, [h => /valor contabil|vl\.? ?contabil/.test(h), h => /valor total|vl\.? ?total|valor (do )?doc|vl\.? ?doc/.test(h), h => /^total$/.test(h), h => /^valor$/.test(h)]),
       };
-      if (ix.data < 0 || ix.valor < 0 || (ix.numero < 0 && ix.doc < 0)) continue;
-      const rows = [];
-      for (let k = li + 1; k < aoa.length; k++) {
-        const r = aoa[k] || []; const data = isoDe(r[ix.data]); if (!data) continue;
-        const cfop = ix.cfop >= 0 ? dig(r[ix.cfop]) : '';
-        rows.push(comLivro({ data, numero: ix.numero >= 0 ? numNf(r[ix.numero]) : '', serie: ix.serie >= 0 ? String(r[ix.serie] || '') : '', doc: ix.doc >= 0 ? dig(r[ix.doc]) : '', nome: ix.nome >= 0 ? String(r[ix.nome] || '').trim() : '', cfop, valor: num(r[ix.valor]) }, livroDe(cfop, tipo)));
-      }
-      const semLv = rows.filter(r => !r.livro).length;
-      return { rows, aviso: semLv ? semLv + ' linha(s) sem CFOP: escolha Entradas, Saídas ou Serviços ao importar' : '' };
+      return (ix.data < 0 || ix.valor < 0 || (ix.numero < 0 && ix.doc < 0)) ? null : ix;
+    };
+    let ix = null, secao = '', eid = '', achouCab = false; const rows = [];
+    for (let k = 0; k < aoa.length; k++) {
+      const r = aoa[k] || [], txt = nrm(r.map(x => x == null ? '' : String(x)).join(' '));
+      if (!txt) continue;
+      if (!eid) { const m = txt.match(/EMPRESA:\s*0*(\d+)\s*-/); if (m) eid = String(+m[1]); }
+      const sec = txt.match(/^(NOTAS (FISCAIS )?DE |LIVRO (DE )?(REGISTRO DE )?)?(ENTRADAS?|SAIDAS?|SERVICOS?)\b/);
+      if (sec && r.filter(x => String(x == null ? '' : x).trim()).length <= 2) { secao = /^E/.test(sec[5]) ? 'E' : /^SA/.test(sec[5]) ? 'S' : 'V'; continue; }
+      const novo = cabecalho(r.map(x => String(x == null ? '' : x))); if (novo) { ix = novo; achouCab = true; continue; }
+      if (!ix) continue;
+      const data = isoDe(r[ix.data]); if (!data) continue;
+      const cfop = ix.cfop >= 0 ? dig(inteiro(r[ix.cfop])) : '';
+      rows.push(comLivro({ data, numero: ix.numero >= 0 ? numNf(inteiro(r[ix.numero])) : '', serie: ix.serie >= 0 ? inteiro(r[ix.serie]).trim() : '', doc: ix.doc >= 0 ? dig(inteiro(r[ix.doc])) : '', nome: ix.nome >= 0 ? String(r[ix.nome] || '').trim() : '', cfop, valor: num(r[ix.valor]) }, tipo || secao || livroDe(cfop, '')));
     }
-    return { rows: [], aviso: 'não achei o cabeçalho (preciso de colunas de data, número ou CNPJ/CPF e valor)' };
+    if (!achouCab) return { rows: [], aviso: 'não achei o cabeçalho (preciso de colunas de data, número ou CNPJ/CPF e valor)' };
+    const semLv = rows.filter(r => !r.livro).length;
+    return { rows, eid, aviso: semLv ? semLv + ' linha(s) sem CFOP: escolha Entradas, Saídas ou Serviços ao importar' : '' };
   }
   // ── PDF ──
   async function linhasPdf(buf) {
