@@ -85,8 +85,8 @@
     lbl('B5', 'CNPJ:'); ws.mergeCells('C5:D5'); inp('C5', emp ? (typeof _fmtCnpjCpf === 'function' ? _fmtCnpjCpf(emp.cnpjNum || emp.cnpj || '') : '') : null);
     lbl('B6', 'Mês de referência:'); inp('C6', null, 'mm/yyyy');
     if (metodo !== false) {
-      lbl('B7', 'Método de custo:'); ws.mergeCells('C7:D7'); inp('C7', 'Custo médio ponderado');
-      ws.getCell('C7').dataValidation = { type: 'list', allowBlank: false, formulae: ['"Custo médio ponderado,PEPS (primeiro que entra primeiro que sai)"'], showErrorMessage: true, errorTitle: 'Método', error: 'O CPC 16 e o RIR/2018 só aceitam custo médio ponderado ou PEPS (UEPS é vedado).' };
+      lbl('B7', 'Método de custo:'); ws.mergeCells('C7:D7'); inp('C7', 'Custo médio ponderado móvel (a cada entrada)');
+      ws.getCell('C7').dataValidation = { type: 'list', allowBlank: false, formulae: ['"Custo médio ponderado móvel (a cada entrada),Custo médio ponderado mensal (fim do mês),PEPS (primeiro que entra primeiro que sai)"'], showErrorMessage: true, errorTitle: 'Método', error: 'O CPC 16 e o RIR/2018 só aceitam custo médio ponderado ou PEPS (UEPS é vedado).' };
     }
   }
   function cabTabela(ws, row, cols) { const hr = ws.getRow(row); hr.height = 44; cols.forEach((c, i) => { const x = hr.getCell(i + 1); x.value = c[0]; x.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 9.5 }; x.fill = fill(COR.cab); x.alignment = { wrapText: true, horizontal: 'center', vertical: 'middle' }; x.border = borda; }); }
@@ -140,12 +140,12 @@
     const wi = wb.addWorksheet('Instruções', { properties: { tabColor: { argb: COR.tit } } });
     wi.getColumn(1).width = 4; wi.getColumn(2).width = 120;
     cabecalho(wi, 'B', M.nome + ' — relatório para a contabilidade (CPC 16 / NBC TG 16)', emp, false);
-    const txt = [['O QUE PRECISAMOS (todo mês, até o dia 10 do mês seguinte)', true]];
+    const txt = [['O QUE PRECISAMOS (todo mês, até o dia 10 do mês seguinte — período fechado do dia 1º ao último dia do mês)', true], ['Nos sistemas, este relatório costuma se chamar Kardex sintético, Razão auxiliar de estoque, Movimentação de estoque valorizada ou Demonstrativo de movimentação de estoque. Se o seu sistema já tiver um relatório padrão assim, ele pode ser usado, desde que traga as mesmas informações (por produto, quantidade e valor de custo).']];
     if (M.industria) txt.push(['1. Aba "Matérias-primas": por item, saldo inicial, compras, requisições para a produção e demais saídas, saldo final — quantidade e valor de CUSTO.'], ['2. Aba "Em elaboração": por ordem de produção (ou produto), a matéria-prima requisitada, a mão de obra direta, os custos indiretos e o que foi transferido para acabados.'], ['3. Aba "Produtos acabados": por produto, produção do período, vendas a custo (CPV), perdas, doações e saldo final.'], ['4. Abas "Movimentos" e "Em poder de terceiros": como no comércio — ligam o estoque às notas fiscais.']);
     else if (chave === 'simples') txt.push(['1. Aba "Resumo por produto": por produto, saldo inicial, total de entradas, custo das vendas (CMV), outras saídas e saldo final — quantidade e valor de CUSTO.'], ['2. Aba "Outras saídas": cada saída que NÃO é venda (perda, devolução de compra, doação, ajuste) com data, produto, quantidade, custo e motivo.'], ['• Remessas (demonstração, consignação, conserto) não entram neste modelo: não lance a saída nem o retorno.']);
     else txt.push(['1. Aba "Resumo por produto": uma linha por produto com saldo inicial, entradas e saídas separadas por natureza e saldo final — quantidade e valor de CUSTO.'], ['2. Aba "Movimentos": cada entrada e saída do mês com data, documento (nº da nota), CFOP, natureza, produto, quantidade e custo. É ela que liga o estoque às notas fiscais.'], ['3. Aba "Em poder de terceiros": mercadoria nossa que está fora (demonstração, consignação, conserto, armazém). Ela CONTINUA sendo estoque da empresa.']);
     txt.push(['REGRAS DE VALOR (CPC 16 e RIR/2018)', true],
-      ['• Método de custo: custo médio ponderado ou PEPS. O UEPS (último que entra, primeiro que sai) não é aceito.'],
+      ['• Método de custo: custo médio ponderado (móvel, recalculado a cada entrada, ou mensal) ou PEPS. Informe no cabeçalho qual o sistema usa. O UEPS (último que entra, primeiro que sai) não é aceito.'],
       ['• Custo de compra = preço + frete + seguro + IPI e ICMS-ST que NÃO são recuperados − descontos − ICMS, PIS e COFINS que a empresa recupera (crédito).'],
       ['• Saídas sempre pelo CUSTO (médio do momento ou PEPS), nunca pelo preço de venda.'],
       ['• Saldo final = saldo inicial + entradas − saídas. A coluna "Conferência" precisa dar zero em quantidade e em valor.'],
