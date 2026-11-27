@@ -11,7 +11,7 @@
   const E = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const TITULO = 'JJR CONSULTORIA CONTÁBIL SS';
   const MARCA = 'JJR_MODELO_FLUXO';
-  const LIN_CAB = 11, LIN_INI = 12, LIN_FIM = 511, N_MANUAL = 300;
+  const LIN_CAB = 17, LIN_INI = 18, LIN_FIM = 517, N_MANUAL = 300;
   const VARIANTES = {
     pag: { nome: 'Só pagamentos', desc: 'Uma aba só com as SAÍDAS do banco (pagamentos), com saldo linha a linha.', abas: [{ nome: 'Pagamentos', tipo: 'pag', cols: ['saida', 'saldo'] }] },
     rec: { nome: 'Só recebimentos', desc: 'Uma aba só com as ENTRADAS do banco (recebimentos), com saldo linha a linha.', abas: [{ nome: 'Recebimentos', tipo: 'rec', cols: ['entrada', 'saldo'] }] },
@@ -32,16 +32,16 @@
       { k: 'data', t: 'Data da movimentação', w: 14 },
       { k: 'hist', t: 'Histórico bancário (como aparece no extrato)', w: 40 },
       { k: 'forn', t: tp === 'pag' ? 'Fornecedor (destinatário)' : tp === 'rec' ? 'Cliente (remetente)' : 'Fornecedor / Cliente (destinatário / remetente)', w: 34 },
-      { k: 'tipoL', t: (tp === 'pag' ? 'Tipo de gasto' : tp === 'rec' ? 'Tipo de recebimento' : 'Tipo de gasto / recebimento') + ' (escolha na lista)', w: 34 },
-      { k: 'tipoN', t: 'Tipo novo (digite se não achar na lista — ele entra na lista)', w: 30 },
       { k: 'nf', t: 'Nº da nota fiscal (se houver)', w: 14 }
     ];
     aba.cols.forEach(k => {
       if (k === 'saida') c.push({ k, t: 'Valor de saída', w: 16 });
       if (k === 'entrada') c.push({ k, t: 'Valor de entrada', w: 16 });
       if (k === 'valor') c.push({ k, t: 'Valor (entrada + / saída −)', w: 18 });
-      if (k === 'saldo') c.push({ k, t: 'Saldo', w: 16 });
     });
+    c.push({ k: 'tipoL', t: (tp === 'pag' ? 'Tipo de gasto' : tp === 'rec' ? 'Tipo de recebimento' : 'Tipo de gasto / recebimento') + ' (escolha na lista)', w: 34 });
+    c.push({ k: 'tipoN', t: 'Tipo novo (digite se não achar na lista — ele entra na lista)', w: 30 });
+    if (aba.cols.includes('saldo')) c.push({ k: 'saldo', t: 'Saldo', w: 16 });
     c.push({ k: 'desc', t: 'Descrição / histórico detalhado (para a contabilidade)', w: 46 });
     c.forEach((x, i) => { x.i = i; x.L = letra(i); });
     return c;
@@ -88,32 +88,33 @@
       ws.mergeCells('A3:' + ult + '3'); const t3 = ws.getCell('A3');
       t3.value = a.espelho ? 'O cabeçalho desta aba vem da aba Pagamentos (preencha lá). Aqui, só os recebimentos: uma linha por movimentação do extrato.' : 'Preencha os campos amarelos. Uma linha por movimentação do extrato bancário. Depois, devolva este arquivo para a JJR.';
       t3.font = { italic: true, size: 10, color: { argb: 'FF64748B' } }; t3.alignment = { horizontal: 'center', wrapText: true };
-      // cabeçalho (rótulo em B, valor em C; rótulo em D, valor em E)
+      // cabeçalho: rótulo em B, valor em C (um por linha)
       const lbl = (end, txt) => { const c = ws.getCell(end); c.value = txt; c.font = { bold: true, color: { argb: COR.lbl } }; c.alignment = { horizontal: 'right', vertical: 'middle', wrapText: true }; };
       const inp = (end, v, fmt) => { const c = ws.getCell(end); if (a.espelho) { c.value = { formula: ref(princ.nome) + '!' + end }; c.fill = fill(COR.calc); } else { if (v != null) c.value = v; c.fill = fill(COR.inp); } c.border = borda; if (fmt) c.numFmt = fmt; c.alignment = { vertical: 'middle' }; };
       lbl('B5', 'Empresa:'); ws.mergeCells('C5:E5'); inp('C5', emp ? emp.nome : null);
-      lbl('F5', 'CNPJ:'); ws.mergeCells('G5:' + (C.length > 8 ? 'H5' : 'H5')); inp('G5', emp ? (typeof _fmtCnpjCpf === 'function' ? _fmtCnpjCpf(emp.cnpjNum || emp.cnpj || '') : (emp.cnpj || '')) : null);
-      lbl('B6', 'Data inicial:'); inp('C6', null, 'dd/mm/yyyy');
-      lbl('D6', 'Data final:'); inp('E6', null, 'dd/mm/yyyy');
-      lbl('B7', 'Banco (opcional):'); inp('C7', null);
-      lbl('D7', 'Agência / conta (opcional):'); inp('E7', null);
-      lbl('B8', 'Saldo inicial do banco:'); inp('C8', null, FMT_V);
-      lbl('D8', 'As saídas estão digitadas como:');
-      const sx = ws.getCell('E8');
+      lbl('B6', 'CNPJ:'); inp('C6', emp ? (typeof _fmtCnpjCpf === 'function' ? _fmtCnpjCpf(emp.cnpjNum || emp.cnpj || '') : (emp.cnpj || '')) : null);
+      lbl('B7', 'Data inicial:'); inp('C7', null, 'dd/mm/yyyy');
+      lbl('B8', 'Data final:'); inp('C8', null, 'dd/mm/yyyy');
+      lbl('B9', 'Banco (opcional):'); inp('C9', null);
+      lbl('B10', 'Agência / conta (opcional):'); inp('C10', null);
+      lbl('B11', 'Saldo inicial do banco:'); inp('C11', null, FMT_V);
+      lbl('B12', 'As saídas estão digitadas como:');
+      const sx = ws.getCell('C12');
       if (a.tipo === 'mix' && a.cols.includes('valor')) { sx.value = 'Negativas (obrigatório nesta planilha)'; sx.fill = fill(COR.calc); sx.border = borda; }
-      else if (a.tipo === 'rec') { sx.value = a.espelho ? { formula: ref(princ.nome) + '!E8' } : 'Não se aplica (só entradas)'; sx.fill = fill(COR.calc); sx.border = borda; }
-      else { inp('E8', 'Positivas (sem sinal: 150)'); if (!a.espelho) sx.dataValidation = { type: 'list', allowBlank: false, formulae: ['"Positivas (sem sinal: 150),Negativas (com sinal: -150)"'], showErrorMessage: true, errorTitle: 'Escolha da lista', error: 'Escolha Positivas ou Negativas.' }; }
-      ws.mergeCells('F8:' + ult + '8'); const nt = ws.getCell('F8');
+      else if (a.tipo === 'rec') { sx.value = a.espelho ? { formula: ref(princ.nome) + '!C12' } : 'Não se aplica (só entradas)'; sx.fill = fill(COR.calc); sx.border = borda; }
+      else { inp('C12', 'Positivas (sem sinal: 150)'); if (!a.espelho) sx.dataValidation = { type: 'list', allowBlank: false, formulae: ['"Positivas (sem sinal: 150),Negativas (com sinal: -150)"'], showErrorMessage: true, errorTitle: 'Escolha da lista', error: 'Escolha Positivas ou Negativas.' }; }
+      ws.mergeCells('D12:' + ult + '12'); const nt = ws.getCell('D12');
       nt.value = (a.tipo === 'mix' && a.cols.includes('valor')) ? 'Entrada com valor positivo (150,00) e saída com sinal de menos (-150,00). O saldo soma tudo a partir do saldo inicial.'
-        : 'Informe se digitou as saídas sem sinal (150,00) ou com sinal de menos (-150,00). O saldo é calculado certo nos dois casos.';
-      nt.font = { size: 9.5, italic: true, color: { argb: 'FF64748B' } }; nt.alignment = { wrapText: true, vertical: 'middle' }; ws.getRow(8).height = 30;
-      // totais (linha 9) — saídas, entradas e saldo final do período (soma as abas no modelo de abas separadas)
+        : a.tipo === 'rec' ? 'Esta aba só tem entradas.' : 'Informe se digitou as saídas sem sinal (150,00) ou com sinal de menos (-150,00). O saldo é calculado certo nos dois casos.';
+      nt.font = { size: 9.5, italic: true, color: { argb: 'FF64748B' } }; nt.alignment = { wrapText: true, vertical: 'middle' }; ws.getRow(12).height = 30;
+      // totais — saídas, entradas e saldo final do período (soma as abas no modelo de abas separadas)
       const rngA = (aa, k) => { const x = aa.colunas.find(c => c.k === k); return x ? ref(aa.nome) + '!$' + x.L + '$' + LIN_INI + ':$' + x.L + '$' + LIN_FIM : null; };
       const fSai = [], fEnt = [];
       abas.forEach(aa => { const s = rngA(aa, 'saida'), e = rngA(aa, 'entrada'), v = rngA(aa, 'valor'); if (s) fSai.push('SUMPRODUCT(ABS(' + s + '))'); if (e) fEnt.push('SUMPRODUCT(ABS(' + e + '))'); if (v) { fSai.push('-SUMIF(' + v + ',"<0")'); fEnt.push('SUMIF(' + v + ',">0")'); } });
-      lbl('B9', 'Total de saídas:'); const ts = ws.getCell('C9'); ts.value = { formula: fSai.length ? fSai.join('+') : '0' }; ts.numFmt = FMT_V; ts.fill = fill(COR.calc); ts.border = borda; ts.font = { bold: true };
-      lbl('D9', 'Total de entradas:'); const te = ws.getCell('E9'); te.value = { formula: fEnt.length ? fEnt.join('+') : '0' }; te.numFmt = FMT_V; te.fill = fill(COR.calc); te.border = borda; te.font = { bold: true };
-      lbl('F9', 'Saldo final:'); ws.mergeCells('G9:H9'); const tf = ws.getCell('G9'); tf.value = { formula: ref(princ.nome) + '!$C$8+E9-C9' }; tf.numFmt = FMT_V; tf.fill = fill(COR.calc); tf.border = borda; tf.font = { bold: true };
+      const tot = (end, txt, f) => { lbl('B' + end, txt); const c = ws.getCell('C' + end); c.value = { formula: f }; c.numFmt = FMT_V; c.fill = fill(COR.calc); c.border = borda; c.font = { bold: true }; };
+      tot(13, 'Total de saídas:', fSai.length ? fSai.join('+') : '0');
+      tot(14, 'Total de entradas:', fEnt.length ? fEnt.join('+') : '0');
+      tot(15, 'Saldo final:', ref(princ.nome) + '!$C$11+C14-C13');
       // cabeçalho das colunas
       const hr = ws.getRow(LIN_CAB); hr.height = 42;
       C.forEach(x => { const c = hr.getCell(x.i + 1); c.value = x.t; c.font = { bold: true, color: { argb: 'FFFFFFFF' }, size: 10 }; c.fill = fill(COR.cab); c.alignment = { wrapText: true, vertical: 'middle', horizontal: 'center' }; c.border = borda; });
@@ -138,7 +139,7 @@
         ws.getCell(aux + r).value = { formula: 'IF(OR(' + tN + r + '="",COUNTIF(Listas!$' + lc + '$2:$' + lc + '$' + fimPad + ',' + tN + r + ')>0,COUNTIF(' + tN + '$' + LIN_INI + ':' + tN + r + ',' + tN + r + ')>1),"",MAX(' + aux + '$' + LIN_CAB + ':' + aux + (r - 1) + ')+1)' };
         if (cSal) {
           const c = row.getCell(cSal.i + 1); c.fill = fill(COR.calc);
-          const S0 = '$C$8', parts = [];
+          const S0 = '$C$11', parts = [];
           if (cEnt) parts.push('+SUM(' + cEnt.L + '$' + LIN_INI + ':' + cEnt.L + r + ')');
           if (cSai) parts.push('-SUMPRODUCT(ABS(' + cSai.L + '$' + LIN_INI + ':' + cSai.L + r + '))');
           if (cVal) parts.push('+SUM(' + cVal.L + '$' + LIN_INI + ':' + cVal.L + r + ')');
