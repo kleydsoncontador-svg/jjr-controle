@@ -188,6 +188,7 @@
         + '<div style="font-size:12px;color:var(--slate);flex:1">' + E(V.desc) + '</div>'
         + '<button class="action-btn action-btn-excel" onclick="ModFluxo.gerar(\'' + k + '\')">📊 Gerar Excel</button></div>'; }).join('')
       + '</div>'
+      + (root.ModEstoque ? ModEstoque.cardsHtml() : '')
       + '<div style="font-size:12px;color:var(--slate);margin-top:16px;line-height:1.5">Todos os modelos têm o cabeçalho da JJR, data inicial e final, banco (opcional), saldo inicial e a indicação de como as saídas foram digitadas. '
       + 'A lista de tipos é a mesma dos Pontos de Atenção; o cliente também pode digitar um tipo novo ou um fornecedor/cliente novo, e eles passam a aparecer na lista das próximas linhas. '
       + 'Quando o cliente devolver, anexe o arquivo em <b>Lançamentos Contábeis → Fluxo de Caixa</b>: o site reconhece o modelo sozinho.</div>';
