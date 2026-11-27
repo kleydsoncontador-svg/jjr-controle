@@ -39,11 +39,12 @@
   function classeCfop(cfop0, cfgEmp, tipo) {
     const c = cfopNosso(cfop0, tipo); if (cfgEmp && cfgEmp.cfop && cfgEmp.cfop[c]) return cfgEmp.cfop[c];
     const d = Math.floor(c / 1000), x = c % 1000, dev = root.CFOP_JJR && root.CFOP_JJR[c] ? root.CFOP_JJR[c][1] === 1 : false;
-    if (d >= 1 && d <= 3) { if ((x >= 101 && x <= 128) || x === 401 || x === 403 || x === 406 || x === 407) return 'compra'; if (dev && [201, 202, 203, 204, 208, 209, 212, 410, 411].includes(x)) return 'devvenda'; return 'outra'; }
-    if (d >= 5 && d <= 7) { if ((x >= 101 && x <= 125) || [401, 402, 403, 404, 405].includes(x) || (x >= 651 && x <= 656)) return 'venda'; if (dev && [201, 202, 205, 206, 207, 208, 209, 210, 410, 411, 412, 413].includes(x)) return 'devcompra'; return 'outra'; }
+    if (d >= 1 && d <= 3) { if ((x >= 101 && x <= 128) || x === 401 || x === 403) return 'compra'; /* 27/11/2026: 1.406 (ativo imobilizado) e 1.407 (uso e consumo) não são mercadoria de revenda */ if (dev && [201, 202, 203, 204, 208, 209, 212, 410, 411].includes(x)) return 'devvenda'; if (x === 910) return 'bonif'; if ([902, 903, 906, 907, 913, 916, 918, 925].includes(x)) return 'retorno'; return 'outra'; }
+    if (d >= 5 && d <= 7) { if ((x >= 101 && x <= 125) || [401, 402, 403, 404, 405].includes(x) || (x >= 651 && x <= 656)) return 'venda'; if (dev && [201, 202, 205, 206, 207, 208, 209, 210, 410, 411, 412, 413].includes(x)) return 'devcompra'; if (x === 927) return 'perda'; if (x === 910 || x === 911) return 'doacao'; if ([901, 905, 912, 915, 917, 920, 934].includes(x)) return 'terceiros'; return 'outra'; }
     return 'outra';
   }
-  const ROT_CL = { compra: 'Compra', devvenda: 'Devolução de venda', venda: 'Venda', devcompra: 'Devolução de compra', outra: 'Outra (não mexe no estoque)' };
+  const ROT_CL = { compra: 'Compra', devvenda: 'Devolução de venda', bonif: 'Bonificação recebida (entra com custo zero)', venda: 'Venda', devcompra: 'Devolução de compra', perda: 'Perda / avaria / vencido', doacao: 'Doação / brinde / amostra', terceiros: 'Remessa (demonstração, consignação, conserto…) — continua no estoque', retorno: 'Retorno de remessa — não mexe no estoque', outra: 'Outra (não mexe no estoque)' };
+  const NAO_MEXE = { outra: 1, terceiros: 1, retorno: 1 };
 
   // ── leitura do XML de NF-e ──
   function lerXml(txt, cnpjEmp) {
@@ -102,15 +103,18 @@
       if (IM) { atual = {}; Object.keys(IM).forEach(p => { atual[p] = { q: num(IM[p].q), t: num(IM[p].t) }; if (!conhecidos.has(p)) { conhecidos.add(p); ordem.push(p); } }); }
       Object.keys(atual).forEach(p => { if (!ordem.includes(p)) ordem.push(p); conhecidos.add(p); });
       const mv = {}, novos = [];
-      lerMes(eid, ano, m).itens.forEach(it => { const cl = classeCfop(it.cfop, emp.cfg, it.tipo); if (cl === 'outra') return; const p = chaveProduto(emp, it); const o = mv[p] = mv[p] || { cq: 0, ct: 0, dvq: 0, vq: 0, dcq: 0, dct: 0, desc: it.desc };
+      lerMes(eid, ano, m).itens.forEach(it => { const cl = classeCfop(it.cfop, emp.cfg, it.tipo); if (NAO_MEXE[cl]) return; const p = chaveProduto(emp, it); const o = mv[p] = mv[p] || { cq: 0, ct: 0, dvq: 0, vq: 0, dcq: 0, dct: 0, bq: 0, pq: 0, xq: 0, oq: 0, desc: it.desc };
         if (cl === 'compra') { o.cq += it.q; o.ct += custoItem(it, ded); } else if (cl === 'devvenda') o.dvq += it.q; else if (cl === 'venda') o.vq += it.q; else if (cl === 'devcompra') { o.dcq += it.q; o.dct += custoItem(it, ded); }
+        else if (cl === 'bonif') o.bq += it.q; else if (cl === 'perda') o.pq += it.q; else if (cl === 'doacao') o.oq += it.q; /* uso e consumo não entra: este estoque é só de mercadoria de revenda (pedido 27/11/2026) */
         if (!conhecidos.has(p)) { conhecidos.add(p); novos.push(p); } });
       novos.forEach(p => ordem.push(p));
       const linhas = [], prox = {};
-      ordem.forEach(p => { const si = atual[p] || { q: 0, t: 0 }, o = mv[p] || { cq: 0, ct: 0, dvq: 0, vq: 0, dcq: 0, dct: 0 };
+      ordem.forEach(p => { const si = atual[p] || { q: 0, t: 0 }, o = mv[p] || { cq: 0, ct: 0, dvq: 0, vq: 0, dcq: 0, dct: 0, bq: 0, pq: 0, xq: 0, oq: 0 };
         const pmIni = si.q ? si.t / si.q : (o.cq ? o.ct / o.cq : 0), dvt = o.dvq * pmIni;
-        const dq = R4(si.q + o.cq + o.dvq), dt = si.t + o.ct + dvt, pm = dq ? dt / dq : 0, cmv = o.vq * pm; /* 26/11/2026: devolução de compra é SAÍDA (depois do preço médio), pelo custo da nota */
-        const l = { p, desc: (emp.prod[p] || {}).desc || o.desc || (IM && IM[p] && IM[p].desc) || '', novo: novos.includes(p), iq: si.q, it: si.t, cq: o.cq, ct: o.ct, dvq: o.dvq, dvt, dcq: o.dcq, dct: o.dct, dq, dt, pm, vq: o.vq, cmv, teq: o.cq + o.dvq, tet: o.ct + dvt, tsq: o.vq + o.dcq, tst: cmv + o.dct, fq: R4(dq - o.vq - o.dcq), ft: dt - cmv - o.dct };
+        const dq = R4(si.q + o.cq + o.dvq + o.bq), dt = si.t + o.ct + dvt, pm = dq ? dt / dq : 0, cmv = o.vq * pm; /* 26/11/2026: devolução de compra é SAÍDA (depois do preço médio), pelo custo da nota */
+        /* 27/11/2026 (CPC 16): bonificação recebida entra com custo zero (dilui o preço médio); perda, uso e consumo e doação/brinde/amostra saem pelo preço médio, separadas do CMV */
+        const pt = o.pq * pm, xt = o.xq * pm, ot = o.oq * pm;
+        const l = { p, desc: (emp.prod[p] || {}).desc || o.desc || (IM && IM[p] && IM[p].desc) || '', novo: novos.includes(p), iq: si.q, it: si.t, cq: o.cq, ct: o.ct, dvq: o.dvq, dvt, bq: o.bq, bt: 0, dcq: o.dcq, dct: o.dct, dq, dt, pm, vq: o.vq, cmv, pq: o.pq, pt, xq: o.xq, xt, oq: o.oq, ot, teq: o.cq + o.dvq + o.bq, tet: o.ct + dvt, tsq: o.vq + o.dcq + o.pq + o.xq + o.oq, tst: cmv + o.dct + pt + xt + ot, fq: R4(dq - o.vq - o.dcq - o.pq - o.xq - o.oq), ft: dt - cmv - o.dct - pt - xt - ot };
         l.alerta = l.fq < -1e-9; linhas.push(l); prox[p] = { q: l.fq, t: l.ft }; });
       atual = prox; res = { linhas }; porMes[m] = linhas;
     }
@@ -120,12 +124,31 @@
   function mesInicioAcum(eid, ano) { const ks = Object.keys(lerAno(eid, ano).iniMes).map(Number).filter(m => m >= 1 && m <= 12); return ks.length ? Math.max(...ks) : 1; }
   function calcularAcumulado(eid, ano) {
     const r = calcularAno(eid, ano, 12), ac = {}, ordem = [], m0 = mesInicioAcum(eid, ano);
-    for (let m = m0; m <= 12; m++) (r.porMes[m] || []).forEach(l => { let a = ac[l.p]; if (!a) { a = ac[l.p] = { p: l.p, desc: l.desc, novo: false, iq: m === m0 ? l.iq : 0, it: m === m0 ? l.it : 0, cq: 0, ct: 0, dvq: 0, dvt: 0, vq: 0, cmv: 0, dcq: 0, dct: 0 }; ordem.push(l.p); }
-      if (l.novo) a.novo = true; ['cq', 'ct', 'dvq', 'dvt', 'vq', 'cmv', 'dcq', 'dct'].forEach(k => a[k] += l[k]); a.fq = l.fq; a.ft = l.ft; if (!a.desc && l.desc) a.desc = l.desc; });
-    const linhas = ordem.map(p => { const a = ac[p]; a.teq = a.cq + a.dvq; a.tet = a.ct + a.dvt; a.dq = R4(a.iq + a.teq); a.dt = a.it + a.tet; a.pm = a.dq ? a.dt / a.dq : 0; a.tsq = a.vq + a.dcq; a.tst = a.cmv + a.dct; a.alerta = a.fq < -1e-9; return a; });
+    for (let m = m0; m <= 12; m++) (r.porMes[m] || []).forEach(l => { let a = ac[l.p]; if (!a) { a = ac[l.p] = { p: l.p, desc: l.desc, novo: false, iq: m === m0 ? l.iq : 0, it: m === m0 ? l.it : 0, cq: 0, ct: 0, dvq: 0, dvt: 0, vq: 0, cmv: 0, dcq: 0, dct: 0, bq: 0, bt: 0, pq: 0, pt: 0, xq: 0, xt: 0, oq: 0, ot: 0 }; ordem.push(l.p); }
+      if (l.novo) a.novo = true; ['cq', 'ct', 'dvq', 'dvt', 'vq', 'cmv', 'dcq', 'dct', 'bq', 'bt', 'pq', 'pt', 'xq', 'xt', 'oq', 'ot'].forEach(k => a[k] += l[k] || 0); a.fq = l.fq; a.ft = l.ft; if (!a.desc && l.desc) a.desc = l.desc; });
+    const linhas = ordem.map(p => { const a = ac[p]; a.teq = a.cq + a.dvq + a.bq; a.tet = a.ct + a.dvt; a.dq = R4(a.iq + a.teq); a.dt = a.it + a.tet; a.pm = a.dq ? a.dt / a.dq : 0; a.tsq = a.vq + a.dcq + a.pq + a.xq + a.oq; a.tst = a.cmv + a.dct + a.pt + a.xt + a.ot; a.alerta = a.fq < -1e-9; return a; });
     return { linhas, m0 };
   }
 
+  // grupos de colunas da aba Estoque e do Excel — bonificação, perdas, uso e consumo e doações só aparecem quando há movimento no período
+  function gruposEst(linhas) {
+    const tem = k => linhas.some(l => Math.abs(l[k] || 0) > 1e-9);
+    return [
+      { t: 'Estoque inicial', c: '#1E3558', k: [['iq', 'Qtd.', 'q'], ['it', 'Total']] },
+      { t: 'Compras', c: '#0F766E', k: [['cq', 'Qtd.', 'q'], ['ct', 'Custo']] },
+      { t: 'Devol. de venda', c: '#0E7490', k: [['dvq', 'Qtd.', 'q'], ['dvt', 'Custo']] },
+      tem('bq') && { t: 'Bonificações recebidas', c: '#15803D', k: [['bq', 'Qtd.', 'q'], ['bt', 'Custo']] },
+      { t: 'Total entradas', c: '#065F46', k: [['teq', 'Qtd.', 'q', 1], ['tet', 'Custo', '', 1]] },
+      { t: 'Disponível / preço médio', c: '#334155', k: [['dq', 'Qtd.', 'q'], ['dt', 'Total'], ['pm', 'Preço médio', '', 1]] },
+      { t: 'Vendas (CMV)', c: '#9A3412', k: [['vq', 'Qtd.', 'q'], ['cmv', 'CMV', '', 0, '#9A3412']] },
+      { t: 'Devol. de compra', c: '#7C2D12', k: [['dcq', 'Qtd.', 'q'], ['dct', 'Custo']] },
+      tem('pq') && { t: 'Perdas / avarias', c: '#B91C1C', k: [['pq', 'Qtd.', 'q'], ['pt', 'Custo']] },
+      tem('oq') && { t: 'Doações / brindes / amostras', c: '#BE185D', k: [['oq', 'Qtd.', 'q'], ['ot', 'Custo']] },
+      { t: 'Total saídas', c: '#7F1D1D', k: [['tsq', 'Qtd.', 'q', 1], ['tst', 'Custo', '', 1]] },
+      { t: 'Estoque final', c: '#854D0E', k: [['fq', 'Qtd.', 'q', 1, 'neg'], ['ft', 'Total', '', 1, 'neg']] }
+    ].filter(Boolean);
+  }
+  const temMov = l => l.iq || l.it || l.cq || l.dvq || l.vq || l.dcq || l.bq || l.pq || l.xq || l.oq || l.fq || Math.abs(l.ft) > 0.004;
   // ── lista padrão de empresas ──
   function abrir() { const la = document.getElementById('estoqueListaArea'), rt = document.getElementById('estoqueRoot'); if (la) la.style.display = ''; if (rt) rt.style.display = 'none'; if (typeof prepararAdicionarEmpresa === 'function') prepararAdicionarEmpresa('estoque'); }
   function abrirEmp(eid) { ST.eid = String(eid); const emp = lerEmp(ST.eid); if (!emp.anos.length) { emp.anos = [fechAno()]; S.s(kEmp(ST.eid), emp); } ST.ano = emp.anos.includes(fechAno()) ? fechAno() : emp.anos[emp.anos.length - 1]; ST.mes = fechMes(); const la = document.getElementById('estoqueListaArea'), rt = document.getElementById('estoqueRoot'); if (la) la.style.display = 'none'; if (rt) rt.style.display = ''; render(); }
@@ -156,22 +179,21 @@
   function corpo0() {
     const el = document.getElementById('estoqueCorpo'); if (!el) return; const f = nrm(ST.filtro), emp = lerEmp(ST.eid);
     if (ST.aba === 'est') {
-      const r = ST.mes === 13 ? calcularAcumulado(ST.eid, ST.ano) : calcularAno(ST.eid, ST.ano, ST.mes); let ls = r.linhas.filter(l => !f || nrm(l.p + ' ' + l.desc).includes(f)); if (ST.soMov) ls = ls.filter(l => l.iq || l.it || l.cq || l.dvq || l.vq || l.dcq || l.fq || Math.abs(l.ft) > 0.004);
+      const r = ST.mes === 13 ? calcularAcumulado(ST.eid, ST.ano) : calcularAno(ST.eid, ST.ano, ST.mes); let ls = r.linhas.filter(l => !f || nrm(l.p + ' ' + l.desc).includes(f)); if (ST.soMov) ls = ls.filter(temMov);
       if (!r.linhas.length) { el.innerHTML = '<div style="padding:14px;border:1px dashed var(--border);border-radius:8px;color:var(--slate)">Sem estoque neste mês. Importe o <b>estoque inicial</b> (inventário) e anexe os <b>XMLs</b> das notas de entrada e saída.</div>'; return; }
-      const T = {}; ['iq', 'it', 'cq', 'ct', 'dvq', 'dvt', 'teq', 'tet', 'dq', 'dt', 'vq', 'cmv', 'dcq', 'dct', 'tsq', 'tst', 'fq', 'ft'].forEach(k => T[k] = 0);
-      const C15 = ['iq', 'it', 'cq', 'ct', 'dvq', 'dvt', 'teq', 'tet', 'dq', 'dt', 'pm', 'vq', 'cmv', 'dcq', 'dct', 'tsq', 'tst', 'fq', 'ft']; const fc = ST.fc || {};
-      ls = ls.filter(l => (!fc.st || (fc.st === 'novo' ? l.novo : fc.st === 'neg' ? l.alerta : fc.st === 'mov' ? (l.cq || l.dvq || l.vq || l.dcq) : (!l.novo && !l.alerta))) && casaTxt(l.p, fc.p) && casaTxt(l.desc, fc.d) && C15.every(k => casaNum(l[k], fc[k])));
+      const G = gruposEst(r.linhas), COLS = [].concat(...G.map(g => g.k)), C15 = COLS.map(c => c[0]), fc = ST.fc || {}; const T = {}; C15.forEach(k => T[k] = 0);
+      ls = ls.filter(l => (!fc.st || (fc.st === 'novo' ? l.novo : fc.st === 'neg' ? l.alerta : fc.st === 'mov' ? (l.cq || l.dvq || l.vq || l.dcq || l.bq || l.pq || l.xq || l.oq) : (!l.novo && !l.alerta))) && casaTxt(l.p, fc.p) && casaTxt(l.desc, fc.d) && C15.every(k => casaNum(l[k], fc[k])));
       let t = THEAD + '<tr>' + '<th rowspan="2" style="padding:5px;background:var(--ink2);color:#fff">Status</th><th rowspan="2" style="padding:5px 8px;text-align:left;background:var(--ink2);color:#fff">Produto</th><th rowspan="2" style="padding:5px 8px;text-align:left;background:var(--ink2);color:#fff">Descrição</th>'
-        + grp('Estoque inicial', 2, '#1E3558') + grp('Compras', 2, '#0F766E') + grp('Devol. de venda', 2, '#0E7490') + grp('Total entradas', 2, '#065F46') + grp('Disponível / preço médio', 3, '#334155') + grp('Vendas', 2, '#9A3412') + grp('Devol. de compra', 2, '#7C2D12') + grp('Total saídas', 2, '#7F1D1D') + grp('Estoque final', 2, '#854D0E') + '</tr><tr>'
-        + ['Qtd.', 'Total', 'Qtd.', 'Custo', 'Qtd.', 'Custo', 'Qtd.', 'Custo', 'Qtd.', 'Total', 'Preço médio', 'Qtd.', 'CMV', 'Qtd.', 'Custo', 'Qtd.', 'Custo', 'Qtd.', 'Total'].map(x => th(x, 'right')).join('') + '</tr>'
+        + G.map(g => grp(g.t, g.k.length, g.c)).join('') + '</tr><tr>' + COLS.map(c => th(c[1], 'right')).join('') + '</tr>'
         + '<tr><th style="padding:3px;background:var(--ink3,#2D3447)"><select class="si" onchange="Estoque.fcol(\'st\',this.value,1)" style="font-size:11px;padding:2px;width:64px"><option value="">Todos</option><option value="novo"' + (fc.st === 'novo' ? ' selected' : '') + '>Novo</option><option value="neg"' + (fc.st === 'neg' ? ' selected' : '') + '>Negativo</option><option value="mov"' + (fc.st === 'mov' ? ' selected' : '') + '>Com movimento</option><option value="ok"' + (fc.st === 'ok' ? ' selected' : '') + '>Sem alerta</option></select></th>' + fIn('p', '🔎', 60) + fIn('d', '🔎 descrição', 90) + C15.map(k => fIn(k, '', 44)).join('') + '</tr></thead><tbody>';
-      ls.forEach(l => { Object.keys(T).forEach(k => T[k] += l[k]);
+      const cel = (l, c) => vc(l[c[0]], !!c[3], c[4] === 'neg' ? ((c[2] === 'q' ? l[c[0]] < 0 : l[c[0]] < -0.004) ? '#dc2626' : '') : (c[4] || 0), c[2] === 'q' ? 1 : 0);
+      ls.forEach(l => { C15.forEach(k => { if (k !== 'pm') T[k] += l[k] || 0; });
         t += '<tr style="' + (l.novo ? 'background:#fef08a;color:#111' : (l.alerta ? 'background:rgba(220,38,38,.12)' : '')) + '"><td style="padding:3px 6px;text-align:center">' + (l.novo ? '<b style="color:#854d0e">Novo</b>' : '') + '</td><td style="padding:3px 6px;font-weight:600;white-space:nowrap;max-width:90px;overflow:hidden;text-overflow:ellipsis" title="' + E(l.p) + '">' + E(l.p) + '</td><td style="padding:3px 6px;font-size:11px;max-width:190px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + E(l.desc) + '">' + E(l.desc) + '</td>'
-          + vc(l.iq, 0, 0, 1) + vc(l.it) + vc(l.cq, 0, 0, 1) + vc(l.ct) + vc(l.dvq, 0, 0, 1) + vc(l.dvt) + vc(l.teq, 1, 0, 1) + vc(l.tet, 1) + vc(l.dq, 0, 0, 1) + vc(l.dt) + vc(l.pm, 1) + vc(l.vq, 0, 0, 1) + vc(l.cmv, 0, '#9A3412') + vc(l.dcq, 0, 0, 1) + vc(l.dct) + vc(l.tsq, 1, 0, 1) + vc(l.tst, 1) + vc(l.fq, 1, l.fq < 0 ? '#dc2626' : '', 1) + vc(l.ft, 1, l.ft < -0.004 ? '#dc2626' : '') + '</tr>'; });
-      t += '<tr style="font-weight:700;background:var(--bg)"><td></td><td colspan="2" style="padding:5px 8px">TOTAL (' + ls.length + ')</td>' + ['iq', 'it', 'cq', 'ct', 'dvq', 'dvt', 'teq', 'tet', 'dq', 'dt'].map((k, i) => vc(T[k], 1, 0, i % 2 === 0)).join('') + '<td></td>' + ['vq', 'cmv', 'dcq', 'dct', 'tsq', 'tst', 'fq', 'ft'].map((k, i) => vc(T[k], 1, 0, i % 2 === 0)).join('') + '</tr></tbody>';
+          + COLS.map(c => cel(l, c)).join('') + '</tr>'; });
+      t += '<tr style="font-weight:700;background:var(--bg)"><td></td><td colspan="2" style="padding:5px 8px">TOTAL (' + ls.length + ')</td>' + COLS.map(c => c[0] === 'pm' ? '<td></td>' : vc(T[c[0]], 1, 0, c[2] === 'q' ? 1 : 0)).join('') + '</tr></tbody>';
       const nN = r.linhas.filter(l => l.novo).length, nA = r.linhas.filter(l => l.alerta).length;
       el.innerHTML = (nN ? '<div style="font-size:12.5px;margin-bottom:4px"><span style="background:#fef08a;color:#854d0e;padding:1px 6px;border-radius:4px;font-weight:700">' + nN + ' produto(s) novo(s)</span> neste mês (no fim da lista).</div>' : '') + (nA ? '<div style="color:#dc2626;font-size:12.5px;margin-bottom:4px">⚠ ' + nA + ' produto(s) com saída maior que o estoque (vermelho): falta estoque inicial, entrada ou vínculo do produto.</div>' : '') + box(t)
-        + '<div style="font-size:11.5px;color:var(--slate);margin-top:6px">' + (ST.mes === 13 ? 'Acumulado de ' + MESES[mesInicioAcum(ST.eid, ST.ano) - 1] + ' a Dez/' + ST.ano + (mesInicioAcum(ST.eid, ST.ano) > 1 ? ' (começa no mês do estoque inicial importado — os meses antes dele não entram, porque o inventário já os substitui)' : '') + ': inicial = estoque inicial do primeiro mês; entradas, saídas e CMV = soma dos meses; final = estoque de dezembro. Inicial + entradas − saídas = final. ' : '') + 'Inicial = ' + (lerAno(ST.eid, ST.ano).iniMes[ST.mes] ? 'estoque inicial importado para ' + nomeMes(ST.mes) : 'estoque final do mês anterior') + '. Entradas = compras (custo da nota, ⚙) + devoluções de venda (pelo preço médio inicial). Preço médio = total disponível ÷ qtd. disponível. Saídas = vendas × preço médio (CMV) + devoluções de compra (custo da nota). Final = disponível − saídas.</div>';
+        + '<div style="font-size:11.5px;color:var(--slate);margin-top:6px">' + (ST.mes === 13 ? 'Acumulado de ' + MESES[mesInicioAcum(ST.eid, ST.ano) - 1] + ' a Dez/' + ST.ano + (mesInicioAcum(ST.eid, ST.ano) > 1 ? ' (começa no mês do estoque inicial importado — os meses antes dele não entram, porque o inventário já os substitui)' : '') + ': inicial = estoque inicial do primeiro mês; entradas, saídas e CMV = soma dos meses; final = estoque de dezembro. Inicial + entradas − saídas = final. ' : '') + 'Inicial = ' + (lerAno(ST.eid, ST.ano).iniMes[ST.mes] ? 'estoque inicial importado para ' + nomeMes(ST.mes) : 'estoque final do mês anterior') + '. Entradas = compras (custo da nota, ⚙) + devoluções de venda (pelo preço médio inicial). Preço médio = total disponível ÷ qtd. disponível. Saídas = vendas × preço médio (CMV) + devoluções de compra (custo da nota) + perdas e doações/brindes/amostras × preço médio (separados do CMV, CPC 16). Bonificação recebida entra com custo zero. Remessas para demonstração, consignação ou conserto não baixam o estoque (continuam sendo da empresa). Final = disponível − saídas.</div>';
       return;
     }
     const tipo = ST.aba === 'ent' ? 'E' : 'S', ded = emp.cfg.ded;
@@ -187,9 +209,9 @@
     let t = THEAD + '<tr>' + th('Data', 'left') + th('NF', 'left') + th(tipo === 'E' ? 'Fornecedor' : 'Cliente', 'left') + th('CFOP', 'left') + th('Operação', 'left') + th('Código', 'left') + th('Descrição', 'left') + th('NCM', 'left') + th('Qtd.') + th('Valor produto')
       + (tipo === 'E' ? th('Frete/seg./outras') + th('Desconto') + th('IPI') + th('ICMS-ST') + th('ICMS') + th('PIS') + th('COFINS') + th('Custo no estoque') + th('Custo unit.') + th('Item no estoque', 'left') : th('Item no estoque', 'left')) + '</tr><tr>' + colsF.map(k => fIn('x_' + k, numCols.includes(k) ? '' : '🔎', ['desc', 'part'].includes(k) ? 110 : 52)).join('') + '</tr></thead><tbody>';
     let tq = 0, tv = 0, tc = 0;
-    its.forEach(i => { const cl = classeCfop(i.cfop, emp.cfg, i.tipo), c = tipo === 'E' ? custoItem(i, ded) : 0, p = chaveProduto(emp, i); tq += i.q; tv += i.vProd; tc += c;
+    its.forEach(i => { const cl = classeCfop(i.cfop, emp.cfg, i.tipo), c = tipo === 'E' && cl !== 'bonif' ? custoItem(i, ded) : 0, p = chaveProduto(emp, i); tq += i.q; tv += i.vProd; tc += c;
       const kv = (i.tipo === 'E' ? 'E|' + String(i.partCnpj || '').slice(0, 8) + '|' : 'S||') + i.cprod;
-      t += '<tr style="' + (cl === 'outra' ? 'opacity:.55' : '') + '"><td style="padding:3px 6px;white-space:nowrap">' + E(String(i.data).split('-').reverse().join('/')) + '</td><td style="padding:3px 6px">' + E(i.nf) + '</td><td style="padding:3px 6px;font-size:11.5px">' + E(i.part) + '</td><td style="padding:3px 6px;white-space:nowrap" title="' + E(((root.CFOP_JJR || {})[cfopNosso(i.cfop, i.tipo)] || [''])[0]) + '">' + E(i.cfop) + (cfopNosso(i.cfop, i.tipo) != i.cfop ? ' → ' + cfopNosso(i.cfop, i.tipo) : '') + '</td><td style="padding:3px 6px;font-size:11px">' + ROT_CL[cl] + '</td><td style="padding:3px 6px;white-space:nowrap">' + E(i.cprod) + '</td><td style="padding:3px 6px;font-size:11.5px">' + E(i.desc) + '</td><td style="padding:3px 6px">' + E(i.ncm) + '</td>' + vc(i.q, 0, 0, 1) + vc(i.vProd)
+      t += '<tr style="' + (NAO_MEXE[cl] ? 'opacity:.55' : '') + '"><td style="padding:3px 6px;white-space:nowrap">' + E(String(i.data).split('-').reverse().join('/')) + '</td><td style="padding:3px 6px">' + E(i.nf) + '</td><td style="padding:3px 6px;font-size:11.5px">' + E(i.part) + '</td><td style="padding:3px 6px;white-space:nowrap" title="' + E(((root.CFOP_JJR || {})[cfopNosso(i.cfop, i.tipo)] || [''])[0]) + '">' + E(i.cfop) + (cfopNosso(i.cfop, i.tipo) != i.cfop ? ' → ' + cfopNosso(i.cfop, i.tipo) : '') + '</td><td style="padding:3px 6px;font-size:11px">' + ROT_CL[cl] + '</td><td style="padding:3px 6px;white-space:nowrap">' + E(i.cprod) + '</td><td style="padding:3px 6px;font-size:11.5px">' + E(i.desc) + '</td><td style="padding:3px 6px">' + E(i.ncm) + '</td>' + vc(i.q, 0, 0, 1) + vc(i.vProd)
         + (tipo === 'E' ? vc(i.vFrete + i.vSeg + i.vOutro + (i.vDif || 0)) + vc(i.vDesc, 0, ded.desc ? '#16a34a' : 'var(--slate)') + vc(i.vIPI) + vc(i.vST) + vc(i.vICMS, 0, ded.icms ? '#16a34a' : 'var(--slate)') + vc(i.vPIS, 0, ded.pis ? '#16a34a' : 'var(--slate)') + vc(i.vCOFINS, 0, ded.cofins ? '#16a34a' : 'var(--slate)') + vc(c, 1) + vc(i.q ? c / i.q : 0) : '')
         + '<td style="padding:2px"><input class="si" list="estProdDL" value="' + E(p) + '" onchange="Estoque.vincular(\'' + E(kv).replace(/'/g, '&#39;') + '\',this.value)" style="width:150px;font-size:11.5px;padding:3px"></td></tr>'; });
     t += '<tr style="font-weight:700;background:var(--bg)"><td colspan="8" style="padding:5px 6px">TOTAL (' + its.length + ' itens)</td>' + vc(tq, 1, 0, 1) + vc(tv, 1) + (tipo === 'E' ? '<td colspan="7"></td>' + vc(tc, 1) + '<td></td>' : '') + '<td></td></tr></tbody>';
@@ -206,10 +228,13 @@
       + [['prod', 'Produto (código)', 'mesmo código = mesmo item'], ['desc', 'Descrição', 'mesma descrição = mesmo item, mesmo que o código seja diferente']].map(([v, n, x]) => '<label style="display:flex;gap:8px;align-items:center;margin:5px 0"><input type="radio" name="estChave" value="' + v + '" ' + ((emp.cfg.chave || 'prod') === v ? 'checked' : '') + '> <b>' + n + '</b> <span style="font-size:12px;color:var(--slate)">— ' + x + '</span></label>').join('')
       + '<div style="margin:14px 0 4px;font-weight:700;font-size:13px;border-top:1px solid var(--border,#ddd);padding-top:10px">Custo das entradas</div><div style="font-size:12.5px;color:var(--slate);margin:0 0 10px">Marque os impostos que a empresa <b>recupera</b> (crédito): eles são descontados do custo do produto que vai para o estoque. Frete, seguro, outras despesas e a diferença da nota são sempre rateados pelo valor dos produtos. O desconto da nota <b>não</b> é abatido, a não ser que você marque a última opção.</div>'
       + it.map(([k, n]) => '<label style="display:flex;gap:8px;align-items:center;margin:5px 0"><input type="checkbox" data-ded="' + k + '" ' + (d[k] ? 'checked' : '') + '> Descontar <b>' + n + '</b> do custo</label>').join('')
+      + '<div style="margin:14px 0 4px;font-weight:700;font-size:13px;border-top:1px solid var(--border,#ddd);padding-top:10px">CFOP com tratamento próprio nesta empresa</div><div style="font-size:12.5px;color:var(--slate);margin:0 0 6px">Um por linha, CFOP = tipo. Tipos: <b>compra, devvenda, bonif, venda, devcompra, perda, doacao, terceiros, outra</b>. Ex.: <code>5949 = perda</code>. Este estoque é só de mercadoria de revenda (uso e consumo não entra).</div>'
+      + '<textarea id="estCfgCfop" class="fi" rows="4" style="width:100%;font-family:var(--mono);font-size:12px">' + E(Object.keys(emp.cfg.cfop || {}).map(k => k + ' = ' + emp.cfg.cfop[k]).join('\n')) + '</textarea>'
       + '<div style="text-align:right;margin-top:12px;display:flex;gap:8px;justify-content:flex-end"><button class="btn bo bsm" onclick="document.getElementById(\'estCfgModal\').remove()">Cancelar</button><button class="btn bp bsm" onclick="Estoque.salvarConfig()">Salvar</button></div></div>';
     document.getElementById('estCfgModal')?.remove(); document.body.appendChild(ov);
   }
-  function salvarConfig() { const emp = lerEmp(ST.eid); document.querySelectorAll('#estCfgModal input[data-ded]').forEach(c => { emp.cfg.ded[c.dataset.ded] = c.checked; }); const ch = document.querySelector('#estCfgModal input[name=estChave]:checked'); if (ch) emp.cfg.chave = ch.value; S.s(kEmp(ST.eid), emp); document.getElementById('estCfgModal')?.remove(); toast('Configurações salvas.', 'ok'); render(); }
+  function salvarConfig() { const emp = lerEmp(ST.eid); document.querySelectorAll('#estCfgModal input[data-ded]').forEach(c => { emp.cfg.ded[c.dataset.ded] = c.checked; }); const ch = document.querySelector('#estCfgModal input[name=estChave]:checked'); if (ch) emp.cfg.chave = ch.value;
+    const ta = document.getElementById('estCfgCfop'); if (ta) { const ok = ['compra', 'devvenda', 'bonif', 'venda', 'devcompra', 'perda', 'doacao', 'terceiros', 'outra'], m = {}, ruins = []; ta.value.split(/\n/).forEach(x => { x = x.trim(); if (!x) return; const r = x.match(/^(\d{4})\s*[=:]\s*([a-z]+)$/i); if (r && ok.includes(r[2].toLowerCase())) m[+r[1]] = r[2].toLowerCase(); else ruins.push(x); }); if (ruins.length) { toast('Linha(s) não entendida(s): ' + ruins.join(' | '), 'err'); return; } emp.cfg.cfop = m; } S.s(kEmp(ST.eid), emp); document.getElementById('estCfgModal')?.remove(); toast('Configurações salvas.', 'ok'); render(); }
   function vincular(kv, val) { const emp = lerEmp(ST.eid); val = String(val || '').trim(); if (val) emp.vinc[kv] = val; else delete emp.vinc[kv]; S.s(kEmp(ST.eid), emp); toast(val ? 'Vínculo salvo (vale para as próximas notas desse produto).' : 'Vínculo removido.', 'ok'); corpo(); }
   function anexarXml() { const inp = document.createElement('input'); inp.type = 'file'; inp.multiple = true; inp.accept = '.xml'; inp.onchange = () => processarArquivos([...inp.files]); inp.click(); }
   // ── pasta da empresa (guardada neste navegador, uma por empresa) → 🔄 Importar XMLs sem escolher arquivo ──
@@ -267,19 +292,21 @@
     const wb = new ExcelJS.Workbook(), fill = c => ({ type: 'pattern', pattern: 'solid', fgColor: { argb: c } }), bd = { top: { style: 'thin', color: { argb: 'FFCBD5E1' } }, left: { style: 'thin', color: { argb: 'FFCBD5E1' } }, bottom: { style: 'thin', color: { argb: 'FFCBD5E1' } }, right: { style: 'thin', color: { argb: 'FFCBD5E1' } } };
     const MO = '#,##0.00;[Red]-#,##0.00', QT = '#,##0.####';
     for (let m = 1; m <= 12; m++) {
-      const ls = calcularAno(ST.eid, ST.ano, m).linhas.filter(l => l.iq || l.it || l.cq || l.dvq || l.vq || l.dcq || l.fq || Math.abs(l.ft) > 0.004); if (!ls.length) continue;
+      const ls = calcularAno(ST.eid, ST.ano, m).linhas.filter(temMov); if (!ls.length) continue;
+      const G = gruposEst(ls), COLS = [].concat(...G.map(g => g.k)), NC = 3 + COLS.length;
       const ws = wb.addWorksheet(MESES[m - 1] + '-' + ST.ano, { views: [{ showGridLines: false, state: 'frozen', ySplit: 6, xSplit: 3 }], pageSetup: { orientation: 'landscape', fitToPage: true, fitToWidth: 1, fitToHeight: 0 } });
-      ws.columns = [{ width: 7 }, { width: 14 }, { width: 34 }, ...Array(19).fill({ width: 12 })];
-      const fx = (r, t, cor, tam) => { ws.mergeCells(r, 1, r, 22); const c = ws.getCell(r, 1); c.value = t; c.font = { bold: true, size: tam, color: { argb: 'FFFFFFFF' } }; c.fill = fill(cor); ws.getRow(r).height = tam + 10; };
-      fx(1, 'JJR CONSULTORIA CONTÁBIL', 'FF1E3558', 16); fx(2, 'Controle de Estoque — custo médio ponderado — ' + MESES[m - 1] + '/' + ST.ano, 'FF0F766E', 12);
-      ws.mergeCells(3, 1, 3, 22); ws.getCell(3, 1).value = (empC.nome || '#' + ST.eid) + (empC.cnpj ? ' · CNPJ ' + empC.cnpj : ''); ws.getCell(3, 1).font = { bold: true, color: { argb: 'FF1E3558' } };
-      const g = [['', 3, 'FF1E3558'], ['Estoque inicial', 2, 'FF1E3558'], ['Compras', 2, 'FF0F766E'], ['Devol. de venda', 2, 'FF0E7490'], ['Total entradas', 2, 'FF065F46'], ['Disponível', 3, 'FF334155'], ['Vendas', 2, 'FF9A3412'], ['Devol. de compra', 2, 'FF7C2D12'], ['Total saídas', 2, 'FF7F1D1D'], ['Estoque final', 2, 'FF854D0E']]; let c0 = 1;
-      g.forEach(([t, n, cor]) => { ws.mergeCells(5, c0, 5, c0 + n - 1); const c = ws.getCell(5, c0); c.value = t; c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.alignment = { horizontal: 'center' }; for (let k = 0; k < n; k++) ws.getCell(5, c0 + k).fill = fill(cor); c0 += n; });
-      ['Status', 'Produto', 'Descrição', 'Qtd.', 'Total', 'Qtd.', 'Custo', 'Qtd.', 'Custo', 'Qtd.', 'Custo', 'Qtd.', 'Total', 'Preço médio', 'Qtd.', 'CMV', 'Qtd.', 'Custo', 'Qtd.', 'Custo', 'Qtd.', 'Total'].forEach((t, i) => { const c = ws.getCell(6, i + 1); c.value = t; c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.fill = fill('FF475569'); c.border = bd; c.alignment = { horizontal: i > 2 ? 'right' : 'left' }; });
-      let r = 7; const T = Array(22).fill(0);
-      ls.forEach((l, k) => { const vals = [l.novo ? 'Novo' : '', l.p, l.desc, l.iq, l.it, l.cq, l.ct, l.dvq, l.dvt, l.teq, l.tet, l.dq, l.dt, l.pm, l.vq, l.cmv, l.dcq, l.dct, l.tsq, l.tst, l.fq, l.ft];
-        vals.forEach((x, i) => { const c = ws.getCell(r, i + 1); c.value = i > 2 ? R4(x) : x; c.border = bd; c.fill = fill(l.novo ? 'FFFEF08A' : (l.alerta ? 'FFFEE2E2' : (k % 2 ? 'FFF1F5F9' : 'FFFFFFFF'))); if (i > 2) { c.numFmt = [3, 5, 7, 9, 11, 14, 16, 18, 20].includes(i) ? QT : MO; if (i !== 13) T[i] += Number(x) || 0; } }); r++; });
-      for (let i = 1; i <= 22; i++) { const c = ws.getCell(r, i); c.fill = fill('FFFFD700'); c.font = { bold: true }; c.border = bd; if (i === 2) c.value = 'TOTAL'; if (i > 3 && i !== 14) { c.value = R2(T[i - 1]); c.numFmt = [4, 6, 8, 10, 12, 15, 17, 19, 21].includes(i) ? QT : MO; } }
+      ws.columns = [{ width: 7 }, { width: 14 }, { width: 34 }, ...Array(COLS.length).fill({ width: 12 })];
+      const fx = (r, t, cor, tam) => { ws.mergeCells(r, 1, r, NC); const c = ws.getCell(r, 1); c.value = t; c.font = { bold: true, size: tam, color: { argb: 'FFFFFFFF' } }; c.fill = fill(cor); ws.getRow(r).height = tam + 10; };
+      fx(1, 'JJR CONSULTORIA CONTÁBIL', 'FF1E3558', 16); fx(2, 'Controle de Estoque — custo médio ponderado (CPC 16) — ' + MESES[m - 1] + '/' + ST.ano, 'FF0F766E', 12);
+      ws.mergeCells(3, 1, 3, NC); ws.getCell(3, 1).value = (empC.nome || '#' + ST.eid) + (empC.cnpj ? ' · CNPJ ' + empC.cnpj : ''); ws.getCell(3, 1).font = { bold: true, color: { argb: 'FF1E3558' } };
+      let c0 = 4; ws.mergeCells(5, 1, 5, 3); ws.getCell(5, 1).fill = fill('FF1E3558');
+      G.forEach(g => { const n = g.k.length; if (n > 1) ws.mergeCells(5, c0, 5, c0 + n - 1); const c = ws.getCell(5, c0); c.value = g.t; c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.alignment = { horizontal: 'center', wrapText: true }; for (let k = 0; k < n; k++) ws.getCell(5, c0 + k).fill = fill('FF' + g.c.slice(1)); c0 += n; });
+      ws.getRow(5).height = 30;
+      ['Status', 'Produto', 'Descrição'].concat(COLS.map(c => c[1])).forEach((t, i) => { const c = ws.getCell(6, i + 1); c.value = t; c.font = { bold: true, color: { argb: 'FFFFFFFF' } }; c.fill = fill('FF475569'); c.border = bd; c.alignment = { horizontal: i > 2 ? 'right' : 'left' }; });
+      let r = 7; const T = Array(COLS.length).fill(0);
+      ls.forEach((l, k) => { const vals = [l.novo ? 'Novo' : '', l.p, l.desc].concat(COLS.map(c => l[c[0]] || 0));
+        vals.forEach((x, i) => { const c = ws.getCell(r, i + 1); c.value = i > 2 ? R4(x) : x; c.border = bd; c.fill = fill(l.novo ? 'FFFEF08A' : (l.alerta ? 'FFFEE2E2' : (k % 2 ? 'FFF1F5F9' : 'FFFFFFFF'))); if (i > 2) { const cc = COLS[i - 3]; c.numFmt = cc[2] === 'q' ? QT : MO; if (cc[0] !== 'pm') T[i - 3] += Number(x) || 0; } }); r++; });
+      for (let i = 1; i <= NC; i++) { const c = ws.getCell(r, i); c.fill = fill('FFFFD700'); c.font = { bold: true }; c.border = bd; if (i === 2) c.value = 'TOTAL'; if (i > 3 && COLS[i - 4][0] !== 'pm') { c.value = R2(T[i - 4]); c.numFmt = COLS[i - 4][2] === 'q' ? QT : MO; } }
     }
     if (!wb.worksheets.length) { toast('Nada para exportar neste ano.', 'err'); return; }
     const buf = await wb.xlsx.writeBuffer(); const url = URL.createObjectURL(new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
