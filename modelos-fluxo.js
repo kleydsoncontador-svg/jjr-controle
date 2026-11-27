@@ -52,17 +52,19 @@
   const fill = argb => ({ type: 'pattern', pattern: 'solid', fgColor: { argb } });
   const FMT_V = '#,##0.00;[Red]-#,##0.00';
 
+  const empSel = () => { const eid = (document.getElementById('modFluxoEmp') || {}).value || ''; return { eid, emp: eid ? (S.emps().find(e => String(e.eid) === String(eid)) || null) : null }; };
+  const nomeLimpo = emp => emp ? ' - ' + String(emp.nome).replace(/[\\/:*?"<>|]/g, '').slice(0, 50) : '';
+  function baixarBlob(blob, nome) { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nome; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500); }
+  async function arquivo(chave) {
+    const { eid, emp } = empSel(); const { wb } = await montar(chave, eid);
+    return { nome: 'Modelo Fluxo de Caixa - ' + VARIANTES[chave].nome + nomeLimpo(emp) + '.xlsx', buf: await wb.xlsx.writeBuffer() };
+  }
   async function gerar(chave) {
     if (typeof ExcelJS === 'undefined') { toast('Biblioteca ExcelJS não carregada', 'err'); return; }
-    const V = VARIANTES[chave]; if (!V) return;
-    const eid = (document.getElementById('modFluxoEmp') || {}).value || '';
-    const { wb, emp } = await montar(chave, eid);
-    const nomeEmp = emp ? ' - ' + String(emp.nome).replace(/[\\/:*?"<>|]/g, '').slice(0, 50) : '';
-    const nomeArq = 'Modelo Fluxo de Caixa - ' + V.nome + nomeEmp + '.xlsx';
-    const buf = await wb.xlsx.writeBuffer();
-    const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
-    const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = nomeArq; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 1500);
-    toast('Modelo gerado: ' + nomeArq, 'ok');
+    if (!VARIANTES[chave]) return;
+    const f = await arquivo(chave);
+    baixarBlob(new Blob([f.buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }), f.nome);
+    toast('Modelo gerado: ' + f.nome, 'ok');
   }
   async function montar(chave, eid) {
     const V = VARIANTES[chave];
@@ -254,7 +256,18 @@
   async function baixarSelecionados(btn) {
     const sel = [...document.querySelectorAll('.modFluxoSel:checked')].map(c => c.value); if (!sel.length) return;
     if (btn) btn.disabled = true;
-    try { for (const k of sel) { await gerar(k); await new Promise(r => setTimeout(r, 400)); } } finally { if (btn) btn.disabled = false; }
+    const txt = btn ? btn.textContent : '';
+    try {
+      if (sel.length === 1) { await gerar(sel[0]); return; }
+      // 27/11/2026: vários modelos de uma vez saem num arquivo .zip só (só nesta tela)
+      if (typeof JSZip === 'undefined') { toast('Biblioteca de ZIP não carregada — recarregue a página (Ctrl+F5).', 'err'); return; }
+      if (btn) btn.textContent = '⏳ Gerando ' + sel.length + ' modelos…';
+      const zip = new JSZip();
+      for (const k of ORDEM.filter(x => sel.includes(x))) { const f = await arquivo(k); zip.file(f.nome, f.buf); }
+      const nomeZip = 'Modelos Fluxo de Caixa' + nomeLimpo(empSel().emp) + '.zip';
+      baixarBlob(await zip.generateAsync({ type: 'blob', compression: 'DEFLATE' }), nomeZip);
+      toast(sel.length + ' modelos baixados em um arquivo ZIP: ' + nomeZip, 'ok');
+    } finally { if (btn) { btn.disabled = false; if (txt) btn.textContent = txt; } }
   }
   root.ModFluxo = { atualizarSel, marcarTodos, baixarSelecionados, gerar, montar, render, ehModelo, lerWorkbook, VARIANTES };
 })(window);
