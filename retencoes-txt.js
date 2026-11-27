@@ -5,8 +5,8 @@
    Contas lembradas por empresa em dados_app "lancctb_ret_txt_<eid>". Retenção que não é descontada do Valor Líquido
    (veio vazia na UneCont ou regra "não descontar") fica de fora do TXT. Layout |6100| (gerarTxtMisterContador). */
 (function (root) {
-  const KEYS = ['iss', 'pis', 'cofins', 'csll', 'irrf'];
-  const NOMES = { iss: 'ISS', pis: 'PIS', cofins: 'COFINS', csll: 'CSLL', irrf: 'IRRF' };
+  const KEYS = ['iss', 'pis', 'cofins', 'csll', 'irrf', 'inss'];
+  const NOMES = { iss: 'ISS', pis: 'PIS', cofins: 'COFINS', csll: 'CSLL', irrf: 'IRRF', inss: 'INSS' };
   const E = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   let ctx = '', sel = new Map(); // nf_id → nf
   const eidAtual = () => (typeof _lancctbEidAtual !== 'undefined' ? String(_lancctbEidAtual) : '');
@@ -46,7 +46,7 @@
     try {
       const { data: parcelas, error } = await _lancctbFetchTudo(() => {
         let q = _supaClient.from('notas_fiscais_parcelas')
-          .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,ret_une_vazias,natureza_operacao,cod_servico,desc_servico,chave_acesso)')
+          .select('id,nf_id,numero_parcela,data_vencimento,data_emissao,valor_parcela,status_conciliacao,notas_fiscais!inner(numero,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,direcao,tipo,modelo,empresa_eid,data_emissao,valor_total,iss_valor,pis_valor,cofins_valor,csll_valor,irrf_valor,inss_valor,ret_une_vazias,natureza_operacao,cod_servico,desc_servico,chave_acesso)')
           .eq('empresa_eid', eid).eq('tipo', aba.tipoDoc).eq('direcao', aba.direcaoNf);
         q = _lancctbNotasAplicarFiltrosServidor(q, 'notas_fiscais.nome_emitente', 'notas_fiscais.cnpj_emitente', true);
         return q.order('data_emissao', { ascending: true }).order('id', { ascending: true });
@@ -63,7 +63,7 @@
     garantirCtx();
     return '<button class="btn bo bsm" onclick="RetTxt.selecionarFiltradas(this)" title="Marca TODAS as NFS-e que batem com os filtros da tela (todas as páginas), para o TXT das retenções">☑ Selecionar filtradas</button>'
       + '<button class="btn bo bsm" id="lancctbRetSelLimpar" style="' + (sel.size ? '' : 'display:none') + '" onclick="RetTxt.limpar()" title="Desmarca todas">✕ Limpar seleção</button>'
-      + '<button class="btn bo bsm" id="lancctbRetTxtBtn" onclick="RetTxt.gerar()" title="TXT de lançamentos das retenções das NFS-e marcadas na caixinha: débito na conta de fornecedor, crédito na conta de cada imposto retido. Você escolhe ISS, PIS, COFINS, CSLL, IRRF ou todos.">' + rotuloBotao() + '</button>';
+      + '<button class="btn bo bsm" id="lancctbRetTxtBtn" onclick="RetTxt.gerar()" title="TXT de lançamentos das retenções das NFS-e marcadas na caixinha: débito na conta de fornecedor, crédito na conta de cada imposto retido. Você escolhe ISS, PIS, COFINS, CSLL, IRRF, INSS ou todos.">' + rotuloBotao() + '</button>';
   }
   const cfgChave = eid => 'lancctb_ret_txt_' + eid;
   function cfgGet(eid) { let v = null; try { v = S.g(cfgChave(eid)); } catch (e) {} return (v && typeof v === 'object') ? v : {}; }
