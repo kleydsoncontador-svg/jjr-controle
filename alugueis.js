@@ -1,6 +1,6 @@
 /* ALUGUÉIS PAGOS (pedido do usuário 27/11/2026).
    Nos Lançamentos Contábeis, todo PAGAMENTO (saída do banco) lançado numa conta de aluguel do plano de contas (descrição com
-   "ALUGU…": despesa de aluguel ou aluguéis a pagar; receitas e "a receber" ficam fora) entra na lista "🏠 Aluguéis pagos":
+   "ALUGU…": despesa de aluguel ou aluguéis a pagar; receitas e "a receber" ficam fora) entra na lista "Aluguéis pagos":
    data, banco de onde saiu, valor, locador, total do locador no mês e o IRRF que incidiria pela TABELA PROGRESSIVA MENSAL da
    pessoa física (mesmo motor das Calculadoras: Lei 15.191/2025 + redução da Lei 15.270/2025 a partir de 2026; desconto
    simplificado quando mais vantajoso). Só pessoa física sofre retenção pela tabela; locador pessoa jurídica não.
@@ -96,7 +96,7 @@
     const emp = (S.emps() || []).find(e => String(e.eid) === ST.eid) || {};
     const D = ST.dados || { contas: [], linhas: [] }, G = analisar(ST.eid, D.linhas);
     const linhas = D.linhas.filter(l => l.ym.startsWith(String(ST.ano)) && (!ST.mes || +l.ym.slice(5) === ST.mes));
-    let h = '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px"><b style="font-size:16px">🏠 Aluguéis pagos</b><span style="color:var(--slate);font-size:13px">#' + E(ST.eid) + ' ' + E(emp.nome || '') + '</span>'
+    let h = '<div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px"><b style="font-size:16px"><img src=\"assets/aluguel-casa.svg\" alt=\"\" style=\"height:16px;width:16px;vertical-align:-3px\"> Aluguéis pagos</b><span style="color:var(--slate);font-size:13px">#' + E(ST.eid) + ' ' + E(emp.nome || '') + '</span>'
       + '<select class="si" onchange="Alugueis.ano(this.value)">' + [ST.ano - 1, ST.ano, ST.ano + 1].map(a => '<option' + (a === ST.ano ? ' selected' : '') + '>' + a + '</option>').join('') + '</select>'
       + '<select class="si" onchange="Alugueis.mes(this.value)"><option value="0">Todos os meses</option>' + MESES.map((m, i) => '<option value="' + (i + 1) + '"' + (ST.mes === i + 1 ? ' selected' : '') + '>' + m + '</option>').join('') + '</select>'
       + '<span style="margin-left:auto;display:flex;gap:6px"><button class="action-btn action-btn-excel" onclick="Alugueis.excel()">📊 Gerar Excel</button><button class="btn bo bsm" onclick="document.getElementById(\'alugModal\').remove()">✕ Fechar</button></span></div>';
@@ -162,7 +162,7 @@
     if (!el) { el = document.createElement('div'); el.id = 'alugAviso'; document.body.appendChild(el); }
     el.dataset.eid = eid; el._avisos = avisos;
     el.style.cssText = 'position:fixed;top:64px;right:16px;z-index:9500;max-width:420px;background:#fef3c7;color:#1f2937;border:2px solid #f59e0b;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.25);padding:12px 14px;font-size:12.5px;line-height:1.45';
-    el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="font-size:13.5px;color:#92400e">🏠 Aluguel — atenção</b><button onclick="document.getElementById(\'alugAviso\').remove()" title="Fechar (volta a aparecer depois)" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:15px;color:#92400e">✕</button></div>'
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px"><b style="font-size:13.5px;color:#92400e"><img src=\"assets/aluguel-casa.svg\" alt=\"\" style=\"height:16px;width:16px;vertical-align:-3px\"> Aluguel — atenção</b><button onclick="document.getElementById(\'alugAviso\').remove()" title="Fechar (volta a aparecer depois)" style="margin-left:auto;background:none;border:none;cursor:pointer;font-size:15px;color:#92400e">✕</button></div>'
       + avisos.slice(0, 6).map(a => '<div style="margin:3px 0">• ' + a.t + '</div>').join('') + (avisos.length > 6 ? '<div>… e mais ' + (avisos.length - 6) + '</div>' : '')
       + '<div style="display:flex;gap:6px;justify-content:flex-end;margin-top:8px"><button class="btn bo bsm" style="background:#fff;color:#92400e;border-color:#f59e0b" onclick="Alugueis.ciente()">Ciente</button><button class="btn bp bsm" onclick="Alugueis.abrir(\'' + E(eid) + '\')">Ver aluguéis pagos</button></div>';
   }
