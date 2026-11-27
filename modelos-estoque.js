@@ -39,12 +39,12 @@
     },
     simples: {
       nome: 'Estoque — revenda (simplificado)', arq: 'Modelo Estoque Revenda Simplificado',
-      desc: 'Comércio, versão enxuta: por produto, saldo inicial, entradas, custo das vendas (CMV), outras saídas e saldo final (a custo, com conferência). As outras saídas são detalhadas numa aba própria. Sem remessas.',
+      desc: 'Comércio, versão enxuta: por produto, saldo inicial, entradas, custo das vendas (CMV), outras saídas e saldo final (a custo, com conferência), movimentos por nota fiscal e as outras saídas detalhadas numa aba própria. Sem remessas.',
       abas: [{ nome: 'Resumo por produto', sub: 'Mercadorias para revenda — resumo mensal por produto (versão simplificada)', fixas: [['Código do produto', 14], ['Descrição', 38], ['NCM', 11], ['Unidade', 8]], nat: [
         ['entrada', 'Entradas (compras, devoluções de vendas e bonificações)', 'E', 'D Estoque / C Fornecedores ou CMV (devolução de venda). Compra a custo: preço + frete + seguro + IPI/ICMS-ST não recuperáveis − descontos − impostos recuperáveis'],
         ['venda', 'Vendas — custo (CMV)', 'S', CMV],
         ['outsai', 'Outras saídas (perdas, devoluções de compras, doações, ajustes) — detalhar na aba "Outras saídas"', 'S', 'Cada tipo tem uma contabilização: perda (custo ou despesa), devolução de compra (estorno), doação/brinde (despesa indedutível), ajuste de inventário']] }],
-      outrasSaidas: true
+      outrasSaidas: true, movimentos: true, semRemessa: true // 27/11/2026: Movimentos também no simplificado (pedido do usuário), sem remessas
     },
     industria: {
       nome: 'Estoque — indústria', arq: 'Modelo Estoque Industria',
@@ -142,7 +142,7 @@
     cabecalho(wi, 'B', M.nome + ' — relatório para a contabilidade (CPC 16 / NBC TG 16)', emp, false);
     const txt = [['O QUE PRECISAMOS (todo mês, até o dia 10 do mês seguinte — período fechado do dia 1º ao último dia do mês)', true], ['Nos sistemas, este relatório costuma se chamar Kardex sintético, Razão auxiliar de estoque, Movimentação de estoque valorizada ou Demonstrativo de movimentação de estoque. Se o seu sistema já tiver um relatório padrão assim, ele pode ser usado, desde que traga as mesmas informações (por produto, quantidade e valor de custo).']];
     if (M.industria) txt.push(['1. Aba "Matérias-primas": por item, saldo inicial, compras, requisições para a produção e demais saídas, saldo final — quantidade e valor de CUSTO.'], ['2. Aba "Em elaboração": por ordem de produção (ou produto), a matéria-prima requisitada, a mão de obra direta, os custos indiretos e o que foi transferido para acabados.'], ['3. Aba "Produtos acabados": por produto, produção do período, vendas a custo (CPV), perdas, doações e saldo final.'], ['4. Abas "Movimentos" e "Em poder de terceiros": como no comércio — ligam o estoque às notas fiscais.']);
-    else if (chave === 'simples') txt.push(['1. Aba "Resumo por produto": por produto, saldo inicial, total de entradas, custo das vendas (CMV), outras saídas e saldo final — quantidade e valor de CUSTO.'], ['2. Aba "Outras saídas": cada saída que NÃO é venda (perda, devolução de compra, doação, ajuste) com data, produto, quantidade, custo e motivo.'], ['• Remessas (demonstração, consignação, conserto) não entram neste modelo: não lance a saída nem o retorno.']);
+    else if (chave === 'simples') txt.push(['1. Aba "Resumo por produto": por produto, saldo inicial, total de entradas, custo das vendas (CMV), outras saídas e saldo final — quantidade e valor de CUSTO.'], ['2. Aba "Movimentos": cada entrada e saída do mês com data, documento (nº da nota), CFOP, tipo do movimento, produto, quantidade e custo. É ela que liga o estoque às notas fiscais.'], ['3. Aba "Outras saídas": cada saída que NÃO é venda (perda, devolução de compra, doação, ajuste) com data, produto, quantidade, custo e motivo.'], ['• Remessas (demonstração, consignação, conserto) não entram neste modelo: não lance a saída nem o retorno.']);
     else txt.push(['1. Aba "Resumo por produto": uma linha por produto com saldo inicial, entradas e saídas separadas por natureza e saldo final — quantidade e valor de CUSTO.'], ['2. Aba "Movimentos": cada entrada e saída do mês com data, documento (nº da nota), CFOP, natureza, produto, quantidade e custo. É ela que liga o estoque às notas fiscais.'], ['3. Aba "Em poder de terceiros": mercadoria nossa que está fora (demonstração, consignação, conserto, armazém). Ela CONTINUA sendo estoque da empresa.']);
     txt.push(['REGRAS DE VALOR (CPC 16 e RIR/2018)', true],
       ['• Método de custo: custo médio ponderado (móvel, recalculado a cada entrada, ou mensal) ou PEPS. Informe no cabeçalho qual o sistema usa. O UEPS (último que entra, primeiro que sai) não é aceito.'],
@@ -164,7 +164,8 @@
 
     // ── Movimentos (detalhe por documento)
     if (M.movimentos) {
-      const natMov = [].concat(...M.abas.map(A => A.nat.map(n => (M.abas.length > 1 ? A.nome + ': ' : '') + n[1] + '|' + (n[2] === 'E' ? 'Entrada' : 'Saída')))).concat(['Remessa p/ demonstração, consignação ou conserto (NÃO baixa o estoque)|Não baixa', 'Retorno de demonstração, consignação ou conserto|Não entra']);
+      const natBase = M.semRemessa ? MODELOS.revenda.abas : M.abas; // simplificado: tipos de movimento detalhados (os do completo), para cada nota
+      const natMov = [].concat(...natBase.map(A => A.nat.map(n => (natBase.length > 1 ? A.nome + ': ' : '') + n[1] + '|' + (n[2] === 'E' ? 'Entrada' : 'Saída')))).concat(M.semRemessa ? [] : ['Remessa p/ demonstração, consignação ou conserto (NÃO baixa o estoque)|Não baixa', 'Retorno de demonstração, consignação ou conserto|Não entra']);
       natMov.forEach((n, k) => { const [a, b] = n.split('|'); wl.getCell('A' + (k + 1)).value = a; wl.getCell('B' + (k + 1)).value = b; });
       const wm = wb.addWorksheet('Movimentos', { views: [{ state: 'frozen', ySplit: 11 }], properties: { tabColor: { argb: 'FF7C3AED' } } });
       const cm = [['Data', 12, 'dd/mm/yyyy'], ['Tipo de documento (NF-e, NFC-e, requisição, ajuste…)', 16], ['Nº do documento', 12], ['Série', 7], ['CFOP', 8], ['Natureza do movimento', 38], ['Entrada ou Saída', 10], ['Código do item', 14], ['Descrição do item', 34], ['Quantidade', 12, FMT_Q], ['Custo unitário', 14, FMT_U], ['Custo total', 15, FMT_V], ['Valor da nota (venda/compra)', 15, FMT_V], ['Fornecedor / Cliente', 30], ['CNPJ / CPF', 19, FMT_DOC], ['Observação (laudo de perda, nº do ajuste…)', 34]];
@@ -181,13 +182,13 @@
     // ── Outras saídas (simplificado)
     if (M.outrasSaidas) {
       const motivos = ['Perda / avaria / quebra / vencido', 'Devolução de compra', 'Doação, brinde ou amostra', 'Ajuste de inventário (falta)', 'Retirada para uso próprio', 'Outra (explique na observação)'];
-      motivos.forEach((n, k) => { wl.getCell('A' + (k + 1)).value = n; });
+      motivos.forEach((n, k) => { wl.getCell('D' + (k + 1)).value = n; });
       const wo = wb.addWorksheet('Outras saídas', { views: [{ state: 'frozen', ySplit: 11 }], properties: { tabColor: { argb: 'FFDC2626' } } });
       const co = [['Data', 12, 'dd/mm/yyyy'], ['Código do produto', 14], ['Descrição', 34], ['Quantidade', 12, FMT_Q], ['Custo total', 15, FMT_V], ['Motivo', 30], ['Nº da nota / documento', 14], ['Observação (laudo, BO, termo de inutilização…)', 40]];
       co.forEach((c, i) => wo.getColumn(i + 1).width = c[1]);
       cabecalho(wo, letra(co.length - 1), 'Outras saídas do mês (tudo o que NÃO é venda) — a soma tem que bater com a coluna "Outras saídas" do resumo', emp, false);
       cabTabela(wo, 11, co);
-      for (let r = 12; r <= 1011; r++) { const row = wo.getRow(r); co.forEach((c, i) => { const x = row.getCell(i + 1); x.border = borda; if (c[2]) x.numFmt = c[2]; }); row.getCell(6).dataValidation = { type: 'list', allowBlank: true, formulae: ['Listas!$A$1:$A$' + motivos.length], showErrorMessage: false }; }
+      for (let r = 12; r <= 1011; r++) { const row = wo.getRow(r); co.forEach((c, i) => { const x = row.getCell(i + 1); x.border = borda; if (c[2]) x.numFmt = c[2]; }); row.getCell(6).dataValidation = { type: 'list', allowBlank: true, formulae: ['Listas!$D$1:$D$' + motivos.length], showErrorMessage: false }; }
     }
     // ── Em poder de terceiros
     if (M.terceiros) {
