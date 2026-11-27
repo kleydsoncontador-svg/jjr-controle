@@ -1041,7 +1041,7 @@ html.dark-mode span.af-sem-txt-badge, :root[data-theme="dark"] span.af-sem-txt-b
 <script src="eqpat.js?v=1"></script>
 <script src="cfop-lista.js?v=1"></script>
 <script src="estoque.js?v=12"></script>
-<script src="escrita-fiscal.js?v=6"></script>
+<script src="escrita-fiscal.js?v=7"></script>
 <script>
 // Barra de rolagem horizontal TAMBÉM acima de toda tabela larga (pedido do usuário 11/11/2026: "todas as telas que tiverem barra de rolagem lá no final, também em cima, acima da linha de título").
 // Genérico: acha a caixa com rolagem horizontal que envolve cada <table>, e põe logo acima dela uma barra fina sincronizada nos dois sentidos. Quem já tem a sua própria (Registro Contábil, cronogramas) é pulado.
@@ -24117,6 +24117,8 @@ const LANCCTB_ABAS=[
   // existe Saída/venda.
   {id:'cte-entrada',   label:'CT-e (Frete)', tipoDoc:'cte', direcaoNf:'compra'},
   // Escrita Fiscal (pedido do usuário 26/11/2026): confronto do livro fiscal (entradas/saídas) com as notas do site + TXT — escrita-fiscal.js. Rótulo dourado.
+  // NFs Canceladas (pedido do usuário 26/11/2026): nota cancelada sai das abas normais e fica aqui, com o tipo (NF-e Entrada/Saída, NFS-e Tomada/Prestada, NFC-e, CT-e) — escrita-fiscal.js
+  {id:'nfs-canceladas', label:'NFs Canceladas', cor:'#dc2626'},
   {id:'escrita-fiscal', label:'Escrita Fiscal', cor:'#D4A537'},
   {id:'comprovantes', label:'Comprovantes de Pagamentos'},
   {id:'comprovantes-receb', label:'Comprovantes de Recebimentos'},
@@ -25292,6 +25294,7 @@ function renderLancctbConteudo(){
   if(aba&&aba.tipoDoc){ renderLancctbNotas(aba); return; }
   if(_lancctbAbaAtiva==='importar-xmls'){ renderLancctbImportarXmls(); return; }
   if(_lancctbAbaAtiva==='escrita-fiscal'){ if(window.EscFis) EscFis.render(); return; }
+  if(_lancctbAbaAtiva==='nfs-canceladas'){ if(window.EscFis) EscFis.canceladas(); return; }
   if(_lancctbAbaAtiva==='folha'){ renderLancctbFolha(); return; }
   if(_lancctbAbaAtiva==='tributos'){ renderLancctbTributos(); return; }
   if(_lancctbAbaAtiva==='plano'){ renderLancctbPlanoContas(); return; }
@@ -26190,6 +26193,11 @@ async function _lancctbChavesConhecidas(eid){
       .select('cnpj_emitente,numero,data_emissao').eq('empresa_eid',eid).eq('tipo','nfse').order('id'));
     (nfs||[]).forEach(r=>conhecidas.add(_lancctbChaveNumeroNfse(r.cnpj_emitente,r.numero,r.data_emissao)));
   }catch(e){ console.warn('NFS-e já importadas (por número):',e); }
+  // 26/11/2026: nota CANCELADA (aba NFs Canceladas) também conta como conhecida — nunca volta para as abas normais numa nova importação
+  try{
+    const { data: cc } = await _lancctbFetchTudo(()=>_supaClient.from('notas_fiscais_canceladas').select('chave_acesso,tipo,cnpj_emitente,numero,data_emissao').eq('empresa_eid',eid).order('id'));
+    (cc||[]).forEach(r=>{ if(r.chave_acesso) conhecidas.add(r.chave_acesso); if(r.tipo==='nfse') conhecidas.add(_lancctbChaveNumeroNfse(r.cnpj_emitente,r.numero,r.data_emissao)); });
+  }catch(e){ console.warn('NFs canceladas (chaves):',e); }
   return conhecidas;
 }
 function _lancctbChaveNumeroNfse(cnpj,numero,dataEmissao){
@@ -26259,7 +26267,39 @@ async function _lancctbImpCacheSalvar(eid,mapa){
   try{ const db=await _lancctbImpCacheDb(); await new Promise((res,rej)=>{ const t=db.transaction('c','readwrite'); t.objectStore('c').put(Object.fromEntries(mapa),String(eid)); t.oncomplete=()=>res(); t.onerror=()=>rej(t.error); }); db.close(); }
   catch(e){ console.warn('Cache de importação não salvou:',e); }
 }
-async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice,chavesConhecidas,impCache}={}){
+// ── NOTAS CANCELADAS (pedido do usuário 26/11/2026): nota cancelada nunca fica nas abas normais nem na amarração — vai para
+// notas_fiscais_canceladas (aba "NFs Canceladas"). Fontes: protocolo do XML da SIEG com cStat 101/135/151/155 (cancelamento homologado)
+// e a pasta "Eventos" do Portal NFS-e (evento e101101 = cancelamento, e105102 = cancelamento por substituição).
+// Se a nota já estava no site, a função do banco mover_nf_para_canceladas copia nota+parcelas+amarrações e tira de notas_fiscais;
+// os lançamentos amarrados ficam como estão (só deixam de apontar para a parcela).
+const LANCCTB_CSTAT_CANCELADA=['101','135','151','155'];
+function _lancctbCStatProtocolo(xml){ return (String(xml).match(/<prot(?:NFe|CTe)[\s\S]*?<cStat>(\d+)<\/cStat>/)||[])[1]||''; }
+async function _lancctbRegistrarCancelada(eid,tipo,direcao,nf,origem,arquivo,canceladaEm){
+  try{
+    eid=String(eid);
+    const { data: ex } = await _supaClient.from('notas_fiscais').select('id').eq('empresa_eid',eid).eq('chave_acesso',nf.chave_acesso).limit(5);
+    for(const r of (ex||[])) await _supaClient.rpc('mover_nf_para_canceladas',{ p_nf_id:r.id, p_origem:origem, p_cancelada_em:canceladaEm||null, p_arquivo:arquivo||null, p_substituta_parcela:null });
+    const reg={ empresa_eid:eid, tipo, direcao:direcao||null, chave_acesso:nf.chave_acesso, numero:nf.numero||null, serie:nf.serie||null, modelo:nf.modelo||null,
+      cnpj_emitente:nf.cnpj_emitente||null, nome_emitente:nf.nome_emitente||null, cnpj_destinatario:nf.cnpj_destinatario||null, nome_destinatario:nf.nome_destinatario||null,
+      data_emissao:nf.data_emissao||null, valor_total:(nf.valor_total!=null?nf.valor_total:null), natureza_operacao:nf.natureza_operacao||null, origem_cancelamento:origem, arquivo:arquivo||null };
+    if(canceladaEm) reg.cancelada_em=canceladaEm;
+    if(!(ex||[]).length) await _supaClient.from('notas_fiscais_canceladas').upsert(reg,{onConflict:'empresa_eid,tipo,chave_acesso'});
+  }catch(e){ console.warn('Registrar nota cancelada:',e); }
+}
+// Eventos do Portal NFS-e: só a chave vem no evento. Se a nota já está no site, move; senão registra o mínimo tirado da chave nacional
+// (cMun 7 + amb 1 + tpInsc 1 + CNPJ/CPF 14 + nº 13 + AAMM 4 + ...) — os dados completos entram quando o XML da nota for lido.
+async function _lancctbCanceladasDoPortal(eid,eventos,cnpjsEmp){
+  let n=0;
+  for(const ev of eventos){
+    const ch='NFS'+ev.ch, cnpjEm=ev.ch.substr(9,14), aamm=ev.ch.substr(36,4);
+    await _lancctbRegistrarCancelada(eid,'nfse',cnpjsEmp.includes(cnpjEm)?'venda':'compra',
+      { chave_acesso:ch, numero:String(+ev.ch.substr(23,13)||ev.nDFSe||''), modelo:'NFSe', cnpj_emitente:cnpjEm, data_emissao:/^\d{4}$/.test(aamm)?('20'+aamm.slice(0,2)+'-'+aamm.slice(2)+'-01'):null },
+      'portal_evento',ev.arquivo,ev.dh||null);
+    n++;
+  }
+  return n;
+}
+async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCorte,indice,chavesConhecidas,impCache,canceladas}={}){
   try{
     const _fp=impCache?((direcaoConhecida||'')+'|'+file.name+'|'+file.size+'|'+file.lastModified):null;
     if(impCache&&chavesConhecidas){ const _e=impCache.get(_fp); if(_e&&_e.split('|').some(k=>k&&chavesConhecidas.has(k))) return 'jaExistente'; } // já importado e a nota ainda está no banco: nem abre o arquivo
@@ -26276,6 +26316,8 @@ async function _lancctbSalvarNotaFiscalArquivo(file,eid,{direcaoConhecida,dataCo
     // só reclassifica pelo campo já extraído por _lancctbParsearNFeXml.
     const tipo=ehCTe?'cte':((ehNFSe||ehNFSeSp)?'nfse':(nf.modelo==='65'?'nfce':'nfe'));
     if(dataCorte&&nf.data_emissao&&nf.data_emissao<dataCorte) return 'ignoradaData';
+    { const _cst=_lancctbCStatProtocolo(xml), _cp=!!(canceladas&&nf.chave_acesso&&canceladas.has(String(nf.chave_acesso).replace(/^NFS/i,'')));
+      if(LANCCTB_CSTAT_CANCELADA.includes(_cst)||_cp){ await _lancctbRegistrarCancelada(eid,tipo,direcao,nf,_cp?'portal_evento':('sieg_cstat_'+_cst),caminho); if(chavesConhecidas&&nf.chave_acesso) chavesConhecidas.add(nf.chave_acesso); return 'cancelada'; } }
     // Já capturada antes (mesma chave de acesso) — pula upload+upsert, que
     // são os passos caros (rede). Achado real (05/09/2026): "Importar mês"
     // reprocessando um mês com ~40 mil arquivos, quase tudo já importado
@@ -29535,7 +29577,7 @@ async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onSt
   const pastasNfse=_lancctbPastasNfsePortalGet(eid);
 
   let puladasPorNome=0;
-  const contagemTotal={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
+  const contagemTotal={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0,cancelada:0};
   const resumoPorMes=[];
 
   for(const {ano,mesNum} of meses){
@@ -29628,8 +29670,22 @@ async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onSt
     // a SIEG não capturou (pedido do usuário 05/09/2026). Só entra se o
     // usuário já concedeu acesso à pasta raiz E configurou os nomes de
     // pasta desta empresa; sem isso, é pulada em silêncio.
+    const cancPortal=new Set();
     if(handleRaizNfse&&pastasNfse.length){
       const mesNumStr=String(mesNum).padStart(2,'0');
+      const eventos=[];
+      for(const nomePasta of pastasNfse){
+        try{
+          const dirEv=await handleRaizNfse.getDirectoryHandle(nomePasta).then(d=>d.getDirectoryHandle(String(ano))).then(d=>d.getDirectoryHandle(mesNumStr)).then(d=>d.getDirectoryHandle('Eventos'));
+          for await (const [nome,fh] of dirEv.entries()){
+            if(fh.kind!=='file'||!nome.toLowerCase().endsWith('.xml')) continue;
+            const x=await (await fh.getFile()).text();
+            const ch=(x.match(/<chNFSe>(\d+)<\/chNFSe>/)||[])[1];
+            if(ch&&/<e101101>|<e105102>/.test(x)&&!cancPortal.has(ch)){ cancPortal.add(ch); eventos.push({ ch, nDFSe:(x.match(/<nDFSe>(\d+)<\/nDFSe>/)||[])[1]||'', dh:((x.match(/<dhEvento>([\d-]{10})/)||x.match(/<dhProc>([\d-]{10})/)||[])[1])||null, arquivo:nomePasta+'/'+ano+'/'+mesNumStr+'/Eventos/'+nome }); }
+          }
+        }catch(e){ /* sem pasta Eventos no mês */ }
+      }
+      if(eventos.length){ if(onStatus) onStatus(`${emp.nome} — ${mesNome}/${ano} — ${eventos.length} NFS-e cancelada(s) no Portal…`); contagemTotal.cancelada+=await _lancctbCanceladasDoPortal(eid,eventos,cnpjs); }
       for(const nomePasta of pastasNfse){
         for(const [subpasta,direcao] of [['Recebidas','compra'],['Emitidas','venda']]){
           try{
@@ -29646,10 +29702,10 @@ async function _lancctbImportarXmlsMesRange(eid,meses,dirXml,handleRaizNfse,onSt
     }
 
     if(!arquivos.length) continue;
-    const contagemMes={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
+    const contagemMes={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0,cancelada:0};
     for(let i=0;i<arquivos.length;i++){
       if(onStatus) onStatus(`${emp.nome} — ${mesNome}/${ano} — processando ${i+1}/${arquivos.length}… (${contagemMes.importada} salvas)`);
-      const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas,impCache});
+      const resultado=await _lancctbSalvarNotaFiscalArquivo(arquivos[i].file,eid,{direcaoConhecida:arquivos[i].direcao,indice:i,chavesConhecidas,impCache,canceladas:cancPortal});
       contagemMes[resultado]++;
       contagemTotal[resultado]++;
       if(i>0&&i%1500===0&&impCache.size!==_impTam0) await _lancctbImpCacheSalvar(eid,impCache); // guarda o progresso de tempos em tempos (se fechar a aba no meio, não perde)
@@ -29688,7 +29744,7 @@ async function confirmarLancctbImportarMes(){
     return;
   }
   const prefixo=meses.length>1?`${meses.length} mês(es) (${resumoPorMes.join(' · ')||'nada novo'}): `:'';
-  toast(`${prefixo}${contagemTotal.importada} nota(s) salva(s), ${totalPuladas} já existente(s) (pulada), ${contagemTotal.naoReconhecido} não reconhecida(s), ${contagemTotal.erro} erro(s).`, contagemTotal.erro?'err':'ok');
+  toast(`${prefixo}${contagemTotal.importada} nota(s) salva(s), ${totalPuladas} já existente(s) (pulada), ${contagemTotal.naoReconhecido} não reconhecida(s), ${contagemTotal.erro} erro(s)${contagemTotal.cancelada?', '+contagemTotal.cancelada+' cancelada(s) (foram para NFs Canceladas)':''}.`, contagemTotal.erro?'err':'ok');
   renderLancctbConteudo();
 }
 // Pedido do usuário 09/09/2026: "dá pra criar um botão aqui, que busca as NF
@@ -29730,7 +29786,7 @@ async function confirmarLancctbImportarMesTodas(){
   const handleRaizNfse=await _lancctbCarregarHandleNfsePortal();
   if(handleRaizNfse&&!(await _lancctbRaizNfsePortalAbre(handleRaizNfse))) toast(_NFSE_PORTAL_AVISO_MOVIDA,'err');
 
-  const totalGeral={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0};
+  const totalGeral={importada:0,ignoradaData:0,erro:0,naoReconhecido:0,jaExistente:0,cancelada:0};
   let puladasGeral=0, empresasComNota=0;
   for(let i=0;i<eids.length;i++){
     const eid=eids[i];
@@ -29746,7 +29802,7 @@ async function confirmarLancctbImportarMesTodas(){
   _lancctbImportTodasModoAtivo=false;
   closeModal('mLancctbImportMes');
   const totalPuladas=puladasGeral+totalGeral.jaExistente;
-  toast(`${eids.length} empresa(s) verificada(s), ${empresasComNota} com nota(s) nova(s): ${totalGeral.importada} nota(s) salva(s) no total, ${totalPuladas} já existente(s), ${totalGeral.naoReconhecido} não reconhecida(s), ${totalGeral.erro} erro(s).`, totalGeral.erro?'err':'ok');
+  toast(`${eids.length} empresa(s) verificada(s), ${empresasComNota} com nota(s) nova(s): ${totalGeral.importada} nota(s) salva(s) no total, ${totalPuladas} já existente(s), ${totalGeral.naoReconhecido} não reconhecida(s), ${totalGeral.erro} erro(s)${totalGeral.cancelada?', '+totalGeral.cancelada+' cancelada(s) (foram para NFs Canceladas)':''}.`, totalGeral.erro?'err':'ok');
   renderLancctbLista();
 }
 // Aba "Importar XMLs" — pedido do usuário (05/09/2026): enquanto a API da

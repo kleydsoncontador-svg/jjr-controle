@@ -128,11 +128,12 @@
       if (s && Math.abs(f.valor - s.valor) > 0.05) obs.push('diferença de R$ ' + F(R2(f.valor - s.valor)));
       if (s && s.data && f.data !== s.data) obs.push('data no site ' + br(s.data)); if (s && f.numero !== s.numero) obs.push('nº no site ' + s.numero);
       if (s) obs.push('no site: ' + ({ nfe: 'NF-e', nfse: 'NFS-e', nfce: 'NFC-e', cte: 'CT-e' }[s.tipo] || s.tipo) + ' ' + (s.es === 'E' ? 'entrada' : 'saída'));
-      return { sit: s ? (Math.abs(f.valor - s.valor) > 0.05 ? 'valor_dif' : 'site') : (opFisc(f).op === 'remessa' ? 'remessa' : 'nao_site'), es: f.es, data: f.data, numero: f.numero, doc: f.doc || (s && s.doc) || '', nome: f.nome || (s && s.nome) || '', cfop: f.cfop, op: opFisc(f).op, vf: f.valor, vs: s ? s.valor : null, obs: obs.join(' · '), ref: f };
+      if (!s && f.canc) obs.push('cancelada no site (' + (f.canc.origem || '') + ')' + (f.canc.cancelada_em ? ' em ' + br(f.canc.cancelada_em) : ''));
+      return { sit: s ? (f.valor === 0 && opFisc(f).op !== 'remessa' ? 'zerada_fiscal' : Math.abs(f.valor - s.valor) > 0.05 ? 'valor_dif' : 'site') : f.canc ? (f.valor > 0.05 ? 'canc_ativa' : 'canc_ok') : (opFisc(f).op === 'remessa' ? 'remessa' : f.valor === 0 ? 'zerado_fora' : 'nao_site'), es: f.es, data: f.data, numero: f.numero, doc: f.doc || (s && s.doc) || '', nome: f.nome || (s && s.nome) || '', cfop: f.cfop, op: opFisc(f).op, vf: f.valor, vs: s ? s.valor : null, obs: obs.join(' · '), ref: f };
     }).sort((a, b) => (a.data || '').localeCompare(b.data || '') || (+a.numero || 0) - (+b.numero || 0));
   }
-  const SIT = { remessa: 'Remessa (não considerada)', site: 'Está no site', valor_dif: 'No site, valor diferente', nao_site: 'Não está no site', nao_fiscal: 'Não está no fiscal', so_fiscal: 'Não está no site' };
-  const SITCOR = { remessa: 'var(--slate)', site: 'var(--green)', valor_dif: 'var(--amber)', nao_site: 'var(--red)', nao_fiscal: 'var(--red)', so_fiscal: 'var(--red)' };
+  const SIT = { zerado_fora: 'Zerada no fiscal (não está no site)', canc_ok: 'Cancelada nos dois', canc_ativa: 'Cancelada no site, ativa no fiscal', zerada_fiscal: 'Zerada no fiscal, ativa no site', remessa: 'Remessa (não considerada)', site: 'Está no site', valor_dif: 'No site, valor diferente', nao_site: 'Não está no site', nao_fiscal: 'Não está no fiscal', so_fiscal: 'Não está no site' };
+  const SITCOR = { zerado_fora: 'var(--slate)', canc_ok: 'var(--slate)', canc_ativa: 'var(--red)', zerada_fiscal: 'var(--red)', remessa: 'var(--slate)', site: 'var(--green)', valor_dif: 'var(--amber)', nao_site: 'var(--red)', nao_fiscal: 'var(--red)', so_fiscal: 'var(--red)' };
 
   // ── tela principal ──
   async function render(eid) {
@@ -171,8 +172,9 @@
     try { ST.site = await carregarSite(eid, ym); } catch (e) { if (box) box.innerHTML = '<div style="color:var(--red)">Erro ao buscar as notas do site: ' + E(e.message) + '</div>'; return; }
     if (eid !== ST.eid || ym !== ST.ym) return; // trocou de mês/empresa no meio
     ST.fisc = [somaMes(ym, -1), ym, somaMes(ym, 1)].reduce((a, m) => a.concat(lerLivro(eid, m)), []).filter(r => String(r.data || '').slice(0, 7) === ym).map(r => Object.assign({}, r));
-    confrontar(ST.site, ST.fisc); ST.ok = true; ST.okYm = ym; ST.okEid = eid;
-    if (ST.fisc.length) { const r = { soFiscal: pendF().length, soSite: pendS().length, em: new Date().toISOString().slice(0, 10) }; const ant = sOk(kRes(eid, ym)); if (!ant || ant.soFiscal !== r.soFiscal || ant.soSite !== r.soSite) { S.s(kRes(eid, ym), r); render(); return; } }
+    ST.canc = await carregarCanc(eid, somaMes(ym, -1) + '-01', ultimoDia(somaMes(ym, 1)));
+    confrontar(ST.site, ST.fisc); casarCanc(); ST.ok = true; ST.okYm = ym; ST.okEid = eid;
+    if (ST.fisc.length) { const r = { soFiscal: pendF().length + pendC().length, soSite: pendS().length, em: new Date().toISOString().slice(0, 10) }; const ant = sOk(kRes(eid, ym)); if (!ant || ant.soFiscal !== r.soFiscal || ant.soSite !== r.soSite) { S.s(kRes(eid, ym), r); render(); return; } }
     corpo();
   }
   function filtrar(L, f) {
@@ -190,11 +192,11 @@
     const rs = document.getElementById('escfisResumo');
     if (rs) rs.innerHTML = !ST.fisc.length
       ? '<span style="color:var(--amber)">Nenhum livro fiscal importado neste mês. Importe pelo botão <b>📒 Importar Livros Fiscais (PDF)</b> na lista de Lançamentos Contábeis (todas as empresas) ou pelo <b>📎 Anexar livro (PDF ou Excel)</b> aqui em cima.</span>' + (ST.site.length ? ' <span style="color:var(--slate)">(o site tem ' + ST.site.length + ' nota(s) neste mês)</span>' : '')
-      : '<b>' + L.length + '</b> nota(s) no livro fiscal · <span style="color:var(--green)">está no site: <b>' + n('site') + '</b></span> · <span style="color:var(--amber)">no site com valor diferente: <b>' + n('valor_dif') + '</b></span> · <span style="color:var(--red)">não está no site: <b>' + n('nao_site') + '</b></span>'
+      : '<b>' + L.length + '</b> nota(s) no livro fiscal · <span style="color:var(--green)">está no site: <b>' + n('site') + '</b></span> · <span style="color:var(--amber)">no site com valor diferente: <b>' + n('valor_dif') + '</b></span> · <span style="color:var(--red)">não está no site: <b>' + n('nao_site') + '</b></span>' + ((n('canc_ativa') + n('zerada_fiscal')) ? ' · <span style="color:var(--red)">⚠ cancelamento divergente: <b>' + (n('canc_ativa') + n('zerada_fiscal')) + '</b></span>' : '') + (n('canc_ok') ? ' · <span style="color:var(--slate)">cancelada nos dois: <b>' + n('canc_ok') + '</b></span>' : '')
         + (soSite ? ' · <a href="#" onclick="event.preventDefault();EscFis.diferencas()" style="color:var(--red)"><b>' + soSite + '</b> nota(s) do site não estão no fiscal → 🔎 Diferenças</a>' : '');
     if (!ST.fisc.length) { box.innerHTML = ''; return; }
     const head = '<tr><th>Situação</th><th>E/S</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Destinatário / Remetente</th><th>CFOP</th><th>Operação</th><th style="text-align:right">Valor no fiscal</th><th style="text-align:right">Valor no site</th><th>Observação</th></tr>'
-      + '<tr>' + thS('sit', [['site', SIT.site], ['valor_dif', SIT.valor_dif], ['nao_site', SIT.nao_site], ['remessa', SIT.remessa]], f, cb) + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thS('op', Object.entries(OPS), f, cb) + thF('vf', 'valor', f, cb) + thF('vs', 'valor', f, cb) + thF('obs', 'obs.', f, cb) + '</tr>';
+      + '<tr>' + thS('sit', [['site', SIT.site], ['valor_dif', SIT.valor_dif], ['nao_site', SIT.nao_site], ['canc_ativa', SIT.canc_ativa], ['zerada_fiscal', SIT.zerada_fiscal], ['canc_ok', SIT.canc_ok], ['remessa', SIT.remessa]], f, cb) + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thS('op', Object.entries(OPS), f, cb) + thF('vf', 'valor', f, cb) + thF('vs', 'valor', f, cb) + thF('obs', 'obs.', f, cb) + '</tr>';
     const body = V.length ? V.map(l => '<tr><td style="color:' + SITCOR[l.sit] + ';font-weight:600;white-space:nowrap">' + SIT[l.sit] + '</td><td>' + (l.es === 'E' ? 'Entrada' : 'Saída') + '</td><td>' + br(l.data) + '</td><td>' + E(l.numero) + '</td><td style="font-family:var(--mono);font-size:11px;white-space:nowrap">' + E(fmtDoc(l.doc)) + '</td><td>' + E(l.nome) + '</td><td style="white-space:nowrap">' + E(fmtCfop(l.cfop)) + '</td><td>' + E(OPS[l.op] || '') + '</td><td style="text-align:right">' + (l.vf == null ? '—' : F(l.vf)) + '</td><td style="text-align:right' + (l.sit === 'valor_dif' ? ';color:var(--amber);font-weight:700' : '') + '">' + (l.vs == null ? '—' : F(l.vs)) + '</td><td style="font-size:11px;color:var(--slate)">' + E(l.obs) + '</td></tr>').join('')
       : '<tr><td colspan="11" style="padding:14px;color:var(--slate)">Nenhuma nota com esses filtros.</td></tr>';
     const tv = V.reduce((s, l) => s + (l.vs || 0), 0), tf = V.reduce((s, l) => s + (l.vf || 0), 0);
@@ -238,7 +240,7 @@
     if (ym && ym !== ST.ym) { ST.ym = ym; ST.ok = false; await render(); }
     else if (!ST.ok) await carregar();
     if (!ST.fisc.length && !confirm('Não há livro fiscal importado em ' + MESES_L[+ST.ym.slice(5) - 1] + '/' + ST.ym.slice(0, 4) + ' — todas as notas do site vão aparecer como "não está no fiscal". Abrir mesmo assim?')) return;
-    ST.mf = { fisc: {}, site: {} }; ST.mSel = {}; ST.mDet = {};
+    ST.mf = { fisc: {}, site: {}, canc: {} }; ST.mSel = {}; ST.mDet = {};
     pendS().forEach(s => { ST.mDet[s.id] = s.det || ''; ST.mSel[s.id] = !!s.det; });
     let ov = document.getElementById('escfisModal'); if (ov) ov.remove();
     ov = document.createElement('div'); ov.id = 'escfisModal';
@@ -253,17 +255,26 @@
     const ab = (k, t, n) => '<button onclick="EscFis.mAba(\'' + k + '\')" style="padding:8px 14px;border:none;background:none;cursor:pointer;font-size:13px;font-weight:600;color:' + (ST.mAba === k ? OURO : 'var(--slate)') + ';border-bottom:2px solid ' + (ST.mAba === k ? OURO : 'transparent') + '">' + t + ' (' + n + ')</button>';
     el.innerHTML = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:6px"><b style="font-size:15px;color:' + OURO + '">📒 Escrita Fiscal — ' + MESES_L[m - 1] + '/' + a + '</b>'
       + '<span style="margin-left:auto;display:flex;gap:6px"><button class="btn bo bsm" onclick="EscFis.mMes(-1)" title="Mês anterior">‹</button><button class="btn bo bsm" onclick="EscFis.mMes(1)" title="Próximo mês">›</button><button class="action-btn action-btn-excel" onclick="EscFis.excelModal()">📊 Gerar Excel</button><button class="btn bo bsm" onclick="document.getElementById(\'escfisModal\').remove()">Fechar</button></span></div>'
-      + '<div style="border-bottom:1px solid var(--border);margin-bottom:10px">' + ab('fisc', 'No fiscal, não no site', so.length) + ab('site', 'No site, não no fiscal', ss.length) + '</div><div id="escfisModalTab"></div>';
+      + '<div style="border-bottom:1px solid var(--border);margin-bottom:10px">' + ab('fisc', 'No fiscal, não no site', so.length) + ab('site', 'No site, não no fiscal', ss.length) + ab('canc', '⚠ Cancelamentos', pendC().length) + '</div><div id="escfisModalTab"></div>';
     modalTab();
   }
-  const pendF = () => ST.fisc.filter(f => !f.par && opFisc(f).op !== 'remessa'), pendS = () => ST.site.filter(s => !s.par && s.op !== 'remessa');
+  const pendF = () => ST.fisc.filter(f => !f.par && !f.canc && f.valor > 0 && opFisc(f).op !== 'remessa'), pendC = () => linhasTela().filter(l => l.sit === 'canc_ativa' || l.sit === 'zerada_fiscal'), pendS = () => ST.site.filter(s => !s.par && s.op !== 'remessa');
   function modalLinhas(aba) {
+    if (aba === 'canc') return pendC();
     if (aba === 'fisc') return pendF().map(f => { return { sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: opFisc(f).op, vs: null, vf: f.valor, obs: '', ref: f }; });
     return pendS().map(s => ({ sit: 'nao_fiscal', es: s.es, data: s.data, numero: s.numero, doc: s.doc, nome: s.nome, cfop: '', op: s.op, vs: s.valor, vf: null, obs: s.tipo.toUpperCase() + (s.natureza_operacao ? ' · ' + s.natureza_operacao : ''), ref: s }));
   }
   function modalTab() {
     const el = document.getElementById('escfisModalTab'); if (!el) return;
     const aba = ST.mAba, f = ST.mf[aba] = ST.mf[aba] || {}, cb = 'EscFis.mFiltro', V = filtrar(modalLinhas(aba), f);
+    if (aba === 'canc') {
+      el.innerHTML = '<div style="font-size:12px;color:var(--slate);margin-bottom:6px"><b>Cancelada no site, ativa no fiscal</b>: a nota foi cancelada (SEFAZ/prefeitura) mas o livro fiscal ainda tem valor — o fiscal precisa cancelar. <b>Zerada no fiscal, ativa no site</b>: o livro traz a nota com valor zero (cancelada no fiscal?) mas no site ela não está nas canceladas — conferir.</div>'
+        + '<div style="overflow-x:auto"><table class="tbl" style="width:100%;font-size:12px"><thead><tr><th>Situação</th><th>E/S</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Destinatário / Remetente</th><th>CFOP</th><th style="text-align:right">Valor no fiscal</th><th style="text-align:right">Valor no site</th><th>Observação</th></tr><tr>'
+        + thS('sit', [['canc_ativa', SIT.canc_ativa], ['zerada_fiscal', SIT.zerada_fiscal]], f, cb) + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thF('vf', 'valor', f, cb) + thF('vs', 'valor', f, cb) + thF('obs', 'obs.', f, cb) + '</tr></thead><tbody>'
+        + (V.length ? V.map(l => '<tr><td style="color:var(--red);font-weight:600">' + SIT[l.sit] + '</td><td>' + (l.es === 'E' ? 'Entrada' : 'Saída') + '</td><td>' + br(l.data) + '</td><td>' + E(l.numero) + '</td><td style="font-family:var(--mono);font-size:11px">' + E(fmtDoc(l.doc)) + '</td><td>' + E(l.nome) + '</td><td>' + E(fmtCfop(l.cfop)) + '</td><td style="text-align:right">' + F(l.vf) + '</td><td style="text-align:right">' + (l.vs == null ? '—' : F(l.vs)) + '</td><td style="font-size:11px;color:var(--slate)">' + E(l.obs) + '</td></tr>').join('') : '<tr><td colspan="10" style="padding:12px;color:var(--slate)">Nenhuma divergência de cancelamento.</td></tr>')
+        + '</tbody></table></div>';
+      return;
+    }
     if (aba === 'fisc') {
       el.innerHTML = '<div style="display:flex;justify-content:flex-end;gap:6px;margin-bottom:6px"><button class="btn bp bsm" onclick="EscFis.gerarNoSite()" title="Cria no site (NF-e Entrada/Saída, NFS-e, CT-e) as notas filtradas desta lista, com os dados do livro fiscal. Remessa e nota de valor zero não entram.">➕ Gerar no site (' + V.filter(l => l.vf > 0).length + ')</button></div><div style="font-size:12px;color:var(--slate);margin-bottom:6px">Notas que estão no livro fiscal mas <b>não foram encontradas no site</b> (falta importar o XML no site, ou a nota está com outro número/CNPJ).</div>'
         + '<div style="overflow-x:auto"><table class="tbl" style="width:100%;font-size:12px"><thead><tr><th>E/S</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Destinatário / Remetente</th><th>CFOP</th><th>Operação</th><th style="text-align:right">Valor</th></tr><tr>'
@@ -640,12 +651,95 @@
   function excelModal() {
     if (typeof XLSX === 'undefined') { toast('Biblioteca XLSX não carregada', 'err'); return; }
     const [a, m] = ST.ym.split('-').map(Number), t = '#' + ST.eid + ' ' + empNome() + ' — ' + MESES_L[m - 1] + '/' + a;
+    if (ST.mAba === 'canc') { salvarXlsx([planilha(filtrar(pendC(), ST.mf.canc || {}), 'Cancelamentos', t + ' — divergências de cancelamento')], 'Escrita_Fiscal_Cancelamentos_' + ST.eid + '_' + ST.ym + '.xlsx'); return; }
+    if (ST.mAba === 'site') { salvarXlsx([planilha(filtrar(modalLinhas('site'), ST.mf.site || {}), 'No site, nao no fiscal', t + ' — no site, não no fiscal'), planilha(pendC().filter(l => l.sit === 'canc_ativa'), 'Canceladas no site ativas', t + ' — canceladas no site, ativas no fiscal')], 'Escrita_Fiscal_No_site_nao_no_fiscal_' + ST.eid + '_' + ST.ym + '.xlsx'); return; }
     const fisc = ST.mAba === 'fisc';
     salvarXlsx([fisc ? planilha(filtrar(modalLinhas('fisc'), ST.mf.fisc || {}), 'No fiscal, nao no site', t + ' — no fiscal, não no site') : planilha(filtrar(modalLinhas('site'), ST.mf.site || {}), 'No site, nao no fiscal', t + ' — no site, não no fiscal')], 'Escrita_Fiscal_' + (fisc ? 'No_fiscal_nao_no_site_' : 'No_site_nao_no_fiscal_') + ST.eid + '_' + ST.ym + '.xlsx');
   }
 
+  // ── NOTAS CANCELADAS (pedido do usuário 26/11/2026) ──
+  // Tabela notas_fiscais_canceladas: nota cancelada na SEFAZ/prefeitura (XML da SIEG com cStat 101/135/151/155, evento do Portal NFS-e)
+  // sai das abas normais e fica aqui. Na Escrita Fiscal: livro com a nota zerada = "cancelada nos dois"; livro com valor = "cancelada no
+  // site, ativa no fiscal" (o fiscal precisa cancelar); livro zerado com a nota ativa no site = "zerada no fiscal, ativa no site".
+  const ultimoDia = ym => { const [a, m] = ym.split('-').map(Number); return ym + '-' + String(new Date(a, m, 0).getDate()).padStart(2, '0'); };
+  const SEL_CANC = 'id,tipo,direcao,chave_acesso,numero,serie,modelo,cnpj_emitente,nome_emitente,cnpj_destinatario,nome_destinatario,data_emissao,valor_total,origem_cancelamento,cancelada_em,arquivo,nf_original_id,substituta_nf_id,movida_em,lancs:snapshot->lancamentos';
+  const ORIGEM = { portal_evento: 'Portal NFS-e (evento)', sieg_cstat_101: 'SIEG (cStat 101)', sieg_cstat_135: 'SIEG (cStat 135)', sieg_cstat_151: 'SIEG (cStat 151)', sieg_cstat_155: 'SIEG (cStat 155)' };
+  function tipoNota(c) { return c.tipo === 'nfe' ? (c.direcao === 'compra' ? 'NF-e Entrada' : 'NF-e Saída') : c.tipo === 'nfse' ? (c.direcao === 'compra' ? 'NFS-e Tomada' : 'NFS-e Prestada') : c.tipo === 'nfce' ? 'NFC-e' : c.tipo === 'cte' ? 'CT-e' : c.tipo; }
+  async function carregarCanc(eid, de, ate) {
+    try {
+      const { data, error } = await _lancctbFetchTudo(() => { let q = _supaClient.from('notas_fiscais_canceladas').select(SEL_CANC).eq('empresa_eid', String(eid)); if (de) q = q.gte('data_emissao', de); if (ate) q = q.lte('data_emissao', ate); return q.order('data_emissao').order('id'); });
+      if (error) throw error;
+      const raiz = cnpjEmp(eid).slice(0, 8), vistos = new Set();
+      return (data || []).filter(c => !vistos.has(c.id) && vistos.add(c.id)).map(c => {
+        const ent = c.direcao === 'compra'; let doc = dig(ent ? c.cnpj_emitente : c.cnpj_destinatario), nome = ent ? c.nome_emitente : c.nome_destinatario;
+        if (raiz && doc.slice(0, 8) === raiz) { doc = dig(ent ? c.cnpj_destinatario : c.cnpj_emitente); nome = ent ? c.nome_destinatario : c.nome_emitente; }
+        return { id: c.id, tipo: c.tipo, direcao: c.direcao, es: ent ? 'E' : 'S', tipoNome: tipoNota(c), data: c.data_emissao, numero: numNf(c.numero), serie: c.serie || '', doc, nome: nome || '', valor: c.valor_total == null ? null : R2(c.valor_total),
+          origem: ORIGEM[c.origem_cancelamento] || c.origem_cancelamento || '', cancelada_em: c.cancelada_em, arquivo: c.arquivo || '',
+          noSite: !c.nf_original_id ? 'Não chegou a entrar' : c.substituta_nf_id ? 'Estava no site — amarração passou para a nota substituta' : (Array.isArray(c.lancs) && c.lancs.length ? 'Estava no site amarrada — lançamento mantido' : 'Estava no site (pendente)') };
+      });
+    } catch (e) { console.warn('NFs canceladas:', e); return []; }
+  }
+  // liga cada linha do livro SEM par no site a uma nota cancelada (mesmo número + mesmo CNPJ/raiz, ou mesmo número + mesmo valor)
+  function casarCanc() {
+    const porNum = new Map(); (ST.canc || []).forEach(c => { if (c.numero) (porNum.get(c.numero) || porNum.set(c.numero, []).get(c.numero)).push(c); });
+    const mesmoDoc = (a, b) => a && b && (a === b || (a.length === 14 && b.length === 14 && a.slice(0, 8) === b.slice(0, 8)));
+    ST.fisc.forEach(f => { f.canc = null; if (f.par || !f.numero) return; const c = (porNum.get(f.numero) || []).find(c => mesmoDoc(c.doc, f.doc) || (c.valor != null && Math.abs(c.valor - f.valor) <= 0.05)); if (c) f.canc = c; });
+  }
+  // situação de cada cancelada no livro fiscal do mês dela
+  function sitFiscalCanc(c, cacheLivro) {
+    const ym = String(c.data || '').slice(0, 7); if (!ym) return 'Sem data';
+    if (!cacheLivro[ym]) cacheLivro[ym] = [somaMes(ym, -1), ym, somaMes(ym, 1)].reduce((a, m) => a.concat(lerLivro(ST.cEid, m)), []);
+    const L = cacheLivro[ym]; if (!L.length) return 'Sem livro fiscal importado';
+    const mesmoDoc = (a, b) => a && b && (a === b || (a.length === 14 && b.length === 14 && a.slice(0, 8) === b.slice(0, 8)));
+    const f = L.find(f => f.numero === c.numero && (mesmoDoc(f.doc, c.doc) || (c.valor != null && Math.abs(f.valor - c.valor) <= 0.05) || (!f.doc && !c.doc)));
+    if (!f) return 'Não está no livro fiscal';
+    return f.valor > 0.05 ? '⚠ Ativa no fiscal (R$ ' + F(f.valor) + ')' : 'Cancelada nos dois';
+  }
+  const CT = { eid: '', de: '', ate: '', f: {}, rows: [] };
+  async function renderCanc() {
+    const eid = String(typeof _lancctbEidAtual !== 'undefined' ? _lancctbEidAtual : ST.eid); ST.cEid = eid;
+    const el = document.getElementById('lancctbConteudoAba'); if (!el) return;
+    if (CT.eid !== eid) { CT.eid = eid; CT.f = {}; const a = fechYm().slice(0, 4); CT.de = a + '-01-01'; CT.ate = a + '-12-31'; }
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:10px"><b style="color:var(--red);font-size:15px">🚫 NFs Canceladas</b>'
+      + '<span style="font-size:12px;color:var(--slate)">notas canceladas na SEFAZ/prefeitura — ficam fora das abas de notas e da amarração</span>'
+      + '<span style="margin-left:auto;display:flex;gap:6px;align-items:center">' + (typeof _drpBotaoHtml === 'function' ? _drpBotaoHtml(CT.de, CT.ate, '_escCancPeriodo', { rotulo: 'Emissão:', vazio: 'todo o período' }) : '')
+      + '<button class="action-btn action-btn-excel" onclick="EscFis.cancExcel()">📊 Gerar Excel</button></span></div><div id="escCancResumo" style="font-size:12.5px;margin-bottom:8px">Carregando…</div><div id="escCancTab"></div>';
+    CT.rows = await carregarCanc(eid, CT.de, CT.ate);
+    const cache = {}; CT.rows.forEach(c => { c.fiscal = sitFiscalCanc(c, cache); });
+    cancCorpo();
+  }
+  function cancFiltrar() {
+    const f = CT.f, t = (v, q) => !q || nrm(v).includes(nrm(q));
+    return CT.rows.filter(c => (!f.tipo || c.tipoNome === f.tipo) && t(br(c.data), f.data) && t(c.numero, f.numero) && (!f.doc || dig(c.doc).includes(dig(f.doc))) && t(c.nome, f.nome)
+      && (!f.valor || (c.valor != null && F(c.valor).includes(f.valor))) && t(c.origem, f.origem) && t(c.noSite, f.noSite) && (!f.fiscal || c.fiscal.indexOf(f.fiscal) >= 0 || (f.fiscal === '⚠' && c.fiscal.startsWith('⚠'))));
+  }
+  function cancCorpo() {
+    const box = document.getElementById('escCancTab'), rs = document.getElementById('escCancResumo'); if (!box) return;
+    const V = cancFiltrar(), f = CT.f, cb = 'EscFis.cancFiltro', tipos = [...new Set(CT.rows.map(c => c.tipoNome))].sort();
+    const ativas = CT.rows.filter(c => c.fiscal.startsWith('⚠')).length;
+    if (rs) rs.innerHTML = '<b>' + CT.rows.length + '</b> nota(s) cancelada(s) no período' + (CT.rows.length ? ' · ' + tipos.map(tn => tn + ': <b>' + CT.rows.filter(c => c.tipoNome === tn).length + '</b>').join(' · ') : '') + (ativas ? ' · <span style="color:var(--red)">⚠ ativas no fiscal: <b>' + ativas + '</b></span>' : '');
+    const head = '<tr><th>Tipo</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Emitente / Destinatário</th><th style="text-align:right">Valor</th><th>Cancelada em</th><th>Onde vi o cancelamento</th><th>No site</th><th>Escrita fiscal</th></tr><tr>'
+      + thS('tipo', tipos.map(t => [t, t]), f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('valor', 'valor', f, cb) + '<th></th>' + thF('origem', 'origem', f, cb) + thF('noSite', 'no site', f, cb)
+      + thS('fiscal', [['Cancelada nos dois', 'Cancelada nos dois'], ['⚠', '⚠ Ativa no fiscal'], ['Não está no livro', 'Não está no livro'], ['Sem livro', 'Sem livro importado']], f, cb) + '</tr>';
+    const body = V.length ? V.map(c => '<tr><td style="white-space:nowrap;font-weight:600">' + E(c.tipoNome) + '</td><td>' + br(c.data) + '</td><td>' + E(c.numero) + '</td><td style="font-family:var(--mono);font-size:11px;white-space:nowrap">' + E(fmtDoc(c.doc)) + '</td><td>' + E(c.nome) + '</td><td style="text-align:right">' + (c.valor == null ? '—' : F(c.valor)) + '</td><td>' + br(c.cancelada_em) + '</td><td style="font-size:11px" title="' + E(c.arquivo) + '">' + E(c.origem) + '</td><td style="font-size:11px;color:var(--slate)">' + E(c.noSite) + '</td><td style="font-size:11.5px;font-weight:600;color:' + (c.fiscal.startsWith('⚠') ? 'var(--red)' : c.fiscal === 'Cancelada nos dois' ? 'var(--green)' : 'var(--slate)') + '">' + E(c.fiscal) + '</td></tr>').join('')
+      : '<tr><td colspan="10" style="padding:14px;color:var(--slate)">Nenhuma nota cancelada' + (CT.rows.length ? ' com esses filtros' : ' no período') + '.</td></tr>';
+    box.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%;font-size:12px"><thead style="position:sticky;top:0;z-index:2">' + head + '</thead><tbody>' + body + '</tbody><tfoot><tr style="font-weight:700"><td colspan="5">' + V.length + ' nota(s)</td><td style="text-align:right">' + F(V.reduce((s, c) => s + (c.valor || 0), 0)) + '</td><td colspan="4"></td></tr></tfoot></table></div>';
+  }
+  let _tmC = null;
+  function cancFiltro(k, v) { CT.f[k] = v; clearTimeout(_tmC); _tmC = setTimeout(cancCorpo, 200); }
+  function cancPeriodo(de, ate) { CT.de = de || ''; CT.ate = ate || ''; renderCanc(); }
+  root._escCancPeriodo = (de, ate) => cancPeriodo(de, ate); // o calendário de período chama uma função global pelo nome
+  function cancExcel() {
+    if (typeof XLSX === 'undefined') { toast('Biblioteca XLSX não carregada', 'err'); return; }
+    const V = cancFiltrar(), per = (CT.de || CT.ate) ? (br(CT.de) || '…') + ' a ' + (br(CT.ate) || '…') : 'todo o período';
+    const aoa = [['JJR CONSULTORIA CONTÁBIL'], ['#' + CT.eid + ' ' + empNome() + ' — NFs Canceladas — ' + per], [], ['Tipo', 'Data emissão', 'Número', 'Série', 'CNPJ/CPF', 'Emitente / Destinatário', 'Valor', 'Cancelada em', 'Onde vi o cancelamento', 'Arquivo', 'No site', 'Escrita fiscal']]
+      .concat(V.map(c => [c.tipoNome, br(c.data), c.numero, c.serie, fmtDoc(c.doc), c.nome, c.valor == null ? '' : c.valor, br(c.cancelada_em), c.origem, c.arquivo, c.noSite, c.fiscal]));
+    const ws = XLSX.utils.aoa_to_sheet(aoa); ws['!cols'] = [{ wch: 14 }, { wch: 12 }, { wch: 10 }, { wch: 6 }, { wch: 20 }, { wch: 40 }, { wch: 12 }, { wch: 12 }, { wch: 22 }, { wch: 40 }, { wch: 40 }, { wch: 28 }];
+    salvarXlsx([[ws, 'NFs Canceladas']], 'NFs_Canceladas_' + CT.eid + '.xlsx');
+  }
+
   root.EscFis = {
-    render: () => render(typeof _lancctbEidAtual !== 'undefined' ? _lancctbEidAtual : ST.eid), importar, processar, config, salvarConfig, diferencas, excel, excelModal, txt, gerarNoSite, excluirLivros, excluirLivrosOk, importarLote, fixarPasta, botaoLoteHtml,
+    render: () => render(typeof _lancctbEidAtual !== 'undefined' ? _lancctbEidAtual : ST.eid), importar, processar, config, salvarConfig, diferencas, excel, excelModal, txt, gerarNoSite, canceladas: renderCanc, cancFiltro, cancPeriodo, cancExcel, excluirLivros, excluirLivrosOk, importarLote, fixarPasta, botaoLoteHtml,
     irMes, mes, filtro, mFiltro, mMes, mTodas,
     mAba: k => { ST.mAba = k; modal(); }, mMarca: (id, v) => { ST.mSel[id] = v; modalTab(); }, mDet: (id, v) => { ST.mDet[id] = v; if (!v) ST.mSel[id] = false; else ST.mSel[id] = true; modalTab(); },
     _t: { classCfop, classSite, confrontar, lerSped, lerTabela, agrupar, isoDe, lerDominio, infoNome, opFisc, lerArquivo, linhasPdf },
