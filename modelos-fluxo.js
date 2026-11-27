@@ -41,7 +41,7 @@
       if (k === 'valor') c.push({ k, t: 'Valor (entrada + / saída −)', w: 18 });
     });
     c.push({ k: 'tipoL', t: tp === 'pag' ? 'Tipo de gasto' : tp === 'rec' ? 'Tipo de recebimento' : 'Tipo de gasto / recebimento', w: 34 });
-    c.push({ k: 'part', t: tp === 'pag' ? 'Marque "Sim" se o gasto é particular do sócio ou não é da empresa (de terceiros)' : tp === 'rec' ? 'Marque "Sim" se a receita é do sócio ou não é da empresa (de terceiros)' : 'Marque "Sim" se é particular do sócio ou não é da empresa (de terceiros)', w: 24 });
+    c.push({ k: 'part', t: tp === 'pag' ? 'Marque "Sim" se o gasto é particular do sócio ou de terceiros (não é da empresa)' : tp === 'rec' ? 'Marque "Sim" se a receita é do sócio ou de terceiros (não é da empresa)' : 'Marque "Sim" se é particular do sócio ou de terceiros (não é da empresa)', w: 24 });
     c.push({ k: 'desc', t: 'Descrição / histórico detalhado (para a contabilidade)', w: 46 });
     if (aba.cols.includes('saldo')) c.push({ k: 'saldo', t: 'Saldo (no fim do dia — automático)', w: 18 });
     c.forEach((x, i) => { x.i = i; x.L = letra(i); });
