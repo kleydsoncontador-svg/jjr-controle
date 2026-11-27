@@ -19,14 +19,14 @@
   const OPS = { venda: 'Venda', compra: 'Compra', dev_venda: 'Devolução de venda', dev_compra: 'Devolução de compra', remessa: 'Remessa', servico: 'Serviço' };
   // operações contábeis do TXT (as contas ficam na engrenagem, por empresa)
   const OPS_TXT = [
-    ['compra_mercadoria', 'Compra de mercadoria para revenda (estoque)', 'compra', 'Compra de mercadoria NF'],
-    ['compra_uso_consumo', 'Compra para uso e consumo', 'compra', 'Compra p/ uso e consumo NF'],
-    ['venda', 'Vendas', 'venda', 'Venda NF'],
-    ['servico_prestado', 'Serviço prestado', 'servico', 'Servico prestado NF'],
-    ['servico_tomado', 'Serviço tomado', 'servico', 'Servico tomado NF'],
-    ['dev_venda', 'Devolução de venda', 'dev_venda', 'Devolucao de venda NF'],
-    ['dev_compra_mercadoria', 'Devolução de compra — mercadoria para revenda', 'dev_compra', 'Devolucao de compra de mercadoria NF'],
-    ['dev_compra_uso_consumo', 'Devolução de compra — uso e consumo', 'dev_compra', 'Devolucao de compra de uso e consumo NF'],
+    ['compra_mercadoria', 'Compra de mercadoria para revenda (estoque)', 'compra', 'Compra para revenda'],
+    ['compra_uso_consumo', 'Compra para uso e consumo', 'compra', 'Compra para uso e consumo'],
+    ['venda', 'Vendas', 'venda', 'Venda'],
+    ['servico_prestado', 'Serviço prestado', 'servico', 'Servicos prestados'],
+    ['servico_tomado', 'Serviço tomado', 'servico', 'Servicos tomados'],
+    ['dev_venda', 'Devolução de venda', 'dev_venda', 'Devolucao de venda'],
+    ['dev_compra_mercadoria', 'Devolução de compra — mercadoria para revenda', 'dev_compra', 'Devolucao de compra'],
+    ['dev_compra_uso_consumo', 'Devolução de compra — uso e consumo', 'dev_compra', 'Devolucao de compra para uso e consumo'],
   ];
   const OPT = Object.fromEntries(OPS_TXT.map(o => [o[0], o]));
   const fechYm = () => { try { const f = String(S.fechAtual() || '').slice(0, 7); if (/^\d{4}-\d{2}$/.test(f)) return f; } catch (e) { } return new Date().toISOString().slice(0, 7); };
@@ -328,7 +328,7 @@
     if (!V.length) { toast('Marque ao menos uma nota com a operação escolhida.', 'err'); return; }
     const falta = [...new Set(V.map(l => ST.mDet[l.ref.id]).filter(d => { const c = cf.contas[d] || {}; return !c.deb || !c.cred; }))];
     if (falta.length) { toast('Falta a conta débito/crédito na ⚙️ para: ' + falta.map(d => OPT[d][1]).join(', '), 'err'); config(); return; }
-    const linhas = V.map(l => { const d = ST.mDet[l.ref.id], c = cf.contas[d]; return { data: br(l.data), debito: c.deb, credito: c.cred, valor: l.vs, historico: (OPT[d][3] + ' ' + l.numero + (l.nome ? ' - ' + l.nome : '')).slice(0, 200) }; });
+    const linhas = V.map(l => { const d = ST.mDet[l.ref.id], c = cf.contas[d]; return { data: br(l.data), debito: c.deb, credito: c.cred, valor: l.vs, historico: ('Reconhecimento manual NF ' + l.numero + (l.nome ? ' - ' + l.nome : '') + ' - ' + OPT[d][3]).slice(0, 200) }; });
     let empNome = ST.eid; try { const e = S.emps().find(x => String(x.eid) === ST.eid); empNome = (e && e.nome) || ST.eid; } catch (e) { }
     const nome = 'Escrita_Fiscal_' + String(empNome).replace(/[^a-zA-Z0-9]/g, '_').slice(0, 40) + '_' + ST.ym + '.txt';
     const naPasta = await baixarTxtMisterContador(cnpjEmp(ST.eid), linhas, nome);
