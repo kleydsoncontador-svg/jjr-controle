@@ -223,6 +223,11 @@
       [['Requisições de matéria-prima − matéria-prima requisitada em elaboração', 'Matérias-primas|requis', 'Em elaboração|mp'], ['Transferido para acabados − produção do período nos acabados', 'Em elaboração|acab', 'Produtos acabados|prod']].forEach(([t, a, b]) => {
         wr.getCell('B' + r).value = t; const x = wr.getCell('D' + r); x.value = { formula: 'ROUND(D' + refT[a] + '-D' + refT[b] + ',2)' }; x.numFmt = FMT_V; x.font = { bold: true }; x.fill = fill(COR.calc); x.border = borda; wr.getCell('B' + r).border = borda; r++; });
     }
+    if (M.outrasSaidas) { // 27/11/2026: a coluna Outras saídas do resumo tem que bater com a soma da aba Outras saídas
+      wr.mergeCells('B' + r + ':E' + r); const g = wr.getCell('B' + r); g.value = 'CONFERÊNCIA DAS OUTRAS SAÍDAS (tem que dar zero)'; g.font = { bold: true, color: { argb: 'FFFFFFFF' } }; g.fill = fill(COR.grp); r++;
+      wr.getCell('B' + r).value = 'Outras saídas do resumo − soma da aba Outras saídas'; wr.getCell('B' + r).border = borda;
+      const x = wr.getCell('D' + r); x.value = { formula: 'ROUND(D' + refT['Resumo por produto|outsai'] + "-SUM('Outras saídas'!E12:E1011),2)" }; x.numFmt = FMT_V; x.font = { bold: true }; x.fill = fill(COR.calc); x.border = borda; r++;
+    }
     await wr.protect('', { selectLockedCells: true, selectUnlockedCells: true, formatColumns: true, formatRows: true });
     wb.views = [{ activeTab: 1 }];
     return { wb, emp };
