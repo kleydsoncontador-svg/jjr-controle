@@ -40,7 +40,7 @@
   const numNf = s => { const d = dig(s).replace(/^0+/, ''); return d || ''; };
   const br = iso => iso ? iso.slice(8, 10) + '/' + iso.slice(5, 7) + '/' + iso.slice(0, 4) : '';
   const fmtDoc = d => { d = dig(d); if (d.length === 14) return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5'); if (d.length === 11) return d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4'); return d; };
-  const fmtCfop = c => (c && c.length === 4) ? c[0] + '.' + c.slice(1) : (c || '');
+  const fmtCfop = c => String(c || '').split('/').map(x => x.length === 4 ? x[0] + '.' + x.slice(1) : x).join(' / ');
   const sOk = k => { try { const x = S.g(k); if (typeof x === 'string') { try { return JSON.parse(x); } catch (e) { return null; } } return x; } catch (e) { return null; } };
   // livros: E = Entradas (compras, devoluções de venda, serviços tomados), S = Saídas, V = Serviços (prestados). Só os DADOS lidos ficam guardados — o PDF nunca.
   const LIVROS = ['E', 'S', 'V'], LIVRO_NOME = { E: 'Entradas', S: 'Saídas', V: 'Serviços' };
@@ -61,7 +61,7 @@
   // ── classificação ──
   // CFOP do livro → operação simplificada + operação contábil do TXT (det). 1/2/3 = entrada, 5/6/7 = saída.
   function classCfop(c0) {
-    const c = dig(c0); if (c.length !== 4) return null;
+    const c = dig(String(c0 || '').split('/')[0]); if (c.length !== 4) return null;
     const d = +c[0], r = +c.slice(1), es = d <= 3 ? 'E' : 'S';
     if (es === 'E') {
       if ([201, 202, 203, 204, 208, 209, 410, 411].includes(r)) return { es, op: 'dev_venda', det: 'dev_venda' };
@@ -119,18 +119,20 @@
     tentar(cNum, (s, f) => s.numero && valOk(s.valor, f.valor) && (!s.doc || !f.doc || mesmoDoc(s.doc, f.doc)));
     tentar(cDoc, (s, f) => f.es === s.es && valOk(s.valor, f.valor) && s.data === f.data);
   }
+  // 26/11/2026 (pedido do usuário): a lista principal são as NOTAS DO LIVRO FISCAL (uma por nota, já consolidada quando o Domínio
+  // abre a nota em 2+ linhas de CFOP), com o valor no fiscal e, ao lado, o valor da mesma nota no site. As notas que só existem no site
+  // ficam na janela de Diferenças (aba "No site, não no fiscal", com o TXT).
   function linhasTela() {
-    const L = [];
-    ST.site.forEach(s => {
-      const f = s.par, cl = f && opFisc(f);
-      const obs = []; if (f && Math.abs(f.valor - s.valor) > 0.05) obs.push('valor diferente'); if (f && f.data && f.data !== s.data) obs.push('data no fiscal ' + br(f.data)); if (f && f.numero !== s.numero) obs.push('nº no fiscal ' + f.numero);
-      L.push({ sit: f ? 'fiscal' : 'nao_fiscal', es: f ? f.es : s.es, data: s.data, numero: s.numero, doc: s.doc || (f && f.doc) || '', nome: s.nome || (f && f.nome) || '', cfop: f ? f.cfop : '', op: cl ? cl.op : s.op, vs: s.valor, vf: f ? f.valor : null, obs: obs.join('; '), ref: s });
-    });
-    ST.fisc.filter(f => !f.par).forEach(f => { L.push({ sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: opFisc(f).op, vs: null, vf: f.valor, obs: '', ref: f }); });
-    return L.sort((a, b) => (a.data || '').localeCompare(b.data || '') || (+a.numero || 0) - (+b.numero || 0));
+    return ST.fisc.map(f => {
+      const s = f.par, obs = [];
+      if (s && Math.abs(f.valor - s.valor) > 0.05) obs.push('diferença de R$ ' + F(R2(f.valor - s.valor)));
+      if (s && s.data && f.data !== s.data) obs.push('data no site ' + br(s.data)); if (s && f.numero !== s.numero) obs.push('nº no site ' + s.numero);
+      if (s) obs.push('no site: ' + ({ nfe: 'NF-e', nfse: 'NFS-e', nfce: 'NFC-e', cte: 'CT-e' }[s.tipo] || s.tipo) + ' ' + (s.es === 'E' ? 'entrada' : 'saída'));
+      return { sit: s ? (Math.abs(f.valor - s.valor) > 0.05 ? 'valor_dif' : 'site') : 'nao_site', es: f.es, data: f.data, numero: f.numero, doc: f.doc || (s && s.doc) || '', nome: f.nome || (s && s.nome) || '', cfop: f.cfop, op: opFisc(f).op, vf: f.valor, vs: s ? s.valor : null, obs: obs.join(' · '), ref: f };
+    }).sort((a, b) => (a.data || '').localeCompare(b.data || '') || (+a.numero || 0) - (+b.numero || 0));
   }
-  const SIT = { fiscal: 'Está no fiscal', nao_fiscal: 'Não está no fiscal', so_fiscal: 'Só no fiscal (não está no site)' };
-  const SITCOR = { fiscal: 'var(--green)', nao_fiscal: 'var(--red)', so_fiscal: 'var(--amber)' };
+  const SIT = { site: 'Está no site', valor_dif: 'No site, valor diferente', nao_site: 'Não está no site', nao_fiscal: 'Não está no fiscal', so_fiscal: 'Não está no site' };
+  const SITCOR = { site: 'var(--green)', valor_dif: 'var(--amber)', nao_site: 'var(--red)', nao_fiscal: 'var(--red)', so_fiscal: 'var(--red)' };
 
   // ── tela principal ──
   async function render(eid) {
@@ -184,15 +186,19 @@
   function corpo() {
     const box = document.getElementById('escfisTab'); if (!box) return;
     const L = linhasTela(), V = filtrar(L, ST.f), f = ST.f, cb = 'EscFis.filtro';
-    const n = k => L.filter(l => l.sit === k).length;
+    const n = k => L.filter(l => l.sit === k).length, soSite = ST.site.filter(s => !s.par).length;
     const rs = document.getElementById('escfisResumo');
-    if (rs) rs.innerHTML = '<b>' + L.length + '</b> nota(s) no mês · <span style="color:var(--green)">está no fiscal: <b>' + n('fiscal') + '</b></span> · <span style="color:var(--red)">não está no fiscal: <b>' + n('nao_fiscal') + '</b></span> · <span style="color:var(--amber)">só no fiscal: <b>' + n('so_fiscal') + '</b></span>' + (!ST.fisc.length ? ' <span style="color:var(--slate)">(sem livro fiscal importado neste mês, todas aparecem como "não está no fiscal")</span>' : '');
-    const head = '<tr><th>Situação</th><th>E/S</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Destinatário / Remetente</th><th>CFOP</th><th>Operação</th><th style="text-align:right">Valor no site</th><th style="text-align:right">Valor no fiscal</th><th>Observação</th></tr>'
-      + '<tr>' + thS('sit', Object.entries(SIT), f, cb) + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thS('op', Object.entries(OPS), f, cb) + thF('vs', 'valor', f, cb) + thF('vf', 'valor', f, cb) + thF('obs', 'obs.', f, cb) + '</tr>';
-    const body = V.length ? V.map(l => '<tr><td style="color:' + SITCOR[l.sit] + ';font-weight:600;white-space:nowrap">' + SIT[l.sit] + '</td><td>' + (l.es === 'E' ? 'Entrada' : 'Saída') + '</td><td>' + br(l.data) + '</td><td>' + E(l.numero) + '</td><td style="font-family:var(--mono);font-size:11px;white-space:nowrap">' + E(fmtDoc(l.doc)) + '</td><td>' + E(l.nome) + '</td><td>' + E(fmtCfop(l.cfop)) + '</td><td>' + E(OPS[l.op] || '') + '</td><td style="text-align:right">' + (l.vs == null ? '—' : F(l.vs)) + '</td><td style="text-align:right">' + (l.vf == null ? '—' : F(l.vf)) + '</td><td style="font-size:11px;color:var(--amber)">' + E(l.obs) + '</td></tr>').join('')
+    if (rs) rs.innerHTML = !ST.fisc.length
+      ? '<span style="color:var(--amber)">Nenhum livro fiscal importado neste mês. Importe pelo botão <b>📒 Importar Livros Fiscais (PDF)</b> na lista de Lançamentos Contábeis (todas as empresas) ou pelo <b>📥 Importar livro fiscal</b> aqui em cima.</span>' + (ST.site.length ? ' <span style="color:var(--slate)">(o site tem ' + ST.site.length + ' nota(s) neste mês)</span>' : '')
+      : '<b>' + L.length + '</b> nota(s) no livro fiscal · <span style="color:var(--green)">está no site: <b>' + n('site') + '</b></span> · <span style="color:var(--amber)">no site com valor diferente: <b>' + n('valor_dif') + '</b></span> · <span style="color:var(--red)">não está no site: <b>' + n('nao_site') + '</b></span>'
+        + (soSite ? ' · <a href="#" onclick="event.preventDefault();EscFis.diferencas()" style="color:var(--red)"><b>' + soSite + '</b> nota(s) do site não estão no fiscal → 🔎 Diferenças</a>' : '');
+    if (!ST.fisc.length) { box.innerHTML = ''; return; }
+    const head = '<tr><th>Situação</th><th>E/S</th><th>Data emissão</th><th>Número</th><th>CNPJ/CPF</th><th>Destinatário / Remetente</th><th>CFOP</th><th>Operação</th><th style="text-align:right">Valor no fiscal</th><th style="text-align:right">Valor no site</th><th>Observação</th></tr>'
+      + '<tr>' + thS('sit', [['site', SIT.site], ['valor_dif', SIT.valor_dif], ['nao_site', SIT.nao_site]], f, cb) + thS('es', [['E', 'Entrada'], ['S', 'Saída']], f, cb) + thF('data', 'data', f, cb) + thF('numero', 'número', f, cb) + thF('doc', 'CNPJ/CPF', f, cb) + thF('nome', 'nome', f, cb) + thF('cfop', 'CFOP', f, cb) + thS('op', Object.entries(OPS), f, cb) + thF('vf', 'valor', f, cb) + thF('vs', 'valor', f, cb) + thF('obs', 'obs.', f, cb) + '</tr>';
+    const body = V.length ? V.map(l => '<tr><td style="color:' + SITCOR[l.sit] + ';font-weight:600;white-space:nowrap">' + SIT[l.sit] + '</td><td>' + (l.es === 'E' ? 'Entrada' : 'Saída') + '</td><td>' + br(l.data) + '</td><td>' + E(l.numero) + '</td><td style="font-family:var(--mono);font-size:11px;white-space:nowrap">' + E(fmtDoc(l.doc)) + '</td><td>' + E(l.nome) + '</td><td style="white-space:nowrap">' + E(fmtCfop(l.cfop)) + '</td><td>' + E(OPS[l.op] || '') + '</td><td style="text-align:right">' + (l.vf == null ? '—' : F(l.vf)) + '</td><td style="text-align:right' + (l.sit === 'valor_dif' ? ';color:var(--amber);font-weight:700' : '') + '">' + (l.vs == null ? '—' : F(l.vs)) + '</td><td style="font-size:11px;color:var(--slate)">' + E(l.obs) + '</td></tr>').join('')
       : '<tr><td colspan="11" style="padding:14px;color:var(--slate)">Nenhuma nota com esses filtros.</td></tr>';
     const tv = V.reduce((s, l) => s + (l.vs || 0), 0), tf = V.reduce((s, l) => s + (l.vf || 0), 0);
-    box.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%;font-size:12px"><thead style="position:sticky;top:0;z-index:2">' + head + '</thead><tbody>' + body + '</tbody><tfoot><tr style="font-weight:700"><td colspan="8">' + V.length + ' nota(s) filtrada(s)</td><td style="text-align:right">' + F(tv) + '</td><td style="text-align:right">' + F(tf) + '</td><td></td></tr></tfoot></table></div>';
+    box.innerHTML = '<div style="overflow-x:auto"><table class="tbl" style="width:100%;font-size:12px"><thead style="position:sticky;top:0;z-index:2">' + head + '</thead><tbody>' + body + '</tbody><tfoot><tr style="font-weight:700"><td colspan="8">' + V.length + ' nota(s) filtrada(s)</td><td style="text-align:right">' + F(tf) + '</td><td style="text-align:right">' + F(tv) + '</td><td></td></tr></tfoot></table></div>';
   }
   let _tmF = null;
   function filtro(k, v) { ST.f[k] = v; clearTimeout(_tmF); _tmF = setTimeout(corpo, 200); }
@@ -447,7 +453,7 @@
   function agrupar(rows) {
     const m = new Map();
     rows.forEach(r => { const k = r.livro + '|' + r.es + '|' + (r.numero || '?' + r.data + r.valor) + '|' + (r.serie || '') + '|' + (r.doc || ''); const g = m.get(k); if (!g) { m.set(k, Object.assign({ _cf: { [r.cfop || '']: r.valor } }, r)); return; } g.valor = R2(g.valor + r.valor); g._cf[r.cfop || ''] = (g._cf[r.cfop || ''] || 0) + r.valor; if (!g.nome && r.nome) g.nome = r.nome; if (!g.doc && r.doc) g.doc = r.doc; });
-    return [...m.values()].map(g => { const cf = Object.entries(g._cf).sort((a, b) => b[1] - a[1])[0]; g.cfop = cf ? cf[0] : g.cfop; delete g._cf; return g; });
+    return [...m.values()].map(g => { const cfs = Object.entries(g._cf).filter(e => e[0]).sort((a, b) => b[1] - a[1]).map(e => e[0]); g.cfop = cfs.join('/'); delete g._cf; return g; });
   }
   const isoDe = v => {
     if (v instanceof Date && !isNaN(v)) return v.getFullYear() + '-' + String(v.getMonth() + 1).padStart(2, '0') + '-' + String(v.getDate()).padStart(2, '0');
@@ -575,8 +581,8 @@
 
   // ── Excel (todas as linhas filtradas, não só a tela) ──
   function planilha(L, nomeAba, titulo) {
-    const cab = ['Situação', 'E/S', 'Data emissão', 'Número', 'CNPJ/CPF', 'Destinatário / Remetente', 'CFOP', 'Operação', 'Valor no site', 'Valor no fiscal', 'Observação'];
-    const aoa = [['JJR CONSULTORIA CONTÁBIL'], [titulo], [], cab].concat(L.map(l => [SIT[l.sit], l.es === 'E' ? 'Entrada' : 'Saída', br(l.data), l.numero, fmtDoc(l.doc), l.nome, fmtCfop(l.cfop), OPS[l.op] || '', l.vs == null ? '' : l.vs, l.vf == null ? '' : l.vf, l.obs]));
+    const cab = ['Situação', 'E/S', 'Data emissão', 'Número', 'CNPJ/CPF', 'Destinatário / Remetente', 'CFOP', 'Operação', 'Valor no fiscal', 'Valor no site', 'Observação'];
+    const aoa = [['JJR CONSULTORIA CONTÁBIL'], [titulo], [], cab].concat(L.map(l => [SIT[l.sit], l.es === 'E' ? 'Entrada' : 'Saída', br(l.data), l.numero, fmtDoc(l.doc), l.nome, fmtCfop(l.cfop), OPS[l.op] || '', l.vf == null ? '' : l.vf, l.vs == null ? '' : l.vs, l.obs]));
     const ws = XLSX.utils.aoa_to_sheet(aoa); ws['!cols'] = [{ wch: 26 }, { wch: 8 }, { wch: 12 }, { wch: 10 }, { wch: 20 }, { wch: 40 }, { wch: 7 }, { wch: 20 }, { wch: 14 }, { wch: 14 }, { wch: 40 }];
     return [ws, nomeAba];
   }
