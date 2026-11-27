@@ -13,11 +13,11 @@
   const MARCA = 'JJR_MODELO_FLUXO';
   const LIN_CAB = 17, LIN_INI = 18, LIN_FIM = 517, N_MANUAL = 300;
   const VARIANTES = {
-    pag: { nome: 'Só pagamentos', desc: 'Uma aba só com as SAÍDAS do banco (pagamentos), com saldo linha a linha.', abas: [{ nome: 'Pagamentos', tipo: 'pag', cols: ['saida', 'saldo'] }] },
-    rec: { nome: 'Só recebimentos', desc: 'Uma aba só com as ENTRADAS do banco (recebimentos), com saldo linha a linha.', abas: [{ nome: 'Recebimentos', tipo: 'rec', cols: ['entrada', 'saldo'] }] },
-    abas: { nome: 'Pagamentos e recebimentos em abas separadas', desc: 'Uma aba de Pagamentos e outra de Recebimentos. O cabeçalho é preenchido uma vez (aba Pagamentos) e o saldo final soma as duas.', abas: [{ nome: 'Pagamentos', tipo: 'pag', cols: ['saida'] }, { nome: 'Recebimentos', tipo: 'rec', cols: ['entrada'], espelho: true }] },
-    mesma: { nome: 'Entrada e saída na mesma coluna', desc: 'Uma aba com uma coluna de valor só: entrada positiva, saída NEGATIVA (com sinal de menos). Saldo linha a linha.', abas: [{ nome: 'Fluxo de Caixa', tipo: 'mix', cols: ['valor', 'saldo'] }] },
-    col: { nome: 'Entrada e saída em colunas diferentes', desc: 'Uma aba com uma coluna de Valor de saída e outra de Valor de entrada. Saldo linha a linha.', abas: [{ nome: 'Fluxo de Caixa', tipo: 'mix', cols: ['saida', 'entrada', 'saldo'] }] }
+    pag: { nome: 'Só pagamentos', desc: 'Uma aba só com as SAÍDAS do banco (pagamentos), com o saldo de cada dia.', abas: [{ nome: 'Pagamentos', tipo: 'pag', cols: ['saida', 'saldo'] }] },
+    rec: { nome: 'Só recebimentos', desc: 'Uma aba só com as ENTRADAS do banco (recebimentos), com o saldo de cada dia.', abas: [{ nome: 'Recebimentos', tipo: 'rec', cols: ['entrada', 'saldo'] }] },
+    abas: { nome: 'Pagamentos e recebimentos em abas separadas', desc: 'Uma aba de Pagamentos e outra de Recebimentos. O cabeçalho é preenchido uma vez (aba Pagamentos); o saldo do dia soma as duas abas.', abas: [{ nome: 'Pagamentos', tipo: 'pag', cols: ['saida', 'saldo'] }, { nome: 'Recebimentos', tipo: 'rec', cols: ['entrada', 'saldo'], espelho: true }] },
+    mesma: { nome: 'Entrada e saída na mesma coluna', desc: 'Uma aba com uma coluna de valor só: entrada positiva, saída NEGATIVA (com sinal de menos). Saldo de cada dia.', abas: [{ nome: 'Fluxo de Caixa', tipo: 'mix', cols: ['valor', 'saldo'] }] },
+    col: { nome: 'Entrada e saída em colunas diferentes', desc: 'Uma aba com uma coluna de Valor de saída e outra de Valor de entrada. Saldo de cada dia.', abas: [{ nome: 'Fluxo de Caixa', tipo: 'mix', cols: ['saida', 'entrada', 'saldo'] }] }
   };
   const ORDEM = ['pag', 'rec', 'abas', 'mesma', 'col'];
   const letra = n => { let s = ''; n++; while (n > 0) { const m = (n - 1) % 26; s = String.fromCharCode(65 + m) + s; n = Math.floor((n - 1) / 26); } return s; }; // 0 → A
@@ -41,8 +41,8 @@
     });
     c.push({ k: 'tipoL', t: (tp === 'pag' ? 'Tipo de gasto' : tp === 'rec' ? 'Tipo de recebimento' : 'Tipo de gasto / recebimento') + ' (escolha na lista)', w: 34 });
     c.push({ k: 'tipoN', t: 'Tipo novo (digite se não achar na lista — ele entra na lista)', w: 30 });
-    if (aba.cols.includes('saldo')) c.push({ k: 'saldo', t: 'Saldo', w: 16 });
     c.push({ k: 'desc', t: 'Descrição / histórico detalhado (para a contabilidade)', w: 46 });
+    if (aba.cols.includes('saldo')) c.push({ k: 'saldo', t: 'Saldo (no fim do dia — automático)', w: 18 });
     c.forEach((x, i) => { x.i = i; x.L = letra(i); });
     return c;
   }
@@ -138,13 +138,18 @@
         // auxiliar: numera cada tipo novo (1ª vez que aparece e que não está na lista padrão)
         ws.getCell(aux + r).value = { formula: 'IF(OR(' + tN + r + '="",COUNTIF(Listas!$' + lc + '$2:$' + lc + '$' + fimPad + ',' + tN + r + ')>0,COUNTIF(' + tN + '$' + LIN_INI + ':' + tN + r + ',' + tN + r + ')>1),"",MAX(' + aux + '$' + LIN_CAB + ':' + aux + (r - 1) + ')+1)' };
         if (cSal) {
-          const c = row.getCell(cSal.i + 1); c.fill = fill(COR.calc);
-          const S0 = '$C$11', parts = [];
-          if (cEnt) parts.push('+SUM(' + cEnt.L + '$' + LIN_INI + ':' + cEnt.L + r + ')');
-          if (cSai) parts.push('-SUMPRODUCT(ABS(' + cSai.L + '$' + LIN_INI + ':' + cSai.L + r + '))');
-          if (cVal) parts.push('+SUM(' + cVal.L + '$' + LIN_INI + ':' + cVal.L + r + ')');
-          const vazio = [cSai, cEnt, cVal].filter(Boolean).map(x => x.L + r + '=""');
-          c.value = { formula: 'IF(' + (vazio.length > 1 ? 'AND(' + vazio.join(',') + ')' : vazio[0]) + ',"",' + S0 + parts.join('') + ')' };
+          // saldo no FIM DO DIA: aparece só na última linha de cada data (a lista pode estar fora de ordem) e soma todas as abas do arquivo
+          const c = row.getCell(cSal.i + 1); c.fill = fill(COR.calc); c.font = { bold: true };
+          const dt = 'A' + r, parts = [];
+          abas.forEach(aa => {
+            const D = ref(aa.nome) + '!$A$' + LIN_INI + ':$A$' + LIN_FIM, cc = k => { const x = aa.colunas.find(y => y.k === k); return x ? ref(aa.nome) + '!$' + x.L + '$' + LIN_INI + ':$' + x.L + '$' + LIN_FIM : null; };
+            const e = cc('entrada'), sa = cc('saida'), v = cc('valor');
+            if (e) parts.push('+SUMIF(' + D + ',"<="&' + dt + ',' + e + ')');
+            if (sa) parts.push('-SUMPRODUCT((' + D + '<=' + dt + ')*ABS(' + sa + '))');
+            if (v) parts.push('+SUMIF(' + D + ',"<="&' + dt + ',' + v + ')');
+          });
+          const ultimaDoDia = r < LIN_FIM ? 'COUNTIF(A' + (r + 1) + ':A$' + LIN_FIM + ',' + dt + ')>0' : 'FALSE';
+          c.value = { formula: 'IF(OR(' + dt + '="",' + ultimaDoDia + '),"",$C$11' + parts.join('') + ')' };
         }
       }
     });
