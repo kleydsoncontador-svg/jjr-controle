@@ -42,10 +42,19 @@
   const fmtDoc = d => { d = dig(d); if (d.length === 14) return d.replace(/^(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})$/, '$1.$2.$3/$4-$5'); if (d.length === 11) return d.replace(/^(\d{3})(\d{3})(\d{3})(\d{2})$/, '$1.$2.$3-$4'); return d; };
   const fmtCfop = c => (c && c.length === 4) ? c[0] + '.' + c.slice(1) : (c || '');
   const sOk = k => { try { const x = S.g(k); if (typeof x === 'string') { try { return JSON.parse(x); } catch (e) { return null; } } return x; } catch (e) { return null; } };
-  const kCfg = eid => 'escfis_cfg_' + eid, kMes = (eid, ym, es) => 'escfis_' + eid + '_' + ym + '_' + es, kRes = (eid, ym) => 'escfis_res_' + eid + '_' + ym;
+  // livros: E = Entradas (compras, devoluções de venda, serviços tomados), S = Saídas, V = Serviços (prestados). Só os DADOS lidos ficam guardados — o PDF nunca.
+  const LIVROS = ['E', 'S', 'V'], LIVRO_NOME = { E: 'Entradas', S: 'Saídas', V: 'Serviços' };
+  const kCfg = eid => 'escfis_cfg_' + eid, kMes = (eid, ym, lv) => 'escfis_' + eid + '_' + ym + '_' + lv, kRes = (eid, ym) => 'escfis_res_' + eid + '_' + ym;
   function cfg(eid) { const v = sOk(kCfg(eid || ST.eid)) || {}; v.contas = v.contas || {}; v.compraPadrao = v.compraPadrao || 'mercadoria'; return v; }
-  function lerLivro(eid, ym) { return ['E', 'S'].reduce((a, es) => { const v = sOk(kMes(eid, ym, es)); return a.concat((v && v.rows) || []); }, []); }
-  function infoLivro(eid, ym) { return ['E', 'S'].map(es => { const v = sOk(kMes(eid, ym, es)); return v && v.rows ? { es, n: v.rows.length, arq: v.arquivo || '', em: v.em || '' } : null; }).filter(Boolean); }
+  // linhas guardadas compactas: [data, numero, serie, doc, nome, cfop, valor]
+  const pack = r => [r.data, r.numero || '', r.serie || '', r.doc || '', r.nome || '', r.cfop || '', R2(r.valor)];
+  const unpack = (a, lv) => Array.isArray(a) ? { livro: lv, es: lv === 'E' ? 'E' : 'S', data: a[0], numero: a[1], serie: a[2], doc: a[3], nome: a[4], cfop: a[5], valor: a[6] } : Object.assign({ livro: lv }, a);
+  function lerLivro(eid, ym) { return LIVROS.reduce((acc, lv) => { const v = sOk(kMes(eid, ym, lv)); return acc.concat(((v && v.rows) || []).map(a => unpack(a, lv))); }, []); }
+  function infoLivro(eid, ym) { return LIVROS.map(lv => { const v = sOk(kMes(eid, ym, lv)); return v && v.rows && v.rows.length ? { lv, n: v.rows.length, arq: v.arquivo || '', em: v.em || '' } : null; }).filter(Boolean); }
+  function gravarLivro(eid, ym, lv, rows, meta) { S.s(kMes(eid, ym, lv), Object.assign({ rows: rows.map(pack), em: new Date().toISOString().slice(0, 10) }, meta || {})); S.s(kRes(eid, ym), { soFiscal: null, soSite: null, em: '' }); }
+  function apagarLivro(eid, ym, lv) { if (sOk(kMes(eid, ym, lv))) S.s(kMes(eid, ym, lv), { rows: [], arquivo: '', em: '' }); }
+  // operação de uma linha do livro: pelo CFOP; livro de Serviços (sem CFOP) = serviço prestado
+  function opFisc(f) { const cl = classCfop(f.cfop); if (cl) return cl; if (f.livro === 'V') return { es: 'S', op: 'servico', det: 'servico_prestado' }; return { es: f.es, op: f.es === 'E' ? 'compra' : 'venda', det: null }; }
   function somaMes(ym, n) { const [a, m] = ym.split('-').map(Number); const d = new Date(a, m - 1 + n, 1); return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0'); }
   function cnpjEmp(eid) { try { const e = S.emps().find(x => String(x.eid) === String(eid)); return dig(e && (e.cnpjNum || e.cnpj)); } catch (e) { return ''; } }
 
@@ -98,21 +107,26 @@
   // ── confronto site × livro ──
   function confrontar(site, fisc) {
     site.forEach(s => { s.par = null; }); fisc.forEach(f => { f.par = null; });
-    const tentar = (ok) => site.forEach(s => { if (s.par) return; let best = null, bd = 1e9; fisc.forEach(f => { if (f.par || f.es !== s.es || !ok(s, f)) return; const d = Math.abs(f.valor - s.valor); if (d < bd) { bd = d; best = f; } }); if (best) { s.par = best; best.par = s; } });
+    // por índice (MD2 tem ~4 mil notas/mês). Lado (entrada/saída) só desempata: nota de ENTRADA emitida pela própria empresa
+    // (retorno/devolução, série própria) fica no site como "saída" porque o emitente é a empresa — número + CNPJ/valor bastam.
+    const porNum = new Map(), porDoc = new Map();
+    fisc.forEach(f => { if (f.numero) (porNum.get(f.numero) || porNum.set(f.numero, []).get(f.numero)).push(f); if (f.doc) { const k = f.doc.length === 14 ? f.doc.slice(0, 8) : f.doc; (porDoc.get(k) || porDoc.set(k, []).get(k)).push(f); } });
+    const tentar = (cands, ok) => site.forEach(s => { if (s.par) return; let best = null, bd = 1e9; (cands(s) || []).forEach(f => { if (f.par || !ok(s, f)) return; const d = Math.abs(f.valor - s.valor) + (f.es === s.es ? 0 : 0.001) + (f.data === s.data ? 0 : 0.0001); if (d < bd) { bd = d; best = f; } }); if (best) { s.par = best; best.par = s; } });
+    const cNum = s => porNum.get(s.numero), cDoc = s => s.doc ? porDoc.get(s.doc.length === 14 ? s.doc.slice(0, 8) : s.doc) : null;
     const mesmoDoc = (a, b) => a && b && (a === b || (a.length === 14 && b.length === 14 && a.slice(0, 8) === b.slice(0, 8)));
     const valOk = (a, b) => Math.abs(a - b) <= 0.05;
-    tentar((s, f) => s.numero && s.numero === f.numero && mesmoDoc(s.doc, f.doc));
-    tentar((s, f) => s.numero && s.numero === f.numero && valOk(s.valor, f.valor) && (!s.doc || !f.doc || mesmoDoc(s.doc, f.doc)));
-    tentar((s, f) => mesmoDoc(s.doc, f.doc) && valOk(s.valor, f.valor) && s.data === f.data);
+    tentar(cNum, (s, f) => s.numero && mesmoDoc(s.doc, f.doc));
+    tentar(cNum, (s, f) => s.numero && valOk(s.valor, f.valor) && (!s.doc || !f.doc || mesmoDoc(s.doc, f.doc)));
+    tentar(cDoc, (s, f) => f.es === s.es && valOk(s.valor, f.valor) && s.data === f.data);
   }
   function linhasTela() {
     const L = [];
     ST.site.forEach(s => {
-      const f = s.par, cl = f && classCfop(f.cfop);
+      const f = s.par, cl = f && opFisc(f);
       const obs = []; if (f && Math.abs(f.valor - s.valor) > 0.05) obs.push('valor diferente'); if (f && f.data && f.data !== s.data) obs.push('data no fiscal ' + br(f.data)); if (f && f.numero !== s.numero) obs.push('nº no fiscal ' + f.numero);
-      L.push({ sit: f ? 'fiscal' : 'nao_fiscal', es: s.es, data: s.data, numero: s.numero, doc: s.doc || (f && f.doc) || '', nome: s.nome || (f && f.nome) || '', cfop: f ? f.cfop : '', op: cl ? cl.op : s.op, vs: s.valor, vf: f ? f.valor : null, obs: obs.join('; '), ref: s });
+      L.push({ sit: f ? 'fiscal' : 'nao_fiscal', es: f ? f.es : s.es, data: s.data, numero: s.numero, doc: s.doc || (f && f.doc) || '', nome: s.nome || (f && f.nome) || '', cfop: f ? f.cfop : '', op: cl ? cl.op : s.op, vs: s.valor, vf: f ? f.valor : null, obs: obs.join('; '), ref: s });
     });
-    ST.fisc.filter(f => !f.par).forEach(f => { const cl = classCfop(f.cfop); L.push({ sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: cl ? cl.op : (f.es === 'E' ? 'compra' : 'venda'), vs: null, vf: f.valor, obs: '', ref: f }); });
+    ST.fisc.filter(f => !f.par).forEach(f => { L.push({ sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: opFisc(f).op, vs: null, vf: f.valor, obs: '', ref: f }); });
     return L.sort((a, b) => (a.data || '').localeCompare(b.data || '') || (+a.numero || 0) - (+b.numero || 0));
   }
   const SIT = { fiscal: 'Está no fiscal', nao_fiscal: 'Não está no fiscal', so_fiscal: 'Só no fiscal (não está no site)' };
@@ -135,16 +149,16 @@
     h += '<div style="display:flex;gap:4px;flex-wrap:wrap;align-items:flex-end;margin-bottom:10px">'
       + '<button class="btn bo bsm" onclick="EscFis.mes(-1)" title="Mês anterior">‹</button>'
       + MESES.map((n, i) => {
-        const ym = a + '-' + String(i + 1).padStart(2, '0'), at = ym === ST.ym, r = sOk(kRes(ST.eid, ym));
+        const ym = a + '-' + String(i + 1).padStart(2, '0'), at = ym === ST.ym, r0 = sOk(kRes(ST.eid, ym)), r = r0 && r0.soFiscal != null ? r0 : null, temLivro = !r && infoLivro(ST.eid, ym).length;
         const tot = r ? (r.soFiscal || 0) + (r.soSite || 0) : null;
-        const selo = r ? '<span onclick="event.stopPropagation();EscFis.diferencas(\'' + ym + '\')" title="Abrir as diferenças de ' + MESES_L[i] + ' (só no fiscal: ' + r.soFiscal + ' · só no site: ' + r.soSite + ')" style="display:block;margin:0 auto 2px;width:max-content;font-size:10px;padding:0 6px;border-radius:8px 8px 0 0;cursor:pointer;background:' + (tot ? 'var(--red-bg)' : 'var(--green-bg)') + ';color:' + (tot ? 'var(--red)' : 'var(--green)') + '">' + (tot ? '⚠ ' + tot : '✓') + '</span>' : '<span style="display:block;height:15px"></span>';
+        const selo = r ? '<span onclick="event.stopPropagation();EscFis.diferencas(\'' + ym + '\')" title="Abrir as diferenças de ' + MESES_L[i] + ' (só no fiscal: ' + r.soFiscal + ' · só no site: ' + r.soSite + ')" style="display:block;margin:0 auto 2px;width:max-content;font-size:10px;padding:0 6px;border-radius:8px 8px 0 0;cursor:pointer;background:' + (tot ? 'var(--red-bg)' : 'var(--green-bg)') + ';color:' + (tot ? 'var(--red)' : 'var(--green)') + '">' + (tot ? '⚠ ' + tot : '✓') + '</span>' : (temLivro ? '<span onclick="event.stopPropagation();EscFis.diferencas(\'' + ym + '\')" title="Livro fiscal importado, ainda não conferido — clique para conferir" style="display:block;margin:0 auto 2px;width:max-content;font-size:10px;padding:0 6px;border-radius:8px 8px 0 0;cursor:pointer;background:var(--gray-bg);color:var(--slate)">📒</span>' : '<span style="display:block;height:15px"></span>');
         return '<div style="text-align:center">' + selo + '<button class="btn ' + (at ? 'bp' : 'bo') + ' bsm" style="min-width:46px' + (at ? '' : ';color:' + OURO) + '" onclick="EscFis.irMes(\'' + ym + '\')">' + n + '</button></div>';
       }).join('')
       + '<button class="btn bo bsm" onclick="EscFis.mes(1)" title="Próximo mês">›</button>'
       + '<span style="margin-left:8px;font-weight:700">' + a + '</span>'
       + '<button class="btn bo bsm" onclick="EscFis.mes(-12)" title="Ano anterior">«</button><button class="btn bo bsm" onclick="EscFis.mes(12)" title="Próximo ano">»</button></div>';
     h += '<div style="font-size:12px;color:var(--slate);margin-bottom:8px">Livro fiscal de ' + MESES_L[m - 1] + '/' + a + ': '
-      + (inf.length ? inf.map(i => '<b>' + (i.es === 'E' ? 'Entradas' : 'Saídas') + '</b> ' + i.n + ' nota(s)' + (i.arq ? ' (' + E(i.arq) + ')' : '')).join(' · ') + ' <button class="btn bo bsm" style="padding:0 6px;font-size:10.5px" onclick="EscFis.apagarMes()" title="Apaga só o livro fiscal importado deste mês (as notas do site não são tocadas)">🗑 apagar livro do mês</button>' : '<span style="color:var(--amber)">nenhum livro importado — use 📥 Importar livro fiscal</span>')
+      + (inf.length ? inf.map(i => '<b>' + LIVRO_NOME[i.lv] + '</b> ' + i.n + ' nota(s)' + (i.arq ? ' (' + E(i.arq) + ')' : '')).join(' · ') + ' <button class="btn bo bsm" style="padding:0 6px;font-size:10.5px" onclick="EscFis.excluirLivros()" title="Excluir os livros fiscais importados de um ou vários meses (as notas do site não são tocadas)">🗑 excluir livros…</button>' : '<span style="color:var(--amber)">nenhum livro importado — use 📥 Importar livro fiscal</span>')
       + '</div><div id="escfisResumo" style="margin-bottom:8px;font-size:12.5px"></div><div id="escfisTab"></div>';
     el.innerHTML = h;
     if (!ST.ok || ST.okYm !== ST.ym || ST.okEid !== ST.eid) await carregar(); else corpo();
@@ -154,7 +168,7 @@
     const eid = ST.eid, ym = ST.ym;
     try { ST.site = await carregarSite(eid, ym); } catch (e) { if (box) box.innerHTML = '<div style="color:var(--red)">Erro ao buscar as notas do site: ' + E(e.message) + '</div>'; return; }
     if (eid !== ST.eid || ym !== ST.ym) return; // trocou de mês/empresa no meio
-    ST.fisc = lerLivro(eid, ym).map(r => Object.assign({}, r));
+    ST.fisc = [somaMes(ym, -1), ym, somaMes(ym, 1)].reduce((a, m) => a.concat(lerLivro(eid, m)), []).filter(r => String(r.data || '').slice(0, 7) === ym).map(r => Object.assign({}, r));
     confrontar(ST.site, ST.fisc); ST.ok = true; ST.okYm = ym; ST.okEid = eid;
     if (ST.fisc.length) { const r = { soFiscal: ST.fisc.filter(f => !f.par).length, soSite: ST.site.filter(s => !s.par).length, em: new Date().toISOString().slice(0, 10) }; const ant = sOk(kRes(eid, ym)); if (!ant || ant.soFiscal !== r.soFiscal || ant.soSite !== r.soSite) { S.s(kRes(eid, ym), r); render(); return; } }
     corpo();
@@ -184,11 +198,33 @@
   function filtro(k, v) { ST.f[k] = v; clearTimeout(_tmF); _tmF = setTimeout(corpo, 200); }
   function irMes(ym) { ST.ym = ym; ST.ok = false; render(); }
   function mes(n) { irMes(somaMes(ST.ym, n)); }
-  function apagarMes() {
-    const [a, m] = ST.ym.split('-');
-    if (!confirm('Apagar o livro fiscal importado de ' + MESES_L[+m - 1] + '/' + a + '?\n\nSó o livro fiscal deste mês é apagado — as notas do site não são tocadas. Depois é só importar de novo.')) return;
-    ['E', 'S'].forEach(es => { if (sOk(kMes(ST.eid, ST.ym, es))) S.s(kMes(ST.eid, ST.ym, es), { rows: [], arquivo: '', em: '' }); });
-    S.s(kRes(ST.eid, ST.ym), { soFiscal: 0, soSite: 0, em: '', semLivro: true }); ST.ok = false; render();
+  // excluir livros de um ou vários meses (só os dados do livro; as notas do site não são tocadas)
+  function mesesComLivro(eid) {
+    const a0 = +fechYm().slice(0, 4), out = [];
+    for (let a = a0 - 3; a <= a0 + 1; a++) for (let m = 1; m <= 12; m++) { const ym = a + '-' + String(m).padStart(2, '0'); infoLivro(eid, ym).forEach(i => out.push({ ym, lv: i.lv, n: i.n, arq: i.arq })); }
+    return out;
+  }
+  function excluirLivros() {
+    const L = mesesComLivro(ST.eid); if (!L.length) { toast('Nenhum livro fiscal importado nesta empresa.', 'err'); return; }
+    let ov = document.getElementById('escfisDel'); if (ov) ov.remove();
+    ov = document.createElement('div'); ov.id = 'escfisDel';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99995;display:flex;align-items:center;justify-content:center;padding:12px';
+    ov.innerHTML = '<div style="background:var(--white);color:var(--ink);border-radius:12px;width:min(560px,100%);max-height:90vh;overflow:auto;padding:16px 18px;box-shadow:var(--shadow-md)">'
+      + '<div style="font-weight:700;font-size:15px;color:' + OURO + ';margin-bottom:4px">🗑 Excluir livros fiscais importados</div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Marque os livros que quer apagar. Só os dados do livro fiscal são apagados — as notas do site não são tocadas e dá para importar de novo depois.</div>'
+      + '<label style="font-size:12px"><input type="checkbox" onchange="document.querySelectorAll(\'#escfisDel input[data-k]\').forEach(c=>c.checked=this.checked)"> marcar todos</label>'
+      + '<table class="tbl" style="width:100%;font-size:12.5px;margin-top:6px"><thead><tr><th></th><th>Mês</th><th>Livro</th><th style="text-align:right">Notas</th><th>Arquivo</th></tr></thead><tbody>'
+      + L.map(x => '<tr><td><input type="checkbox" data-k="' + x.ym + '|' + x.lv + '"' + (x.ym === ST.ym ? ' checked' : '') + '></td><td>' + MESES_L[+x.ym.slice(5) - 1] + '/' + x.ym.slice(0, 4) + '</td><td>' + LIVRO_NOME[x.lv] + '</td><td style="text-align:right">' + x.n + '</td><td style="font-size:11px;color:var(--slate)">' + E(x.arq) + '</td></tr>').join('')
+      + '</tbody></table><div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn bo" onclick="document.getElementById(\'escfisDel\').remove()">Cancelar</button><button class="btn bo" style="color:#dc2626;border-color:#dc2626" onclick="EscFis.excluirLivrosOk()">Excluir marcados</button></div></div>';
+    document.body.appendChild(ov);
+  }
+  function excluirLivrosOk() {
+    const ks = [...document.querySelectorAll('#escfisDel input[data-k]:checked')].map(c => c.dataset.k);
+    if (!ks.length) { toast('Marque ao menos um livro.', 'err'); return; }
+    if (!confirm('Excluir ' + ks.length + ' livro(s) fiscal(is) importado(s)?\n\n' + ks.map(k => { const [ym, lv] = k.split('|'); return LIVRO_NOME[lv] + ' ' + ym.slice(5) + '/' + ym.slice(0, 4); }).join('\n') + '\n\nAs notas do site não são tocadas.')) return;
+    const yms = new Set(); ks.forEach(k => { const [ym, lv] = k.split('|'); apagarLivro(ST.eid, ym, lv); yms.add(ym); });
+    yms.forEach(ym => S.s(kRes(ST.eid, ym), { soFiscal: null, soSite: null, em: '' }));
+    document.getElementById('escfisDel').remove(); toast(ks.length + ' livro(s) excluído(s).', 'ok'); ST.ok = false; render();
   }
 
   // ── janela de diferenças do mês (2 abas) ──
@@ -215,7 +251,7 @@
     modalTab();
   }
   function modalLinhas(aba) {
-    if (aba === 'fisc') return ST.fisc.filter(f => !f.par).map(f => { const cl = classCfop(f.cfop); return { sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: cl ? cl.op : '', vs: null, vf: f.valor, obs: '', ref: f }; });
+    if (aba === 'fisc') return ST.fisc.filter(f => !f.par).map(f => { return { sit: 'so_fiscal', es: f.es, data: f.data, numero: f.numero, doc: f.doc, nome: f.nome, cfop: f.cfop, op: opFisc(f).op, vs: null, vf: f.valor, obs: '', ref: f }; });
     return ST.site.filter(s => !s.par).map(s => ({ sit: 'nao_fiscal', es: s.es, data: s.data, numero: s.numero, doc: s.doc, nome: s.nome, cfop: '', op: s.op, vs: s.valor, vf: null, obs: s.tipo.toUpperCase() + (s.natureza_operacao ? ' · ' + s.natureza_operacao : ''), ref: s }));
   }
   function modalTab() {
@@ -284,14 +320,19 @@
   }
 
   // ── importação do livro fiscal ──
+  // Nome padrão dos PDFs do Domínio na pasta Relatórios Fiscal: Entradas_<eid>_<MMAAAA>.pdf, Saídas_…, Serviços_…
+  function infoNome(nome) {
+    const m = nrm(nome).match(/^(ENTRADAS|SAIDAS|SERVICOS)_(\d+)_(\d{2})(\d{4})\.PDF$/);
+    return m ? { lv: { ENTRADAS: 'E', SAIDAS: 'S', SERVICOS: 'V' }[m[1]], eid: String(+m[2]), ym: m[4] + '-' + m[3] } : null;
+  }
   function importar() {
     let ov = document.getElementById('escfisImp'); if (ov) ov.remove();
     ov = document.createElement('div'); ov.id = 'escfisImp';
     ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99995;display:flex;align-items:center;justify-content:center;padding:12px';
-    ov.innerHTML = '<div style="background:var(--white);color:var(--ink);border-radius:12px;width:min(520px,100%);padding:16px 18px;box-shadow:var(--shadow-md)">'
-      + '<div style="font-weight:700;font-size:15px;color:' + OURO + ';margin-bottom:8px">📥 Importar livro fiscal</div>'
-      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Aceita SPED EFD (.txt), planilha (.xlsx, .xls, .csv) ou PDF do livro de Entradas/Saídas. As notas entram no mês da data de emissão; o livro já importado desses meses (mesmo tipo) é substituído.</div>'
-      + '<div style="font-size:12.5px;margin-bottom:10px"><b>Este arquivo é:</b><br><label><input type="radio" name="escfisTipo" value="" checked> descobrir pelo CFOP</label> <label style="margin-left:8px"><input type="radio" name="escfisTipo" value="E"> livro de Entradas</label> <label style="margin-left:8px"><input type="radio" name="escfisTipo" value="S"> livro de Saídas</label></div>'
+    ov.innerHTML = '<div style="background:var(--white);color:var(--ink);border-radius:12px;width:min(540px,100%);padding:16px 18px;box-shadow:var(--shadow-md)">'
+      + '<div style="font-weight:700;font-size:15px;color:' + OURO + ';margin-bottom:8px">📥 Importar livro fiscal desta empresa</div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">PDF do Domínio (Acompanhamento de Entradas / Saídas / Serviços), SPED EFD (.txt) ou planilha (.xlsx/.csv). Só os dados lidos ficam no site — o arquivo não é guardado. O livro já importado do mesmo mês é substituído.<br>Para importar de <b>todas as empresas</b> de uma vez, use o botão <b>📒 Importar Livros Fiscais (PDF)</b> na lista de Lançamentos Contábeis.</div>'
+      + '<div style="font-size:12.5px;margin-bottom:10px"><b>Este arquivo é:</b><br><label><input type="radio" name="escfisTipo" value="" checked> descobrir sozinho</label> <label style="margin-left:6px"><input type="radio" name="escfisTipo" value="E"> Entradas</label> <label style="margin-left:6px"><input type="radio" name="escfisTipo" value="S"> Saídas</label> <label style="margin-left:6px"><input type="radio" name="escfisTipo" value="V"> Serviços</label></div>'
       + '<input type="file" id="escfisArq" multiple accept=".txt,.csv,.xlsx,.xls,.pdf" class="fi" style="width:100%">'
       + '<div id="escfisImpMsg" style="font-size:12px;margin-top:8px"></div>'
       + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn bo" onclick="document.getElementById(\'escfisImp\').remove()">Cancelar</button><button class="btn bp" onclick="EscFis.processar()">Importar</button></div></div>';
@@ -304,24 +345,108 @@
     let rows = [], avisos = [];
     for (const f of arqs) {
       msg.textContent = 'Lendo ' + f.name + '…';
-      try { const r = await lerArquivo(f, tipo); r.rows.forEach(x => { x.arq = f.name; }); rows = rows.concat(r.rows); if (r.aviso) avisos.push(f.name + ': ' + r.aviso); }
-      catch (e) { avisos.push(f.name + ': ' + e.message); }
+      try {
+        const r = await lerArquivo(f, tipo);
+        if (r.eid && r.eid !== ST.eid) { avisos.push(f.name + ': é da empresa ' + r.eid + ', não desta (' + ST.eid + ') — ignorado'); continue; }
+        rows = rows.concat(r.rows); if (r.aviso) avisos.push(f.name + ': ' + r.aviso);
+      } catch (e) { avisos.push(f.name + ': ' + e.message); }
     }
-    rows = agrupar(rows.filter(r => r.data && r.es && (r.numero || r.valor)));
-    if (!rows.length) { msg.innerHTML = '<span style="color:var(--red)">Nenhuma nota reconhecida.' + (avisos.length ? '<br>' + avisos.map(E).join('<br>') : '') + '</span><br><span style="color:var(--slate)">Me mande este modelo para eu ajustar a leitura.</span>'; return; }
-    const grupos = {}; rows.forEach(r => { const k = r.data.slice(0, 7) + '|' + r.es; (grupos[k] = grupos[k] || []).push(r); });
-    const ks = Object.keys(grupos).sort(), ja = ks.filter(k => { const [ym, es] = k.split('|'); const v = sOk(kMes(ST.eid, ym, es)); return v && v.rows && v.rows.length; });
-    const desc = ks.map(k => { const [ym, es] = k.split('|'); return (es === 'E' ? 'Entradas' : 'Saídas') + ' ' + ym.slice(5) + '/' + ym.slice(0, 4) + ': ' + grupos[k].length + ' nota(s), R$ ' + F(grupos[k].reduce((s, r) => s + r.valor, 0)); }).join('\n');
-    if (!confirm('Livro fiscal lido:\n\n' + desc + (ja.length ? '\n\nJá existe livro importado em ' + ja.map(k => k.replace('|E', ' (entradas)').replace('|S', ' (saídas)')).join(', ') + ' — será SUBSTITUÍDO.' : '') + (avisos.length ? '\n\nAvisos:\n' + avisos.join('\n') : '') + '\n\nGravar?')) return;
-    const nomeArq = arqs.map(f => f.name).join(', ').slice(0, 120), hoje = new Date().toISOString().slice(0, 10);
-    ks.forEach(k => { const [ym, es] = k.split('|'); S.s(kMes(ST.eid, ym, es), { rows: grupos[k].map(r => ({ es: r.es, data: r.data, numero: r.numero, serie: r.serie || '', doc: r.doc || '', nome: r.nome || '', cfop: r.cfop || '', valor: R2(r.valor) })), arquivo: nomeArq, em: hoje }); });
+    rows = agrupar(rows.filter(r => r.data && r.livro && (r.numero || r.valor)));
+    if (!rows.length) { msg.innerHTML = '<span style="color:var(--red)">Nenhuma nota reconhecida.' + (avisos.length ? '<br>' + avisos.map(E).join('<br>') : '') + '</span>'; return; }
+    const grupos = {}; rows.forEach(r => { const k = r.data.slice(0, 7) + '|' + r.livro; (grupos[k] = grupos[k] || []).push(r); });
+    const ks = Object.keys(grupos).sort(), ja = ks.filter(k => { const [ym, lv] = k.split('|'); const v = sOk(kMes(ST.eid, ym, lv)); return v && v.rows && v.rows.length; });
+    const desc = ks.map(k => { const [ym, lv] = k.split('|'); return LIVRO_NOME[lv] + ' ' + ym.slice(5) + '/' + ym.slice(0, 4) + ': ' + grupos[k].length + ' nota(s), R$ ' + F(grupos[k].reduce((s, r) => s + r.valor, 0)); }).join('\n');
+    if (!confirm('Livro fiscal lido:\n\n' + desc + (ja.length ? '\n\nJá existe livro importado em ' + ja.map(k => { const [ym, lv] = k.split('|'); return LIVRO_NOME[lv] + ' ' + ym; }).join(', ') + ' — será SUBSTITUÍDO.' : '') + (avisos.length ? '\n\nAvisos:\n' + avisos.join('\n') : '') + '\n\nGravar?')) return;
+    const nomeArq = arqs.map(f => f.name).join(', ').slice(0, 120);
+    ks.forEach(k => { const [ym, lv] = k.split('|'); gravarLivro(ST.eid, ym, lv, grupos[k], { arquivo: nomeArq }); });
     ov.remove(); toast('Livro fiscal importado: ' + rows.length + ' nota(s) em ' + [...new Set(ks.map(k => k.split('|')[0]))].length + ' mês(es).', 'ok');
-    const primeiro = ks[0].split('|')[0]; if (!ks.some(k => k.startsWith(ST.ym))) ST.ym = primeiro; ST.ok = false; render();
+    if (!ks.some(k => k.startsWith(ST.ym))) ST.ym = ks[0].split('|')[0]; ST.ok = false; render();
   }
+
+  // ── importação em LOTE (todas as empresas) pela pasta fixa "Relatórios Fiscal" (subpastas Livros de Entradas / Saídas / Serviços) ──
+  const CH_PASTA = 'raizLivrosFiscais';
+  async function pastaRaiz(trocar) {
+    if (!window.showDirectoryPicker) { toast('Este navegador não permite pasta fixa. Use o Chrome ou o Edge.', 'err'); return null; }
+    let h = null;
+    if (!trocar) {
+      try { h = await _lancctbCarregarHandleGenerico(CH_PASTA); } catch (e) { h = null; }
+      if (h) { let p = 'prompt'; try { p = await h.queryPermission({ mode: 'read' }); if (p !== 'granted') p = await h.requestPermission({ mode: 'read' }); } catch (e) { } if (p === 'granted') return h; }
+    }
+    toast('Escolha a pasta "Relatórios Fiscal" (a que tem Livros de Entradas, Livros de Saídas e Livros de Serviços). Ela fica fixa neste navegador.', 'ok');
+    try { h = await window.showDirectoryPicker({ id: 'jjrLivrosFiscais', mode: 'read' }); } catch (e) { if (e.name !== 'AbortError') toast('Erro: ' + e.message, 'err'); return null; }
+    await _lancctbSalvarHandleGenerico(CH_PASTA, h); atualizarBotaoLote(); return h;
+  }
+  async function listarPdfs(raiz) {
+    const out = [];
+    async function varre(dir, prof) {
+      for await (const [nome, fh] of dir.entries()) {
+        if (fh.kind === 'file') { const inf = infoNome(nome); if (inf) out.push({ nome, fh, ...inf }); }
+        else if (prof < 1 && /^livros de (entradas|sa[ií]das|servi[cç]os)$/i.test(nome.trim())) await varre(fh, prof + 1);
+      }
+    }
+    await varre(raiz, 0); return out;
+  }
+  async function atualizarBotaoLote() {
+    const b = document.getElementById('escfisLoteFixar'); if (!b) return;
+    let ok = false; try { const h = await _lancctbCarregarHandleGenerico(CH_PASTA); ok = !!h && (await h.queryPermission({ mode: 'read' })) === 'granted'; b.title = h ? 'Pasta fixa: "' + h.name + '"' + (ok ? '' : ' (falta reautorizar — clique em Importar)') + '. Clique para trocar.' : 'Fixar a pasta padrão dos livros fiscais'; } catch (e) { }
+    b.textContent = ok ? '📌✓' : '📌';
+  }
+  async function importarLote() {
+    const raiz = await pastaRaiz(false); if (!raiz) return;
+    let arqs; try { arqs = await listarPdfs(raiz); } catch (e) { toast('Não consegui ler a pasta: ' + e.message, 'err'); return; }
+    if (!arqs.length) { toast('Nenhum PDF no padrão Entradas_<código>_<MMAAAA>.pdf em "' + raiz.name + '". Confira se escolheu a pasta Relatórios Fiscal (📌 troca a pasta).', 'err'); return; }
+    let emps = new Set(); try { emps = new Set((S.g('emps') || []).map(e => String(e.eid))); } catch (e) { }
+    const yms = [...new Set(arqs.map(a => a.ym))].sort().reverse(), fy = fechYm();
+    let ov = document.getElementById('escfisLote'); if (ov) ov.remove();
+    ov = document.createElement('div'); ov.id = 'escfisLote';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:99995;display:flex;align-items:center;justify-content:center;padding:12px';
+    ov.innerHTML = '<div style="background:var(--white);color:var(--ink);border-radius:12px;width:min(560px,100%);max-height:90vh;overflow:auto;padding:16px 18px;box-shadow:var(--shadow-md)">'
+      + '<div style="font-weight:700;font-size:15px;color:' + OURO + ';margin-bottom:4px">📒 Importar Livros Fiscais (PDF) — todas as empresas</div>'
+      + '<div style="font-size:12px;color:var(--slate);margin-bottom:10px">Pasta: <b>' + E(raiz.name) + '</b> · ' + arqs.length + ' PDF(s). A empresa e o mês vêm do nome do arquivo (Entradas_53_062026.pdf). Só os dados lidos ficam no site — os PDFs não são guardados. Arquivo já importado e sem alteração é pulado.</div>'
+      + '<div style="font-size:12.5px;margin-bottom:6px"><b>Meses a importar:</b> <label style="font-size:11.5px;margin-left:6px"><input type="checkbox" onchange="document.querySelectorAll(\'#escfisLote input[data-ym]\').forEach(c=>c.checked=this.checked)"> todos</label></div>'
+      + '<div style="display:flex;flex-wrap:wrap;gap:6px 14px;font-size:12.5px">' + yms.map(ym => { const n = arqs.filter(a => a.ym === ym).length; return '<label><input type="checkbox" data-ym="' + ym + '"' + (ym === fy || (yms.indexOf(ym) === 0 && !yms.includes(fy)) ? ' checked' : '') + '> ' + MESES_L[+ym.slice(5) - 1] + '/' + ym.slice(0, 4) + ' <span style="color:var(--slate)">(' + n + ')</span></label>'; }).join('') + '</div>'
+      + '<label style="display:block;font-size:12px;margin-top:10px"><input type="checkbox" id="escfisLoteForcar"> reimportar mesmo os que já foram importados</label>'
+      + '<div id="escfisLoteMsg" style="font-size:12px;margin-top:10px"></div>'
+      + '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:14px"><button class="btn bo" onclick="document.getElementById(\'escfisLote\').remove()">Fechar</button><button class="btn bp" id="escfisLoteOk">Importar</button></div></div>';
+    document.body.appendChild(ov);
+    ov.querySelector('#escfisLoteOk').onclick = async () => {
+      const sel = new Set([...ov.querySelectorAll('input[data-ym]:checked')].map(c => c.dataset.ym)), forcar = ov.querySelector('#escfisLoteForcar').checked;
+      const lista = arqs.filter(a => sel.has(a.ym)); if (!lista.length) { toast('Marque ao menos um mês.', 'err'); return; }
+      const btn = ov.querySelector('#escfisLoteOk'); btn.disabled = true; const msg = ov.querySelector('#escfisLoteMsg');
+      const rep = { ok: [], pulados: 0, semEmp: [], erros: [], notas: 0 };
+      for (let i = 0; i < lista.length; i++) {
+        const a = lista[i]; msg.innerHTML = 'Lendo <b>' + E(a.nome) + '</b> (' + (i + 1) + ' de ' + lista.length + ')…';
+        if (emps.size && !emps.has(a.eid)) { rep.semEmp.push(a.nome); continue; }
+        try {
+          const file = await a.fh.getFile(), atual = sOk(kMes(a.eid, a.ym, a.lv));
+          if (!forcar && atual && atual.arquivo === a.nome && atual.tam === file.size && atual.mod === file.lastModified && atual.rows && atual.rows.length) { rep.pulados++; continue; }
+          const r = await lerArquivo(file, a.lv);
+          if (r.eid && r.eid !== a.eid) { rep.erros.push(a.nome + ': o cabeçalho do PDF é da empresa ' + r.eid); continue; }
+          const rows = agrupar(r.rows.filter(x => x.data && (x.numero || x.valor)).map(x => Object.assign(x, { livro: a.lv, es: a.lv === 'E' ? 'E' : 'S' })));
+          if (!rows.length) { rep.erros.push(a.nome + ': nenhuma nota reconhecida'); continue; }
+          const fora = rows.filter(x => x.data.slice(0, 7) !== a.ym).length;
+          gravarLivro(a.eid, a.ym, a.lv, rows, { arquivo: a.nome, tam: file.size, mod: file.lastModified, total: R2(rows.reduce((s, x) => s + x.valor, 0)), foraDoMes: fora });
+          rep.ok.push(a.nome); rep.notas += rows.length;
+        } catch (e) { rep.erros.push(a.nome + ': ' + e.message); }
+      }
+      btn.disabled = false;
+      msg.innerHTML = '<b style="color:var(--green)">✓ ' + rep.ok.length + ' livro(s) importado(s), ' + rep.notas + ' nota(s).</b>' + (rep.pulados ? '<br>' + rep.pulados + ' já estavam importados e sem alteração (pulados).' : '')
+        + (rep.semEmp.length ? '<br><span style="color:var(--amber)">' + rep.semEmp.length + ' de empresa não cadastrada no site: ' + E(rep.semEmp.slice(0, 8).join(', ')) + (rep.semEmp.length > 8 ? '…' : '') + '</span>' : '')
+        + (rep.erros.length ? '<br><span style="color:var(--red)">' + rep.erros.length + ' com erro:<br>' + rep.erros.slice(0, 15).map(E).join('<br>') + '</span>' : '');
+      if (ST.eid && document.getElementById('escfisTab')) { ST.ok = false; render(); }
+    };
+  }
+  function botaoLoteHtml() {
+    setTimeout(atualizarBotaoLote, 50);
+    return '<span style="display:inline-flex;gap:0"><button class="btn bo bsm btn-neon" style="color:' + OURO + '" onclick="EscFis.importarLote()" title="Importa os livros fiscais (PDF do Domínio: Entradas, Saídas e Serviços) de TODAS as empresas, pela pasta fixa Relatórios Fiscal. A empresa e o mês vêm do nome do arquivo. Só os dados ficam no site, o PDF não.">📒 Importar Livros Fiscais (PDF)</button>'
+      + '<button class="btn bo bsm" id="escfisLoteFixar" style="margin-left:2px" onclick="EscFis.fixarPasta()" title="Fixar a pasta padrão dos livros fiscais">📌</button></span>';
+  }
+  async function fixarPasta() { const h = await pastaRaiz(true); if (h) toast('Pasta padrão dos livros fiscais: "' + h.name + '".', 'ok'); }
+
   // várias linhas da mesma nota (uma por CFOP/alíquota) → 1 nota com a soma; CFOP = o de maior valor
   function agrupar(rows) {
     const m = new Map();
-    rows.forEach(r => { const k = r.es + '|' + (r.numero || '?' + r.data + r.valor) + '|' + (r.serie || '') + '|' + (r.doc || ''); const g = m.get(k); if (!g) { m.set(k, Object.assign({ _cf: { [r.cfop || '']: r.valor } }, r)); return; } g.valor = R2(g.valor + r.valor); g._cf[r.cfop || ''] = (g._cf[r.cfop || ''] || 0) + r.valor; if (!g.nome && r.nome) g.nome = r.nome; if (!g.doc && r.doc) g.doc = r.doc; });
+    rows.forEach(r => { const k = r.livro + '|' + r.es + '|' + (r.numero || '?' + r.data + r.valor) + '|' + (r.serie || '') + '|' + (r.doc || ''); const g = m.get(k); if (!g) { m.set(k, Object.assign({ _cf: { [r.cfop || '']: r.valor } }, r)); return; } g.valor = R2(g.valor + r.valor); g._cf[r.cfop || ''] = (g._cf[r.cfop || ''] || 0) + r.valor; if (!g.nome && r.nome) g.nome = r.nome; if (!g.doc && r.doc) g.doc = r.doc; });
     return [...m.values()].map(g => { const cf = Object.entries(g._cf).sort((a, b) => b[1] - a[1])[0]; g.cfop = cf ? cf[0] : g.cfop; delete g._cf; return g; });
   }
   const isoDe = v => {
@@ -330,10 +455,12 @@
     const s = String(v || '').trim(); let x = s.match(/^(\d{2})\/(\d{2})\/(\d{4})/); if (x) return x[3] + '-' + x[2] + '-' + x[1];
     x = s.match(/^(\d{4})-(\d{2})-(\d{2})/); if (x) return x[0]; x = s.match(/^(\d{2})(\d{2})(\d{4})$/); if (x) return x[3] + '-' + x[2] + '-' + x[1]; return '';
   };
-  const esDe = (cfop, tipo) => { const c = dig(cfop); if (c.length === 4) return +c[0] <= 3 ? 'E' : 'S'; return tipo || ''; };
+  // livro da linha: escolhido no import > CFOP (1/2/3 = Entradas, 5/6/7 = Saídas)
+  const livroDe = (cfop, tipo) => { if (tipo) return tipo; const c = dig(cfop); if (c.length === 4) return +c[0] <= 3 ? 'E' : 'S'; return ''; };
+  const comLivro = (r, lv) => Object.assign(r, { livro: lv, es: lv === 'E' ? 'E' : lv ? 'S' : '' });
   async function lerArquivo(f, tipo) {
-    const nome = f.name.toLowerCase();
-    if (nome.endsWith('.pdf')) return lerPdf(await f.arrayBuffer(), tipo);
+    const nome = f.name.toLowerCase(), inf = infoNome(f.name); if (inf && !tipo) tipo = inf.lv;
+    if (nome.endsWith('.pdf')) { const r = await lerPdf(await f.arrayBuffer(), tipo); if (inf && !r.eid) r.eid = inf.eid; return r; }
     if (nome.endsWith('.xlsx') || nome.endsWith('.xls')) { const wb = XLSX.read(await f.arrayBuffer(), { type: 'array', cellDates: true }); let out = { rows: [] }; wb.SheetNames.forEach(sn => { const r = lerTabela(XLSX.utils.sheet_to_json(wb.Sheets[sn], { header: 1, raw: true, defval: '' }), tipo); out.rows = out.rows.concat(r.rows); if (r.aviso && !out.rows.length) out.aviso = r.aviso; }); return out; }
     let txt = await f.text(); if (txt.includes('�')) { try { txt = new TextDecoder('windows-1252').decode(await f.arrayBuffer()); } catch (e) { } }
     if (/^\|0000\|/m.test(txt.slice(0, 2000))) return lerSped(txt);
@@ -354,12 +481,11 @@
         else if (reg === 'D100') o = { sit: c[6], serie: c[7], numero: numNf(c[9]), data: isoDe(c[11]), valor: num(c[15]), part: c[4] };
         else o = { sit: c[5], serie: c[6], numero: numNf(c[8]), data: isoDe(c[10]), valor: num(c[12]), part: c[4], cfop: ent ? '1933' : '5933' };
         if (['02', '03', '04', '05'].includes(o.sit)) return; // cancelada / denegada / inutilizada
-        const p = part[o.part] || {};
-        cur = { es: ent ? 'E' : 'S', data: o.data, numero: o.numero, serie: o.serie || '', doc: p.doc || '', nome: p.nome || '', cfop: o.cfop || '', valor: o.valor, _cfs: [] };
+        const p = part[o.part] || {}, lv = ent ? 'E' : (reg === 'A100' ? 'V' : 'S');
+        cur = comLivro({ data: o.data, numero: o.numero, serie: o.serie || '', doc: p.doc || '', nome: p.nome || '', cfop: o.cfop || '', valor: o.valor, _cfs: [] }, lv);
       } else if ((reg === 'C190' || reg === 'D190') && cur) cur._cfs.push([dig(c[3]), num(c[5])]);
     });
     fim();
-    // 0150 pode vir depois? (não pelo leiaute, mas garante) — completa nome/doc pelo código
     return { rows };
   }
   // planilha/CSV: acha a linha de cabeçalho e as colunas sozinho
@@ -381,35 +507,70 @@
       const rows = [];
       for (let k = li + 1; k < aoa.length; k++) {
         const r = aoa[k] || []; const data = isoDe(r[ix.data]); if (!data) continue;
-        const cfop = ix.cfop >= 0 ? dig(r[ix.cfop]) : '', es = esDe(cfop, tipo);
-        rows.push({ es, data, numero: ix.numero >= 0 ? numNf(r[ix.numero]) : '', serie: ix.serie >= 0 ? String(r[ix.serie] || '') : '', doc: ix.doc >= 0 ? dig(r[ix.doc]) : '', nome: ix.nome >= 0 ? String(r[ix.nome] || '').trim() : '', cfop, valor: num(r[ix.valor]) });
+        const cfop = ix.cfop >= 0 ? dig(r[ix.cfop]) : '';
+        rows.push(comLivro({ data, numero: ix.numero >= 0 ? numNf(r[ix.numero]) : '', serie: ix.serie >= 0 ? String(r[ix.serie] || '') : '', doc: ix.doc >= 0 ? dig(r[ix.doc]) : '', nome: ix.nome >= 0 ? String(r[ix.nome] || '').trim() : '', cfop, valor: num(r[ix.valor]) }, livroDe(cfop, tipo)));
       }
-      const semEs = rows.filter(r => !r.es).length;
-      return { rows, aviso: semEs ? semEs + ' linha(s) sem CFOP: escolha "livro de Entradas" ou "Saídas" ao importar' : '' };
+      const semLv = rows.filter(r => !r.livro).length;
+      return { rows, aviso: semLv ? semLv + ' linha(s) sem CFOP: escolha Entradas, Saídas ou Serviços ao importar' : '' };
     }
     return { rows: [], aviso: 'não achei o cabeçalho (preciso de colunas de data, número ou CNPJ/CPF e valor)' };
   }
-  // PDF: leitura GENÉRICA por linha (data + número + CNPJ/CPF + CFOP + valor). Ajustar ao modelo do sistema fiscal quando o usuário mandar.
-  async function lerPdf(buf, tipo) {
+  // ── PDF ──
+  async function linhasPdf(buf) {
     if (typeof pdfjsLib === 'undefined') throw new Error('leitor de PDF não carregado');
-    const pdf = await pdfjsLib.getDocument({ data: buf }).promise, rows = [];
+    const pdf = await pdfjsLib.getDocument({ data: buf }).promise, out = [];
     for (let p = 1; p <= pdf.numPages; p++) {
-      const pg = await pdf.getPage(p), tc = await pg.getTextContent(), linhas = new Map();
-      tc.items.forEach(it => { const y = Math.round(it.transform[5] / 3) * 3; if (!linhas.has(y)) linhas.set(y, []); linhas.get(y).push({ x: it.transform[4], s: it.str }); });
-      [...linhas.entries()].sort((a, b) => b[0] - a[0]).forEach(([, its]) => {
-        const toks = its.sort((a, b) => a.x - b.x).map(i => i.s.trim()).filter(Boolean), t = toks.join(' ');
-        const datas = [...t.matchAll(/\b(\d{2}\/\d{2}\/\d{4})\b/g)].map(x => x[1]); if (!datas.length) return;
-        const money = t.match(/\b\d{1,3}(?:\.\d{3})*,\d{2}\b/); if (!money) return;
-        const cfopM = t.match(/\b([1-3]|[5-7])\.(\d{3})\b/), cfop = cfopM ? cfopM[1] + cfopM[2] : '';
-        const docM = t.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/);
-        const dataUsada = datas.length > 1 ? datas[1] : datas[0], pos = t.indexOf(dataUsada);
-        const antes = t.slice(0, pos).match(/\b\d{1,9}\b/g), depois = t.slice(pos + 10).match(/\b\d{1,9}\b/);
-        const numero = numNf((antes && antes[antes.length - 1]) || (depois && depois[0]) || '');
-        let nome = ''; if (docM) { const dps = t.slice(t.indexOf(docM[0]) + docM[0].length).match(/^\s*([A-Za-zÀ-ÿ][^\d]{2,60})/); if (dps) nome = dps[1].trim(); }
-        const es = esDe(cfop, tipo); rows.push({ es, data: isoDe(dataUsada), numero, serie: '', doc: docM ? dig(docM[0]) : '', nome, cfop, valor: num(money[0]) });
-      });
+      const tc = await (await pdf.getPage(p)).getTextContent(), L = [];
+      tc.items.forEach(it => { const s = String(it.str || '').trim(); if (!s) return; const y = it.transform[5]; let l = L.find(l => Math.abs(l.y - y) <= 2); if (!l) { l = { y, t: [] }; L.push(l); } l.t.push({ x: it.transform[4], s }); });
+      L.sort((a, b) => b.y - a.y).forEach(l => { l.t.sort((a, b) => a.x - b.x); l.p = p; out.push(l); });
     }
-    return { rows, aviso: 'PDF lido pelo modo genérico — confira os valores; mande o modelo para ajustar a leitura.' + (rows.some(r => !r.es) ? ' Linhas sem CFOP: escolha Entradas ou Saídas.' : '') };
+    return out;
+  }
+  // Domínio "ACOMPANHAMENTO DE ENTRADAS / SAÍDAS / SERVIÇOS": colunas achadas pela posição dos títulos (mudam um pouco de livro para livro)
+  function lerDominio(linhas) {
+    let lv = '', eid = '', hdr = null; const rows = [];
+    const MONEY = /^-?\d{1,3}(?:\.\d{3})*,\d{2}/;
+    for (const l of linhas) {
+      const txt = l.t.map(t => t.s).join(' '), n = nrm(txt);
+      if (!lv) { const m = n.match(/ACOMPANHAMENTO DE (ENTRADAS|SAIDAS|SERVICOS)/); if (m) lv = { ENTRADAS: 'E', SAIDAS: 'S', SERVICOS: 'V' }[m[1]]; }
+      if (!eid && l.p === 1) { const m = txt.match(/^(\d+)\s+-\s+\S/); if (m && l.t[0].x < 10) eid = String(+m[1]); }
+      if (/DATA EMISS/.test(n) && /VALOR CONT/.test(n)) {
+        const pos = re => { const t = l.t.find(t => re.test(nrm(t.s))); return t ? t.x : null; };
+        const esp = pos(/^ESPECIE$/), cods = l.t.filter(t => nrm(t.s) === 'CODIGO').map(t => t.x);
+        hdr = { de: pos(/^DATA EMISS/), n: pos(/^NOTA$/), serie: pos(/^SERIE$/), esp, cod: cods.find(x => esp != null && x > esp) || null, nome: pos(/^(FORNECEDOR|CLIENTE|REMETENTE|DESTINATARIO|TOMADOR|PRESTADOR)$/), doc: pos(/^CNPJ/), ie: pos(/^INSC\.? EST/), cfop: pos(/^CFOP$/), v: pos(/^VALOR CONTABIL/) };
+        if (hdr.de == null || hdr.n == null || hdr.v == null) hdr = null;
+        continue;
+      }
+      if (!hdr) continue;
+      const em = l.t.find(t => Math.abs(t.x - hdr.de) <= 15 && /^\d{2}\/\d{2}\/\d{4}$/.test(t.s)); if (!em) continue;
+      const entre = (a, b) => l.t.filter(t => t.x >= a && t.x < b);
+      const fimNota = hdr.serie != null ? hdr.serie - 2 : hdr.n + 15;
+      const numero = (entre(hdr.n - 22, fimNota).find(t => /^\d+$/.test(t.s)) || {}).s || '';
+      const serie = hdr.serie != null ? (entre(hdr.serie - 3, (hdr.esp || hdr.serie + 20) - 3)[0] || {}).s || '' : '';
+      const iniNome = hdr.cod != null ? hdr.cod - 5 : (hdr.nome != null ? hdr.nome - 5 : null);
+      const nome = iniNome != null && hdr.doc != null ? entre(iniNome, hdr.doc - 5).map(t => t.s).join(' ').replace(/^\d+\s+/, '').trim() : '';
+      const docT = hdr.doc != null ? entre(hdr.doc - 8, (hdr.ie || hdr.doc + 65) - 3).find(t => /^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$|^\d{3}\.\d{3}\.\d{3}-\d{2}$|^\d{11,14}$/.test(t.s)) : null;
+      let cfop = ''; if (hdr.cfop != null) { const c = entre(hdr.cfop - 10, hdr.cfop + 25).map(t => t.s.match(/^([1235-7])-(\d{3})/)).find(Boolean); if (c) cfop = c[1] + c[2]; }
+      const vT = entre(hdr.v - 25, hdr.v + 45).find(t => MONEY.test(t.s)); if (!vT) continue;
+      rows.push(comLivro({ data: isoDe(em.s), numero: numNf(numero), serie, doc: docT ? dig(docT.s) : '', nome, cfop, valor: num(vT.s.match(MONEY)[0]) }, lv));
+    }
+    return { ok: !!(lv && rows.length), lv, eid, rows };
+  }
+  async function lerPdf(buf, tipo) {
+    const linhas = await linhasPdf(buf), d = lerDominio(linhas);
+    if (d.ok) { if (tipo && tipo !== d.lv) d.rows.forEach(r => comLivro(r, tipo)); return { rows: d.rows, eid: d.eid }; }
+    // modelo desconhecido: leitura genérica por linha (data + número + CNPJ/CPF + CFOP + valor) — conferir
+    const rows = [];
+    linhas.forEach(l => {
+      const t = l.t.map(x => x.s).join(' ');
+      const datas = [...t.matchAll(/\b(\d{2}\/\d{2}\/\d{4})\b/g)].map(x => x[1]); if (!datas.length) return;
+      const money = t.match(/\b\d{1,3}(?:\.\d{3})*,\d{2}\b/); if (!money) return;
+      const cfopM = t.match(/\b([1-3]|[5-7])[.-](\d{3})\b/), cfop = cfopM ? cfopM[1] + cfopM[2] : '';
+      const docM = t.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b|\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/);
+      const pos = t.indexOf(datas[0]), depois = t.slice(pos + 10).match(/\b\d{1,9}\b/g) || [];
+      rows.push(comLivro({ data: isoDe(datas[0]), numero: numNf(depois.find(x => !datas.join(' ').includes(x)) || ''), serie: '', doc: docM ? dig(docM[0]) : '', nome: '', cfop, valor: num(money[0]) }, livroDe(cfop, tipo)));
+    });
+    return { rows, aviso: 'PDF em modelo desconhecido, lido pelo modo genérico — confira os valores' + (rows.some(r => !r.livro) ? '; linhas sem CFOP: escolha Entradas, Saídas ou Serviços.' : '.') };
   }
 
   // ── Excel (todas as linhas filtradas, não só a tela) ──
@@ -433,10 +594,10 @@
   }
 
   root.EscFis = {
-    render: () => render(typeof _lancctbEidAtual !== 'undefined' ? _lancctbEidAtual : ST.eid), importar, processar, config, salvarConfig, diferencas, excel, excelModal, txt, apagarMes,
+    render: () => render(typeof _lancctbEidAtual !== 'undefined' ? _lancctbEidAtual : ST.eid), importar, processar, config, salvarConfig, diferencas, excel, excelModal, txt, excluirLivros, excluirLivrosOk, importarLote, fixarPasta, botaoLoteHtml,
     irMes, mes, filtro, mFiltro, mMes, mTodas,
     mAba: k => { ST.mAba = k; modal(); }, mMarca: (id, v) => { ST.mSel[id] = v; modalTab(); }, mDet: (id, v) => { ST.mDet[id] = v; if (!v) ST.mSel[id] = false; else ST.mSel[id] = true; modalTab(); },
-    _t: { classCfop, classSite, confrontar, lerSped, lerTabela, agrupar, isoDe },
+    _t: { classCfop, classSite, confrontar, lerSped, lerTabela, agrupar, isoDe, lerDominio, infoNome, opFisc, lerArquivo, linhasPdf },
   };
   if (typeof module !== 'undefined' && module.exports) module.exports = root.EscFis;
 })(typeof window !== 'undefined' ? window : globalThis);
