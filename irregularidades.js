@@ -34,14 +34,19 @@
   }
   const ehData = t => /^\d{2}\/\d{2}\/\d{4}$/.test(t), ehValor = t => /^-?[\d.]*\d,\d{2}$/.test(t);
   const ehPA = t => /^(\d{2}\/\d{4}|\d{4}|[A-Za-zçÇ]+\/\d{4})$/.test(t);
-  const cnpjDe = linhas => { for (const l of linhas) { const m = l.join(' ').match(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/); if (m) return dig(m[1]); } return ''; };
-
+  // CNPJ da empresa: "CNPJ: 00.000.000/0000-00" (o "Autor pedido"/"Contratante" do cabeçalho é a contabilidade, não a empresa)
+  const cnpjDe = linhas => {
+    for (const l of linhas) { const m = l.join(' ').match(/CNPJ:\s*(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/); if (m) return dig(m[1]); }
+    for (const l of linhas) { const t = l.join(' '); if (/Autor pedido|Contratante/i.test(t)) continue; const m = t.match(/(\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2})/); if (m) return dig(m[1]); }
+    return '';
+  };
   function lerCadin(linhas) {
-    const r = { tipo: 'CADIN', cnpj: cnpjDe(linhas), situacao: '', incluidoEm: '', itens: [] }; let secao = '';
+    const r = { tipo: 'CADIN', cnpj: cnpjDe(linhas), situacao: '', incluidoEm: '', emitidoEm: '', itens: [] }; let secao = '';
     linhas.forEach(l => {
       const t = l.join(' ');
       const m = t.match(/INCLU[ÍI]DO PELA RFB EM (\d{2}\/\d{2}\/\d{4})/i); if (m) { r.situacao = 'Incluído pela RFB'; r.incluidoEm = brIso(m[1]); }
-      if (/N[ÃA]O (CONSTA|INCLU)/i.test(t) && !r.situacao) r.situacao = t.slice(0, 80);
+      else if (/N[ÃA]O INCLU[ÍI]DO/i.test(t) && !r.situacao) r.situacao = 'Não incluído pela RFB';
+      if (/Data de emiss[ãa]o do relat/i.test(t)) { const d = l.find(ehData); if (d) r.emitidoEm = brIso(d); }
       if (/Deve ser regularizado para exclus/i.test(t)) secao = 'Já incluído — regularizar para sair do CADIN';
       else if (/Motivar[áa]/i.test(t)) secao = 'Comunicado — pode levar à inclusão/manutenção se não regularizar (Lei 10.522/2002)';
       const datas = l.filter(ehData), vals = l.filter(ehValor), pa = l.find(ehPA);
@@ -53,23 +58,37 @@
     });
     return r;
   }
+  // Diagnóstico Fiscal (Relatório de Situação Fiscal do Integra Contador): várias seções, cada uma com o próprio cabeçalho de colunas
+  // (Fontana: Receita|PA|Vcto|Vl. Original|Sdo. Devedor|Multa|Juros|Sdo. Dev. Cons.|Situação · Accurare: Receita|PA|Vcto|Vl.Original|Sdo.Devedor|Situação)
+  const ROT_COL = [[/Vl\.?\s*Original/i, 'original'], [/Sdo\.?\s*Dev(edor)?\.?\s*Cons/i, 'consolidado'], [/Sdo\.?\s*Devedor/i, 'saldo'], [/Multa/i, 'multa'], [/Juros/i, 'juros']];
+  function colunasDoCabecalho(t) {
+    const achados = []; let resto = t;
+    ROT_COL.forEach(([re, k]) => { const m = resto.match(re); if (m) { achados.push([resto.indexOf(m[0]), k]); resto = resto.slice(0, m.index) + ' '.repeat(m[0].length) + resto.slice(m.index + m[0].length); } });
+    return achados.sort((a, b) => a[0] - b[0]).map(x => x[1]);
+  }
   function lerDiagnostico(linhas) {
-    const r = { tipo: 'Diagnóstico Fiscal', cnpj: cnpjDe(linhas), itens: [], textos: [] }; let orgao = 'Receita Federal', secao = '';
+    const r = { tipo: 'Diagnóstico Fiscal', cnpj: cnpjDe(linhas), emitidoEm: '', itens: [], textos: [] }; let orgao = 'Receita Federal', secao = '', cols = [];
     linhas.forEach(l => {
-      const t = l.join(' ');
-      if (/Diagn[óo]stico Fiscal na Procuradoria/i.test(t)) { orgao = 'PGFN'; secao = ''; }
-      else if (/Diagn[óo]stico Fiscal na Receita/i.test(t)) { orgao = 'Receita Federal'; secao = ''; }
-      const ms = t.match(/Pend[êe]ncia\s*-\s*([^_]+?)\s*_{3,}/i) || t.match(/^_*\s*Pend[êe]ncia\s*-\s*(.+?)\s*$/i); if (ms) secao = ms[1].trim();
-      if (/N[ãa]o foram detectadas/i.test(t)) r.textos.push(orgao + ': ' + t.replace(/\s+/g, ' ').trim());
-      const vals = l.filter(ehValor), datas = l.filter(ehData), pa = l.find(x => /^(\d{2}\/\d{4}|\d{4})$/.test(x));
-      if (secao && vals.length >= 3 && pa) {
-        const sit = l.find(x => /^(DEVEDOR|A VENCER|SUSPENSO|EXIG[ÍI]VEL|PARCELADO)/i.test(x)) || '';
-        const receita = l.filter(x => !ehValor(x) && !ehData(x) && x !== pa && x !== sit).join(' ').replace(/\s+/g, ' ').trim();
-        // ordem visual: Receita | PA | Vencimento | Vl. Original | Sdo. Devedor | Multa | Juros | Sdo. Dev. Cons. | Situação
-        r.itens.push({ tipo: orgao === 'PGFN' ? 'PGFN' : 'Receita Federal', secao, receita, pa, venc: brIso(datas[0] || ''), original: num(vals[0]), saldo: num(vals[1]), multa: num(vals[2]), juros: vals.length > 4 ? num(vals[3]) : null, consolidado: num(vals[vals.length - 1]), situacao: sit });
-      } else if (secao && /omiss|declara/i.test(secao) && t.length > 6 && !/^Pend/i.test(t) && !/_{5,}/.test(t)) {
-        // pendência de declaração (ex.: omissão de entrega): guarda a linha como está
-        r.itens.push({ tipo: orgao === 'PGFN' ? 'PGFN' : 'Receita Federal', secao, receita: t.replace(/\s+/g, ' ').trim().slice(0, 160), pa: '', venc: '' });
+      const t = l.join(' '), tt = t.replace(/_+/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!r.emitidoEm) { const m = t.match(/(\d{2}\/\d{2}\/\d{4})\s+\d{2}:\d{2}:\d{2}/); if (m) r.emitidoEm = brIso(m[1]); }
+      if (/Diagn[óo]stico Fiscal na Procuradoria/i.test(tt)) { orgao = 'PGFN'; secao = ''; return; }
+      if (/Diagn[óo]stico Fiscal na Receita/i.test(tt)) { orgao = 'Receita Federal'; secao = ''; return; }
+      if (/_{5,}/.test(t) && !/Dados Cadastrais|S[óo]cios|Certid[ãa]o|Final do Relat/i.test(tt) && tt.length > 3) { secao = tt.replace(/^Pend[êe]ncia\s*-\s*/i, ''); cols = []; return; }
+      if (/N[ãa]o foram detectadas/i.test(tt)) { r.textos.push(orgao + ': ' + tt); return; }
+      if (/^Receita\b/i.test(tt) && /PA|Exerc/i.test(tt)) { cols = colunasDoCabecalho(tt); return; }
+      if (!secao) return;
+      const iPa = l.findIndex(x => /^(\d{2}\/\d{4}|\d{4})$/.test(x)), vals = l.filter(ehValor), datas = l.filter(ehData);
+      if (iPa > 0 && vals.length >= 1) {
+        const receita = l.slice(0, iPa).join(' ').replace(/\s+/g, ' ').trim();
+        const iUltVal = l.map((x, i) => ehValor(x) ? i : -1).filter(i => i >= 0).pop();
+        const situacao = l.slice(iUltVal + 1).filter(x => !ehData(x)).join(' ').replace(/Situa[çc][ãa]o:?/i, '').trim();
+        const it = { tipo: orgao === 'PGFN' ? 'PGFN' : 'Receita Federal', secao, receita, pa: l[iPa], venc: brIso(datas[0] || ''), situacao };
+        const ks = cols.length ? cols : ['original', 'saldo', 'multa', 'juros', 'consolidado'];
+        vals.forEach((v, i) => { if (ks[i]) it[ks[i]] = num(v); });
+        r.itens.push(it);
+      } else if (/omiss|declara|processo/i.test(secao) && tt.length > 6 && !/^(CNPJ|Receita|Per[íi]odo)/i.test(tt)) {
+        // pendência sem valores (ex.: omissão de declaração): guarda a linha como está
+        r.itens.push({ tipo: orgao === 'PGFN' ? 'PGFN' : 'Receita Federal', secao, receita: tt.slice(0, 160), pa: '', venc: '' });
       }
     });
     return r;
@@ -104,6 +123,7 @@
       (c.arquivos || []).forEach(a => {
         const r = lidos[a.arquivo]; if (!r) return;
         if (r.tipo === 'CADIN') emp.cadin = { situacao: r.situacao, incluidoEm: r.incluidoEm, em: quando };
+        if (r.emitidoEm) (emp.relatorios = emp.relatorios || {})[r.tipo] = r.emitidoEm; // data de emissão do relatório na SIEG (pode ser antiga)
         if (r.textos && r.textos.length) emp.obs = r.textos;
         r.itens.forEach(i => {
           const k = chaveLinha(i); vistos.add(k);
@@ -180,6 +200,7 @@
     h += '<div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;margin-bottom:8px;font-size:12.5px">'
       + (emp.cadin && emp.cadin.incluidoEm ? '<span style="background:#fee2e2;color:#991b1b;font-weight:700;padding:3px 8px;border-radius:4px">CADIN: incluída pela RFB em ' + isoBr(emp.cadin.incluidoEm) + '</span>' : (emp.cadin ? '<span>CADIN: ' + E(emp.cadin.situacao || '—') + '</span>' : ''))
       + '<span>Última verificação: <b>' + isoBr(emp.ultimaVerif) + '</b></span>'
+      + Object.entries(emp.relatorios || {}).map(([t, dt]) => { const velho = emp.ultimaVerif && (new Date(emp.ultimaVerif) - new Date(dt)) / 864e5 > 30; return '<span style="' + (velho ? 'background:#fee2e2;color:#991b1b;font-weight:700;padding:2px 6px;border-radius:4px' : 'color:var(--slate)') + '" title="Data em que a SIEG emitiu o relatório' + (velho ? ' — mais de 30 dias antes da verificação: pode estar desatualizado' : '') + '">' + E(t) + ' emitido em ' + isoBr(dt) + (velho ? ' ⚠' : '') + '</span>'; }).join('')
       + ((emp.itensSieg || []).length ? '<span style="color:var(--slate)">Na SIEG: ' + emp.itensSieg.map(i => E(i.nome) + ' (' + i.qtd + ')').join(' · ') + '</span>' : '')
       + '<b style="margin-left:auto;color:#dc2626">Em aberto: R$ ' + F(r.consolidado) + '</b></div>';
     const ls = Object.entries(emp.linhas || {}).filter(([, l]) => !ST.soAbertas || l.aberta).sort((a, b) => (b[1].aberta - a[1].aberta) || String(a[1].venc).localeCompare(String(b[1].venc)) || String(a[1].receita).localeCompare(String(b[1].receita)));
