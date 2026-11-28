@@ -213,7 +213,7 @@
       const corSit = l.aberta ? (l.pagoManual ? 'background:#dbeafe;color:#1e40af' : 'background:#fef3c7;color:#92400e') : 'background:#dcfce7;color:#166534';
       const origem = l.tipo === 'CADIN' ? 'CADIN — ' + (l.secao || '') + (l.comunicado ? ' (comunicado em ' + isoBr(l.comunicado) + ')' : '') : (l.tipo + (l.secao ? ' — ' + l.secao : '') + (l.situacao ? ' · ' + l.situacao : ''));
       const kk = E(k).replace(/'/g, '&#39;');
-      h += '<tr style="' + (l.aberta ? 'background:rgba(254,243,199,.35)' : 'opacity:.65') + '"><td style="padding:7px 8px">' + E(l.receita) + '</td><td style="padding:7px 8px;font-size:11.5px">' + E(origem) + '</td><td style="padding:7px 8px;font-family:var(--mono)">' + E(l.pa) + '</td><td style="padding:7px 8px;font-family:var(--mono)">' + isoBr(l.venc) + '</td>'
+      h += '<tr style="' + (l.aberta ? '' : 'opacity:.65') + '"><td style="padding:7px 8px">' + E(l.receita) + '</td><td style="padding:7px 8px;font-size:11.5px">' + E(origem) + '</td><td style="padding:7px 8px;font-family:var(--mono)">' + E(l.pa) + '</td><td style="padding:7px 8px;font-family:var(--mono)">' + isoBr(l.venc) + '</td>'
         + '<td style="padding:7px 8px;text-align:right;font-family:var(--mono)">' + (l.original != null ? 'R$ ' + F(l.original) : (l.tipo === 'CADIN' && l.saldo != null ? 'R$ ' + F(l.saldo) : '—')) + '</td>'
         + '<td style="padding:7px 8px;text-align:right;font-family:var(--mono);color:#dc2626;font-weight:600">' + (atual != null ? 'R$ ' + F(atual) : '—') + '</td>'
         + '<td style="padding:7px 8px"><span style="' + corSit + ';font-weight:700;font-size:11px;padding:2px 7px;border-radius:4px;white-space:nowrap">' + E(sit) + '</span></td><td style="padding:7px 8px;font-size:11.5px">' + E(l.obs || '—') + '</td>'
